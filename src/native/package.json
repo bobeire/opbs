@@ -1,0 +1,17 @@
+{
+  "name": "opbs-native",
+  "version": "0.1.0",
+  "description": "Native C++ addon for OPBS disk imaging",
+  "main": "build/Release/opbs_native.node",
+  "scripts": {
+    "install": "node-gyp rebuild",
+    "build": "node-gyp rebuild",
+    "clean": "node-gyp clean"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.0.0"
+  },
+  "devDependencies": {
+    "node-gyp": "^10.0.1"
+  }
+}

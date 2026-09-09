@@ -1,0 +1,13 @@
+node_modules/
+dist/
+release/
+build/
+*.log
+.DS_Store
+*.local
+.vscode/
+.idea/
+src/native/build/
+*.fbackup
+*.mrimg
+*.mrimgx

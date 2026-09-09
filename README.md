@@ -1,0 +1,447 @@
+# OPBS — Open Pickle Backup System
+
+A FOSS disk imaging backup solution for Windows, inspired by Macrium Reflect.
+Crafted by **RHITCS** — named in honour of a certain well-preserved pickle.
+
+## Features
+
+- **Disk & partition imaging** with per-block CRC-32 integrity checking
+- **VSS support**: back up live systems using Windows Volume Shadow Copy Service
+- **Compression**: Zstandard (zstd) with multithreaded worker-thread compression, plus classic zlib deflate for backward compatibility; multiple levels to balance speed vs. size
+- **Incremental backups**: deltas capture only changed blocks against a base image; restore chains replay base + deltas in order. Optionally the NTFS **USN journal** (`useUsnJournal`) is used to read only the blocks touched by changed files instead of scanning the whole volume (falls back to a full scan if the journal is unavailable).
+- **Used-blocks-only capture**: `usedBlocksOnly` (CLI `--used-blocks-only`) reads the NTFS `$Bitmap` and stores only blocks containing allocated clusters, dropping free space; non-NTFS partitions fall back to a full capture.
+- **Disk-to-disk clone**: `clone` copies selected live partitions straight onto a different local disk (VSS snapshots, optional dissimilar layout + fresh GPT/MBR table, optional grow-on-restore), with no image file or cloud upload.
+- **Encryption**: optional AES-256-GCM per-block encryption (master-key-derived via PBKDF2-SHA256)
+- **Verification**: self-check images after write and before restore
+- **Retention / GFS pruning**: keep the newest N full chains plus a bounded number of trailing deltas per chain; old images are pruned leaf-first
+- **Scheduling + notifications**: cron-based scheduled backups with Windows toast + optional webhook notification on success/failure
+- **Disk health warnings**: SMART/reliability counters surfaced before backup
+- **Network-share destinations**: `destinationPath` accepts local paths, UNC
+  (`\\server\share`), and `file://`/`smb://` URIs (normalised to filesystem
+  paths). `s3://bucket/prefix` destinations write locally then upload to S3
+  (SigV4, `AWS_*` env vars); `sftp://user@host/path` destinations stream the
+  finished image over the `ssh2` SFTP client (`SFTP_USER`/`SFTP_PASSWORD`/
+  `SFTP_PRIVATE_KEY` env vars or the Settings cloud profiles). FTP is detected
+  but not yet supported.
+- **Headless CLI**: run backups/restores/verification/pruning from a script or task scheduler
+- **Simple wizard UI**: step-by-step backup and restore workflows
+
+## Tech Stack
+
+- **Electron**: Desktop application framework
+- **React + TypeScript**: User interface
+- **C++ Native Addon**: VSS integration, raw disk I/O, block writing, GPT/MBR
+  partition-table generation, USN journal, CRC-32, and Native zstd (vendored
+  libzstd in the addon)
+- **Elevated helper**: the app relaunches itself with a UAC prompt (`--opbs-helper`) to gain admin for raw reads/writes + VSS; progress is streamed back over temp JSON files
+- **Node zlib (deflate)**: compression, custom CRC-32 integrity checking
+- **zstdify + fzstd (pure JS)**: Zstandard compression/decompression fallback when the native addon is unavailable
+- **Node crypto (AES-256-GCM, PBKDF2)**: per-block encryption
+- **worker_threads**: multithreaded zstd/deflate block compression in the backup loop
+- **ssh2**: dependency-free SFTP client for `sftp://` cloud destinations
+- **electron-builder**: Packaging
+
+## Project Structure
+
+```
+src/
+├── main/                  # Electron main process
+│   ├── index.ts           # Entry point + IPC + helper-mode dispatch + CLI early-return
+│   ├── cli/index.ts       # Headless CLI (backup/restore/verify/list/prune/health/disks)
+│   ├── backup/
+│   │   ├── manager.ts     # BackupManager facade (progress/status)
+│   │   ├── scheduler.ts   # cron-based scheduling + retention + notifications
+│   │   └── retention.ts   # GFS/retention planning, chain grouping, manifest
+│   ├── imaging/
+│   │   ├── image-format.ts    # .opbs container (header/partitions/blocks/CRC/cipher)
+│   │   ├── imaging-job.ts     # job/progress/result types shared by both processes
+│   │   ├── backup-engine.ts   # builds jobs, maps progress, drives launcher
+│   │   └── restore-engine.ts  # restore jobs, chain resolution, image summary
+│   ├── helper/
+│   │   ├── job-runner.ts  # runs in the elevated instance: VSS + read + compress + write
+│   │   └── launcher.ts    # spawns the elevated instance via UAC + file IPC
+│   ├── restore/           # Restore logic
+│   │   └── manager.ts
+│   ├── utils/
+│   │   ├── disk-enumerator.ts  # Disk/partition enumeration (native)
+│   │   ├── disk-health.ts      # SMART/reliability counters via PowerShell
+│   │   ├── notify.ts           # Toast + webhook notifications
+│   │   ├── native-loader.ts    # Native addon path resolution (dev + packaged)
+│   │   ├── settings-manager.ts # settings.json (retention, notifications, schedules)
+│   │   └── logger.ts           # Logging
+│   └── types/
+│       └── native.d.ts         # Native addon types
+├── renderer/              # React frontend
+│   ├── App.tsx            # Main app with routing
+│   ├── components/
+│   │   ├── Dashboard.tsx     # Overview dashboard
+│   │   ├── BackupWizard.tsx  # Backup creation flow (incremental + encryption options)
+│   │   ├── RestoreWizard.tsx # Restore flow (chain + passphrase)
+│   │   └── Settings.tsx      # App settings (retention, notifications)
+│   └── styles/
+│       └── globals.css       # Global styles
+└── native/                # C++ native addon
+    ├── binding.gyp
+    └── src/
+        ├── addon.cpp         # N-API bindings
+        ├── vss_manager.*     # VSS shadow copy create/delete
+        ├── disk_reader.*     # Enumeration + raw block I/O
+        └── backup_format.*   # .opbs format (native writer stubs)
+```
+
+## How a backup runs
+
+1. **Main process (no admin)** builds a job: selected partitions + their volume
+   device paths (enumerated via the native addon, no elevation needed).
+2. If incremental, the engine validates the base image matches the selected
+   partitions and records it; an optional passphrase is turned into per-job
+   cipher metadata (the raw passphrase never reaches the helper).
+3. The app relaunches **itself** elevated with `--opbs-helper <job> <result>
+   <progress> <cancel>` through the UAC prompt.
+4. In helper mode the app creates VSS shadow copies for live volumes, reads raw
+   blocks (from snapshots or physical drives), compresses each block (zstd or
+   deflate, optionally spread across worker threads for parallelism) and
+   optionally encrypts each frame with AES-256-GCM, then writes the `.opbs`
+   image with per-block CRC-32 + a block index + header metadata.
+ 5. For incremental images, unchanged blocks (matched by CRC against the
+    **whole ancestor chain**'s block index — full image plus every intermediate
+    delta, so a delta never rewrites a block a grandparent already holds) are
+    skipped; the header records the base path and the delta flag.
+6. Progress is streamed to `progress.json`; the main process polls it. Cancel is
+   signalled via a `cancel` file.
+7. If requested, the image is verified by re-reading and re-CRC-checking every
+    block (decrypting as needed). The final outcome is written to `result.json`.
+
+### Used-blocks-only capture (`usedBlocksOnly`)
+
+A backup (or clone) can drop free space: `usedBlocksOnly` reads the NTFS
+**$Bitmap** from the snapshot/volume and stores only blocks that contain at
+least one allocated cluster (non-NTFS partitions fall back to a full capture).
+Skipped blocks are simply absent from the image (the same gap mechanism
+incrementals already use), so the `.opbs` format is unchanged and restores
+leave spare space untouched. CLI: `backup --used-blocks-only` /
+`clone --used-blocks-only`.
+
+## How a clone runs
+
+A **clone** copies selected live partitions straight onto another local disk
+— no intermediate image, no cloud upload. `CloneEngine` builds the job exactly
+like a restore (captured offsets by default, `targetLayout` to move/resize,
+fresh GPT/MBR partition table for dissimilar clones), but the source is the
+live volume: the helper creates VSS snapshots, reads allocated blocks (skipping
+free space with `--used-blocks-only`), and writes them to the target disk at
+`target.offset + blockIndex * blockSize`. Same safety gates as restore apply:
+a custom layout requires `--confirm-layout`, and cloning onto the source disk
+requires `--acknowledge-same-disk`. Any NTFS grow-on-restore request is honored
+the same way as a restore.
+
+CLI: `clone <config.json> [--elevated] [--used-blocks-only] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk]`.
+
+## How a restore runs
+
+- The engine resolves the **restore chain** for the selected image: it walks
+  `baseImagePath` links back to the root full image, then restores `[full, ...deltas]`
+  in order so later blocks overwrite earlier writes at their original offsets.
+- Each unverified image in the chain is verified (with the provided passphrase
+  key) before any data is written.
+- Blocks are written to the target disk at `target.offset + blockIndex * blockSize`.
+- Decompression is multithreaded for compressed images (defaults to a few
+  worker threads; `compressionThreads: 0` or `--threads 0` forces the
+  synchronous path). Blocks are decompressed out of order but written in
+  submission order.
+
+### Dissimilar-hardware restore (moving partitions onto new disks)
+
+A restore can re-order or move captured partitions to different offsets via
+`targetLayout` (or CLI `restore --layout 0:4096,1:8388608`). Because that
+placement **destroys the target disk's existing partition table**, the layout
+must be acknowledged explicitly:
+
+```bash
+OPBS.exe --cli restore job-restore.json --layout 0:2097152 --confirm-layout
+```
+
+With a differing layout acknowledged, OPBS writes a fresh partition table to
+the target disk **before** any partition contents:
+
+- Native addon `buildPartitionTable` generates `gpt` or `mbr` tables as byte
+  regions. GPT output includes the protective MBR, primary header/entries with
+  header + entry CRCs, and the mirrored backup header/entries at the end of the
+  disk. MBR output supports ≤4 partitions with the classic `0x55AA` signature.
+- Scheme defaults to `auto`: MBR when every placement fits (≤4 partitions,
+  ≤2 TiB disk, ≥LBA63 start, 32-bit LBAs), otherwise GPT. Override with
+  `tableScheme` / `--table-scheme gpt|mbr`.
+- Optional knobs: `tableDiskGuid` (deterministic GPT disk GUID),
+  `tableTypeGuids` (per-partition GPT type GUIDs; default is basic-data), and
+  `tableBootPartition` (MBR boot flag).
+- `writePartitionTable:false`/`--no-write-table` restores raw blocks only
+  (still moves data, but leaves whatever table the target already has).
+
+Backups record the source disk's **model + serial** in the image header. A
+dissimilar restore is refused when the target is the *same physical disk the
+image came from* (matching serial) unless you also pass `--acknowledge-same-disk`:
+
+```bash
+# Restoring the exact disk that was imaged onto itself requires this extra flag.
+OPBS.exe --cli restore job-restore.json --layout 0:2097152 --confirm-layout --acknowledge-same-disk
+```
+
+If only the *model* matches (serial differs), the restore proceeds with a
+warning hint on the result instead of blocking.
+
+### Filesystem grow-on-restore (NTFS)
+
+A layout entry may also specify a **larger size** — `targetLayout[].size` or a
+third field in `--layout` — so a captured partition can be expanded onto a
+bigger disk:
+
+```bash
+# Place partition 0 at 2 MiB and grow it to 32 GiB.
+OPBS.exe --cli restore job-restore.json --layout 0:2097152:34359738368 --confirm-layout
+```
+
+After the partition blocks are written, OPBS grows the NTFS volume in place:
+the boot sector's total-sector field, the `$Bitmap` file (run + allocated/valid
+sizes, with the newly added clusters marked free) and the `$BadClus` sparse run
+are patched from the image's metadata. Growing is **grow-only** — a size below
+the captured size is refused at job-build time; a target that is not
+cluster-aligned, or a filesystem that is not a simple single-run NTFS layout,
+is reported as a warning and the restore still completes.
+
+## File-level browse / extract
+
+You can browse and restore individual files/folders from a `.opbs` image
+without restoring the whole disk. The engine resolves the image chain, opens a
+partition reader that decompresses only the covering blocks on demand, and
+parses NTFS directly from those bytes:
+
+```bash
+# List the root of partition 2
+OPBS.exe --cli browse img.opbs --partition 2
+# List a subdirectory
+OPBS.exe --cli browse img.opbs --partition 2 --path "Users\me\Documents"
+# Extract a file
+OPBS.exe --cli extract img.opbs --partition 2 --path "Users\me\Documents\notes.txt" --out D:\restored\notes.txt
+# Extract a whole folder (recursively)
+OPBS.exe --cli extract img.opbs --partition 2 --path "Users\me" --out D:\restored
+```
+
+For encrypted images pass `--passphrase p`. The NTFS reader supports directory
+trees, resident and non-resident files (via data runlists), chains of
+full + delta images, sparse runs, LZNT1-compressed files, and alternate data
+streams. EFS-encrypted files are detected and skipped (browse shows a 🔒 and
+extract refuses) — decryption is not implemented.
+
+## Browsing Macrium images (.mrimgx and .mrimg)
+
+OPBS can also open other tools' images read-only without mounting them:
+
+```bash
+# Inspect a Macrium Reflect 7/8 image (QuickLZ; reports backup type,
+# compression, source disk geometry and partitions)
+OPBS.exe --cli mrimg info img.mrimg
+# Browse / extract a Reflect X image like any OPBS image
+OPBS.exe --cli browse img.mrimgx --partition 2
+OPBS.exe --cli extract img.mrimg --partition 1 --path "Users\me\notes.txt" --out D:\restored\notes.txt
+```
+
+- `.mrimgx` (Reflect X) is parsed from the official layout: footer → metadata
+  chain → `$JSON` navigation → per-partition `$INDEX` of zstd blocks.
+- `.mrimg` (Reflect 7/8) uses a proprietary QuickLZ 1.31 container. OPBS
+  includes a clean-room decoder (`src/main/imaging/mrimg/quicklz.ts`) whose
+  output is validated against each block's stored MD5, so corrupt images are
+  detected rather than silently misread.
+- Recognised-but-unreadable features are refused with a clear error instead of
+  failing mid-browse: encryption, split multi-part images, and v7 delta chains.
+- Whether a partition can be listed depends on the volume: partition images of
+  NTFS/FAT volumes browse and extract normally; block streams without a
+  resident boot sector (e.g. file/data backups) report that no filesystem is
+  present.
+
+## Headless CLI
+
+The app accepts a `--cli` flag that runs a single command and exits:
+
+```bash
+OPBS.exe --cli disks
+OPBS.exe --cli partitions 0
+OPBS.exe --cli list D:\OPBS
+OPBS.exe --cli verify D:\OPBS\img_0_1746300000000.opbs --passphrase secret
+OPBS.exe --cli backup job-backup.json
+OPBS.exe --cli restore job-restore.json
+OPBS.exe --cli restore job-restore.json --threads 4
+OPBS.exe --cli prune D:\OPBS --keep-full 3 --keep-deltas 3 --dry-run
+OPBS.exe --cli health 0
+OPBS.exe --cli new-config example.json
+OPBS.exe --cli verify --dir D:\OPBS --scope newest --json-out result.json
+OPBS.exe --cli schedule install-backup "OPBS nightly" --config job-backup.json --time 02:00
+OPBS.exe --cli schedule install-verify "OPBS verify" --dir D:\OPBS --scope newest --time 03:00 --run-as-user
+OPBS.exe --cli schedule list
+OPBS.exe --cli schedule remove "OPBS nightly"
+OPBS.exe --cli media check
+OPBS.exe --cli media create --iso D:\recovery\opbs-winpe.iso --arch amd64
+OPBS.exe --cli browse D:\OPBS\img_0_1746300000000.opbs --partition 2
+OPBS.exe --cli extract D:\OPBS\img_0_1746300000000.opbs --partition 2 --path "Users\me\Documents\notes.txt" --out D:\restored\notes.txt
+OPBS.exe --cli store put s3://bucket/backups D:\OPBS\img_0_1746300000000.opbs
+OPBS.exe --cli store list s3://bucket/backups
+OPBS.exe --cli store verify s3://bucket/backups
+OPBS.exe --cli prune s3://bucket/backups --keep-full 3 --keep-deltas 3 --dry-run
+OPBS.exe --cli usn-changes C: --count 20
+```
+
+Example `job-backup.json`:
+
+```json
+{
+  "kind": "backup",
+  "sourceDiskIndex": 0,
+  "sourcePartitions": [2],
+  "destinationPath": "D:\\OPBS",
+  "compressionLevel": 3,
+  "compressionType": "zstd",
+  "compressionThreads": 4,
+  "verificationEnabled": true,
+  "baseImagePath": "D:\\OPBS\\img_0_1746300000000.opbs",
+  "passphrase": "optional"
+}
+```
+
+`compressionType` is `"zstd"` (default recommendation) or `"deflate"`;
+`compressionThreads` (0 = synchronous, 1+ = multithreaded) is optional and
+defaults to a sensible count on the app path.
+
+Backup/restore still require the UAC prompt (raw I/O). Verification, listing,
+pruning and health checks do not.
+
+## Scheduled runs (Windows Task Scheduler)
+
+While the in-app Settings scheduler runs backups/verification only while OPBS
+is open, `schedule` commands register **native Windows tasks** that run the
+headless CLI:
+
+- `schedule install-backup <name> --config job.json [--time HH:MM|--on-login] [--as-system]`
+  runs the backup elevated (`/RL HIGHEST` or `/RU SYSTEM`). Because the task is
+  already elevated, the helper no longer triggers a **UAC prompt at run time**;
+  elevation is only required once, at task registration time. Use the `--elevated`
+  flag automatically added by the CLI so the job executes in-process.
+- `schedule install-verify <name> --dir D:\OPBS [--scope newest|all] [--time HH:MM|--on-login]`
+  registers a verification task. Verification only reads files, so use
+  `--run-as-user` to register it **without admin rights**.
+- `schedule list` / `schedule remove <name>` inspect and delete tasks.
+
+Running the app's own scheduled verification is covered in **Settings →
+Scheduled Verification** (cron, scope, destination, failure notification).
+Failure alerts are only sent once a configurable number of consecutive
+failures is reached (`alertAfter`, default 2), so transient blips don't spam
+while persistent problems surface. When **auto-cleanup** is enabled, a
+verification run also prunes images that exceed retention. An optional
+**idle scrub** (`scrubWhileIdle`, interval in hours) re-verifies the newest
+images in the backup location in the background to catch bit-rot early.
+
+## WinPE recovery media
+
+`media create` builds a bootable WinPE ISO (or USB key) carrying the OPBS
+headless CLI, the native disk addon, and a stock Node.js runtime. Booting it
+presents a restore prompt backed by:
+
+```
+node.exe winpe-entry.js restore <restore.json> --elevated
+```
+
+Prerequisites: the Windows ADK (with the **Windows Preinstallation
+Environment** component) and Node.js. Run elevated (or confirm the UAC prompt,
+which one elevation spawn covers the whole build):
+
+```bash
+OPBS.exe --cli media check
+OPBS.exe --cli media create --iso D:\recovery\opbs-winpe.iso
+OPBS.exe --cli media create --arch amd64 --usb E --yes
+OPBS.exe --cli media create --iso D:\recovery\opbs-winpe.iso --restore-config D:\backups\restore.json
+# Inject NIC/storage drivers into the WIM before it is committed
+OPBS.exe --cli media create --iso D:\recovery\opbs-winpe.iso --driver D:\drivers\net,D:\drivers\storage
+# Stage the payload + write build.ps1 WITHOUT attempting elevation; run the
+# printed script from an already-elevated PowerShell (CI / non-admin shells):
+OPBS.exe --cli media create --iso D:\recovery\opbs-winpe.iso --script-only
+# Stage + headless-boot the payload without elevation (native addon + codecs)
+OPBS.exe --cli media smoke [--node <node.exe>] [--dist <dir>] [--native <addon>]
+```
+
+The generated script: `copype` a WinPE working dir, layer OPBS under
+`media\OPBS\` (dist + codecs + `opbs_native.node` + `node.exe`), optionally
+`dism /Image ... /Add-Driver /Recurse` each `--driver` folder, inject a
+`startnet.cmd` into `boot.wim` that locates the OPBS folder and launches
+`restore.cmd`, commit with DISM, then `MakeWinPEMedia`. `restore.cmd` uses a
+`OPBS-restore.json` on the media if present (or one supplied via
+`--restore-config`), otherwise asks for a config path.
+
+## `.opbs` container v1
+
+- **Header** (256 B): magic `OPBS`, version, timestamp, total bytes, block size,
+  compression id, partition count, flags (`HAS_BLOCK_INDEX`, `VERIFIED`,
+  `INCREMENTAL`), block-index offset, cipher id, KDF iterations, PBKDF2 salt,
+  base-image path (128 B ASCII, incremental only).
+  Compression id: `0` = none, `1` = deflate, `2` = zstd.
+- **Partition table**: fixed 64 B entries (index, size, offset, first block
+  offset, block count).
+- **Frames**: `[frame header 16 B][IV 12 B (encrypted)][tag 16 B (encrypted)][compressed payload]`.
+- **Block index**: `[u64 count][28 B entries]` (partition, block index, file
+  offset, sizes, raw CRC-32).
+- Encryption: AES-256-GCM, one IV+tag per frame, key derived from the passphrase
+  via PBKDF2-SHA256 (210,000 iterations), salt stored in the header.
+
+## Development
+
+```bash
+# Install dependencies
+npm install
+cd src/native && npm install && cd ../..
+
+# Build native addon (requires Python + Visual Studio Build Tools)
+npm run build:native
+
+# Run in development mode
+npm run dev
+
+# Build production
+npm run build
+
+# Lint (ESLint 9 + typescript-eslint flat config)
+npm run lint
+
+# Run unit tests
+npm test
+
+# Run the Electron GUI click-test (launches the built app, walks every view)
+npm run test:e2e
+
+# Package installer
+npm run package
+```
+
+### Building the native addon
+
+The native addon requires:
+- **Node.js + node-gyp**
+- **Python** (for node-gyp)
+- **Visual Studio Build Tools** with the "Desktop development with C++" workload
+
+The addon uses the Windows SDK's volume and storage APIs (no admin required for
+enumeration). Raw disk imaging/restore and VSS operations require elevation,
+which the app acquires by relaunching itself elevated through the UAC prompt.
+
+## Current Status
+
+- **Working**: UI shell, disk/partition enumeration (native, no-admin), UAC
+  helper elevation, VSS snapshots, `.opbs` imaging with zlib compression +
+  per-block CRC-32 verification, encrypted images (AES-256-GCM), incremental
+  backups + chain restore, retention/GFS pruning + manifest, cron scheduling +
+  toast/webhook notifications, SMART/disk-health reporting, headless CLI, NTFS
+  browse/extract (sparse, LZNT1, ADS, EFS detection), used-blocks-only capture
+  via NTFS `$Bitmap`, disk-to-disk clone (live VSS copy, dissimilar layout +
+  fresh partition table), Macrium `.mrimgx`/`.mrimg` browse/extract, WinPE media
+  with driver injection + headless payload smoke, 300+ unit/integration tests
+- **Planned**: see `ROADMAP.md`
+
+## License
+
+GPL-3.0 (planned)
