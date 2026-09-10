@@ -85,6 +85,14 @@ export class BackupScheduler {
     logger.info('Scheduler stopped');
   }
 
+  /**
+   * Live cron validation for the UI. Reuses node-cron's own validator so
+   * what the scheduler accepts is exactly what the form permits.
+   */
+  validate(expression: string): boolean {
+    return getCron().validate(expression);
+  }
+
   scheduleBackup(config: ScheduledBackup): boolean {
     this.cancelBackup(config.id);
     

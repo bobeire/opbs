@@ -378,6 +378,10 @@ function setupIpcHandlers(): void {
     return settingsManager.deleteScheduledBackup(id);
   });
 
+  ipcMain.handle('validate-cron', async (_, expression: string) => {
+    return scheduler.validate(typeof expression === 'string' ? expression : '');
+  });
+
   // File dialogs
   ipcMain.handle('select-directory', async () => {
     const result = await dialog.showOpenDialog(mainWindow!, {

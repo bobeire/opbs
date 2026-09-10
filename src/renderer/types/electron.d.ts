@@ -15,6 +15,7 @@ declare global {
       addScheduledBackup: (config: any) => Promise<any>;
       updateScheduledBackup: (id: string, updates: any) => Promise<any>;
       deleteScheduledBackup: (id: string) => Promise<boolean>;
+      validateCron: (expression: string) => Promise<boolean>;
       selectDirectory: () => Promise<string | undefined>;
       selectFile: (options?: any) => Promise<string | undefined>;
       selectSaveFile: (options?: any) => Promise<string | undefined>;

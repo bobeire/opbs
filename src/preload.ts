@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   addScheduledBackup: (config: any) => ipcRenderer.invoke('add-scheduled-backup', config),
   updateScheduledBackup: (id: string, updates: any) => ipcRenderer.invoke('update-scheduled-backup', id, updates),
   deleteScheduledBackup: (id: string) => ipcRenderer.invoke('delete-scheduled-backup', id),
+  validateCron: (expression: string) => ipcRenderer.invoke('validate-cron', expression),
 
   // File dialogs
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
