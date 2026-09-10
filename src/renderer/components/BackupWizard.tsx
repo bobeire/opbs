@@ -43,16 +43,19 @@ interface BackupProgress {
 
 interface BackupWizardProps {
   onComplete: () => void;
+  initialDestination?: string;
+  initialAllDisks?: boolean;
 }
 
 type WizardStep = 'select_source' | 'select_destination' | 'options' | 'progress' | 'complete';
 
-function BackupWizard({ onComplete }: BackupWizardProps) {
+function BackupWizard({ onComplete, initialDestination, initialAllDisks }: BackupWizardProps) {
   const [currentStep, setCurrentStep] = useState<WizardStep>('select_source');
   const [disks, setDisks] = useState<DiskInfo[]>([]);
   const [selectedDisk, setSelectedDisk] = useState<DiskInfo | null>(null);
   const [selectedPartitions, setSelectedPartitions] = useState<number[]>([]);
-  const [destinationPath, setDestinationPath] = useState('');
+  const [allDisks, setAllDisks] = useState(initialAllDisks ?? false);
+  const [destinationPath, setDestinationPath] = useState(initialDestination ?? '');
   const [compressionLevel, setCompressionLevel] = useState(3);
   const [compressionType, setCompressionType] = useState<'deflate' | 'zstd'>('zstd');
   const [compressionThreads, setCompressionThreads] = useState(() =>
@@ -64,6 +67,8 @@ function BackupWizard({ onComplete }: BackupWizardProps) {
   const [baseImagePath, setBaseImagePath] = useState<string | undefined>(undefined);
   const [baseImageName, setBaseImageName] = useState<string | undefined>(undefined);
   const [progress, setProgress] = useState<BackupProgress | null>(null);
+  const [diskLabel, setDiskLabel] = useState<string | null>(null);
+  const [networkOpen, setNetworkOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
@@ -72,6 +77,14 @@ function BackupWizard({ onComplete }: BackupWizardProps) {
       setProgress(p);
     });
     return cleanup;
+  }, []);
+
+  useEffect(() => {
+    if (!initialDestination) return;
+    if (destinationPath.trim()) {
+      void resolveNewestBase(destinationPath.trim());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadDisks = async () => {
@@ -129,23 +142,43 @@ function BackupWizard({ onComplete }: BackupWizardProps) {
     }
   };
 
+  const eligibleDisks = disks.filter((d) => d.partitions.length > 0);
+
   const handleStartBackup = async () => {
     setCurrentStep('progress');
 
-    const config: BackupConfig = {
-      sourceDiskIndex: selectedDisk!.index,
-      sourcePartitions: selectedPartitions,
+    const common: Omit<BackupConfig, 'sourceDiskIndex' | 'sourcePartitions'> = {
       destinationPath,
       compressionLevel,
       compressionType,
       compressionThreads,
       verificationEnabled,
-      ...(incrementalEnabled && baseImagePath ? { baseImagePath } : {}),
       ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {})
     };
 
     try {
-      await window.electronAPI.startBackup(config);
+      if (allDisks) {
+        for (let i = 0; i < eligibleDisks.length; i++) {
+          const disk = eligibleDisks[i];
+          setDiskLabel(`Disk ${i + 1} of ${eligibleDisks.length}: ${disk.model}`);
+          const config: BackupConfig = {
+            ...common,
+            sourceDiskIndex: disk.index,
+            sourcePartitions: disk.partitions.map((p) => p.partitionIndex),
+            ...(incrementalEnabled && baseImagePath ? { baseImagePath } : {})
+          };
+          await window.electronAPI.startBackup(config);
+        }
+      } else {
+        setDiskLabel(null);
+        const config: BackupConfig = {
+          ...common,
+          sourceDiskIndex: selectedDisk!.index,
+          sourcePartitions: selectedPartitions,
+          ...(incrementalEnabled && baseImagePath ? { baseImagePath } : {})
+        };
+        await window.electronAPI.startBackup(config);
+      }
       setCurrentStep('complete');
     } catch (error) {
       console.error('Backup failed:', error);
@@ -159,10 +192,34 @@ function BackupWizard({ onComplete }: BackupWizardProps) {
         return (
           <div className="wizard-step">
             <h2>Select Source Disk</h2>
-            
+
             {isLoading ? (
               <div className="loading">Loading disks...</div>
             ) : (
+              <>
+                <label className="checkbox-label all-disks-option">
+                  <input
+                    type="checkbox"
+                    checked={allDisks}
+                    onChange={(e) => {
+                      setAllDisks(e.target.checked);
+                      if (e.target.checked) {
+                        setSelectedDisk(null);
+                        setSelectedPartitions([]);
+                      }
+                    }}
+                  />
+                  Back up entire system (all disks, all partitions) to one destination
+                </label>
+
+                <p className="field-hint">
+                  Central backup: every disk with partitions ({eligibleDisks.length} available) is
+                  imaged sequentially to the destination you choose next.
+                </p>
+              </>
+            )}
+
+            {!allDisks && (
               <div className="disk-list">
                 {disks.map((disk) => (
                   <div
@@ -181,7 +238,7 @@ function BackupWizard({ onComplete }: BackupWizardProps) {
               </div>
             )}
             
-            {selectedDisk && (
+{selectedDisk && (
               <div className="partition-selection">
                 <h3>Select Partitions to Backup</h3>
                 <div className="partition-list">
@@ -213,12 +270,12 @@ function BackupWizard({ onComplete }: BackupWizardProps) {
                 </div>
               </div>
             )}
-            
+
             <div className="wizard-actions">
               <button className="btn-secondary" onClick={onComplete}>Cancel</button>
               <button
                 className="btn-primary"
-                disabled={!selectedDisk || selectedPartitions.length === 0}
+                disabled={!allDisks && (!selectedDisk || selectedPartitions.length === 0)}
                 onClick={() => setCurrentStep('select_destination')}
               >
                 Next
@@ -244,6 +301,23 @@ function BackupWizard({ onComplete }: BackupWizardProps) {
                   />
                   <button onClick={handleSelectDestination}>Browse</button>
                 </div>
+                <div className="net-browse-row">
+                  <button
+                    className="btn-secondary btn-small"
+                    onClick={() => setNetworkOpen((v) => !v)}
+                  >
+                    {networkOpen ? 'Hide network shares' : 'Browse network…'}
+                  </button>
+                </div>
+                {networkOpen && (
+                  <NetworkPicker
+                    onPick={(unc) => {
+                      const dest = unc.endsWith('\\') ? `${unc}opbs` : `${unc}\\opbs`;
+                      setDestinationPath(dest);
+                      void resolveNewestBase(dest);
+                    }}
+                  />
+                )}
                 <p className="field-hint">
                   Use <code>s3://bucket/prefix</code> or <code>sftp://[user[:pass]@]host[:port]/path</code> to
                   upload the finished image with the cloud credentials configured in Settings.
@@ -358,8 +432,17 @@ function BackupWizard({ onComplete }: BackupWizardProps) {
             <div className="summary">
               <h3>Backup Summary</h3>
               <ul>
-                <li>Source Disk: {selectedDisk?.model}</li>
-                <li>Partitions: {selectedPartitions.length}</li>
+                {allDisks ? (
+                  <>
+                    <li>Source: Entire system ({eligibleDisks.length} disks)</li>
+                    <li>Disks: {eligibleDisks.map((d) => d.model).join(' | ') || 'none found'}</li>
+                  </>
+                ) : (
+                  <>
+                    <li>Source Disk: {selectedDisk?.model}</li>
+                    <li>Partitions: {selectedPartitions.length}</li>
+                  </>
+                )}
                 <li>Destination: {destinationPath}</li>
                 <li>Compression: Level {compressionLevel} ({compressionType}{compressionThreads > 1 ? `, ${compressionThreads} threads` : ''})</li>
                 <li>Verification: {verificationEnabled ? 'Enabled' : 'Disabled'}</li>
@@ -385,6 +468,7 @@ function BackupWizard({ onComplete }: BackupWizardProps) {
             <h2>Backup in Progress</h2>
             
             <div className="progress-container">
+              {diskLabel && <p className="progress-disk-label">{diskLabel}</p>}
               <div className="progress-bar">
                 <div
                   className="progress-fill"
@@ -442,6 +526,107 @@ function BackupWizard({ onComplete }: BackupWizardProps) {
       </div>
       
       {renderStep()}
+    </div>
+  );
+}
+
+interface NetworkShare {
+  unc: string;
+  name: string;
+  kind: 'share' | 'admin';
+  reachable: boolean;
+  writable: boolean;
+  remark?: string;
+}
+
+interface NetworkPickerProps {
+  onPick: (unc: string) => void;
+}
+
+function NetworkPicker({ onPick }: NetworkPickerProps) {
+  const [machines, setMachines] = useState<{ name: string; addresses: string[] }[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [openHost, setOpenHost] = useState<string | null>(null);
+  const [sharesByHost, setSharesByHost] = useState<Map<string, NetworkShare[]>>(new Map());
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    window.electronAPI
+      .networkDiscover()
+      .then((res) => {
+        if (alive) setMachines(res.machines ?? []);
+      })
+      .catch((e: any) => {
+        if (alive) setError(e?.message ?? 'Discovery failed');
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const toggleHost = async (host: string) => {
+    if (openHost === host) {
+      setOpenHost(null);
+      return;
+    }
+    setOpenHost(host);
+    if (sharesByHost.has(host)) return;
+    try {
+      const res = await window.electronAPI.networkShares(host);
+      setSharesByHost((m) => {
+        const next = new Map(m);
+        next.set(host, res.shares ?? []);
+        return next;
+      });
+    } catch {
+      // ignore
+    }
+  };
+
+  return (
+    <div className="network-picker">
+      {loading && <div className="table-empty">Scanning the network…</div>}
+      {error && (
+        <div className="error-message">
+          <p>{error}</p>
+        </div>
+      )}
+      {!loading && machines.length === 0 && (
+        <div className="table-empty">
+          No machines found. Enter a UNC path or <code>smb://host/share</code> above instead.
+        </div>
+      )}
+      {machines.map((m) => (
+        <div key={m.name} className="net-machine">
+          <button className="net-machine-head" onClick={() => void toggleHost(m.name)}>
+            <span className="net-machine-name">{m.name}</span>
+            <span className="net-caret">{openHost === m.name ? '▾' : '▸'}</span>
+          </button>
+          {openHost === m.name && (
+            <div className="net-shares">
+              {(sharesByHost.get(m.name) ?? []).map((s) => (
+                <div key={s.unc} className="net-share">
+                  <code className="net-share-unc">{s.unc}</code>
+                  <button
+                    className="btn-secondary btn-small"
+                    onClick={() => onPick(s.unc)}
+                    disabled={!s.reachable && !s.writable}
+                  >
+                    Use
+                  </button>
+                </div>
+              ))}
+              {!(sharesByHost.get(m.name) ?? []).length && (
+                <div className="table-empty">No shares.</div>
+              )}
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   );
 }

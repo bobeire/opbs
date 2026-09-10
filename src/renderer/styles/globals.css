@@ -1016,3 +1016,157 @@ body {
     transform: translateX(0);
   }
 }
+
+/* ---------- Network destinations ---------- */
+.network-view {
+  max-width: 1000px;
+}
+
+.net-machines {
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.net-machine + .net-machine {
+  border-top: 1px solid var(--border-color, #eeeeee);
+}
+
+.net-machine-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.net-machine-head:hover {
+  background: var(--hover-color, #f9fafb);
+}
+
+.net-machine-name {
+  font-weight: 600;
+  min-width: 160px;
+}
+
+.net-machine-meta {
+  flex: 1;
+  color: #777;
+  font-size: 12px;
+}
+
+.net-caret {
+  color: #999;
+  margin-left: auto;
+}
+
+.net-shares {
+  padding: 4px 16px 12px 16px;
+}
+
+.net-share {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border-color, #f0f0f0);
+}
+
+.net-share-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.net-share code,
+.net-share-unc {
+  background: var(--bg-muted, #f3f4f6);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.share-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ccc;
+  flex-shrink: 0;
+}
+
+.share-dot.ok {
+  background: #2ecc71;
+}
+
+.share-kind {
+  font-size: 11px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.share-ok {
+  font-size: 12px;
+  color: #27ae60;
+}
+
+.share-bad {
+  font-size: 12px;
+  color: #c0392b;
+}
+
+.net-share-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.net-browse-row {
+  margin-top: 8px;
+}
+
+.network-picker {
+  margin-top: 10px;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 8px;
+  padding: 8px 0;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.network-picker .net-machine-head {
+  padding: 8px 12px;
+}
+
+.all-disks-option {
+  display: block;
+  padding: 10px 0 4px 0;
+  font-weight: 500;
+}
+
+.progress-disk-label {
+  font-size: 13px;
+  color: #555;
+  margin-bottom: 8px;
+}
+
+.path-input {
+  display: flex;
+  gap: 8px;
+}
+
+.path-input input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 6px;
+  font: inherit;
+}

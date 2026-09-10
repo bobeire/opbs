@@ -80,6 +80,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Auto-update
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
   installUpdate: () => ipcRenderer.invoke('install-update'),
+
+  // Network destination discovery
+  networkDiscover: () => ipcRenderer.invoke('network-discover'),
+  networkShares: (host: string) => ipcRenderer.invoke('network-shares', host),
+  networkTest: (uncPath: string, create?: boolean) => ipcRenderer.invoke('network-test', uncPath, create),
   onUpdateStatus: (callback: (status: any) => void) => {
     const handler = (_event: any, status: any) => callback(status);
     ipcRenderer.on('update-status', handler);

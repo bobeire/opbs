@@ -6,12 +6,19 @@ import Settings from './components/Settings';
 import BrowseView from './components/BrowseView';
 import MediaView from './components/MediaView';
 import LogViewer from './components/LogViewer';
+import NetworkView from './components/NetworkView';
 import ToastHost from './components/ToastHost';
 
-type Page = 'dashboard' | 'backup' | 'restore' | 'browse' | 'media' | 'logs' | 'settings';
+type Page = 'dashboard' | 'backup' | 'restore' | 'browse' | 'media' | 'network' | 'logs' | 'settings';
+
+interface BackupIntent {
+  destinationPath?: string;
+  allDisks?: boolean;
+}
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
+  const [backupIntent, setBackupIntent] = useState<BackupIntent | null>(null);
 
   useEffect(() => {
     void window.electronAPI.checkForUpdates();
@@ -20,13 +27,22 @@ function App() {
   const renderPage = () => {
     switch (currentPage) {
       case 'backup':
-        return <BackupWizard onComplete={() => setCurrentPage('dashboard')} />;
+        return <BackupWizard onComplete={() => setCurrentPage('dashboard')} initialDestination={backupIntent?.destinationPath} initialAllDisks={backupIntent?.allDisks} />;
       case 'restore':
         return <RestoreWizard onComplete={() => setCurrentPage('dashboard')} />;
       case 'browse':
         return <BrowseView onComplete={() => setCurrentPage('dashboard')} />;
       case 'media':
         return <MediaView onComplete={() => setCurrentPage('dashboard')} />;
+      case 'network':
+        return (
+          <NetworkView
+            onStartBackup={(destinationPath, allDisks) => {
+              setBackupIntent({ destinationPath, allDisks });
+              setCurrentPage('backup');
+            }}
+          />
+        );
       case 'logs':
         return <LogViewer onClose={() => setCurrentPage('dashboard')} />;
       case 'settings':
@@ -88,6 +104,15 @@ function App() {
             >
               <span className="nav-icon">💿</span>
               Recovery Media
+            </button>
+          </li>
+          <li>
+            <button
+              className={`nav-item ${currentPage === 'network' ? 'active' : ''}`}
+              onClick={() => setCurrentPage('network')}
+            >
+              <span className="nav-icon">🌐</span>
+              Network
             </button>
           </li>
           <li>

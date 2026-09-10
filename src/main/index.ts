@@ -9,6 +9,7 @@ import { BackupScheduler } from './backup/scheduler';
 import { SettingsManager } from './utils/settings-manager';
 import { logger } from './utils/logger';
 import { initAutoUpdater, checkForUpdates, quitAndInstall } from './utils/auto-updater';
+import { discoverNetworkMachines, enumerateShares, testNetworkDestination } from './utils/network';
 import { ImagingEngine } from './imaging/backup-engine';
 import { RestoreEngine } from './imaging/restore-engine';
 import { dispatchHelperJob } from './helper/job-runner';
@@ -431,6 +432,21 @@ function setupIpcHandlers(): void {
   ipcMain.handle('install-update', async () => {
     quitAndInstall();
     return { ok: true };
+  });
+
+  // Network destination discovery
+  ipcMain.handle('network-discover', async () => {
+    const machines = await discoverNetworkMachines();
+    return { machines };
+  });
+
+  ipcMain.handle('network-shares', async (_, host: string) => {
+    const shares = await enumerateShares(String(host ?? ''));
+    return { shares };
+  });
+
+  ipcMain.handle('network-test', async (_, uncPath: string, create?: boolean) => {
+    return testNetworkDestination(String(uncPath ?? ''), create !== false);
   });
 
   // Retention / GFS
