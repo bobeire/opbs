@@ -10,6 +10,7 @@ Crafted by **RHITCS** — named in honour of a certain well-preserved pickle.
 - **Compression**: Zstandard (zstd) with multithreaded worker-thread compression, plus classic zlib deflate for backward compatibility; multiple levels to balance speed vs. size
 - **Incremental backups**: deltas capture only changed blocks against a base image; restore chains replay base + deltas in order. Optionally the NTFS **USN journal** (`useUsnJournal`) is used to read only the blocks touched by changed files instead of scanning the whole volume (falls back to a full scan if the journal is unavailable).
 - **Used-blocks-only capture**: `usedBlocksOnly` (CLI `--used-blocks-only`) reads the NTFS `$Bitmap` and stores only blocks containing allocated clusters, dropping free space; non-NTFS partitions fall back to a full capture.
+- **Read-only mount via WinFsp**: mount a partition from a `.opbs` or Macrium image as a virtual drive letter with **zero extra disk usage** — file reads are served lazily by decompressing only the covering blocks. Requires the free WinFsp runtime (https://winfsp.dev).
 - **Disk-to-disk clone**: `clone` copies selected live partitions straight onto a different local disk (VSS snapshots, optional dissimilar layout + fresh GPT/MBR table, optional grow-on-restore), with no image file or cloud upload.
 - **Encryption**: optional AES-256-GCM per-block encryption (master-key-derived via PBKDF2-SHA256)
 - **Verification**: self-check images after write and before restore
@@ -38,6 +39,11 @@ Crafted by **RHITCS** — named in honour of a certain well-preserved pickle.
 - **zstdify + fzstd (pure JS)**: Zstandard compression/decompression fallback when the native addon is unavailable
 - **Node crypto (AES-256-GCM, PBKDF2)**: per-block encryption
 - **worker_threads**: multithreaded zstd/deflate block compression in the backup loop
+- **WinFsp** (runtime + a subset of the SDK headers vendored under
+  `src/native/vendor/winfsp`, GPLv3): the read-only in-memory filesystem that
+  exposes an image partition as a real drive letter. Only the *runtime* is
+  installed on end-user machines; headers ship in the repo so the addon builds
+  without a separate SDK install.
 - **ssh2**: dependency-free SFTP client for `sftp://` cloud destinations
 - **electron-builder**: Packaging
 
@@ -56,7 +62,12 @@ src/
 │   │   ├── image-format.ts    # .opbs container (header/partitions/blocks/CRC/cipher)
 │   │   ├── imaging-job.ts     # job/progress/result types shared by both processes
 │   │   ├── backup-engine.ts   # builds jobs, maps progress, drives launcher
-│   │   └── restore-engine.ts  # restore jobs, chain resolution, image summary
+│   │   ├── restore-engine.ts  # restore jobs, chain resolution, image summary
+│   │   ├── mount-manager.ts   # WinFsp availability + mount/unmount lifecycle
+│   │   └── fs/
+│   │       ├── file-browse.ts # NTFS browse/extract over image readers
+│   │       ├── ntfs.ts        # NTFS parsing + ranged file reads
+│   │       └── mount-fs.ts    # WinFsp <-> JS bridge: stat/read/readDir handlers
 │   ├── helper/
 │   │   ├── job-runner.ts  # runs in the elevated instance: VSS + read + compress + write
 │   │   └── launcher.ts    # spawns the elevated instance via UAC + file IPC
@@ -82,8 +93,10 @@ src/
 │       └── globals.css       # Global styles
 └── native/                # C++ native addon
     ├── binding.gyp
+    ├── vendor/winfsp/      # WinFsp SDK headers (GPLv3, subset)
     └── src/
-        ├── addon.cpp         # N-API bindings
+        ├── addon.cpp         # N-API bindings (registers WinFsp mount exports)
+        ├── winfsp_mount.cpp  # Read-only WinFsp FS; JS bridge over the native addon
         ├── vss_manager.*     # VSS shadow copy create/delete
         ├── disk_reader.*     # Enumeration + raw block I/O
         └── backup_format.*   # .opbs format (native writer stubs)
@@ -258,6 +271,31 @@ OPBS.exe --cli extract img.mrimg --partition 1 --path "Users\me\notes.txt" --out
   resident boot sector (e.g. file/data backups) report that no filesystem is
   present.
 
+## Mounting an image partition as a read-only drive
+
+Instead of extracting, you can attach a partition from a `.opbs` or Macrium
+image directly as a **drive letter** via WinFsp. The drive is fully virtual —
+file reads are served on demand by decompressing only the covering blocks, so
+**no extra disk space is used** and nothing is written back to the image.
+
+```bash
+# Mount partition 2 (GUI: Browse view → "Mount as drive")
+OPBS.exe --cli mount D:\OPBS\img_0_1746300000000.opbs --partition 2
+# Pin a specific drive letter (defaults to WinFsp auto-assign) + custom label
+OPBS.exe --cli mount D:\OPBS\img_0_1746300000000.opbs --partition 2 --letter E: --label "Recovery 2026"
+# Encrypted images
+OPBS.exe --cli mount D:\OPBS\img_0_1746300000000.opbs --partition 2 --passphrase secret
+# Just check whether WinFsp is installed (no elevation, no mount)
+OPBS.exe --cli mount --check
+```
+
+The mount stays alive until you press **Ctrl+C** (or click **Unmount** in the
+GUI); unmounting is a clean WinFsp teardown. Since drive letters require
+admin rights, the command relaunches itself elevated through a UAC prompt (same
+mechanism as backup/restore) and the read/write handlers run in the elevated
+helper. Requires the **WinFsp runtime** (https://winfsp.dev); the GUI shows a
+hint when it is missing.
+
 ## Headless CLI
 
 The app accepts a `--cli` flag that runs a single command and exits:
@@ -287,6 +325,8 @@ OPBS.exe --cli store list s3://bucket/backups
 OPBS.exe --cli store verify s3://bucket/backups
 OPBS.exe --cli prune s3://bucket/backups --keep-full 3 --keep-deltas 3 --dry-run
 OPBS.exe --cli usn-changes C: --count 20
+OPBS.exe --cli mount D:\OPBS\img_0_1746300000000.opbs --partition 2 --letter E:
+OPBS.exe --cli mount --check
 ```
 
 Example `job-backup.json`:
@@ -438,9 +478,12 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   toast/webhook notifications, SMART/disk-health reporting, headless CLI, NTFS
   browse/extract (sparse, LZNT1, ADS, EFS detection), used-blocks-only capture
   via NTFS `$Bitmap`, disk-to-disk clone (live VSS copy, dissimilar layout +
-  fresh partition table), Macrium `.mrimgx`/`.mrimg` browse/extract, WinPE media
-  with driver injection + headless payload smoke, 300+ unit/integration tests
-- **Planned**: see `ROADMAP.md`
+  fresh partition table), Macrium `.mrimgx`/`.mrimg` browse/extract, read-only
+  WinFsp mount of image partitions (GUI + CLI), WinPE media with driver
+  injection + headless payload smoke, 300+ unit/integration tests
+- **Planned**: see `ROADMAP.md`. Real WinFsp mounts are verified once the
+  WinFsp runtime is installed (detected automatically; the mount bridge is
+  unit-tested via in-memory browse sessions).
 
 ## License
 

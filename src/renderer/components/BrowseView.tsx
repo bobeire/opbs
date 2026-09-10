@@ -17,6 +17,14 @@ interface BrowsePartition {
   blockCount: number;
 }
 
+interface MountStatus {
+  id: string;
+  state: string;
+  mountPoint?: string;
+  ok?: boolean;
+  error?: string;
+}
+
 interface BrowseViewProps {
   onComplete?: () => void;
 }
@@ -33,6 +41,39 @@ function BrowseView({ onComplete }: BrowseViewProps) {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [extracting, setExtracting] = useState<string | null>(null);
   const [notice, setNotice] = useState('');
+  const [winfspOk, setWinfspOk] = useState(false);
+  const [mountId, setMountId] = useState<string | null>(null);
+  const [mountPoint, setMountPoint] = useState('');
+  const [mountedOf, setMountedOf] = useState('');
+  const [mounting, setMounting] = useState(false);
+  const [mountError, setMountError] = useState('');
+
+  useEffect(() => {
+    void window.electronAPI
+      .winfspStatus()
+      .then((status: { available: boolean }) => setWinfspOk(status.available))
+      .catch(() => setWinfspOk(false));
+    const unsubscribe = window.electronAPI.onMountStatus((status: MountStatus) => {
+      if (status.id !== mountId) return;
+      if (status.state === 'mounted') {
+        setMountPoint(status.mountPoint ?? '');
+        setMountedOf(`${imagePath}#${partitionIndex}`);
+        setMounting(false);
+        setMountError('');
+      } else if (status.state === 'unmounted') {
+        if (status.ok === false) {
+          setMountError(status.error ?? 'The mount was removed unexpectedly.');
+        }
+        setMountId(null);
+        setMountPoint('');
+        setMounting(false);
+      }
+    });
+    return () => {
+      unsubscribe();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -143,6 +184,34 @@ function BrowseView({ onComplete }: BrowseViewProps) {
     }
   };
 
+  const handleMount = async (): Promise<void> => {
+    if (partitionIndex === null || mountId) return;
+    setMounting(true);
+    setMountError('');
+    try {
+      const result = await window.electronAPI.mountImage({
+        imagePath,
+        partitionIndex,
+        label: `OPBS ${imagePath.split(/[\\/]/).pop() ?? 'image'} (partition ${partitionIndex})`,
+        passphrase: passphrase || undefined
+      });
+      if (!result.ok) {
+        setMountError(result.error ?? 'Mount failed');
+        setMounting(false);
+      } else {
+        setMountId(result.id);
+      }
+    } catch (e: any) {
+      setMountError(e?.message ?? 'Mount failed');
+      setMounting(false);
+    }
+  };
+
+  const handleUnmount = async (): Promise<void> => {
+    if (!mountId) return;
+    await window.electronAPI.unmountImage(mountId);
+  };
+
   const formatSize = (bytes: number): string => {
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     let size = bytes;
@@ -202,6 +271,27 @@ function BrowseView({ onComplete }: BrowseViewProps) {
           </div>
         )}
       </div>
+
+      {mountedOf === `${imagePath}#${partitionIndex}` ? (
+        <div className="mount-bar mount-active">
+          <span className="mount-point">Mounted at {mountPoint}</span>
+          <button className="btn-secondary btn-small" onClick={() => void handleUnmount()}>
+            Unmount
+          </button>
+        </div>
+      ) : (
+        <div className="mount-bar">
+          <button
+            className="btn-secondary btn-small"
+            disabled={mounting || partitionIndex === null}
+            onClick={() => void handleMount()}
+          >
+            {mounting ? 'Mounting…' : 'Mount as drive'}
+          </button>
+          {!winfspOk && <span className="field-hint">WinFsp not installed — mount unavailable.</span>}
+          {mountError && <span className="error-text">{mountError}</span>}
+        </div>
+      )}
 
       {error && (
         <div className="error-message">

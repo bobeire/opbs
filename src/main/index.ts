@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import path from 'path';
+import * as crypto from 'crypto';
 import { DiskEnumerator } from './utils/disk-enumerator';
 import { BackupManager } from './backup/manager';
 import { RestoreManager } from './restore/manager';
@@ -9,6 +10,8 @@ import { logger } from './utils/logger';
 import { ImagingEngine } from './imaging/backup-engine';
 import { RestoreEngine } from './imaging/restore-engine';
 import { dispatchHelperJob } from './helper/job-runner';
+import { launchElevatedJob } from './helper/launcher';
+import { winfspAvailable } from './imaging/mount-manager';
 import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains, writeManifest } from './backup/retention';
 import { checkDiskHealth } from './utils/disk-health';
 import { runCli } from './cli';
@@ -30,6 +33,9 @@ const backupManager = new BackupManager(imagingEngine);
 const restoreManager = new RestoreManager(new RestoreEngine(diskEnumerator));
 const settingsManager = new SettingsManager();
 const scheduler = new BackupScheduler(backupManager, settingsManager);
+
+// Read-only image mounts: job launcher per mount id (cancel = unmount).
+const mountLaunchers = new Map<string, { cancel(): void }>();
 
 // Cached file browsing sessions (parsing the MFT is expensive; reuse per image).
 const browseSessions = new Map<string, BrowseSession>();
@@ -299,13 +305,10 @@ function setupIpcHandlers(): void {
   ipcMain.handle('browse-partitions', async (_, imagePath: string) => {
     const format = detectMacriumFormat(imagePath);
     if (format) {
-      if (format === 'mrimg-v7') {
-        throw new Error(`${imagePath}: .mrimg (Reflect 7/8) images use a proprietary QuickLZ container that is not readable yet.`);
-      }
       const info = readMacriumImage(imagePath);
       return {
         encrypted: info.encryption.enable,
-        imageFormat: 'mrimgx',
+        imageFormat: format === 'mrimgx' ? 'mrimgx' : 'mrimg',
         partitions: info.partitions.map((p, i) => ({
           partitionIndex: i,
           diskIndex: p.diskIndex,
@@ -341,6 +344,57 @@ function setupIpcHandlers(): void {
 
   ipcMain.handle('browse-close', async () => {
     browseSessions.clear();
+  });
+
+  // Read-only WinFsp mounts of image partitions (elevated helper)
+  ipcMain.handle('winfsp-status', async () => {
+    return { available: winfspAvailable() };
+  });
+
+  ipcMain.handle('mount-image', async (_, config) => {
+    if (!winfspAvailable()) {
+      return {
+        ok: false,
+        error: 'WinFsp is not installed. Install the WinFsp runtime (https://winfsp.dev) and try again.'
+      };
+    }
+    const id = `mount-${crypto.randomUUID()}`;
+    const job = {
+      type: 'mount',
+      imagePath: config.imagePath,
+      partitionIndex: config.partitionIndex,
+      driveLetter: config.driveLetter,
+      label: config.label,
+      passphrase: config.passphrase
+    };
+    const launcher = launchElevatedJob<typeof job, any, any>(job);
+    launcher.onProgress((p) => {
+      if (mainWindow) {
+        mainWindow.webContents.send('mount-status', { id, ...p });
+      }
+    });
+    launcher.promise
+      .then((result) => {
+        mountLaunchers.delete(id);
+        if (mainWindow) {
+          mainWindow.webContents.send('mount-status', { id, state: 'unmounted', ok: result?.ok !== false });
+        }
+      })
+      .catch(() => {
+        mountLaunchers.delete(id);
+        if (mainWindow) {
+          mainWindow.webContents.send('mount-status', { id, state: 'unmounted', ok: false });
+        }
+      });
+    mountLaunchers.set(id, { cancel: launcher.cancel });
+    return { ok: true, id };
+  });
+
+  ipcMain.handle('unmount-image', async (_, id: string) => {
+    const launcher = mountLaunchers.get(id);
+    if (!launcher) return { ok: false, error: `No such mount: ${id}` };
+    launcher.cancel();
+    return { ok: true };
   });
 
   // Select a file to save (browse extraction target)

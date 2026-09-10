@@ -41,6 +41,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('browse-extract', imagePath, partitionIndex, relPath, outPath, passphrase),
   browseClose: () => ipcRenderer.invoke('browse-close'),
 
+  // Read-only mount of an image partition (WinFsp, elevated helper)
+  winfspStatus: () => ipcRenderer.invoke('winfsp-status'),
+  mountImage: (config: any) => ipcRenderer.invoke('mount-image', config),
+  unmountImage: (id: string) => ipcRenderer.invoke('unmount-image', id),
+  onMountStatus: (callback: (status: any) => void) => {
+    const handler = (_event: any, status: any) => callback(status);
+    ipcRenderer.on('mount-status', handler);
+    return () => {
+      ipcRenderer.removeListener('mount-status', handler);
+    };
+  },
+
   // File dialogs
   selectSaveFile: (options?: any) => ipcRenderer.invoke('select-save-file', options),
 

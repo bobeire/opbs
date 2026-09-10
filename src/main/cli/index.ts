@@ -11,6 +11,8 @@ import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains, wr
 import { checkDiskHealth } from '../utils/disk-health';
 import { registerScheduledTask, removeScheduledTask, listScheduledTasks } from '../utils/task-scheduler';
 import { dispatchHelperJob } from '../helper/job-runner';
+import { launchElevatedJob } from '../helper/launcher';
+import { winfspAvailable } from '../imaging/mount-manager';
 import { JobResult } from '../imaging/imaging-job';
 import { locateAdk, peArchForProcess } from '../utils/adk';
 import { createRecoveryMedia, resolveNodeExe, smokeMediaPayload } from '../utils/winpe-media';
@@ -81,6 +83,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdStore(ctx);
       case 'usn-changes':
         return await cmdUsn(ctx);
+      case 'mount':
+        return await cmdMount(ctx);
       case 'new-config':
         return cmdNewConfig(ctx);
       case 'smoke-selfcheck':
@@ -148,6 +152,11 @@ Commands:
   store verify <s3://bucket/prefix|sftp://user@host/path> [--key K] [--passphrase p] [--region R]
                                          Download + verify S3 objects (per-block CRC).
   usn-changes <volume> [--count N]       List recent NTFS USN journal changes (elevation needed).
+  mount <image> --partition N [--letter X:] [--label L] [--passphrase p] [--check]
+                                         Mount an image partition as a read-only drive (WinFsp).
+                                         Stays mounted until you press Ctrl+C (unmount). The
+                                         volume is virtual: no extra disk space is used.
+                                         --check only reports whether WinFsp is installed.
   new-config <output.json>               Write an example job configuration.
 
 Global:
@@ -1189,6 +1198,74 @@ async function cmdUsn(ctx: CommandContext): Promise<number> {
       console.log(`${limited.length} change(s)`);
     }
     return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
+async function cmdMount(ctx: CommandContext): Promise<number> {
+  if (ctx.argv.includes('--check')) {
+    console.log(winfspAvailable() ? 'WinFsp: installed' : 'WinFsp: not installed (https://winfsp.dev)');
+    return winfspAvailable() ? 0 : 1;
+  }
+
+  const imagePath = ctx.argv[0];
+  if (!imagePath) {
+    console.error('Usage: mount <image> --partition N [--letter X:] [--label L] [--passphrase p] [--check]');
+    return 1;
+  }
+  const partitionIndex = parsePartitionIndex(ctx.argv);
+  if (partitionIndex === null) {
+    console.error('Invalid --partition value');
+    return 1;
+  }
+  const letter = flagValue(ctx.argv, '--letter');
+  const label = flagValue(ctx.argv, '--label');
+  const passphrase = flagValue(ctx.argv, '--passphrase');
+  if (letter && !/^[A-Za-z]:$/.test(letter)) {
+    console.error('--letter must look like "X:"');
+    return 1;
+  }
+
+  if (!winfspAvailable()) {
+    console.error('WinFsp is not installed. Install the WinFsp runtime (https://winfsp.dev) and try again.');
+    return 1;
+  }
+
+  const job = {
+    type: 'mount',
+    imagePath,
+    partitionIndex,
+    driveLetter: letter,
+    label,
+    passphrase
+  };
+
+  try {
+    const launcher = launchElevatedJob<typeof job, Record<string, unknown>, { ok?: boolean }>(job);
+    let mountedInfo: string | null = null;
+    launcher.onProgress((p) => {
+      if (p && p.state === 'mounted') {
+        mountedInfo = `${p.mountPoint as string} (id ${String(p.id)})`;
+        if (ctx.opts.json) {
+          console.log(JSON.stringify({ ok: true, state: 'mounted', ...p }));
+        } else {
+          console.log(`Mounted at ${mountedInfo}. Press Ctrl+C to unmount.`);
+        }
+      }
+    });
+    const onInterrupt = (): void => {
+      launcher.cancel();
+    };
+    process.once('SIGINT' as string, onInterrupt);
+    const result = await launcher.promise;
+    if (ctx.opts.json) {
+      console.log(JSON.stringify({ ok: result?.ok !== false, state: 'unmounted' }));
+    } else {
+      console.log('Unmounted.');
+    }
+    return result?.ok === false ? 1 : 0;
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     return 1;

@@ -690,6 +690,39 @@ export function readFileData(reader: PartitionReader, layout: NtfsLayout, file: 
 }
 
 /**
+ * Read a byte range of a file's unnamed $DATA stream. The range is clamped to
+ * the stream length. Compressed files are decoded whole and then sliced (their
+ * compression units are independent, so this is always safe).
+ */
+export function readFileRange(
+  reader: PartitionReader,
+  layout: NtfsLayout,
+  file: NtfsFile,
+  offset: number,
+  length: number
+): Buffer {
+  if (file.isEncrypted) {
+    throw new EfsEncryptedError(
+      `"${file.name?.name ?? `record ${file.recordNumber}`}" is EFS-encrypted; its bytes are ciphertext ` +
+        'and cannot be decrypted offline from the image without the owner\'s private key'
+    );
+  }
+  if (length <= 0 || offset >= file.size) return Buffer.alloc(0);
+  const start = offset < 0 ? 0 : offset;
+  const end = Math.min(start + length, file.size);
+  if (file.compressionUnit && file.compressionUnit > 0) {
+    return readCompressedFileData(reader, layout, file).subarray(start, end);
+  }
+  if (file.residentData.length > 0) {
+    return Buffer.from(file.residentData.subarray(start, end));
+  }
+  if (file.dataRuns.length === 0) {
+    return Buffer.alloc(Math.max(0, end - start));
+  }
+  return readRuns(reader, layout.clusterSize, file.dataRuns, start, end - start);
+}
+
+/**
  * Read an NTFS-compressed (LZNT1) file. The data is stored as independent
  * compression units of `1 << compressionUnit` clusters; each unit is either a
  * full raw data run (uncompressed), a short data run followed by a sparse fill

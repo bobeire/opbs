@@ -147,6 +147,29 @@ implemented; **Investigate** items need spike work first.
 - ✅ Unit tests: `used-blocks.test.ts`, `clone-job.test.ts`, `clone-engine.test.ts`
   (20 tests) — full suite green.
 
+### Read-only mount of image partitions (WinFsp)
+- ✅ Vendored WinFsp SDK headers (`native/vendor/winfsp`, GPLv3-compatible) +
+  `binding.gyp`/`addon.cpp` wiring; addon builds cleanly.
+- ✅ `native/winfsp_mount.cpp`: read-only volume with the JS bridge
+  (`winfspAvailable`, `winfspMount`, `winfspUnmount`). NT paths (`\foo`, root
+  `\`); u64 sizes/FILETIMEs travel as decimal strings; replies return NTSTATUS
+  as unsigned hex; readDirectory filters entries past the marker to avoid
+  enumeration loops.
+- ✅ Bridge handler `imaging/fs/mount-fs.ts` over the existing chain-aware NTFS
+  reader; `readFileRange` (`imaging/fs/ntfs.ts`) serves ranged reads (resident,
+  compressed, non-resident, encrypted → clear error).
+- ✅ `imaging/mount-manager.ts`: availability + mount/unmount lifecycle.
+- ✅ Elevated mount jobs: `job-runner` `type:'mount'` (`runMountJob` polls the
+  cancel file, unmounts, writes result).
+- ✅ GUI: `Browse view → Mount as drive / Unmount` + WinFsp hint + status line;
+  IPC (`winfsp-status`, `mount-image`, `unmount-image`, `mount-status` events).
+- ✅ CLI: `mount <image> --partition N [--letter X:] [--label L]
+  [--passphrase p] [--check]`, blocks until Ctrl+C.
+- ✅ Unit tests: `mount-fs.test.ts` (bridge stat/read/readDir + export presence,
+  `winfspAvailable() === false` on this machine).
+- ⬜ **Remaining**: live smoke test on a machine with the WinFsp runtime
+  installed (auto-detected; GUI shows a hint when missing).
+
 ## Planned
 
 ### Cloud / network destinations

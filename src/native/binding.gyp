@@ -9,6 +9,7 @@
         "src/vss_manager.cpp",
         "src/disk_reader.cpp",
         "src/backup_format.cpp",
+        "src/winfsp_mount.cpp",
         "vendor/zstd/common/entropy_common.c",
         "vendor/zstd/common/error_private.c",
         "vendor/zstd/common/fse_decompress.c",
@@ -37,35 +38,38 @@
       ],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",
+        "vendor/winfsp",
         "vendor/zstd",
         "vendor/zstd/common"
       ],
       "libraries": [
         "-lole32",
         "-loleaut32",
-        "-luuid"
+        "-luuid",
+        "-ladvapi32"
       ],
       "msvs_settings": {
         "VCCLCompilerTool": {
           "ExceptionHandling": 1
         }
       },
-      "conditions": [
-        [
-          "OS=='win'",
-          {
-            "libraries": [
-              "-lole32",
-              "-loleaut32",
-              "-luuid",
-              "-lBcrypt",
-              "-lrpcrt4",
-              "-lsetupapi",
-              "-lvssapi"
+"conditions": [
+            [
+              "OS=='win'",
+              {
+                "libraries": [
+                  "-lole32",
+                  "-loleaut32",
+                  "-luuid",
+                  "-ladvapi32",
+                  "-lBcrypt",
+                  "-lrpcrt4",
+                  "-lsetupapi",
+                  "-lvssapi"
+                ]
+              }
             ]
-          }
-        ]
-      ]
+          ]
     }
   ]
 }

@@ -35,6 +35,7 @@ import { CompressionPool } from '../imaging/compression-pool';
 import { computeChangedBlockIndices } from '../imaging/usn-tracking';
 import { planNtfsGrow, MAX_METADATA_BYTES } from '../imaging/fs/ntfs-resize';
 import { readUsedBlockIndexes } from '../imaging/fs/used-blocks';
+import { mountImage, winfspAvailable } from '../imaging/mount-manager';
 import {
   ImagingJob,
   JobProgress,
@@ -1195,6 +1196,76 @@ function readLivePartitionMetadata(
 }
 
 /**
+ * Mounts a partition from a backup image as a read-only WinFsp drive (the job
+ * flavour used when the helper has to hold the mount open). Writes a
+ * `{ state: 'mounted', id, mountPoint }` progress update once the volume is
+ * live, then stays alive until `cancelPath` appears (the unmount request), at
+ * which point the volume is unmounted and the result file is written.
+ */
+export async function runMountJob(
+  jobPath: string,
+  resultPath: string,
+  progressPath: string,
+  cancelPath: string
+): Promise<void> {
+  const job = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as {
+    imagePath: string;
+    partitionIndex: number;
+    driveLetter?: string;
+    label?: string;
+    passphrase?: string;
+  };
+
+  if (!winfspAvailable()) {
+    fs.writeFileSync(
+      resultPath,
+      JSON.stringify({
+        ok: false,
+        error: 'WinFsp is not installed. Install the WinFsp runtime (https://winfsp.dev) and try again.'
+      })
+    );
+    return;
+  }
+
+  let handle: { id: number; mountPoint: string; unmount(): boolean };
+  try {
+    handle = mountImage(job);
+  } catch (error) {
+    fs.writeFileSync(
+      resultPath,
+      JSON.stringify({ ok: false, error: errorMessage(error) })
+    );
+    return;
+  }
+
+  fs.writeFileSync(
+    progressPath,
+    JSON.stringify({
+      state: 'mounted',
+      id: handle.id,
+      mountPoint: handle.mountPoint,
+      image: job.imagePath,
+      partitionIndex: job.partitionIndex
+    })
+  );
+
+  // Stay alive until the launcher asks us to unmount.
+  while (!fs.existsSync(cancelPath)) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  try {
+    handle.unmount();
+    fs.writeFileSync(resultPath, JSON.stringify({ ok: true }));
+  } catch (error) {
+    fs.writeFileSync(
+      resultPath,
+      JSON.stringify({ ok: false, error: errorMessage(error) })
+    );
+  }
+}
+
+/**
  * Reads the job file and dispatches to the correct runner based on its type.
  * Used by the elevated helper entry point.
  */
@@ -1206,6 +1277,10 @@ export async function dispatchHelperJob(
   nativeApi?: NativeImagingApi
 ): Promise<void> {
   const raw = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as { type?: string };
+  if (raw.type === 'mount') {
+    await runMountJob(jobPath, resultPath, progressPath, cancelPath);
+    return;
+  }
   if (raw.type === 'restore') {
     await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, nativeApi);
     return;
