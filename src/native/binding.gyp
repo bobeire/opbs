@@ -50,7 +50,12 @@
       ],
       "msvs_settings": {
         "VCCLCompilerTool": {
-          "ExceptionHandling": 1
+          "ExceptionHandling": 1,
+          "DebugInformationFormat": 3,
+          "WholeProgramOptimization": "false"
+        },
+        "VCLinkerTool": {
+          "GenerateDebugInformation": "true"
         }
       },
 "conditions": [
@@ -65,7 +70,8 @@
                   "-lBcrypt",
                   "-lrpcrt4",
                   "-lsetupapi",
-                  "-lvssapi"
+                  "-lvssapi",
+                  "-ldbghelp"
                 ]
               }
             ]

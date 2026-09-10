@@ -181,8 +181,7 @@ describe('native WinFsp exports', () => {
     if (!native) return;
     const available = native.winfspAvailable();
     expect(typeof available).toBe('boolean');
-    // On bare CI the WinFsp runtime is not installed; the important part is
-    // that the check works and never throws.
-    expect(available).toBe(false);
+    // WinFsp may or may not be installed; the important part is that the
+    // check works and never throws.
   });
 });

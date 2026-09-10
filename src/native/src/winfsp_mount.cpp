@@ -18,10 +18,16 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <cstdarg>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
+#include <condition_variable>
 #include <cwchar>
 #include <windows.h>
 #include <sddl.h>
+#include <strsafe.h>
+#include <dbghelp.h>
 #include <winfsp/winfsp.h>
 
 namespace opbs_winfsp
@@ -76,29 +82,89 @@ struct WinFspApi
 
 static WinFspApi g_api;
 
+// Last load outcome, useful for user-facing diagnosis ("WinFsp not detected").
+static std::wstring g_loadNote = L"not attempted";
+
 static HMODULE LoadWinFspDll()
 {
-    HMODULE M = LoadLibraryW(L"winfsp-x64.dll");
-    if (M)
-        return M;
-
-    // Fall back to the InstallDir recorded by the WinFsp MSI.
-    WCHAR Path[MAX_PATH];
-    DWORD Size = sizeof Path;
-    LONG R = RegGetValueW(
-        HKEY_LOCAL_MACHINE,
-        L"Software\\WOW6432Node\\WinFsp",
-        L"InstallDir",
-        RRF_RT_REG_SZ,
-        nullptr,
-        Path,
-        &Size);
-    if (ERROR_SUCCESS == R)
+    // The WinFsp MSI records InstallDir in the 32-bit registry view
+    // (WOW6432Node). Query it explicitly; also try the 64-bit view and a
+    // best-effort default install location. Prefer these explicit paths over
+    // a raw LoadLibraryW by name (which depends on PATH/cwd and is flaky
+    // from code that runs before the app has set up its environment).
+    for (const wchar_t *Key : {
+             L"Software\\WOW6432Node\\WinFsp",
+             L"Software\\WinFsp" })
     {
-        wcscat_s(Path, L"bin\\winfsp-x64.dll");
-        return LoadLibraryW(Path);
+        WCHAR Dir[MAX_PATH];
+        DWORD Size = sizeof Dir;
+        LONG R = RegGetValueW(
+            HKEY_LOCAL_MACHINE, Key, L"InstallDir",
+            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6432KEY,
+            nullptr, Dir, &Size);
+        if (ERROR_SUCCESS != R)
+            R = RegGetValueW(
+                HKEY_LOCAL_MACHINE, Key, L"InstallDir",
+                RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+                nullptr, Dir, &Size);
+        if (ERROR_SUCCESS != R)
+        {
+            g_loadNote = L"registry InstallDir lookup err " +
+                         std::to_wstring(R) + L" @ " + Key;
+            continue;
+        }
+        {
+            // InstallDir usually ends with '\'; normalise to no trailing
+            // separator so the append below is unambiguous.
+            WCHAR *End = Dir + wcslen(Dir);
+            while (End > Dir && (End[-1] == L'\\' || End[-1] == L'/'))
+                *--End = L'\0';
+            WCHAR Path[MAX_PATH];
+            if (FAILED(StringCbCopyW(Path, sizeof Path, Dir)) ||
+                FAILED(StringCbCatW(Path, sizeof Path, L"\\bin\\winfsp-x64.dll")))
+                continue;
+            HMODULE M = LoadLibraryW(Path);
+            if (M) { g_loadNote = std::wstring(L"loaded via registry: ") + Path; return M; }
+            if (GetFileAttributesW(Path) == INVALID_FILE_ATTRIBUTES)
+                g_loadNote = std::wstring(L"registry path missing: ") + Path;
+            else
+                g_loadNote = std::wstring(L"registry path load err ") +
+                    std::to_wstring(GetLastError()) + L" @ " + Path;
+        }
     }
+
+    WCHAR Fallback[] = L"C:\\Program Files (x86)\\WinFsp\\bin\\winfsp-x64.dll";
+    if (GetFileAttributesW(Fallback) != INVALID_FILE_ATTRIBUTES)
+    {
+        HMODULE M = LoadLibraryW(Fallback);
+        if (M) { g_loadNote = L"loaded via fallback path"; return M; }
+        g_loadNote = L"fallback load err " + std::to_wstring(GetLastError());
+    }
+    else
+    {
+        g_loadNote = L"fallback path not found";
+    }
+
+    HMODULE M = LoadLibraryW(L"winfsp-x64.dll");
+    if (M) { g_loadNote = L"loaded by name winfsp-x64.dll"; return M; }
+    g_loadNote = L"plain LoadLibraryW err " + std::to_wstring(GetLastError());
     return nullptr;
+}
+
+// Ensure the WinFsp DLL is loaded and resolved; safely idempotent, and a
+// no-op once g_api.Module is valid.
+static void EnsureWinFsp()
+{
+    if (g_api.Module != nullptr)
+        return;
+    HMODULE M = LoadWinFspDll();
+    if (M && !g_api.Resolve(M))
+    {
+        g_loadNote = L"dll loaded but required exports missing";
+        FreeLibrary(M);
+        M = nullptr;
+    }
+    g_api.Module = M;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +403,91 @@ static std::map<FSP_FILE_SYSTEM *, MountState *> g_mounts;
 static std::map<uint32_t, MountState *> g_mountsById;
 static uint32_t g_nextId = 1;
 
+// ---------------------------------------------------------------------------
+// Crash logger: writes the faulting address plus a symbolized stack to a file.
+// Mostly a diagnostic aid; kept minimal and side-effect safe.
+// ---------------------------------------------------------------------------
+
+static HANDLE g_crashFile = INVALID_HANDLE_VALUE;
+
+static void CrashFileOpen()
+{
+    WCHAR Dir[MAX_PATH];
+    if (!GetTempPathW(MAX_PATH, Dir) || !Dir[0])
+        return;
+    WCHAR Full[MAX_PATH];
+    if (FAILED(StringCbCopyW(Full, sizeof Full, Dir)) ||
+        FAILED(StringCbCatW(Full, sizeof Full, L"opbs-crash.log")))
+        return;
+    g_crashFile = CreateFileW(Full, GENERIC_WRITE, FILE_SHARE_READ,
+                              nullptr, CREATE_ALWAYS, 0, nullptr);
+}
+
+static void CrashLog(const char *Fmt, ...)
+{
+    if (g_crashFile == INVALID_HANDLE_VALUE)
+        return;
+    char Buf[1024];
+    va_list Ap;
+    va_start(Ap, Fmt);
+    int N = vsprintf_s(Buf, Fmt, Ap);
+    va_end(Ap);
+    if (N < 0)
+        return;
+    DWORD W = 0;
+    WriteFile(g_crashFile, Buf, (DWORD)N, &W, nullptr);
+}
+
+static LONG WINAPI OpbsExceptionFilter(PEXCEPTION_POINTERS P)
+{
+    if (g_crashFile == INVALID_HANDLE_VALUE)
+        CrashFileOpen();
+    CrashLog("code=0x%08lX addr=0x%p threadId=%lu\r\n",
+             P ? P->ExceptionRecord->ExceptionCode : 0,
+             P ? P->ExceptionRecord->ExceptionAddress : nullptr,
+             GetCurrentThreadId());
+    if (P && P->ContextRecord)
+    {
+        CrashLog("regs rip=0x%IX rsp=0x%IX rax=0x%IX rcx=0x%IX rdx=0x%IX rbx=0x%IX rbp=0x%IX rsi=0x%IX rdi=0x%IX\r\n",
+                 P->ContextRecord->Rip, P->ContextRecord->Rsp,
+                 P->ContextRecord->Rax, P->ContextRecord->Rcx,
+                 P->ContextRecord->Rdx, P->ContextRecord->Rbx,
+                 P->ContextRecord->Rbp, P->ContextRecord->Rsi,
+                 P->ContextRecord->Rdi);
+    }
+    SymInitializeW(GetCurrentProcess(), nullptr, TRUE);
+    PVOID Frames[48];
+    USHORT Cnt = CaptureStackBackTrace(0, 48, Frames, nullptr);
+    for (USHORT I = 0; I < Cnt; I++)
+    {
+        DWORD64 Addr = reinterpret_cast<DWORD64>(Frames[I]);
+        alignas(SYMBOL_INFO) char SymBuf[sizeof(SYMBOL_INFO) + 512];
+        auto *S = new (SymBuf) SYMBOL_INFO();
+        S->MaxNameLen = 512;
+        S->SizeOfStruct = sizeof(SYMBOL_INFO);
+        DWORD64 Disp = 0;
+        if (SymFromAddr(GetCurrentProcess(), Addr, &Disp, S))
+        {
+            DWORD Line = 0;
+            DWORD LineDisp = 0;
+            IMAGEHLP_LINE64 Hl = {};
+            Hl.SizeOfStruct = sizeof Hl;
+            BOOL HaveLine = SymGetLineFromAddr64(GetCurrentProcess(), Addr, &LineDisp, &Hl);
+            CrashLog("fn[%u]=0x%IX %hs+0x%IX [%hs:%d]\r\n", I, Addr, S->Name, Disp,
+                     HaveLine && Hl.FileName ? Hl.FileName : "?",
+                     HaveLine ? (int)Hl.LineNumber : 0);
+        }
+        else
+        {
+            CrashLog("fn[%u]=0x%IX (no symbol)\r\n", I, Addr);
+        }
+    }
+    FlushFileBuffers(g_crashFile);
+    CloseHandle(g_crashFile);
+    g_crashFile = INVALID_HANDLE_VALUE;
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 static MountState *Lookup(FSP_FILE_SYSTEM *Fs)
 {
     std::lock_guard<std::mutex> Lock(g_mountsMutex);
@@ -350,13 +501,15 @@ struct FileContext
     std::wstring Path;
 };
 
-// Build a self-relative security descriptor granting everyone broad access.
+// Build a self-relative security descriptor. WinFsp's kernel access check
+// needs specific (not generic) FILE_* rights in the DACL plus explicit owner
+// and group; follow the memfs sample's layout.
 static PSECURITY_DESCRIPTOR BuildDefaultSecurity(SIZE_T *POutSize)
 {
     PSECURITY_DESCRIPTOR SD = nullptr;
     ULONG Size = 0;
     if (ConvertStringSecurityDescriptorToSecurityDescriptorA(
-            "D:P(A;;GA;;;WD)", SDDL_REVISION_1, &SD, &Size))
+            "O:BAG:BAD:P(A;;FA;;;WD)", SDDL_REVISION_1, &SD, &Size))
     {
         *POutSize = Size;
         return SD;
@@ -394,12 +547,66 @@ static std::wstring CombinePath(const std::wstring &NtPath, const std::wstring &
 // ---------------------------------------------------------------------------
 
 // Call JS with op/path and wait for the reply. Runs on a WinFsp worker thread.
+// The ThreadSafeFunction is the callback-based (untyped) kind: its CallJS
+// invokes the std::function we hand to BlockingCall, funneling the Bridge
+// pointer into BridgeCallback on the Node main thread. napi_call_threadsafe_
+// function is asynchronous, so we wait on the condition variable until
+// BridgeCallback has stored the reply into B.
+static std::mutex g_cvMutex;
+static std::condition_variable g_cv;
+
+// Optional FS trace to the user's temp dir (enabled via OPBS_TRACE_FS=1).
+static FILE *TraceFile()
+{
+    static FILE *f = nullptr;
+    if (f == nullptr)
+    {
+        if (getenv("OPBS_TRACE_FS"))
+        {
+            WCHAR Dir[MAX_PATH];
+            if (GetTempPathW(MAX_PATH, Dir) && Dir[0])
+            {
+                WCHAR Full[MAX_PATH];
+                if (SUCCEEDED(StringCbCopyW(Full, sizeof Full, Dir)) &&
+                    SUCCEEDED(StringCbCatW(Full, sizeof Full, L"opbs-fs-trace.log")))
+                    f = _wfopen(Full, L"w");
+            }
+        }
+    }
+    return f;
+}
+
+static void Trace(ULONG TId, const char *Fmt, ...)
+{
+    FILE *f = TraceFile();
+    if (!f)
+        return;
+    va_list Ap;
+    va_start(Ap, Fmt);
+    fwprintf(f, L"t=%lu ", TId);
+    vfprintf(f, Fmt, Ap);
+    fputc(L'\n', f);
+    fflush(f);
+    va_end(Ap);
+}
+
 static int64_t CallJs(MountState *St, Bridge &B)
 {
+    Trace(GetCurrentThreadId(), "CallJs op=%s path=%S", B.Op.c_str(), B.Path.c_str());
+    std::unique_lock<std::mutex> Lock(g_cvMutex);
     B.Done = false;
-    napi_status S = St->Tsf.BlockingCall(static_cast<void *>(&B));
+    napi_status S = St->Tsf.BlockingCall(
+        [&B](Napi::Env Env, Napi::Function JsHandler) {
+            BridgeCallback(Env, JsHandler, &B);
+            g_cv.notify_all();
+        });
     if (S != napi_ok)
+    {
+        Trace(GetCurrentThreadId(), "CallJs %s -> napi %d", B.Op.c_str(), (int)S);
         return STATUS_UNSUCCESSFUL;
+    }
+    g_cv.wait(Lock, [&B] { return B.Done; });
+    Trace(GetCurrentThreadId(), "CallJs %s -> status 0x%llX done", B.Op.c_str(), (unsigned long long)B.Status);
     return B.Status;
 }
 
@@ -434,6 +641,7 @@ static NTSTATUS OpGetVolumeInfo(FSP_FILE_SYSTEM *Fs, FSP_FSCTL_VOLUME_INFO *Volu
     MountState *St = Lookup(Fs);
     if (!St)
         return STATUS_INVALID_DEVICE_REQUEST;
+    Trace(GetCurrentThreadId(), "GetVolumeInfo");
     memset(VolumeInfo, 0, sizeof *VolumeInfo);
     VolumeInfo->TotalSize = St->TotalSize;
     VolumeInfo->FreeSize = 0;
@@ -453,6 +661,7 @@ static NTSTATUS OpGetSecurityByName(
     MountState *St = Lookup(Fs);
     if (!St)
         return STATUS_INVALID_DEVICE_REQUEST;
+    Trace(GetCurrentThreadId(), "GetSecurityByName %S", FileName ? FileName : L"<null>");
 
     Bridge B;
     B.Op = "stat";
@@ -471,22 +680,31 @@ static NTSTATUS OpGetSecurityByName(
             if (!EnsureSecurity(St))
             {
                 *PSecurityDescriptorSize = 0;
+                Trace(GetCurrentThreadId(), "GetSecurityByName %S -> no SD", FileName ? FileName : L"<null>");
                 return STATUS_SUCCESS;
             }
             SIZE_T Size = St->SecurityDescriptorSize;
             if (*PSecurityDescriptorSize < Size)
             {
                 *PSecurityDescriptorSize = Size;
+                Trace(GetCurrentThreadId(), "GetSecurityByName %S -> BUFFER_OVERFLOW need=%zu", FileName ? FileName : L"<null>", Size);
                 return STATUS_BUFFER_OVERFLOW;
             }
             memcpy(SecurityDescriptor, St->SecurityDescriptor, Size);
             *PSecurityDescriptorSize = Size;
+            Trace(GetCurrentThreadId(), "GetSecurityByName %S -> SD ok(%zu)", FileName ? FileName : L"<null>", Size);
         }
         else
         {
             if (EnsureSecurity(St))
                 *PSecurityDescriptorSize = St->SecurityDescriptorSize;
+            Trace(GetCurrentThreadId(), "GetSecurityByName %S -> size query %zu", FileName ? FileName : L"<null>",
+                  EnsureSecurity(St) ? St->SecurityDescriptorSize : (SIZE_T)0);
         }
+    }
+    else
+    {
+        Trace(GetCurrentThreadId(), "GetSecurityByName %S -> no size ptr", FileName ? FileName : L"<null>");
     }
     return STATUS_SUCCESS;
 }
@@ -511,12 +729,18 @@ static NTSTATUS OpOpenOrCreate(
     MountState *St = Lookup(Fs);
     if (!St)
         return STATUS_INVALID_DEVICE_REQUEST;
+    Trace(GetCurrentThreadId(), "OpenOrCreate %S creating=%d options=0x%X", FileName ? FileName : L"<null>", (int)Creating, CreateOptions);
 
     std::wstring Path = FileName ? (std::wstring)FileName : std::wstring(L"\\");
     Bridge B;
     B.Op = "stat";
     B.Path = Path;
     int64_t Status = CallJs(St, B);
+    if (!NT_SUCCESS((NTSTATUS)Status))
+        return (NTSTATUS)Status;
+    Trace(GetCurrentThreadId(), "OpenOrCreate %S creating=%d options=0x%X -> 0x%llX",
+          FileName ? FileName : L"<null>", (int)Creating, CreateOptions, (unsigned long long)Status);
+
     if (NT_SUCCESS((NTSTATUS)Status))
     {
         bool IsDir = (B.Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -618,10 +842,12 @@ static NTSTATUS OpFlush(FSP_FILE_SYSTEM *Fs, PVOID FCtx, FSP_FSCTL_FILE_INFO *Fi
 
 static NTSTATUS OpGetFileInfo(FSP_FILE_SYSTEM *Fs, PVOID FCtx, FSP_FSCTL_FILE_INFO *FileInfo)
 {
-    MountState *St = Lookup(Fs);
+MountState *St = Lookup(Fs);
     auto *Ctx = static_cast<FileContext *>(FCtx);
     if (!St || !Ctx)
         return STATUS_INVALID_DEVICE_REQUEST;
+    Trace(GetCurrentThreadId(), "GetFileInfo %S", Ctx->Path.c_str());
+
     Bridge B;
     B.Op = "stat";
     B.Path = Ctx->Path;
@@ -663,6 +889,8 @@ static NTSTATUS OpReadDirectory(
     auto *Ctx = static_cast<FileContext *>(FCtx);
     if (!St || !Ctx)
         return STATUS_INVALID_DEVICE_REQUEST;
+    Trace(GetCurrentThreadId(), "ReadDirectory %S pattern=%S marker=%S", Ctx->Path.c_str(),
+          Pattern ? Pattern : L"<null>", Marker ? Marker : L"<null>");
 
     Bridge B;
     B.Op = "readDir";
@@ -710,6 +938,7 @@ static NTSTATUS OpReadDirectory(
     // EOF marker.
     g_api.FspFileSystemAddDirInfo(nullptr, Buffer, Length, &Bytes);
     *PBytesTransferred = Bytes;
+    Trace(GetCurrentThreadId(), "ReadDirectory %S -> bytes=%lu status 0x0", Ctx->Path.c_str(), (unsigned long)Bytes);
     return STATUS_SUCCESS;
 }
 
@@ -722,6 +951,7 @@ static NTSTATUS OpGetDirInfoByName(
     auto *Ctx = static_cast<FileContext *>(FCtx);
     if (!St || !Ctx)
         return STATUS_INVALID_DEVICE_REQUEST;
+    Trace(GetCurrentThreadId(), "GetDirInfoByName %S name=%S", Ctx->Path.c_str(), FileName ? FileName : L"<null>");
 
     Bridge B;
     B.Op = "stat";
@@ -829,12 +1059,21 @@ static void BuildInterface()
 
 Napi::Value WinFspAvailable(const Napi::CallbackInfo &Info)
 {
+    EnsureWinFsp();
     return Napi::Boolean::New(Info.Env(), g_api.Module != nullptr);
+}
+
+// Human-readable note on the last detection attempt ("WinFsp not detected" etc.)
+Napi::Value WinFspLoadNote(const Napi::CallbackInfo &Info)
+{
+    return Napi::String::New(Info.Env(),
+        reinterpret_cast<const char16_t *>(g_loadNote.c_str()), g_loadNote.size());
 }
 
 Napi::Value WinFspMount(const Napi::CallbackInfo &Info)
 {
     Napi::Env Env = Info.Env();
+    EnsureWinFsp();
     if (g_api.Module == nullptr)
     {
         Napi::Error::New(Env, "WinFsp is not installed").ThrowAsJavaScriptException();
@@ -980,6 +1219,7 @@ Napi::Value WinFspUnmount(const Napi::CallbackInfo &Info)
 
 void Register(Napi::Env Env, Napi::Object Exports)
 {
+    SetUnhandledExceptionFilter(OpbsExceptionFilter);
     BuildInterface();
     if (LoadWinFspDll())
     {
@@ -990,6 +1230,7 @@ void Register(Napi::Env Env, Napi::Object Exports)
         }
     }
     Exports.Set("winfspAvailable", Napi::Function::New(Env, WinFspAvailable));
+    Exports.Set("winfspLoadNote", Napi::Function::New(Env, WinFspLoadNote));
     Exports.Set("winfspMount", Napi::Function::New(Env, WinFspMount));
     Exports.Set("winfspUnmount", Napi::Function::New(Env, WinFspUnmount));
 }
