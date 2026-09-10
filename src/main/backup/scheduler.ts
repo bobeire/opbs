@@ -29,6 +29,25 @@ function electronApp(): { isPackaged: boolean; getAppPath: () => string } | null
 const VERIFY_TASK_ID = 'scheduled-verify';
 const SCRUB_TASK_ID = 'idle-scrub';
 
+export interface ActivityEvent {
+  kind: 'success' | 'failure';
+  title: string;
+  body: string;
+  backupName: string;
+  bytesWritten: number;
+  destinationPath: string;
+  error?: string;
+  timestamp: string;
+}
+
+function broadcastActivity(event: ActivityEvent): void {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const electron = require('electron') as typeof import('electron');
+  for (const win of electron.BrowserWindow.getAllWindows()) {
+    win.webContents.send('activity', event);
+  }
+}
+
 export class BackupScheduler {
   private tasks: Map<string, ScheduledTask> = new Map();
   private backupManager: BackupManager;
@@ -199,10 +218,21 @@ export class BackupScheduler {
             this.verifyFailures.record(false);
             if (opts.notifyOnFailure && this.verifyFailures.shouldAlert(opts.alertAfter)) {
               const settings = this.settingsManager.getSettings();
+              const body = `${result.failed} image(s) failed verification in ${destinationPath}. Restore may be impossible.`;
+              broadcastActivity({
+                kind: 'failure',
+                title: 'OPBS verification FAILED',
+                body,
+                backupName: opts.label,
+                bytesWritten: 0,
+                destinationPath,
+                error: body,
+                timestamp: new Date().toISOString()
+              });
               await tryNotify(
                 {
                   title: 'OPBS verification FAILED',
-                  body: `${result.failed} image(s) failed verification in ${destinationPath}. Restore may be impossible.`,
+                  body,
                   severity: 'error'
                 },
                 settings.notifications.webhookUrl || ''
@@ -313,6 +343,24 @@ export class BackupScheduler {
     bytesWritten: number,
     error?: string
   ): Promise<void> {
+    // Always surface scheduled activity in the app UI independent of the
+    // OS/webhook notification preferences.
+    const title = kind === 'success' ? 'OPBS completed' : 'OPBS failed';
+    const body =
+      kind === 'success'
+        ? `${backupName} finished writing ${(bytesWritten / 1024 / 1024).toFixed(1)} MB to ${destinationPath}`
+        : `${backupName} failed: ${error}`;
+    broadcastActivity({
+      kind,
+      title,
+      body,
+      backupName,
+      bytesWritten,
+      destinationPath,
+      error,
+      timestamp: new Date().toISOString()
+    });
+
     const settings = this.settingsManager.getSettings();
     const notif = settings.notifications;
     if (!notif.enabled) {
@@ -324,12 +372,6 @@ export class BackupScheduler {
     if (kind === 'success' && !notif.notifyOnSuccess) {
       return;
     }
-
-    const title = kind === 'success' ? 'OPBS completed' : 'OPBS failed';
-    const body =
-      kind === 'success'
-        ? `${backupName} finished writing ${(bytesWritten / 1024 / 1024).toFixed(1)} MB to ${destinationPath}`
-        : `${backupName} failed: ${error}`;
 
     await tryNotify({ title, body, severity: kind === 'success' ? 'success' : 'error' }, notif.webhookUrl || '');
   }

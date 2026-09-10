@@ -37,6 +37,14 @@ declare global {
       unmountImage: (id: string) => Promise<{ ok: boolean; error?: string }>;
       onMountStatus: (callback: (status: any) => void) => () => void;
       showAbout: () => Promise<void>;
+      getLogs: () => Promise<{ name: string; path: string; size: number; modified: number; ageDays: number }[]>;
+      readLogFile: (filePath: string) => Promise<{ ok: boolean; content?: string; error?: string }>;
+      exportSettings: () => Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>;
+      importSettings: () => Promise<{ ok: boolean; canceled?: boolean; settings?: any; error?: string }>;
+      checkForUpdates: () => Promise<{ ok: boolean }>;
+      installUpdate: () => Promise<{ ok: boolean }>;
+      onUpdateStatus: (callback: (status: any) => void) => () => void;
+      onActivity: (callback: (event: any) => void) => () => void;
     };
   }
 }

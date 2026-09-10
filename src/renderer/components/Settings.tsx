@@ -105,6 +105,8 @@ function Settings() {
   const [s3Result, setS3Result] = useState<{ ok: boolean; count?: number; error?: string } | null>(null);
   const [sftpChecking, setSftpChecking] = useState(false);
   const [sftpResult, setSftpResult] = useState<{ ok: boolean; count?: number; error?: string } | null>(null);
+  const [exportResult, setExportResult] = useState<{ ok: boolean; message?: string } | null>(null);
+  const [importResult, setImportResult] = useState<{ ok: boolean; message?: string } | null>(null);
 
   useEffect(() => {
     window.electronAPI.getSettings().then((loaded) => {
@@ -186,6 +188,28 @@ function Settings() {
       setSftpResult({ ok: false, error: e?.message ?? 'Connection failed' });
     } finally {
       setSftpChecking(false);
+    }
+  };
+
+  const handleExport = async () => {
+    setExportResult(null);
+    const res = await window.electronAPI.exportSettings();
+    if (res.ok) {
+      setExportResult({ ok: true, message: `Exported to ${res.path}` });
+    } else if (!res.canceled) {
+      setExportResult({ ok: false, message: res.error ?? 'Export failed' });
+    }
+  };
+
+  const handleImport = async () => {
+    setImportResult(null);
+    const res = await window.electronAPI.importSettings();
+    if (res.ok) {
+      setSettings(mergeSettings(res.settings));
+      setHasChanges(false);
+      setImportResult({ ok: true, message: 'Settings imported.' });
+    } else if (!res.canceled) {
+      setImportResult({ ok: false, message: res.error ?? 'Import failed' });
     }
   };
 
@@ -635,6 +659,50 @@ function Settings() {
         )}
       </div>
       
+      <div className="settings-section">
+        <h2>Settings Backup</h2>
+        <p className="field-hint">
+          Export your settings and scheduled backups to a JSON file, or restore
+          them from a previous export.
+        </p>
+
+        {exportResult && (
+          exportResult.ok
+            ? (
+              <div className="success-message">
+                <p>{exportResult.message}</p>
+              </div>
+            ) : (
+              <div className="error-message">
+                <p>{exportResult.message}</p>
+              </div>
+            )
+        )}
+        {importResult && (
+          importResult.ok
+            ? (
+              <div className="success-message">
+                <p>{importResult.message}</p>
+              </div>
+            ) : (
+              <div className="error-message">
+                <p>{importResult.message}</p>
+              </div>
+            )
+        )}
+
+        <div className="setting-item">
+          <button className="btn-secondary" onClick={() => void handleExport()}>
+            Export settings
+          </button>
+          <span style={{ marginLeft: 12 }}>
+            <button className="btn-secondary" onClick={() => void handleImport()}>
+              Import settings
+            </button>
+          </span>
+        </div>
+      </div>
+
       <div className="settings-actions">
         <button
           className="btn-primary"

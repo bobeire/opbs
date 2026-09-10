@@ -9,6 +9,29 @@ export enum LogLevel {
   ERROR = 'ERROR'
 }
 
+type AnyLog = {
+  info: (m: string, d?: unknown) => void;
+  debug: (m: string, d?: unknown) => void;
+  warn: (m: string, d?: unknown) => void;
+  error: (m: string, d?: unknown) => void;
+  transports: {
+    file: { level: string; getFile: () => { path: string } };
+    console: { level: string };
+  };
+};
+
+function loadElectronLog(): AnyLog | null {
+  try {
+    // Lazy require so the WinPE/CLI payload (bundled with only fzstd/zstdify
+    // and the native addon) can load this module graph without electron-log.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const log = require('electron-log') as unknown as AnyLog;
+    return log;
+  } catch {
+    return null;
+  }
+}
+
 function getUserDataDir(): string {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -24,31 +47,40 @@ function getUserDataDir(): string {
   return path.join(os.tmpdir(), 'opbs');
 }
 
-export class Logger {
-  private logFile: string;
-  private level: LogLevel;
+/**
+ * Logger that prefers electron-log (crash/file handling, rotation) but falls
+ * back to a minimal file+console logger when electron-log is not bundled,
+ * e.g. inside the WinPE smoke/restore payload.
+ */
+class Logger {
+  private fallbackDir: string;
+  private fallbackFile: string;
+  private level: LogLevel = LogLevel.INFO;
+  private el: AnyLog | null;
 
   constructor(level: LogLevel = LogLevel.INFO) {
-    this.level = level;
+    this.el = loadElectronLog();
     const logDir = path.join(getUserDataDir(), 'logs');
-    
     if (!fs.existsSync(logDir)) {
-      fs.mkdirSync(logDir, { recursive: true });
+      try {
+        fs.mkdirSync(logDir, { recursive: true });
+      } catch {
+        // best effort
+      }
     }
-
+    this.fallbackDir = logDir;
     const date = new Date().toISOString().split('T')[0];
-    this.logFile = path.join(logDir, `opbs-${date}.log`);
+    this.fallbackFile = path.join(logDir, `opbs-${date}.log`);
+    this.setLevel(level);
   }
 
-  private formatMessage(level: LogLevel, message: string, data?: unknown): string {
+  private format(level: LogLevel, message: string, data?: unknown): string {
     const timestamp = new Date().toISOString();
-    let logEntry = `[${timestamp}] [${level}] ${message}`;
-    
+    let entry = `[${timestamp}] [${level}] ${message}`;
     if (data !== undefined) {
-      logEntry += ` | ${JSON.stringify(data)}`;
+      entry += ` | ${JSON.stringify(data)}`;
     }
-    
-    return logEntry;
+    return entry;
   }
 
   private shouldLog(level: LogLevel): boolean {
@@ -56,42 +88,70 @@ export class Logger {
     return levels.indexOf(level) >= levels.indexOf(this.level);
   }
 
-  private writeLog(entry: string): void {
+  private writeFallback(level: LogLevel, message: string, data?: unknown): void {
+    if (!this.shouldLog(level)) return;
+    const entry = this.format(level, message, data);
     try {
-      fs.appendFileSync(this.logFile, entry + '\n');
-    } catch (error) {
-      console.error('Failed to write to log file:', error);
+      fs.appendFileSync(this.fallbackFile, entry + '\n');
+    } catch {
+      // ignore write failures
     }
-    
     console.log(entry);
   }
 
   debug(message: string, data?: unknown): void {
-    if (this.shouldLog(LogLevel.DEBUG)) {
-      this.writeLog(this.formatMessage(LogLevel.DEBUG, message, data));
+    if (this.el) {
+      this.el.debug(message, data);
+    } else {
+      this.writeFallback(LogLevel.DEBUG, message, data);
     }
   }
 
   info(message: string, data?: unknown): void {
-    if (this.shouldLog(LogLevel.INFO)) {
-      this.writeLog(this.formatMessage(LogLevel.INFO, message, data));
+    if (this.el) {
+      this.el.info(message, data);
+    } else {
+      this.writeFallback(LogLevel.INFO, message, data);
     }
   }
 
   warn(message: string, data?: unknown): void {
-    if (this.shouldLog(LogLevel.WARN)) {
-      this.writeLog(this.formatMessage(LogLevel.WARN, message, data));
+    if (this.el) {
+      this.el.warn(message, data);
+    } else {
+      this.writeFallback(LogLevel.WARN, message, data);
     }
   }
 
   error(message: string, error?: unknown): void {
-    if (this.shouldLog(LogLevel.ERROR)) {
-      const errorData = error instanceof Error ? {
-        message: error.message,
-        stack: error.stack
-      } : error;
-      this.writeLog(this.formatMessage(LogLevel.ERROR, message, errorData));
+    if (this.el) {
+      this.el.error(message, error);
+    } else {
+      this.writeFallback(LogLevel.ERROR, message, error);
     }
+  }
+
+  setLevel(level: LogLevel): void {
+    this.level = level;
+    if (this.el) {
+      try {
+        this.el.transports.file.level = level.toLowerCase();
+        this.el.transports.console.level = level.toLowerCase();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  getLogDir(): string {
+    if (this.el) {
+      try {
+        return path.dirname(this.el.transports.file.getFile().path);
+      } catch {
+        // fall through
+      }
+    }
+    return this.fallbackDir;
   }
 }
 

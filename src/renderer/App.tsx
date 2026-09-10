@@ -1,15 +1,21 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Dashboard from './components/Dashboard';
 import BackupWizard from './components/BackupWizard';
 import RestoreWizard from './components/RestoreWizard';
 import Settings from './components/Settings';
 import BrowseView from './components/BrowseView';
 import MediaView from './components/MediaView';
+import LogViewer from './components/LogViewer';
+import ToastHost from './components/ToastHost';
 
-type Page = 'dashboard' | 'backup' | 'restore' | 'browse' | 'media' | 'settings';
+type Page = 'dashboard' | 'backup' | 'restore' | 'browse' | 'media' | 'logs' | 'settings';
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
+
+  useEffect(() => {
+    void window.electronAPI.checkForUpdates();
+  }, []);
 
   const renderPage = () => {
     switch (currentPage) {
@@ -21,6 +27,8 @@ function App() {
         return <BrowseView onComplete={() => setCurrentPage('dashboard')} />;
       case 'media':
         return <MediaView onComplete={() => setCurrentPage('dashboard')} />;
+      case 'logs':
+        return <LogViewer onClose={() => setCurrentPage('dashboard')} />;
       case 'settings':
         return <Settings />;
       default:
@@ -84,6 +92,15 @@ function App() {
           </li>
           <li>
             <button
+              className={`nav-item ${currentPage === 'logs' ? 'active' : ''}`}
+              onClick={() => setCurrentPage('logs')}
+            >
+              <span className="nav-icon">📜</span>
+              Logs
+            </button>
+          </li>
+          <li>
+            <button
               className={`nav-item ${currentPage === 'settings' ? 'active' : ''}`}
               onClick={() => setCurrentPage('settings')}
             >
@@ -97,12 +114,17 @@ function App() {
           <button className="version-btn" onClick={() => window.electronAPI.showAbout()}>
             v0.1.0
           </button>
+          <button className="version-btn" onClick={() => void window.electronAPI.checkForUpdates()}>
+            Check for updates
+          </button>
         </div>
       </nav>
       
       <main className="main-content">
         {renderPage()}
       </main>
+
+      <ToastHost />
     </div>
   );
 }

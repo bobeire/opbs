@@ -1,12 +1,14 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage } from 'electron';
 import path from 'path';
 import * as crypto from 'crypto';
+import * as fs from 'fs';
 import { DiskEnumerator } from './utils/disk-enumerator';
 import { BackupManager } from './backup/manager';
 import { RestoreManager } from './restore/manager';
 import { BackupScheduler } from './backup/scheduler';
 import { SettingsManager } from './utils/settings-manager';
 import { logger } from './utils/logger';
+import { initAutoUpdater, checkForUpdates, quitAndInstall } from './utils/auto-updater';
 import { ImagingEngine } from './imaging/backup-engine';
 import { RestoreEngine } from './imaging/restore-engine';
 import { dispatchHelperJob } from './helper/job-runner';
@@ -160,6 +162,9 @@ function main(): void {
     setupBackupEvents();
     setupRestoreEvents();
     scheduler.startAll();
+    if (mainWindow) {
+      initAutoUpdater(mainWindow);
+    }
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {
@@ -303,6 +308,9 @@ function setupIpcHandlers(): void {
 
   ipcMain.handle('update-settings', async (_, updates) => {
     const result = settingsManager.updateSettings(updates);
+    if (result.logLevel) {
+      logger.setLevel(result.logLevel as any);
+    }
     scheduler.resyncFromSettings();
     return result;
   });
@@ -347,8 +355,82 @@ function setupIpcHandlers(): void {
 
   // Logging
   ipcMain.handle('get-logs', async () => {
-    // TODO: Return recent log entries
-    return [];
+    const logDir = logger.getLogDir();
+    if (!fs.existsSync(logDir)) return [];
+    const now = Date.now();
+    return fs
+      .readdirSync(logDir)
+      .filter((f) => f.endsWith('.log'))
+      .map((f) => {
+        const p = path.join(logDir, f);
+        const stat = fs.statSync(p);
+        return { name: f, path: p, size: stat.size, modified: stat.mtimeMs, ageDays: (now - stat.mtimeMs) / 86400000 };
+      })
+      .sort((a, b) => b.modified - a.modified);
+  });
+
+  ipcMain.handle('read-log-file', async (_, filePath: string) => {
+    const logDir = logger.getLogDir();
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(logDir + path.sep) && resolved !== path.join(logDir, path.basename(filePath))) {
+      return { ok: false, error: 'Invalid log file path' };
+    }
+    try {
+      const content = fs.readFileSync(resolved, 'utf-8');
+      const lines = content.split(/\r?\n/).filter((l) => l.trim().length > 0);
+      return { ok: true, content: lines.slice(-2000).join('\n') };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  // Settings export/import
+  ipcMain.handle('export-settings', async () => {
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      title: 'Export OPBS settings',
+      defaultPath: `opbs-settings-${new Date().toISOString().split('T')[0]}.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    });
+    if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+    try {
+      fs.writeFileSync(result.filePath, JSON.stringify(settingsManager.getSettings(), null, 2), 'utf-8');
+      return { ok: true, path: result.filePath };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('import-settings', async () => {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: 'Import OPBS settings',
+      properties: ['openFile'],
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    });
+    if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
+    const importPath = result.filePaths[0];
+    try {
+      const data = fs.readFileSync(importPath, 'utf-8');
+      const parsed = JSON.parse(data);
+      if (typeof parsed !== 'object' || parsed === null) {
+        return { ok: false, error: 'Invalid settings file format' };
+      }
+      const merged = settingsManager.updateSettings(parsed);
+      logger.setLevel(merged.logLevel as any);
+      scheduler.resyncFromSettings();
+      return { ok: true, settings: merged };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  // Auto-update
+  ipcMain.handle('check-for-updates', async () => {
+    return { ok: await checkForUpdates() };
+  });
+
+  ipcMain.handle('install-update', async () => {
+    quitAndInstall();
+    return { ok: true };
   });
 
   // Retention / GFS

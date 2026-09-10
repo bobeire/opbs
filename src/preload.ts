@@ -69,6 +69,34 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Cloud SFTP
   verifySftp: () => ipcRenderer.invoke('verify-sftp'),
 
+  // Logs
+  getLogs: () => ipcRenderer.invoke('get-logs'),
+  readLogFile: (filePath: string) => ipcRenderer.invoke('read-log-file', filePath),
+
+  // Settings export/import
+  exportSettings: () => ipcRenderer.invoke('export-settings'),
+  importSettings: () => ipcRenderer.invoke('import-settings'),
+
+  // Auto-update
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  installUpdate: () => ipcRenderer.invoke('install-update'),
+  onUpdateStatus: (callback: (status: any) => void) => {
+    const handler = (_event: any, status: any) => callback(status);
+    ipcRenderer.on('update-status', handler);
+    return () => {
+      ipcRenderer.removeListener('update-status', handler);
+    };
+  },
+
+  // Events
+  onActivity: (callback: (event: any) => void) => {
+    const handler = (_event: any, activity: any) => callback(activity);
+    ipcRenderer.on('activity', handler);
+    return () => {
+      ipcRenderer.removeListener('activity', handler);
+    };
+  },
+
   // Events
   onBackupProgress: (callback: (progress: any) => void) => {
     const handler = (_event: any, progress: any) => callback(progress);
