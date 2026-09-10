@@ -30,6 +30,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   applyRetention: (directory: string, options: any) => ipcRenderer.invoke('apply-retention', directory, options),
   listImages: (directory: string) => ipcRenderer.invoke('list-images', directory),
 
+  // Recent backups & backup actions
+  listRecentBackups: () => ipcRenderer.invoke('list-recent-backups'),
+  addRecentDestination: (directory: string) => ipcRenderer.invoke('add-recent-destination', directory),
+  openPath: (filePath: string) => ipcRenderer.invoke('open-path', filePath),
+  copyImage: (imagePath: string, destDir: string) => ipcRenderer.invoke('copy-image', imagePath, destDir),
+  uploadToCloud: (imagePath: string) => ipcRenderer.invoke('upload-to-cloud', imagePath),
+
   // Disk health
   checkDiskHealth: (diskIndex: number) => ipcRenderer.invoke('check-disk-health', diskIndex),
 
@@ -90,6 +97,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('update-status', handler);
     return () => {
       ipcRenderer.removeListener('update-status', handler);
+    };
+  },
+
+  onNav: (callback: (page: string) => void) => {
+    const handler = (_event: any, page: string) => callback(page);
+    ipcRenderer.on('nav', handler);
+    return () => {
+      ipcRenderer.removeListener('nav', handler);
     };
   },
 

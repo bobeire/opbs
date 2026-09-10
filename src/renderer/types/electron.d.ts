@@ -21,6 +21,11 @@ declare global {
       planRetention: (directory: string, options?: any) => Promise<any>;
       applyRetention: (directory: string, options?: any) => Promise<any>;
       listImages: (directory: string) => Promise<any>;
+      listRecentBackups: () => Promise<{ entries: any[]; destinations: string[] }>;
+      addRecentDestination: (directory: string) => Promise<{ destinations: string[] }>;
+      openPath: (filePath: string) => Promise<{ ok: boolean; error?: string }>;
+      copyImage: (imagePath: string, destDir: string) => Promise<{ ok: boolean; copied?: string[]; bytes?: number; destPath?: string; error?: string }>;
+      uploadToCloud: (imagePath: string) => Promise<{ ok: boolean; uploaded?: string[]; error?: string }>;
       checkDiskHealth: (diskIndex: number) => Promise<any>;
       browsePartitions: (imagePath: string) => Promise<{ encrypted: boolean; partitions: any[] }>;
       browseList: (imagePath: string, partitionIndex: number, relPath: string, passphrase?: string) => Promise<any[]>;
@@ -47,6 +52,7 @@ declare global {
       networkShares: (host: string) => Promise<{ shares: { unc: string; name: string; kind: string; reachable: boolean; writable: boolean; remark?: string }[] }>;
       networkTest: (uncPath: string, create?: boolean) => Promise<{ path: string; ok: boolean; writable?: boolean; reachable?: boolean; created?: boolean; error?: string }>;
       onUpdateStatus: (callback: (status: any) => void) => () => void;
+      onNav: (callback: (page: string) => void) => () => void;
       onActivity: (callback: (event: any) => void) => () => void;
     };
   }

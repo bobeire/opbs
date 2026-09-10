@@ -157,6 +157,73 @@ body {
   margin-bottom: 20px;
 }
 
+.recent-backups-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.recent-backups-head h2 {
+  margin-bottom: 0;
+}
+
+.dashboard-message {
+  margin-bottom: 12px;
+}
+
+.selection-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background-color: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+
+.selection-count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-right: 6px;
+}
+
+.busy-spinner {
+  font-size: 13px;
+  color: var(--warning-color);
+  margin-left: auto;
+}
+
+.backup-row {
+  cursor: pointer;
+}
+
+.backup-row.selected {
+  background-color: rgba(64, 156, 255, 0.12);
+}
+
+.col-check {
+  width: 36px;
+  text-align: center;
+}
+
+.col-check input {
+  pointer-events: none;
+}
+
+.col-dest {
+  font-size: 12px;
+  color: var(--text-muted);
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .empty-state {
   background-color: var(--card-bg);
   padding: 40px;

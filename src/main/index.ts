@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, Menu } from 'electron';
 import path from 'path';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
@@ -25,6 +25,8 @@ import { locateAdk, peArchForProcess } from './utils/adk';
 import { createRecoveryMedia, resolveNodeExe, MediaCreateOptions } from './utils/winpe-media';
 import { S3Store, resolveS3Config } from './utils/s3';
 import { SftpStore, resolveSftpConfig } from './utils/sftp';
+import { getRecentDestinations, addRecentDestination } from './utils/recent';
+import { resolveImageChain } from './imaging/restore-engine';
 
 const HELPER_FLAG = '--opbs-helper';
 
@@ -138,6 +140,106 @@ function createWindow(): void {
   });
 }
 
+function showAboutDialog(): void {
+  if (aboutWindow) { aboutWindow.focus(); return; }
+  const iconPath = path.join(__dirname, '../resources/icon.png');
+  const icon = nativeImage.createFromPath(iconPath);
+  const version = app.getVersion();
+  const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>About OPBS</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #1e1e2e; color: #cdd6f4;
+         display: flex; flex-direction: column; align-items: center; justify-content: center;
+         height: 100vh; user-select: none; overflow: hidden; }
+  .icon { width: 72px; height: 72px; margin-bottom: 12px; }
+  .title { font-size: 22px; font-weight: 700; color: #f5c2e7; }
+  .subtitle { font-size: 13px; color: #a6adc8; margin-top: 2px; }
+  .version { font-size: 12px; color: #6c7086; margin-top: 10px; }
+  .desc { font-size: 13px; color: #bac2de; text-align: center; margin: 14px 32px 0;
+          line-height: 1.5; }
+  a { color: #89b4fa; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .link { font-size: 12px; margin-top: 16px; }
+  .copy { font-size: 10px; color: #585b70; margin-top: 12px; }
+</style>
+</head>
+<body>
+  <img class="icon" src="${iconPath.replace(/\\/g, '\\\\')}" />
+  <div class="title">OPBS</div>
+  <div class="subtitle">Open Pickle Backup System</div>
+  <div class="version">Version ${version}</div>
+  <div class="desc">Disk imaging and backup tool with Macrium&nbsp;Reflect compatibility,
+    scheduled backups, cloud storage support, and read-only image browsing.</div>
+  <div class="link"><a href="https://opbs.rhitcs.com">opbs.rhitcs.com</a></div>
+  <div class="copy">&copy; ${new Date().getFullYear()} RHITCS</div>
+</body>
+</html>`;
+  aboutWindow = new BrowserWindow({
+    width: 420,
+    height: 340,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    title: 'About OPBS',
+    icon,
+    parent: mainWindow ?? undefined,
+    modal: true,
+    show: false,
+    webPreferences: { nodeIntegration: false, contextIsolation: true }
+  });
+  aboutWindow.setMenuBarVisibility(false);
+  aboutWindow.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  aboutWindow.webContents.on('will-navigate', (e, url) => {
+    e.preventDefault();
+    shell.openExternal(url);
+  });
+  const tmpFile = path.join(app.getPath('temp'), 'opbs-about.html');
+  fs.writeFileSync(tmpFile, html, 'utf-8');
+  aboutWindow.loadFile(tmpFile);
+  aboutWindow.on('ready-to-show', () => aboutWindow?.show());
+  aboutWindow.on('closed', () => { aboutWindow = null; });
+}
+
+function buildAppMenu(): void {
+  const isMac = process.platform === 'darwin';
+  const template: Electron.MenuItemConstructorOptions[] = [
+    ...(isMac ? [{ role: 'appMenu' as const }] : []),
+    {
+      label: 'File',
+      submenu: [
+        { label: 'New Backup', click: () => mainWindow?.webContents.send('nav', 'backup') },
+        { label: 'Restore', click: () => mainWindow?.webContents.send('nav', 'restore') },
+        { type: 'separator' },
+        isMac ? { role: 'close' as const } : { role: 'quit' as const }
+      ]
+    },
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+    {
+      label: 'Help',
+      submenu: [
+        { label: 'About OPBS', click: () => showAboutDialog() },
+        {
+          label: 'Website',
+          click: () => void shell.openExternal('https://opbs.rhitcs.com')
+        },
+        {
+          label: 'Check for Updates',
+          click: () => void checkForUpdates()
+        }
+      ]
+    }
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 function main(): void {
   // Headless CLI mode: run the requested command and exit without a window.
   const cliIndex = process.argv.indexOf('--cli');
@@ -159,6 +261,7 @@ function main(): void {
 
   app.whenReady().then(() => {
     createWindow();
+    buildAppMenu();
     setupIpcHandlers();
     setupBackupEvents();
     setupRestoreEvents();
@@ -199,70 +302,7 @@ function setupRestoreEvents(): void {
 function setupIpcHandlers(): void {
   // About dialog
   ipcMain.handle('show-about', async () => {
-    if (aboutWindow) { aboutWindow.focus(); return; }
-    const iconPath = path.join(__dirname, '../resources/icon.png');
-    const icon = nativeImage.createFromPath(iconPath);
-    const version = app.getVersion();
-    const html = `<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>About OPBS</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #1e1e2e; color: #cdd6f4;
-         display: flex; flex-direction: column; align-items: center; justify-content: center;
-         height: 100vh; user-select: none; overflow: hidden; }
-  .icon { width: 72px; height: 72px; margin-bottom: 12px; }
-  .title { font-size: 22px; font-weight: 700; color: #f5c2e7; }
-  .subtitle { font-size: 13px; color: #a6adc8; margin-top: 2px; }
-  .version { font-size: 12px; color: #6c7086; margin-top: 10px; }
-  .desc { font-size: 13px; color: #bac2de; text-align: center; margin: 14px 32px 0;
-          line-height: 1.5; }
-  a { color: #89b4fa; text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .link { font-size: 12px; margin-top: 16px; }
-  .copy { font-size: 10px; color: #585b70; margin-top: 12px; }
-</style>
-</head>
-<body>
-  <img class="icon" src="${iconPath.replace(/\\/g, '\\\\')}" />
-  <div class="title">OPBS</div>
-  <div class="subtitle">Open Pickle Backup System</div>
-  <div class="version">Version ${version}</div>
-  <div class="desc">Disk imaging and backup tool with Macrium&nbsp;Reflect compatibility,
-    scheduled backups, cloud storage support, and read-only image browsing.</div>
-  <div class="link"><a href="https://opbs.rhitcs.com">opbs.rhitcs.com</a></div>
-  <div class="copy">&copy; ${new Date().getFullYear()} RHITCS</div>
-</body>
-</html>`;
-    aboutWindow = new BrowserWindow({
-      width: 420,
-      height: 340,
-      resizable: false,
-      minimizable: false,
-      maximizable: false,
-      fullscreenable: false,
-      title: 'About OPBS',
-      icon,
-      parent: mainWindow ?? undefined,
-      modal: true,
-      show: false,
-      webPreferences: { nodeIntegration: false, contextIsolation: true }
-    });
-    aboutWindow.setMenuBarVisibility(false);
-    aboutWindow.webContents.setWindowOpenHandler(({ url }) => {
-      shell.openExternal(url);
-      return { action: 'deny' };
-    });
-    aboutWindow.webContents.on('will-navigate', (e, url) => {
-      e.preventDefault();
-      shell.openExternal(url);
-    });
-    const tmpFile = path.join(app.getPath('temp'), 'opbs-about.html');
-    const fs = await import('fs');
-    fs.writeFileSync(tmpFile, html, 'utf-8');
-    aboutWindow.loadFile(tmpFile);
-    aboutWindow.on('ready-to-show', () => aboutWindow?.show());
-    aboutWindow.on('closed', () => { aboutWindow = null; });
+    showAboutDialog();
   });
 
   // Disk information
@@ -461,6 +501,133 @@ function setupIpcHandlers(): void {
   ipcMain.handle('list-images', async (_, directory: string) => {
     const entries = scanBackupDirectory(directory);
     return { entries, chains: groupIntoChains(entries) };
+  });
+
+  // Recent backups across known destinations
+  ipcMain.handle('list-recent-backups', async () => {
+    const out: Array<{
+      id: string;
+      name: string;
+      path: string;
+      destPath: string;
+      size: number;
+      date: number;
+      incremental: boolean;
+      encrypted: boolean;
+      verified: boolean;
+      chain: string[];
+    }> = [];
+    for (const dir of getRecentDestinations()) {
+      let entries;
+      try {
+        entries = scanBackupDirectory(dir);
+      } catch {
+        continue; // destination offline (e.g. network share) - skip
+      }
+      const chains = groupIntoChains(entries);
+      for (const e of entries) {
+        const chain = chains
+          .find((c) => c.items.some((i) => i.path === e.path))
+          ?.items.map((i) => i.path);
+        out.push({
+          id: e.path,
+          name: e.name,
+          path: e.path,
+          destPath: dir,
+          size: e.size,
+          date: e.timestamp,
+          incremental: e.incremental,
+          encrypted: e.encrypted,
+          verified: e.verified,
+          chain: Array.isArray(chain) && chain.length ? chain : [e.path]
+        });
+      }
+    }
+    out.sort((a, b) => b.date - a.date);
+    return { entries: out, destinations: getRecentDestinations() };
+  });
+
+  ipcMain.handle('add-recent-destination', async (_, directory: string) => {
+    return { destinations: addRecentDestination(String(directory ?? '')) };
+  });
+
+  ipcMain.handle('open-path', async (_, filePath: string) => {
+    const target = String(filePath ?? '');
+    try {
+      shell.showItemInFolder(target);
+      return { ok: true };
+    } catch {
+      try {
+        const dir = path.dirname(target);
+        await shell.openPath(dir);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  });
+
+  ipcMain.handle('copy-image', async (_, imagePath: string, destDir: string) => {
+    const src = String(imagePath ?? '');
+    const dest = String(destDir ?? '');
+    if (!src || !fs.existsSync(src)) return { ok: false, error: 'Image not found' };
+    if (!dest || !fs.existsSync(dest)) return { ok: false, error: 'Destination does not exist' };
+    try {
+      const chain = resolveImageChain(src);
+      fs.mkdirSync(dest, { recursive: true });
+      const copied: string[] = [];
+      let copiedBytes = 0;
+      for (const item of chain) {
+        if (!fs.existsSync(item)) continue;
+        const target = path.join(dest, path.basename(item));
+        fs.copyFileSync(item, target);
+        copied.push(target);
+        copiedBytes += fs.statSync(item).size;
+      }
+      return { ok: true, copied, bytes: copiedBytes, destPath: dest };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('upload-to-cloud', async (_, imagePath: string) => {
+    const src = String(imagePath ?? '');
+    if (!src || !fs.existsSync(src)) return { ok: false, error: 'Image not found' };
+    try {
+      const chain = resolveImageChain(src);
+      const profileS3 = s3ProfileFromSettings();
+      const profileSftp = sftpProfileFromSettings();
+      const useS3 = !!(profileS3?.accessKeyId && profileS3.bucket);
+      const useSftp = !!(profileSftp?.host && profileSftp.username);
+      if (!useS3 && !useSftp) {
+        return {
+          ok: false,
+          error: 'No cloud profile configured. Set S3 or SFTP credentials in Settings.'
+        };
+      }
+      const uploaded: string[] = [];
+      if (useS3) {
+        const uri = `s3://${profileS3.bucket}${profileS3.prefix ? '/' + profileS3.prefix : ''}`;
+        const config = resolveS3Config(profileS3, uri);
+        const store = new S3Store(config);
+        for (const item of chain) {
+          if (!fs.existsSync(item)) continue;
+          await store.put(path.basename(item), fs.readFileSync(item));
+          uploaded.push(`${config.prefix}/${path.basename(item)}`.replace(/^\/+/, ''));
+        }
+      }
+      if (useSftp) {
+        const store = new SftpStore({ config: resolveSftpConfig(profileSftp, `sftp://${profileSftp.host}`) });
+        for (const item of chain) {
+          if (!fs.existsSync(item)) continue;
+          await store.put(path.basename(item), fs.readFileSync(item));
+          uploaded.push(path.basename(item));
+        }
+      }
+      return { ok: true, uploaded };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   });
 
   // Disk health

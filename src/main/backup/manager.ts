@@ -7,6 +7,7 @@ import {
 } from '../imaging/backup-engine';
 import { JobProgress, JobResult } from '../imaging/imaging-job';
 import { normalizeBackupLocation } from '../utils/location';
+import { recordBackupDestination } from '../utils/recent';
 
 export type BackupConfig = BackupJobConfig;
 
@@ -71,6 +72,8 @@ export class BackupManager extends EventEmitter {
       if (!result.ok) {
         throw new Error(result.error ?? 'Backup failed');
       }
+
+      recordBackupDestination(config.destinationPath);
 
       this.emitProgress({
         phase: 'completed',

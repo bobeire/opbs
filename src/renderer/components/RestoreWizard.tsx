@@ -2,13 +2,16 @@ import { useState, useEffect } from 'react';
 
 interface RestoreWizardProps {
   onComplete: () => void;
+  initialImagePath?: string;
+  mode?: 'restore' | 'clone';
 }
 
 type WizardStep = 'select_image' | 'select_target' | 'options' | 'progress' | 'complete';
 
-function RestoreWizard({ onComplete }: RestoreWizardProps) {
+function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: RestoreWizardProps) {
+  const isClone = mode === 'clone';
   const [currentStep, setCurrentStep] = useState<WizardStep>('select_image');
-  const [imagePath, setImagePath] = useState('');
+  const [imagePath, setImagePath] = useState(initialImagePath ?? '');
   const [imageInfo, setImageInfo] = useState<any>(null);
   const [targetDiskIndex, setTargetDiskIndex] = useState<number | null>(null);
   const [targetPartitions, setTargetPartitions] = useState<number[]>([]);
@@ -23,6 +26,14 @@ function RestoreWizard({ onComplete }: RestoreWizardProps) {
     });
     return cleanup;
   }, []);
+
+  useEffect(() => {
+    if (!initialImagePath) return;
+    window.electronAPI
+      .getImageInfo(initialImagePath)
+      .then((info) => setImageInfo(info))
+      .catch(() => setImageInfo(null));
+  }, [initialImagePath]);
 
   const handleSelectImage = async () => {
     const path = await window.electronAPI.selectFile({
@@ -242,7 +253,7 @@ function RestoreWizard({ onComplete }: RestoreWizardProps) {
             </div>
             
             <div className="summary">
-              <h3>Restore Summary</h3>
+              <h3>{isClone ? 'Clone Summary' : 'Restore Summary'}</h3>
               <ul>
                 <li>Source Image: {imagePath}</li>
                 <li>Target Disk: Disk {targetDiskIndex}</li>
@@ -256,7 +267,7 @@ function RestoreWizard({ onComplete }: RestoreWizardProps) {
                 Back
               </button>
               <button className="btn-danger" onClick={handleStartRestore}>
-                Start Restore
+                {isClone ? 'Start Clone' : 'Start Restore'}
               </button>
             </div>
           </div>
@@ -265,7 +276,7 @@ function RestoreWizard({ onComplete }: RestoreWizardProps) {
       case 'progress':
         return (
           <div className="wizard-step">
-            <h2>Restore in Progress</h2>
+            <h2>{isClone ? 'Clone in Progress' : 'Restore in Progress'}</h2>
             
             <div className="progress-container">
               <div className="progress-bar">
@@ -292,10 +303,14 @@ function RestoreWizard({ onComplete }: RestoreWizardProps) {
       case 'complete':
         return (
           <div className="wizard-step">
-            <h2>Restore Complete</h2>
+            <h2>{isClone ? 'Clone Complete' : 'Restore Complete'}</h2>
             
             <div className="success-message">
-              <p>Your system has been restored successfully!</p>
+              <p>
+                {isClone
+                  ? 'The disk has been cloned successfully from the backup image.'
+                  : 'Your system has been restored successfully!'}
+              </p>
               <p>Please restart your computer to complete the process.</p>
             </div>
             
@@ -312,7 +327,7 @@ function RestoreWizard({ onComplete }: RestoreWizardProps) {
   return (
     <div className="restore-wizard">
       <div className="wizard-header">
-        <h1>Restore Backup</h1>
+        <h1>{isClone ? 'Clone Backup' : 'Restore Backup'}</h1>
         <div className="step-indicator">
           <span className={`step ${currentStep === 'select_image' ? 'active' : ''}`}>1</span>
           <span className="step-line" />

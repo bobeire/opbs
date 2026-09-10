@@ -19,9 +19,17 @@ interface BackupIntent {
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
   const [backupIntent, setBackupIntent] = useState<BackupIntent | null>(null);
+  const [restoreIntent, setRestoreIntent] = useState<{ imagePath?: string; mode?: 'restore' | 'clone' } | null>(null);
 
   useEffect(() => {
     void window.electronAPI.checkForUpdates();
+  }, []);
+
+  useEffect(() => {
+    const cleanup = window.electronAPI.onNav((page) => {
+      if (page === 'backup' || page === 'restore') setCurrentPage(page);
+    });
+    return cleanup;
   }, []);
 
   const renderPage = () => {
@@ -29,7 +37,13 @@ function App() {
       case 'backup':
         return <BackupWizard onComplete={() => setCurrentPage('dashboard')} initialDestination={backupIntent?.destinationPath} initialAllDisks={backupIntent?.allDisks} />;
       case 'restore':
-        return <RestoreWizard onComplete={() => setCurrentPage('dashboard')} />;
+        return (
+          <RestoreWizard
+            onComplete={() => setCurrentPage('dashboard')}
+            initialImagePath={restoreIntent?.imagePath}
+            mode={restoreIntent?.mode ?? 'restore'}
+          />
+        );
       case 'browse':
         return <BrowseView onComplete={() => setCurrentPage('dashboard')} />;
       case 'media':
@@ -48,7 +62,18 @@ function App() {
       case 'settings':
         return <Settings />;
       default:
-        return <Dashboard />;
+        return (
+          <Dashboard
+            onNavigate={(page, intent) => {
+              if (page === 'restore' || page === 'clone') {
+                setRestoreIntent({ imagePath: intent?.imagePath, mode: page });
+                setCurrentPage('restore');
+              } else {
+                setCurrentPage(page);
+              }
+            }}
+          />
+        );
     }
   };
 
