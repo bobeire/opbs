@@ -56,6 +56,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // File dialogs
   selectSaveFile: (options?: any) => ipcRenderer.invoke('select-save-file', options),
 
+  // About dialog
+  showAbout: () => ipcRenderer.invoke('show-about'),
+
   // WinPE recovery media
   mediaCheck: () => ipcRenderer.invoke('media-check'),
   mediaCreate: (options: any) => ipcRenderer.invoke('media-create', options),

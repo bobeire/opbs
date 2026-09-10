@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage } from 'electron';
 import path from 'path';
 import * as crypto from 'crypto';
 import { DiskEnumerator } from './utils/disk-enumerator';
@@ -26,6 +26,7 @@ import { SftpStore, resolveSftpConfig } from './utils/sftp';
 const HELPER_FLAG = '--opbs-helper';
 
 let mainWindow: BrowserWindow | null = null;
+let aboutWindow: BrowserWindow | null = null;
 
 const diskEnumerator = new DiskEnumerator();
 const imagingEngine = new ImagingEngine(diskEnumerator);
@@ -190,6 +191,74 @@ function setupRestoreEvents(): void {
 }
 
 function setupIpcHandlers(): void {
+  // About dialog
+  ipcMain.handle('show-about', async () => {
+    if (aboutWindow) { aboutWindow.focus(); return; }
+    const iconPath = path.join(__dirname, '../resources/icon.png');
+    const icon = nativeImage.createFromPath(iconPath);
+    const version = app.getVersion();
+    const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>About OPBS</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #1e1e2e; color: #cdd6f4;
+         display: flex; flex-direction: column; align-items: center; justify-content: center;
+         height: 100vh; user-select: none; overflow: hidden; }
+  .icon { width: 72px; height: 72px; margin-bottom: 12px; }
+  .title { font-size: 22px; font-weight: 700; color: #f5c2e7; }
+  .subtitle { font-size: 13px; color: #a6adc8; margin-top: 2px; }
+  .version { font-size: 12px; color: #6c7086; margin-top: 10px; }
+  .desc { font-size: 13px; color: #bac2de; text-align: center; margin: 14px 32px 0;
+          line-height: 1.5; }
+  a { color: #89b4fa; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .link { font-size: 12px; margin-top: 16px; }
+  .copy { font-size: 10px; color: #585b70; margin-top: 12px; }
+</style>
+</head>
+<body>
+  <img class="icon" src="${iconPath.replace(/\\/g, '\\\\')}" />
+  <div class="title">OPBS</div>
+  <div class="subtitle">Open Pickle Backup System</div>
+  <div class="version">Version ${version}</div>
+  <div class="desc">Disk imaging and backup tool with Macrium&nbsp;Reflect compatibility,
+    scheduled backups, cloud storage support, and read-only image browsing.</div>
+  <div class="link"><a href="https://opbs.rhitcs.com">opbs.rhitcs.com</a></div>
+  <div class="copy">&copy; ${new Date().getFullYear()} RHITCS</div>
+</body>
+</html>`;
+    aboutWindow = new BrowserWindow({
+      width: 420,
+      height: 340,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      title: 'About OPBS',
+      icon,
+      parent: mainWindow ?? undefined,
+      modal: true,
+      show: false,
+      webPreferences: { nodeIntegration: false, contextIsolation: true }
+    });
+    aboutWindow.setMenuBarVisibility(false);
+    aboutWindow.webContents.setWindowOpenHandler(({ url }) => {
+      shell.openExternal(url);
+      return { action: 'deny' };
+    });
+    aboutWindow.webContents.on('will-navigate', (e, url) => {
+      e.preventDefault();
+      shell.openExternal(url);
+    });
+    const tmpFile = path.join(app.getPath('temp'), 'opbs-about.html');
+    const fs = await import('fs');
+    fs.writeFileSync(tmpFile, html, 'utf-8');
+    aboutWindow.loadFile(tmpFile);
+    aboutWindow.on('ready-to-show', () => aboutWindow?.show());
+    aboutWindow.on('closed', () => { aboutWindow = null; });
+  });
+
   // Disk information
   ipcMain.handle('get-disks', async () => {
     return diskEnumerator.getDisks();

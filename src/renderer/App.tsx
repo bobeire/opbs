@@ -94,7 +94,9 @@ function App() {
         </ul>
         
         <div className="sidebar-footer">
-          <p>v0.1.0</p>
+          <button className="version-btn" onClick={() => window.electronAPI.showAbout()}>
+            v0.1.0
+          </button>
         </div>
       </nav>
       

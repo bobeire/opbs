@@ -98,6 +98,22 @@ body {
   font-size: 0.875rem;
 }
 
+.version-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: color 0.2s, background-color 0.2s;
+}
+
+.version-btn:hover {
+  color: var(--text-color);
+  background-color: var(--card-bg);
+}
+
 /* Main Content */
 .main-content {
   flex: 1;

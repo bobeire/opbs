@@ -36,6 +36,7 @@ declare global {
       mountImage: (config: any) => Promise<{ ok: boolean; id?: string; error?: string }>;
       unmountImage: (id: string) => Promise<{ ok: boolean; error?: string }>;
       onMountStatus: (callback: (status: any) => void) => () => void;
+      showAbout: () => Promise<void>;
     };
   }
 }
