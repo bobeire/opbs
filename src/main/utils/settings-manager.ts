@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { app } from 'electron';
 import { SftpProfileSettings } from './sftp';
+import { ErrorReportingConfig } from './error-reporter';
 
 export interface AppSettings {
   defaultCompression: number;
@@ -15,8 +16,12 @@ export interface AppSettings {
   notifications: NotificationSettings;
   scheduledVerification: ScheduledVerification;
   scheduledBackups: ScheduledBackup[];
+  /** Reusable named backup configurations loaded into the backup wizard. */
+  backupProfiles: BackupProfile[];
   /** Idle background scrub: proactively re-verify the newest images. */
   scrubWhileIdle: boolean;
+  /** Anonymous crash/error reporting (opt-in). */
+  errorReporting: ErrorReportingConfig;
   scrubIntervalHours: number;
   /** Cloud destination credentials (used for s3:// backup destinations). */
   cloud: CloudSettings;
@@ -70,6 +75,24 @@ export interface ScheduledBackup {
   enabled: boolean;
   lastRun?: string;
   nextRun?: string;
+  /** Number of automatic retries after a failed run before alerting (default 2). */
+  maxRetries?: number;
+  /** Base delay between retries in minutes; doubles each attempt (default 5). */
+  retryDelayMinutes?: number;
+}
+
+export interface BackupProfile {
+  id: string;
+  name: string;
+  sourceDiskIndex: number;
+  sourcePartitions: number[];
+  destinationPath: string;
+  compressionLevel: number;
+  compressionType?: 'deflate' | 'zstd';
+  compressionThreads?: number;
+  verificationEnabled: boolean;
+  incremental: boolean;
+  passphrase?: string;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -96,6 +119,11 @@ const DEFAULT_SETTINGS: AppSettings = {
     alertAfter: 2
   },
   scheduledBackups: [],
+  backupProfiles: [],
+  errorReporting: {
+    enabled: false,
+    endpoint: ''
+  },
   scrubWhileIdle: false,
   scrubIntervalHours: 24,
   cloud: {
@@ -205,6 +233,44 @@ export class SettingsManager {
     }
     
     this.settings.scheduledBackups.splice(index, 1);
+    this.save();
+    return true;
+  }
+
+  addBackupProfile(config: Omit<BackupProfile, 'id'>): BackupProfile | null {
+    if (!config.name?.trim()) {
+      return null;
+    }
+    const profile: BackupProfile = {
+      ...config,
+      name: config.name.trim(),
+      id: Date.now().toString()
+    };
+    this.settings.backupProfiles.push(profile);
+    this.save();
+    return profile;
+  }
+
+  updateBackupProfile(id: string, updates: Partial<BackupProfile>): BackupProfile | null {
+    const index = this.settings.backupProfiles.findIndex((p) => p.id === id);
+    if (index === -1) {
+      return null;
+    }
+    this.settings.backupProfiles[index] = {
+      ...this.settings.backupProfiles[index],
+      ...updates,
+      id
+    };
+    this.save();
+    return this.settings.backupProfiles[index];
+  }
+
+  deleteBackupProfile(id: string): boolean {
+    const index = this.settings.backupProfiles.findIndex((p) => p.id === id);
+    if (index === -1) {
+      return false;
+    }
+    this.settings.backupProfiles.splice(index, 1);
     this.save();
     return true;
   }

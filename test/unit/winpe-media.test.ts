@@ -95,15 +95,18 @@ describe('winpe-media', () => {
       expect(s).toContain('OPBS-restore.json');
     });
 
-    it('example restore config references the source image and target disk', () => {
+    it('example restore config uses canonical CLI keys', () => {
       const cfg = buildExampleRestoreConfig();
-      expect(cfg).toContain('sourceImagePath');
-      expect(cfg).toContain('destinationDiskIndex');
+      expect(cfg).toContain('imagePath');
+      expect(cfg).toContain('targetDiskIndex');
       expect(cfg).toContain('targetPartitions');
+      expect(cfg).toContain('verifyBeforeWrite');
     });
 
-    it('README documents the restore workflow', () => {
+    it('README documents the restore workflow and preflight', () => {
       expect(buildReadme()).toContain('winpe-entry.js');
+      expect(buildReadme()).toContain('--preflight');
+      expect(buildReadme()).toContain('sourceImagePath / destinationDiskIndex');
     });
 
     it('payloadTextFiles emits all embedded files once', () => {

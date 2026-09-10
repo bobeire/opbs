@@ -2,8 +2,29 @@ import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import { RestoreCoordinator, RestoreJobConfig, mapRestoreJobProgress, summarizeImage, ImageSummary } from '../imaging/restore-engine';
 import { RestoreJobProgress, RestoreJobResult } from '../imaging/imaging-job';
+import { DiskEnumerator } from '../utils/disk-enumerator';
 
 export type RestoreConfig = RestoreJobConfig;
+
+export interface RestorePreflightResult {
+  ok: boolean;
+  error?: string;
+  /** Total bytes required on the target disk (captured partition sizes). */
+  requiredBytes?: number;
+  /** Total size of the target physical disk. */
+  targetDiskBytes?: number;
+  targetDiskModel?: string;
+  /** Existing partitions on the target disk that the restore will overwrite. */
+  targetDiskPartitionCount?: number;
+  targets?: Array<{ partitionIndex: number; offset: number; size: number }>;
+  /** Partition-table scheme the restore would write when the layout deviates. */
+  writeTableScheme?: string | null;
+  /** Engine warnings from the layout/same-disk safety gates. */
+  warnings?: string[];
+  sameDisk?: boolean;
+  encrypted?: boolean;
+  passphraseRequired?: boolean;
+}
 
 export interface RestoreProgress {
   phase: 'preparing' | 'reading_image' | 'restoring' | 'completed' | 'error';
@@ -21,7 +42,7 @@ export class RestoreManager extends EventEmitter {
   private shouldCancel = false;
   private lastJobResult: RestoreJobResult | null = null;
 
-  constructor(private coordinator: RestoreCoordinator) {
+  constructor(private coordinator: RestoreCoordinator, private diskEnumerator = new DiskEnumerator()) {
     super();
   }
 
@@ -106,6 +127,59 @@ export class RestoreManager extends EventEmitter {
 
   getImageSummary(imagePath: string): ImageSummary {
     return summarizeImage(imagePath);
+  }
+
+  /**
+   * Preflight / dry-run: builds the restore job (image check, chain resolution,
+   * disk-size and layout safety gates) WITHOUT writing a single byte, then
+   * reports the plan so the UI can warn about data loss and demand an
+   * explicit acknowledgement before the real restore starts.
+   */
+  async preflight(config: RestoreConfig): Promise<RestorePreflightResult> {
+    try {
+      await this.validateConfig(config);
+
+      const job = await this.coordinator.buildJob(config);
+
+      const summary = this.getImageSummary(config.imagePath);
+      const sizeByIndex = new Map<number, number>(summary.partitions.map((p) => [p.index, p.size]));
+
+      let requiredBytes = 0;
+      const targets = job.targets.map((t) => {
+        const size = t.size ?? sizeByIndex.get(t.partitionIndex) ?? 0;
+        requiredBytes += size;
+        return { partitionIndex: t.partitionIndex, offset: t.offset, size };
+      });
+
+      const disks = await this.diskEnumerator.getDisks();
+      const targetDisk = disks.find((d) => d.index === config.targetDiskIndex);
+
+      const warnings = [...(job.warnings ?? [])];
+      const encrypted = summary.encrypted;
+      const passphraseRequired = encrypted && !(config.passphrase?.trim());
+      if (passphraseRequired) {
+        warnings.push('This image is encrypted; the passphrase is required to restore it.');
+      }
+
+      return {
+        ok: true,
+        requiredBytes,
+        targetDiskBytes: targetDisk?.size ?? 0,
+        targetDiskModel: targetDisk?.model,
+        targetDiskPartitionCount: targetDisk?.partitions.length ?? 0,
+        targets,
+        writeTableScheme: job.writeTable?.scheme ?? null,
+        warnings,
+        sameDisk: (job.warnings ?? []).some((w) => w.includes('same disk the image')),
+        encrypted,
+        passphraseRequired
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
   }
 
   private emitMapped(progress: RestoreJobProgress): void {

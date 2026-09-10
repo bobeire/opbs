@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Restore operations
   startRestore: (config: any) => ipcRenderer.invoke('start-restore', config),
   cancelRestore: () => ipcRenderer.invoke('cancel-restore'),
+  restorePreflight: (config: any) => ipcRenderer.invoke('restore-preflight', config),
   getImageInfo: (imagePath: string) => ipcRenderer.invoke('get-image-info', imagePath),
 
   // Settings
@@ -21,6 +22,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateScheduledBackup: (id: string, updates: any) => ipcRenderer.invoke('update-scheduled-backup', id, updates),
   deleteScheduledBackup: (id: string) => ipcRenderer.invoke('delete-scheduled-backup', id),
   validateCron: (expression: string) => ipcRenderer.invoke('validate-cron', expression),
+  addBackupProfile: (config: any) => ipcRenderer.invoke('add-backup-profile', config),
+  updateBackupProfile: (id: string, updates: any) => ipcRenderer.invoke('update-backup-profile', id, updates),
+  deleteBackupProfile: (id: string) => ipcRenderer.invoke('delete-backup-profile', id),
 
   // File dialogs
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
@@ -34,6 +38,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Recent backups & backup actions
   listRecentBackups: () => ipcRenderer.invoke('list-recent-backups'),
   addRecentDestination: (directory: string) => ipcRenderer.invoke('add-recent-destination', directory),
+  destinationHealth: (destinations: string[]) => ipcRenderer.invoke('destination-health', destinations),
   openPath: (filePath: string) => ipcRenderer.invoke('open-path', filePath),
   copyImage: (imagePath: string, destDir: string) => ipcRenderer.invoke('copy-image', imagePath, destDir),
   uploadToCloud: (imagePath: string) => ipcRenderer.invoke('upload-to-cloud', imagePath),

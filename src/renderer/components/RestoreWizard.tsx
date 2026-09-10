@@ -6,6 +6,38 @@ interface RestoreWizardProps {
   mode?: 'restore' | 'clone';
 }
 
+interface DiskInfo {
+  index: number;
+  model: string;
+  size: number;
+  partitions: Array<{
+    diskIndex: number;
+    partitionIndex: number;
+    driveLetter: string | null;
+    label: string;
+    fsType: string;
+    size: number;
+    usedSpace: number;
+    isSystem: boolean;
+    isBoot: boolean;
+  }>;
+}
+
+interface PreflightResult {
+  ok: boolean;
+  error?: string;
+  requiredBytes?: number;
+  targetDiskBytes?: number;
+  targetDiskModel?: string;
+  targetDiskPartitionCount?: number;
+  targets?: Array<{ partitionIndex: number; offset: number; size: number }>;
+  writeTableScheme?: string | null;
+  warnings?: string[];
+  sameDisk?: boolean;
+  encrypted?: boolean;
+  passphraseRequired?: boolean;
+}
+
 type WizardStep = 'select_image' | 'select_target' | 'options' | 'progress' | 'complete';
 
 function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: RestoreWizardProps) {
@@ -13,11 +45,15 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   const [currentStep, setCurrentStep] = useState<WizardStep>('select_image');
   const [imagePath, setImagePath] = useState(initialImagePath ?? '');
   const [imageInfo, setImageInfo] = useState<any>(null);
+  const [disks, setDisks] = useState<DiskInfo[]>([]);
+  const [disksLoading, setDisksLoading] = useState(true);
   const [targetDiskIndex, setTargetDiskIndex] = useState<number | null>(null);
   const [targetPartitions, setTargetPartitions] = useState<number[]>([]);
-  const [resizePartitions, setResizePartitions] = useState(true);
   const [applyDeltas, setApplyDeltas] = useState(true);
   const [passphrase, setPassphrase] = useState('');
+  const [preflight, setPreflight] = useState<PreflightResult | null>(null);
+  const [preflightLoading, setPreflightLoading] = useState(false);
+  const [acknowledge, setAcknowledge] = useState(false);
   const [progress, setProgress] = useState<any>(null);
 
   useEffect(() => {
@@ -28,12 +64,66 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   }, []);
 
   useEffect(() => {
-    if (!initialImagePath) return;
+    let alive = true;
     window.electronAPI
-      .getImageInfo(initialImagePath)
+      .getDisks()
+      .then((list) => {
+        if (alive) setDisks(list ?? []);
+      })
+      .catch(() => {
+        if (alive) setDisks([]);
+      })
+      .finally(() => {
+        if (alive) setDisksLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!imagePath) return;
+    window.electronAPI
+      .getImageInfo(imagePath)
       .then((info) => setImageInfo(info))
       .catch(() => setImageInfo(null));
-  }, [initialImagePath]);
+  }, [imagePath]);
+
+  // Dry-run the restore whenever the target selection changes so the user sees
+  // the data-loss warning and passphrase requirement BEFORE anything starts.
+  useEffect(() => {
+    let alive = true;
+    const run = () => {
+      if (imagePath && targetDiskIndex !== null && targetPartitions.length > 0) {
+        setPreflightLoading(true);
+        setAcknowledge(false);
+        window.electronAPI
+          .restorePreflight({
+            imagePath,
+            targetDiskIndex,
+            targetPartitions,
+            applyDeltas
+          })
+          .then((res) => {
+            if (alive) setPreflight(res);
+          })
+          .catch((e: any) => {
+            if (alive) setPreflight({ ok: false, error: e?.message ?? 'Preflight failed' });
+          })
+          .finally(() => {
+            if (alive) setPreflightLoading(false);
+          });
+      } else {
+        setPreflight(null);
+      }
+    };
+    Promise.resolve().then(() => {
+      if (alive) run();
+    });
+    return () => {
+      alive = false;
+    };
+  }, [imagePath, targetDiskIndex, targetPartitions.join(','), applyDeltas]);
 
   const handleSelectImage = async () => {
     const path = await window.electronAPI.selectFile({
@@ -45,13 +135,6 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     
     if (path) {
       setImagePath(path);
-      try {
-        const info = await window.electronAPI.getImageInfo(path);
-        setImageInfo(info);
-      } catch (error) {
-        console.error('Failed to read image info:', error);
-        setImageInfo(null);
-      }
     }
   };
 
@@ -86,6 +169,18 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     
     return `${size.toFixed(2)} ${units[unitIndex]}`;
   };
+
+  const destructiveAckNeeded =
+    !!preflight && preflight.ok &&
+    (!!preflight.writeTableScheme || !!preflight.sameDisk ||
+      (preflight.targetDiskPartitionCount ?? 0) > 0);
+
+  const canStart =
+    !!preflight &&
+    preflight.ok &&
+    !!targetDiskIndex &&
+    !(imageInfo?.encrypted && !passphrase.trim()) &&
+    (!destructiveAckNeeded || acknowledge);
 
   const renderStep = () => {
     switch (currentStep) {
@@ -150,21 +245,31 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                 Warning: This will overwrite all data on the target disk!
               </p>
               
-              <div className="disk-list">
-                {/* TODO: Load actual disks */}
-                <div
-                  className={`disk-card ${targetDiskIndex === 0 ? 'selected' : ''}`}
-                  onClick={() => setTargetDiskIndex(0)}
-                >
-                  <h3>Disk 0 - System Disk</h3>
-                  <p>Size: 1 TB</p>
-                  <p>Partitions: 2</p>
+              {disksLoading ? (
+                <div className="loading">Loading disks...</div>
+              ) : (
+                <div className="disk-list">
+                  {disks.map((disk) => (
+                    <div
+                      key={disk.index}
+                      className={`disk-card ${targetDiskIndex === disk.index ? 'selected' : ''}`}
+                      onClick={() => {
+                        setTargetDiskIndex(disk.index);
+                        setTargetPartitions([]);
+                        setAcknowledge(false);
+                      }}
+                    >
+                      <h3>{disk.model}</h3>
+                      <p>Size: {formatSize(disk.size)}</p>
+                      <p>Partitions: {disk.partitions.length}</p>
+                    </div>
+                  ))}
                 </div>
-              </div>
+              )}
               
               {targetDiskIndex !== null && (
                 <div className="partition-selection">
-                  <h3>Select Target Partitions</h3>
+                  <h3>Select Partitions to Restore</h3>
                   <div className="partition-list">
                     {imageInfo?.partitions.map((partition: any) => (
                       <label key={partition.index} className="partition-item">
@@ -194,6 +299,65 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                   </div>
                 </div>
               )}
+
+              {targetDiskIndex !== null && targetPartitions.length > 0 && (
+                <div className="preflight-panel">
+                  {preflightLoading ? (
+                    <p className="field-hint">Checking target disk…</p>
+                  ) : preflight && !preflight.ok ? (
+                    <div className="error-message">
+                      <p>Cannot restore: {preflight.error}</p>
+                    </div>
+                  ) : preflight?.ok ? (
+                    <>
+                      <div className="preflight-grid">
+                        <div>
+                          <span>Required</span>
+                          <strong>{formatSize(preflight.requiredBytes ?? 0)}</strong>
+                        </div>
+                        <div>
+                          <span>Target capacity</span>
+                          <strong>{formatSize(preflight.targetDiskBytes ?? 0)}</strong>
+                        </div>
+                        <div>
+                          <span>Target</span>
+                          <strong>{preflight.targetDiskModel ?? `Disk ${targetDiskIndex}`}</strong>
+                        </div>
+                      </div>
+                      {(preflight.targetDiskPartitionCount ?? 0) > 0 && (
+                        <div className="error-message">
+                          <p>
+                            Target disk already has {preflight.targetDiskPartitionCount} partition(s).
+                            Restoring overwrites the existing data in place.
+                          </p>
+                        </div>
+                      )}
+                      {preflight.writeTableScheme && (
+                        <div className="error-message">
+                          <p>This restore writes a fresh {preflight.writeTableScheme.toUpperCase()} partition table, erasing the target disk's current layout.</p>
+                        </div>
+                      )}
+                      {preflight.sameDisk && (
+                        <div className="error-message">
+                          <p>Target disk matches the disk the image was captured from. Restoring overwrites the source.</p>
+                        </div>
+                      )}
+                      {preflight.passphraseRequired && (
+                        <div className="error-message">
+                          <p>This image is encrypted. Enter the passphrase to restore it.</p>
+                        </div>
+                      )}
+                      {preflight.warnings.map((w, i) => (
+                        w.includes('matches the source disk') ? (
+                          <div key={i} className="warning-box">
+                            <p>{w}</p>
+                          </div>
+                        ) : null
+                      ))}
+                    </>
+                  ) : null}
+                </div>
+              )}
             </div>
             
             <div className="wizard-actions">
@@ -202,7 +366,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
               </button>
               <button
                 className="btn-primary"
-                disabled={targetDiskIndex === null || targetPartitions.length === 0}
+                disabled={targetDiskIndex === null || targetPartitions.length === 0 || (!!preflight && !preflight.ok) || preflightLoading}
                 onClick={() => setCurrentStep('options')}
               >
                 Next
@@ -239,26 +403,28 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                   placeholder={imageInfo?.encrypted ? 'Required for encrypted image' : 'Optional'}
                 />
               </div>
-
-              <div className="option-group">
+            </div>
+            
+            {destructiveAckNeeded && (
+              <div className="acknowledge-box">
                 <label className="checkbox-label">
                   <input
                     type="checkbox"
-                    checked={resizePartitions}
-                    onChange={(e) => setResizePartitions(e.target.checked)}
+                    checked={acknowledge}
+                    onChange={(e) => setAcknowledge(e.target.checked)}
                   />
-                  Resize partitions to fit target disk
+                  Yes, I understand the target disk will be permanently overwritten and existing data will be lost.
                 </label>
               </div>
-            </div>
-            
+            )}
+
             <div className="summary">
               <h3>{isClone ? 'Clone Summary' : 'Restore Summary'}</h3>
               <ul>
                 <li>Source Image: {imagePath}</li>
-                <li>Target Disk: Disk {targetDiskIndex}</li>
+                <li>Target Disk: {preflight?.targetDiskModel ?? `Disk ${targetDiskIndex}`} ({formatSize(preflight?.targetDiskBytes ?? 0)})</li>
                 <li>Partitions to Restore: {targetPartitions.length}</li>
-                <li>Resize: {resizePartitions ? 'Yes' : 'No'}</li>
+                <li>Required Space: {formatSize(preflight?.requiredBytes ?? 0)}</li>
               </ul>
             </div>
             
@@ -266,7 +432,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
               <button className="btn-secondary" onClick={() => setCurrentStep('select_target')}>
                 Back
               </button>
-              <button className="btn-danger" onClick={handleStartRestore}>
+              <button className="btn-danger" onClick={handleStartRestore} disabled={!canStart}>
                 {isClone ? 'Start Clone' : 'Start Restore'}
               </button>
             </div>

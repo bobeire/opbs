@@ -789,6 +789,65 @@ body {
   margin-top: 4px;
 }
 
+/* Backup profiles */
+.profile-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.profile-row label {
+  font-weight: 500;
+}
+
+.profile-row select {
+  flex: 0 1 320px;
+  padding: 10px 12px;
+  background-color: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-color);
+  font-size: 0.9rem;
+}
+
+.profile-save-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.profile-save-row input {
+  flex: 1;
+  padding: 10px 12px;
+  background-color: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-color);
+  font-size: 0.9rem;
+}
+
+/* Destination health */
+.health-free-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 120px;
+}
+
+.health-free-wrap span {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.health-free-bar {
+  height: 6px;
+  background-color: var(--success-color);
+  border-radius: 3px;
+  min-width: 4px;
+}
+
 /* Loading */
 .loading {
   text-align: center;
@@ -799,6 +858,57 @@ body {
 /* Target Disk Warning */
 .target-disk-selector .warning-text {
   margin-bottom: 20px;
+}
+
+/* Restore preflight / dry-run */
+.preflight-panel {
+  margin-top: 20px;
+  background-color: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 14px;
+}
+
+.preflight-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.preflight-grid div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.preflight-grid span {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.preflight-grid strong {
+  font-size: 1rem;
+  word-break: break-word;
+}
+
+.warning-box {
+  border-left: 4px solid var(--danger-color);
+  background-color: var(--card-bg);
+  padding: 10px 12px;
+  border-radius: 4px;
+  margin-top: 8px;
+  color: var(--text-color);
+}
+
+.acknowledge-box {
+  border: 1px solid var(--danger-color);
+  background-color: rgba(220, 38, 38, 0.08);
+  border-radius: 6px;
+  padding: 14px;
+  margin-bottom: 16px;
 }
 
 /* Responsive */

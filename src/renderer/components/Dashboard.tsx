@@ -24,14 +24,26 @@ function Dashboard({ onNavigate }: DashboardProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [systemInfo, setSystemInfo] = useState({ disks: 0, totalSpace: 0, usedSpace: 0 });
+  const [destinations, setDestinations] = useState<string[]>([]);
+  const [health, setHealth] = useState<any[]>([]);
+  const [now, setNow] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const res = await window.electronAPI.listRecentBackups();
       setBackups(res.entries ?? []);
+      const dirs = res.destinations ?? [];
+      setDestinations(dirs);
+      if (dirs.length > 0) {
+        const healthRes = await window.electronAPI.destinationHealth(dirs);
+        setHealth(Array.isArray(healthRes) ? healthRes : []);
+      } else {
+        setHealth([]);
+      }
     } catch {
       setBackups([]);
+      setHealth([]);
     } finally {
       setLoading(false);
     }
@@ -39,17 +51,18 @@ function Dashboard({ onNavigate }: DashboardProps) {
 
   useEffect(() => {
     let cancelled = false;
-    window.electronAPI
-      .listRecentBackups()
-      .then((res) => {
-        if (!cancelled) setBackups(res.entries ?? []);
-      })
-      .catch(() => {
+    const tick = () => {
+      if (cancelled) return;
+      setNow(Date.now());
+    };
+    Promise.resolve().then(tick);
+    const interval = setInterval(tick, 60000);
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+      load().catch(() => {
         if (!cancelled) setBackups([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
       });
+    });
     window.electronAPI
       .getDisks()
       .then((diskList) => {
@@ -67,8 +80,9 @@ function Dashboard({ onNavigate }: DashboardProps) {
       });
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
-  }, []);
+  }, [load]);
 
   const toggleSelected = (id: string) => {
     setSelected((prev) => {
@@ -144,6 +158,10 @@ function Dashboard({ onNavigate }: DashboardProps) {
     });
   };
 
+  const ageDays = (ts: number): number => {
+    return now > 0 ? Math.max(0, Math.floor((now - ts) / 86400000)) : 0;
+  };
+
   return (
     <div className="dashboard">
       <h1>Dashboard</h1>
@@ -166,6 +184,65 @@ function Dashboard({ onNavigate }: DashboardProps) {
           <p className="stat-value">{backups.length}</p>
         </div>
       </div>
+
+      {destinations.length > 0 && (
+        <div className="recent-backups">
+          <div className="recent-backups-head">
+            <h2>Backup Destinations</h2>
+          </div>
+          <table className="backup-table">
+            <thead>
+              <tr>
+                <th>Destination</th>
+                <th>Free space</th>
+                <th>Images</th>
+                <th>Chains</th>
+                <th>Newest image</th>
+                <th>Prune preview</th>
+              </tr>
+            </thead>
+            <tbody>
+              {destinations.map((dir) => {
+                const h = health.find((x) => x && x.path === dir);
+                return (
+                  <tr key={dir}>
+                    <td className="col-dest" title={dir}>
+                      {dir}
+                    </td>
+                    <td>
+                      {h && h.reachable && h.totalBytes ? (
+                        <div className="health-free-wrap" title={`${formatSize(h.freeBytes)} free of ${formatSize(h.totalBytes)}`}>
+                          <div
+                            className="health-free-bar"
+                            style={{ width: `${Math.max(2, Math.min(100, (h.freeBytes / h.totalBytes) * 100))}%` }}
+                          />
+                          <span>
+                            {formatSize(h.freeBytes)} free
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="status-badge in_progress">{h && !h.reachable ? 'offline' : '…'}</span>
+                      )}
+                    </td>
+                    <td>{h ? h.imageCount : '…'}</td>
+                    <td>{h ? h.chainCount : '…'}</td>
+                    <td>
+                      {h && h.newestDate ? (
+                        <span className={`status-badge ${ageDays(h.newestDate) > 7 ? 'in_progress' : 'completed'}`}>
+                          {ageDays(h.newestDate)}d ago
+                        </span>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                    <td>{h && h.plannedPrune > 0 ? `${h.plannedPrune} would prune` : 'in retention'}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <div className="recent-backups">
         <div className="recent-backups-head">

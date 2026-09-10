@@ -9,6 +9,20 @@ declare global {
       cancelBackup: () => Promise<void>;
       startRestore: (config: any) => Promise<void>;
       cancelRestore: () => Promise<void>;
+      restorePreflight: (config: any) => Promise<{
+        ok: boolean;
+        error?: string;
+        requiredBytes?: number;
+        targetDiskBytes?: number;
+        targetDiskModel?: string;
+        targetDiskPartitionCount?: number;
+        targets?: Array<{ partitionIndex: number; offset: number; size: number }>;
+        writeTableScheme?: string | null;
+        warnings?: string[];
+        sameDisk?: boolean;
+        encrypted?: boolean;
+        passphraseRequired?: boolean;
+      }>;
       getImageInfo: (imagePath: string) => Promise<any>;
       getSettings: () => Promise<any>;
       updateSettings: (updates: any) => Promise<any>;
@@ -16,6 +30,9 @@ declare global {
       updateScheduledBackup: (id: string, updates: any) => Promise<any>;
       deleteScheduledBackup: (id: string) => Promise<boolean>;
       validateCron: (expression: string) => Promise<boolean>;
+      addBackupProfile: (config: any) => Promise<any>;
+      updateBackupProfile: (id: string, updates: any) => Promise<any>;
+      deleteBackupProfile: (id: string) => Promise<boolean>;
       selectDirectory: () => Promise<string | undefined>;
       selectFile: (options?: any) => Promise<string | undefined>;
       selectSaveFile: (options?: any) => Promise<string | undefined>;
@@ -24,6 +41,18 @@ declare global {
       listImages: (directory: string) => Promise<any>;
       listRecentBackups: () => Promise<{ entries: any[]; destinations: string[] }>;
       addRecentDestination: (directory: string) => Promise<{ destinations: string[] }>;
+      destinationHealth: (destinations: string[]) => Promise<{
+        path: string;
+        reachable: boolean;
+        error?: string;
+        freeBytes?: number;
+        totalBytes?: number;
+        imageCount: number;
+        chainCount: number;
+        newestDate?: number;
+        oldestDate?: number;
+        plannedPrune: number;
+      }[]>;
       openPath: (filePath: string) => Promise<{ ok: boolean; error?: string }>;
       copyImage: (imagePath: string, destDir: string) => Promise<{ ok: boolean; copied?: string[]; bytes?: number; destPath?: string; error?: string }>;
       uploadToCloud: (imagePath: string) => Promise<{ ok: boolean; uploaded?: string[]; error?: string }>;

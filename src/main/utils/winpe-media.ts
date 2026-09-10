@@ -238,10 +238,11 @@ export function buildRestoreCmd(): string {
 export function buildExampleRestoreConfig(): string {
   return JSON.stringify(
     {
-      sourceImagePath: 'D:\\backups\\system.opbs',
-      destinationDiskIndex: 0,
+      imagePath: 'D:\\backups\\system.opbs',
+      targetDiskIndex: 0,
       targetPartitions: [0, 1],
-      passphrase: ''
+      passphrase: '',
+      verifyBeforeWrite: true
     },
     null,
     2
@@ -264,11 +265,16 @@ export function buildReadme(): string {
     '   accessible volume as OPBS-restore.json, or type its path at the prompt.',
     '3. restore.cmd runs:  node.exe winpe-entry.js restore <config> --elevated',
     '',
-    'The restore config fields:',
-    '   sourceImagePath      : the .opbs image to restore',
-    '   destinationDiskIndex : target physical disk (list with the disks command)',
-    '   targetPartitions     : partition indexes to restore (0 = whole disk)',
-    '   passphrase           : passphrase for encrypted images (leave empty if none)',
+    'The restore config fields (sourceImagePath / destinationDiskIndex are',
+    'accepted as aliases for imagePath / targetDiskIndex):',
+    '   imagePath          : the .opbs image to restore',
+    '   targetDiskIndex    : target physical disk (list with the disks command)',
+    '   targetPartitions   : partition indexes to restore (0 = whole disk)',
+    '   passphrase         : passphrase for encrypted images (leave empty if none)',
+    '',
+    'Dry-run the restore without writing anything (validates the image, the',
+    'target disk size and the safety gates):',
+    '   node.exe winpe-entry.js restore X:\\path\\restore.json --preflight',
     '',
     'Manual CLI usage (Shift+F10 console):',
     '   cd /d <media-drive>:\\OPBS',

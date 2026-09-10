@@ -47,6 +47,9 @@ export interface RestoreJobConfig {
 
 export interface RestoreCoordinator {
   runRestore(config: RestoreJobConfig, onProgress: (p: RestoreJobProgress) => void): Promise<RestoreJobResult>;
+  /** Build a restore job without writing anything: validates the image, the
+   *  target disk size and the layout gates. Used for preflight/dry-run. */
+  buildJob(config: RestoreJobConfig): Promise<RestoreJob>;
   cancel(): Promise<void>;
 }
 

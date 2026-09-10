@@ -71,6 +71,8 @@ interface ScheduleForm {
   verificationEnabled: boolean;
   incremental: boolean;
   passphrase: string;
+  maxRetries: number;
+  retryDelayMinutes: number;
 }
 
 interface DiskInfo {
@@ -105,6 +107,7 @@ interface Settings {
   scheduledVerification: ScheduledVerification;
   scheduledBackups: ScheduledBackup[];
   cloud: CloudSettings;
+  errorReporting: { enabled: boolean; endpoint: string };
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -149,6 +152,10 @@ const DEFAULT_SETTINGS: Settings = {
       privateKey: '',
       remotePath: ''
     }
+  },
+  errorReporting: {
+    enabled: false,
+    endpoint: ''
   }
 };
 
@@ -189,7 +196,8 @@ function Settings() {
     cloud: {
       s3: { ...DEFAULT_SETTINGS.cloud.s3, ...(loaded?.cloud?.s3 || {}) },
       sftp: { ...DEFAULT_SETTINGS.cloud.sftp, ...(loaded?.cloud?.sftp || {}) }
-    }
+    },
+    errorReporting: { ...DEFAULT_SETTINGS.errorReporting, ...(loaded?.errorReporting || {}) }
   });
 
   const handleSave = async () => {
@@ -307,7 +315,9 @@ function Settings() {
     compressionThreads: Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1)),
     verificationEnabled: settings.defaultVerification,
     incremental: false,
-    passphrase: ''
+    passphrase: '',
+    maxRetries: 2,
+    retryDelayMinutes: 5
   });
 
   const openNewSchedule = () => {
@@ -333,7 +343,9 @@ function Settings() {
       compressionThreads: job.compressionThreads || defaultScheduleForm().compressionThreads,
       verificationEnabled: job.verificationEnabled,
       incremental: job.incremental,
-      passphrase: job.passphrase || ''
+      passphrase: job.passphrase || '',
+      maxRetries: job.maxRetries ?? 2,
+      retryDelayMinutes: job.retryDelayMinutes ?? 5
     });
   };
 
@@ -408,6 +420,8 @@ function Settings() {
       compressionThreads: scheduleForm.compressionThreads,
       verificationEnabled: scheduleForm.verificationEnabled,
       incremental: scheduleForm.incremental,
+      maxRetries: scheduleForm.maxRetries,
+      retryDelayMinutes: scheduleForm.retryDelayMinutes,
       ...(scheduleForm.passphrase.trim() ? { passphrase: scheduleForm.passphrase.trim() } : {})
     };
     try {
@@ -890,6 +904,34 @@ function Settings() {
             </div>
 
             <div className="setting-item">
+              <label>Automatic retries on failure:</label>
+              <input
+                type="number"
+                min={0}
+                max={10}
+                value={scheduleForm.maxRetries}
+                onChange={(e) =>
+                  setScheduleForm({ ...scheduleForm, maxRetries: Math.max(0, parseInt(e.target.value) || 0) })
+                }
+              />
+              <p className="field-hint">Number of retries with backoff (0 = fail immediately, alert once).</p>
+            </div>
+
+            <div className="setting-item">
+              <label>Retry delay (minutes):</label>
+              <input
+                type="number"
+                min={1}
+                max={1440}
+                value={scheduleForm.retryDelayMinutes}
+                onChange={(e) =>
+                  setScheduleForm({ ...scheduleForm, retryDelayMinutes: Math.max(1, parseInt(e.target.value) || 1) })
+                }
+              />
+              <p className="field-hint">Base delay between attempts; doubles on each retry.</p>
+            </div>
+
+            <div className="setting-item">
               <label>Encryption Passphrase:</label>
               <input
                 type="password"
@@ -1169,8 +1211,48 @@ function Settings() {
                 placeholder="https://example.com/hook"
               />
             </div>
-          </>
-        )}
+</>
+      )}
+      </div>
+      
+      <div className="settings-section">
+        <h2>Error Reporting</h2>
+        <p className="field-hint">
+          Opt in to send anonymous crash and error reports. Stack traces are stripped of
+          local file paths before anything leaves this machine.
+        </p>
+        <div className="setting-item">
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={settings.errorReporting.enabled}
+              onChange={(e) =>
+                handleChange('errorReporting', {
+                  ...settings.errorReporting,
+                  enabled: e.target.checked
+                })
+              }
+            />
+            Send anonymous error reports
+          </label>
+        </div>
+        <div className="setting-item">
+          <label>Error reporting endpoint URL:</label>
+          <input
+            type="text"
+            value={settings.errorReporting.endpoint}
+            onChange={(e) =>
+              handleChange('errorReporting', {
+                ...settings.errorReporting,
+                endpoint: e.target.value
+              })
+            }
+            placeholder="https://your-server.example.com/report"
+          />
+          <p className="field-hint">
+            Reports are batched and posted as JSON. Leave empty to only log errors locally.
+          </p>
+        </div>
       </div>
       
       <div className="settings-section">

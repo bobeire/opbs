@@ -70,9 +70,17 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
   const [diskLabel, setDiskLabel] = useState<string | null>(null);
   const [networkOpen, setNetworkOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [profiles, setProfiles] = useState<any[]>([]);
+  const [selectedProfileId, setSelectedProfileId] = useState<string>('');
+  const [profileName, setProfileName] = useState('');
+  const [profileMsg, setProfileMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   useEffect(() => {
     loadDisks();
+    window.electronAPI
+      .getSettings()
+      .then((s) => setProfiles(s?.backupProfiles ?? []))
+      .catch(() => setProfiles([]));
     const cleanup = window.electronAPI.onBackupProgress((p) => {
       setProgress(p);
     });
@@ -143,6 +151,72 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
   };
 
   const eligibleDisks = disks.filter((d) => d.partitions.length > 0);
+
+  const applyProfile = (profile: any) => {
+    const disk = disks.find((d) => d.index === profile.sourceDiskIndex);
+    if (!disk) {
+      setProfileMsg({ kind: 'err', text: `Profile "${profile.name}" references disk ${profile.sourceDiskIndex}, which is not present on this machine.` });
+      return;
+    }
+    setSelectedDisk(disk);
+    setSelectedPartitions(profile.sourcePartitions ?? []);
+    if (profile.destinationPath) {
+      setDestinationPath(profile.destinationPath);
+      void resolveNewestBase(profile.destinationPath);
+    }
+    setCompressionLevel(profile.compressionLevel ?? 3);
+    setCompressionType(profile.compressionType ?? 'zstd');
+    setCompressionThreads(
+      profile.compressionThreads || Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1))
+    );
+    setVerificationEnabled(profile.verificationEnabled ?? true);
+    setIncrementalEnabled(profile.incremental ?? false);
+    setPassphrase(profile.passphrase ?? '');
+    setProfileMsg({ kind: 'ok', text: `Profile "${profile.name}" applied.` });
+  };
+
+  const deleteProfile = async (id: string) => {
+    await window.electronAPI.deleteBackupProfile(id);
+    setProfiles((prev) => prev.filter((p) => p.id !== id));
+    setSelectedProfileId('');
+  };
+
+  const saveAsProfile = async () => {
+    setProfileMsg(null);
+    if (!profileName.trim()) {
+      setProfileMsg({ kind: 'err', text: 'Enter a profile name.' });
+      return;
+    }
+    if (!selectedDisk || !destinationPath.trim()) {
+      setProfileMsg({ kind: 'err', text: 'Select a source disk and destination first.' });
+      return;
+    }
+    if (selectedPartitions.length === 0) {
+      setProfileMsg({ kind: 'err', text: 'Select at least one partition to back up.' });
+      return;
+    }
+    const payload: any = {
+      name: profileName.trim(),
+      sourceDiskIndex: selectedDisk.index,
+      sourcePartitions: selectedPartitions,
+      destinationPath,
+      compressionLevel,
+      compressionType,
+      compressionThreads,
+      verificationEnabled,
+      incremental: incrementalEnabled,
+      ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {})
+    };
+    const created = await window.electronAPI.addBackupProfile(payload);
+    if (created) {
+      setProfiles((prev) => [...prev, created]);
+      setProfileName('');
+      setSelectedProfileId(created.id);
+      setProfileMsg({ kind: 'ok', text: `Profile "${created.name}" saved.` });
+    } else {
+      setProfileMsg({ kind: 'err', text: 'Could not save the profile.' });
+    }
+  };
 
   const handleStartBackup = async () => {
     setCurrentStep('progress');
@@ -216,6 +290,44 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
                   Central backup: every disk with partitions ({eligibleDisks.length} available) is
                   imaged sequentially to the destination you choose next.
                 </p>
+              </>
+            )}
+
+            {!allDisks && (
+              <>
+                <div className="profile-row">
+                  <label>Load profile:</label>
+                  <select
+                    value={selectedProfileId}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      setSelectedProfileId(id);
+                      const profile = profiles.find((p) => p.id === id);
+                      if (profile) applyProfile(profile);
+                    }}
+                  >
+                    <option value="">Choose a saved configuration…</option>
+                    {profiles.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                  {selectedProfileId && (
+                    <button className="btn-danger btn-small" onClick={() => void deleteProfile(selectedProfileId)}>
+                      Delete
+                    </button>
+                  )}
+                </div>
+                {profileMsg && (
+                  profileMsg.kind === 'ok' ? (
+                    <div className="success-message">
+                      <p>{profileMsg.text}</p>
+                    </div>
+                  ) : (
+                    <div className="error-message">
+                      <p>{profileMsg.text}</p>
+                    </div>
+                  )
+                )}
               </>
             )}
 
@@ -426,6 +538,22 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
                 <p className="field-hint">
                   AES-256-GCM per-block. The passphrase is required to verify or restore this backup.
                 </p>
+              </div>
+
+              <div className="option-group">
+                <label>Save as profile:</label>
+                <div className="profile-save-row">
+                  <input
+                    type="text"
+                    value={profileName}
+                    onChange={(e) => setProfileName(e.target.value)}
+                    placeholder="Profile name, e.g. Weekly workstation"
+                  />
+                  <button className="btn-secondary btn-small" onClick={() => void saveAsProfile()}>
+                    Save as profile
+                  </button>
+                </div>
+                <p className="field-hint">Reuse this configuration later from the first step.</p>
               </div>
             </div>
             

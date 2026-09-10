@@ -29,6 +29,12 @@ function electronApp(): { isPackaged: boolean; getAppPath: () => string } | null
 const VERIFY_TASK_ID = 'scheduled-verify';
 const SCRUB_TASK_ID = 'idle-scrub';
 
+interface RetryState {
+  /** Number of retries already attempted after the original failure. */
+  attempt: number;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
 export interface ActivityEvent {
   kind: 'success' | 'failure';
   title: string;
@@ -53,6 +59,7 @@ export class BackupScheduler {
   private backupManager: BackupManager;
   private settingsManager: SettingsManager;
   private verifyFailures = new ConsecutiveFailureTracker();
+  private retries: Map<string, RetryState> = new Map();
 
   constructor(backupManager: BackupManager, settingsManager: SettingsManager) {
     this.backupManager = backupManager;
@@ -82,7 +89,18 @@ export class BackupScheduler {
   stopAll(): void {
     this.tasks.forEach((task) => task.stop());
     this.tasks.clear();
+    this.clearRetries();
     logger.info('Scheduler stopped');
+  }
+
+  /** Cancel pending retry timers so a stopped scheduler cannot fire late. */
+  private clearRetries(): void {
+    this.retries.forEach((state) => {
+      if (state.timer) {
+        clearTimeout(state.timer);
+      }
+    });
+    this.retries.clear();
   }
 
   /**
@@ -116,6 +134,13 @@ export class BackupScheduler {
       task.stop();
       this.tasks.delete(id);
       logger.info(`Cancelled scheduled task ${id}`);
+    }
+    const retry = this.retries.get(id);
+    if (retry) {
+      if (retry.timer) {
+        clearTimeout(retry.timer);
+      }
+      this.retries.delete(id);
     }
   }
 
@@ -336,10 +361,44 @@ export class BackupScheduler {
       });
 
       logger.info(`Scheduled backup ${config.name} completed (${result.bytesWritten} bytes)`);
+      this.retries.delete(config.id);
       await this.notify('success', config.name, config.destinationPath, result.bytesWritten);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       logger.error(`Scheduled backup ${config.name} failed`, error);
+
+      // Exponential retry with backoff. Each failure schedules another attempt
+      // (delay doubles per attempt); only the final failure alerts.
+      const maxRetries = Math.max(0, Math.floor(config.maxRetries ?? 2));
+      const baseDelayMs = Math.max(1, config.retryDelayMinutes ?? 5) * 60_000;
+      const state = this.retries.get(config.id) ?? { attempt: 0 };
+      if (state.attempt < maxRetries) {
+        state.attempt += 1;
+        const delayMs = baseDelayMs * 2 ** (state.attempt - 1);
+        logger.warn(
+          `${config.name} failed (${message}); retry ${state.attempt}/${maxRetries} in ${(delayMs / 60000).toFixed(1)} min`
+        );
+        broadcastActivity({
+          kind: 'failure',
+          title: 'OPBS scheduled backup retrying',
+          body: `${config.name} failed and will be retried (${state.attempt}/${maxRetries}) in ${(delayMs / 60000).toFixed(1)} min: ${message}`,
+          backupName: config.name,
+          bytesWritten: 0,
+          destinationPath: config.destinationPath,
+          error: message,
+          timestamp: new Date().toISOString()
+        });
+        state.timer = setTimeout(() => {
+          if (state.timer) {
+            clearTimeout(state.timer);
+            state.timer = undefined;
+          }
+          void this.runBackup(config);
+        }, delayMs);
+        this.retries.set(config.id, state);
+        return;
+      }
+      this.retries.delete(config.id);
       await this.notify('failure', config.name, config.destinationPath, 0, message);
     }
   }

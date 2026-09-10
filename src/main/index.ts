@@ -26,6 +26,8 @@ import { createRecoveryMedia, resolveNodeExe, MediaCreateOptions } from './utils
 import { S3Store, resolveS3Config } from './utils/s3';
 import { SftpStore, resolveSftpConfig } from './utils/sftp';
 import { getRecentDestinations, addRecentDestination } from './utils/recent';
+import { destinationHealth } from './utils/destination-health';
+import { initErrorReporter, setErrorReporting } from './utils/error-reporter';
 import { resolveImageChain } from './imaging/restore-engine';
 
 const HELPER_FLAG = '--opbs-helper';
@@ -260,6 +262,7 @@ function main(): void {
   }
 
   app.whenReady().then(() => {
+    initErrorReporter(() => settingsManager.getSettings().errorReporting);
     createWindow();
     buildAppMenu();
     setupIpcHandlers();
@@ -342,6 +345,10 @@ function setupIpcHandlers(): void {
     return restoreManager.getImageSummary(imagePath);
   });
 
+  ipcMain.handle('restore-preflight', async (_, config) => {
+    return restoreManager.preflight(config);
+  });
+
   // Settings
   ipcMain.handle('get-settings', async () => {
     return settingsManager.getSettings();
@@ -351,6 +358,9 @@ function setupIpcHandlers(): void {
     const result = settingsManager.updateSettings(updates);
     if (result.logLevel) {
       logger.setLevel(result.logLevel as any);
+    }
+    if (result.errorReporting) {
+      setErrorReporting(result.errorReporting);
     }
     scheduler.resyncFromSettings();
     return result;
@@ -380,6 +390,19 @@ function setupIpcHandlers(): void {
 
   ipcMain.handle('validate-cron', async (_, expression: string) => {
     return scheduler.validate(typeof expression === 'string' ? expression : '');
+  });
+
+  // Backup profiles
+  ipcMain.handle('add-backup-profile', async (_, config) => {
+    return settingsManager.addBackupProfile(config);
+  });
+
+  ipcMain.handle('update-backup-profile', async (_, id, updates) => {
+    return settingsManager.updateBackupProfile(id, updates);
+  });
+
+  ipcMain.handle('delete-backup-profile', async (_, id) => {
+    return settingsManager.deleteBackupProfile(id);
   });
 
   // File dialogs
@@ -551,8 +574,25 @@ function setupIpcHandlers(): void {
     return { entries: out, destinations: getRecentDestinations() };
   });
 
-  ipcMain.handle('add-recent-destination', async (_, directory: string) => {
-    return { destinations: addRecentDestination(String(directory ?? '')) };
+ipcMain.handle('add-recent-destination', async (_, directory: string) => {
+    return { destinations: addRecentDestination(directory) };
+  });
+
+  ipcMain.handle('destination-health', async (_, destinations: string[]) => {
+    const settings = settingsManager.getSettings();
+    const list = Array.isArray(destinations) ? destinations : [];
+    const results = [];
+    for (const dir of list) {
+      results.push(
+        await destinationHealth(dir, {
+          keepFull: settings.keepFull,
+          keepDeltasPerFull: settings.keepDeltasPerFull,
+          retentionDays: settings.retentionDays,
+          autoCleanup: settings.autoCleanup
+        })
+      );
+    }
+    return results;
   });
 
   ipcMain.handle('open-path', async (_, filePath: string) => {

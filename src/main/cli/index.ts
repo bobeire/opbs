@@ -290,13 +290,49 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   return result.ok ? 0 : 1;
 }
 
+function renderRestorePlan(plan: any): string {
+  const lines: string[] = [];
+  lines.push(`Image: ${plan.imagePath}`);
+  lines.push(`Verify before write: ${plan.verifyBeforeWrite ? 'yes' : 'no'}`);
+  if (Array.isArray(plan.applyDeltas) && plan.applyDeltas.length > 0) {
+    lines.push(`Apply delta chain: ${plan.applyDeltas.length} image(s)`);
+  }
+  const targets: any[] = Array.isArray(plan.targets) ? plan.targets : [];
+  lines.push(`Target partitions: ${targets.map((t) => `disk ${t.diskIndex} part ${t.partitionIndex} @${formatBytes(t.offset)}`).join(', ') || 'none'}`);
+  if (plan.encryption?.algorithm) {
+    lines.push(`Encryption: ${plan.encryption.algorithm}`);
+  }
+  if (plan.writeTable) {
+    const entries: any[] = Array.isArray(plan.writeTable.entries) ? plan.writeTable.entries : [];
+    lines.push(`Partition table: ${plan.writeTable.scheme} (${entries.length} entries, disk size ${formatBytes(plan.writeTable.diskSize)})`);
+  } else {
+    lines.push('Partition table: keep existing (no layout change)');
+  }
+  if (Array.isArray(plan.warnings) && plan.warnings.length > 0) {
+    for (const warning of plan.warnings) {
+      lines.push(`warning: ${warning}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 async function cmdRestore(ctx: CommandContext): Promise<number> {
   const configPath = ctx.argv[0];
   if (!configPath) {
-    console.error('Usage: restore <config.json> [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk]');
+    console.error('Usage: restore <config.json> [--preflight] [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk]');
     return 1;
   }
   const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+  // Accept GUI/WinPE-era aliases for parity with configs written by older
+  // media and docs. The canonical keys are imagePath / targetDiskIndex.
+  if (config.imagePath === undefined && config.sourceImagePath !== undefined) {
+    config.imagePath = config.sourceImagePath;
+  }
+  if (config.targetDiskIndex === undefined && config.destinationDiskIndex !== undefined) {
+    config.targetDiskIndex = config.destinationDiskIndex;
+  }
+
   const threadsFlag = flagValue(ctx.argv, '--threads');
   if (threadsFlag !== undefined) {
     const parsed = Number(threadsFlag);
@@ -341,6 +377,19 @@ async function cmdRestore(ctx: CommandContext): Promise<number> {
   }
   if (ctx.argv.includes('--acknowledge-same-disk')) {
     config.acknowledgeSameDisk = true;
+  }
+
+  // Dry-run: build the restore plan and validate the image, target disk and
+  // layout gates without writing a single block.
+  if (ctx.argv.includes('--preflight')) {
+    try {
+      const plan = await restoreEngine.buildJob(config);
+      console.log(ctx.opts.json ? JSON.stringify(plan, null, 2) : renderRestorePlan(plan));
+      return plan ? 0 : 1;
+    } catch (error) {
+      console.error(`Preflight FAILED: ${error instanceof Error ? error.message : error}`);
+      return 1;
+    }
   }
 
   if (ctx.argv.includes('--elevated')) {
