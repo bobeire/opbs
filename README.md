@@ -34,6 +34,12 @@ created by **RHITCS** — named in honour of a certain well-preserved pickle.
   the filesystems back from disk — boot sector, `$MFT` record 0 and FAT
   geometry. Drill results are recorded per image and shown as a "drill-tested"
   badge in the Dashboard; failures alert after N consecutive misses.
+- **Backup analytics & churn forensics**: per-image and per-chain metrics —
+  compression ratio, dedup/churn footprint, chain efficiency, and estimated
+  restore time — computed from image headers (works for historical images) and
+  cached after every backup. Surfaced in the Dashboard and via a CLI
+  `analytics <directory>` command. Tells you how much disk a chain truly
+  covers and whether your increments are actually shrinking data re-stored.
 
 ## Tech Stack
 
@@ -549,7 +555,9 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   injection + headless payload smoke, `.opbs` right-click context menu verbs
   (browse/mount/restore/verify) with a Settings toggle, automated restore drills
   (scheduled scratch-disk restore + on-disk filesystem validation, per-image
-  "drill-tested" status), 350+ unit/integration tests
+  "drill-tested" status), backup analytics/churn forensics (per-chain
+  compression, dedup footprint, chain efficiency, restore-time estimate — CLI
+  `analytics` command + Dashboard panel), 350+ unit/integration tests
 - **Planned**: see `ROADMAP.md`. Real WinFsp mounts are verified once the
   WinFsp runtime is installed (detected automatically; the mount bridge is
   unit-tested via in-memory browse sessions).

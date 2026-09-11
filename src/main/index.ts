@@ -694,6 +694,35 @@ function setupIpcHandlers(): void {
     return { entries: out, destinations: getRecentDestinations() };
   });
 
+  // Aggregated backup analytics across all known destinations
+  ipcMain.handle('get-backup-analytics', async () => {
+    const { computeAnalytics } = await import('./utils/backup-analytics');
+    const destinations = getRecentDestinations();
+    const perDestination = [];
+    for (const dir of destinations) {
+      try {
+        const summary = computeAnalytics(dir);
+        perDestination.push(summary);
+      } catch {
+        // destination offline — skip
+      }
+    }
+    let totalDiskBytes = 0;
+    let totalImageBytes = 0;
+    for (const dest of perDestination) {
+      totalDiskBytes += dest.totalDiskBytes;
+      totalImageBytes += dest.totalImageBytes;
+    }
+    return {
+      destinations: perDestination,
+      totals: {
+        totalDiskBytes,
+        totalImageBytes,
+        avgCompressionRatio: totalImageBytes > 0 ? totalDiskBytes / totalImageBytes : 1
+      }
+    };
+  });
+
 ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     return { destinations: addRecentDestination(directory) };
   });

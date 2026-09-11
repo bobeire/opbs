@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listRecentBackups: () => ipcRenderer.invoke('list-recent-backups'),
   addRecentDestination: (directory: string) => ipcRenderer.invoke('add-recent-destination', directory),
   destinationHealth: (destinations: string[]) => ipcRenderer.invoke('destination-health', destinations),
+  getBackupAnalytics: () => ipcRenderer.invoke('get-backup-analytics'),
   openPath: (filePath: string) => ipcRenderer.invoke('open-path', filePath),
   copyImage: (imagePath: string, destDir: string) => ipcRenderer.invoke('copy-image', imagePath, destDir),
   uploadToCloud: (imagePath: string) => ipcRenderer.invoke('upload-to-cloud', imagePath),

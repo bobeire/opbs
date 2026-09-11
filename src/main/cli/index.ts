@@ -23,6 +23,7 @@ import { SftpStore, parseSftpLocation, resolveSftpConfig } from '../utils/sftp';
 import { applyRetentionS3, planRetentionS3 } from '../backup/retention-s3';
 import { loadNative } from '../utils/native-loader';
 import { NativeImagingApi } from '../imaging/imaging-job';
+import { computeAnalytics } from '../utils/backup-analytics';
 
 const diskEnumerator = new DiskEnumerator();
 const imagingEngine = new ImagingEngine(diskEnumerator);
@@ -63,6 +64,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdRestore(ctx);
       case 'drill':
         return await cmdDrill(ctx);
+      case 'analytics':
+        return cmdAnalytics(ctx);
       case 'clone':
         return await cmdClone(ctx);
       case 'verify':
@@ -122,6 +125,10 @@ Commands:
                            proven. Exits 0 only when the restore AND validation pass.
                            Without a config it drills the newest unencrypted image in
                            <dir>; encrypted images are skipped.
+  analytics [directory]              Compute backup analytics: chain efficiency,
+                                     compression ratios, total disk vs image size,
+                                     and estimated restore time.
+                                     (default: backup location).
   clone <config.json> [--elevated] [--used-blocks-only] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk]
                            Clone live partitions to a different local disk.
   verify <image.opbs> [--passphrase p] Verify a single image (no elevation needed).
@@ -244,6 +251,48 @@ async function cmdList(ctx: CommandContext): Promise<number> {
   }
   console.log(`\n${entries.length} image(s) across ${chains.length} chain(s)`);
   return 0;
+}
+
+function cmdAnalytics(ctx: CommandContext): Promise<number> {
+  const dir = ctx.argv[0];
+  if (!dir) {
+    console.error('Usage: analytics <directory>');
+    return Promise.resolve(1);
+  }
+
+  const summary = computeAnalytics(dir);
+
+  if (ctx.opts.json) {
+    console.log(JSON.stringify(summary, null, 2));
+    return Promise.resolve(0);
+  }
+
+  console.log(`Analytics for ${dir}`);
+  console.log(`  ${summary.imageCount} image(s) across ${summary.chainCount} chain(s)`);
+  console.log(`  Total disk space captured: ${formatBytes(summary.totalDiskBytes)}`);
+  console.log(`  Total image storage: ${formatBytes(summary.totalImageBytes)}`);
+  console.log(`  Average compression ratio: ${summary.avgCompressionRatio.toFixed(1)}x`);
+
+  if (summary.chains.length === 0) {
+    console.log('\nNo chains to analyze.');
+    return Promise.resolve(0);
+  }
+
+  console.log('\nPer-chain breakdown:');
+  for (const chain of summary.chains) {
+    const oldest = new Date(chain.oldestTimestamp).toLocaleDateString();
+    const newest = new Date(chain.newestTimestamp).toLocaleDateString();
+    console.log(`\n  Chain: ${chain.chainPath.length} image(s), ${oldest} to ${newest}`);
+    console.log(`    Disk captured: ${formatBytes(chain.totalDiskBytes)}`);
+    console.log(`    Image storage: ${formatBytes(chain.totalImageBytes)}`);
+    console.log(`    Compression: ${chain.avgCompressionRatio.toFixed(1)}x`);
+    console.log(`    Unique blocks: ${chain.uniqueBlocks} / ${chain.totalBlocksAcrossImages} total`);
+    console.log(`    Chain efficiency: ${(chain.chainEfficiency * 100).toFixed(1)}%`);
+    console.log(`    Full: ${chain.fullCount}, Delta: ${chain.deltaCount}`);
+    console.log(`    Estimated restore time: ~${Math.ceil(chain.estimatedRestoreTimeSec / 60)} min`);
+  }
+
+  return Promise.resolve(0);
 }
 
 async function cmdBackup(ctx: CommandContext): Promise<number> {

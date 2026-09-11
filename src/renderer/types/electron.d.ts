@@ -41,6 +41,18 @@ declare global {
       listImages: (directory: string) => Promise<any>;
       listRecentBackups: () => Promise<{ entries: any[]; destinations: string[] }>;
       addRecentDestination: (directory: string) => Promise<{ destinations: string[] }>;
+      getBackupAnalytics: () => Promise<{
+        destinations: Array<{
+          directory: string;
+          imageCount: number;
+          chainCount: number;
+          totalDiskBytes: number;
+          totalImageBytes: number;
+          avgCompressionRatio: number;
+          chains: any[];
+        }>;
+        totals: { totalDiskBytes: number; totalImageBytes: number; avgCompressionRatio: number };
+      }>;
       destinationHealth: (destinations: string[]) => Promise<{
         path: string;
         reachable: boolean;

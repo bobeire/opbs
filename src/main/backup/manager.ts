@@ -8,6 +8,7 @@ import {
 import { JobProgress, JobResult } from '../imaging/imaging-job';
 import { normalizeBackupLocation } from '../utils/location';
 import { recordBackupDestination } from '../utils/recent';
+import { recordBackupAnalytics } from '../utils/backup-analytics';
 
 export type BackupConfig = BackupJobConfig;
 
@@ -74,6 +75,7 @@ export class BackupManager extends EventEmitter {
       }
 
       recordBackupDestination(config.destinationPath);
+      recordBackupAnalytics(config.destinationPath, result.imagePath, result);
 
       this.emitProgress({
         phase: 'completed',

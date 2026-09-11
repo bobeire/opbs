@@ -27,6 +27,10 @@ function Dashboard({ onNavigate }: DashboardProps) {
   const [systemInfo, setSystemInfo] = useState({ disks: 0, totalSpace: 0, usedSpace: 0 });
   const [destinations, setDestinations] = useState<string[]>([]);
   const [health, setHealth] = useState<any[]>([]);
+  const [analytics, setAnalytics] = useState<{
+    destinations: any[];
+    totals: { totalDiskBytes: number; totalImageBytes: number; avgCompressionRatio: number };
+  } | null>(null);
   const [now, setNow] = useState(0);
 
   const load = useCallback(async () => {
@@ -41,6 +45,10 @@ function Dashboard({ onNavigate }: DashboardProps) {
         setHealth(Array.isArray(healthRes) ? healthRes : []);
       } else {
         setHealth([]);
+      }
+      const analyticsRes = await window.electronAPI.getBackupAnalytics();
+      if (analyticsRes && Array.isArray(analyticsRes.destinations)) {
+        setAnalytics(analyticsRes);
       }
     } catch {
       setBackups([]);
@@ -185,6 +193,66 @@ function Dashboard({ onNavigate }: DashboardProps) {
           <p className="stat-value">{backups.length}</p>
         </div>
       </div>
+
+      {analytics && analytics.totals.totalDiskBytes > 0 && (
+        <div className="recent-backups">
+          <div className="recent-backups-head">
+            <h2>Backup Analytics</h2>
+          </div>
+          <div className="stats-grid" style={{ marginBottom: '12px' }}>
+            <div className="stat-card">
+              <h3>Disk Captured</h3>
+              <p className="stat-value">{formatSize(analytics.totals.totalDiskBytes)}</p>
+            </div>
+            <div className="stat-card">
+              <h3>Image Storage</h3>
+              <p className="stat-value">{formatSize(analytics.totals.totalImageBytes)}</p>
+            </div>
+            <div className="stat-card">
+              <h3>Avg Compression</h3>
+              <p className="stat-value">{analytics.totals.avgCompressionRatio.toFixed(1)}x</p>
+            </div>
+            <div className="stat-card">
+              <h3>Destinations</h3>
+              <p className="stat-value">{analytics.destinations.length}</p>
+            </div>
+          </div>
+          <table className="backup-table">
+            <thead>
+              <tr>
+                <th>Destination</th>
+                <th>Images</th>
+                <th>Chains</th>
+                <th>Disk Captured</th>
+                <th>Image Storage</th>
+                <th>Compression</th>
+                <th>Best Chain Efficiency</th>
+              </tr>
+            </thead>
+            <tbody>
+              {analytics.destinations.map((dest) => {
+                const bestChain = (dest.chains ?? []).reduce<{ chainEfficiency: number } | null>(
+                  (best, c) => (best === null || c.chainEfficiency > best.chainEfficiency ? c : best),
+                  null
+                );
+                return (
+                  <tr key={dest.directory}>
+                    <td className="col-dest" title={dest.directory}>
+                      {dest.directory}
+                    </td>
+                    <td>{dest.imageCount}</td>
+                    <td>{dest.chainCount}</td>
+                    <td>{formatSize(dest.totalDiskBytes)}</td>
+                    <td>{formatSize(dest.totalImageBytes)}</td>
+                    <td>{dest.avgCompressionRatio ? `${dest.avgCompressionRatio.toFixed(1)}x` : '—'}</td>
+                    <td>{bestChain ? `${(bestChain.chainEfficiency * 100).toFixed(0)}%` : '—'}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {destinations.length > 0 && (
         <div className="recent-backups">
