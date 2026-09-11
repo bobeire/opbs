@@ -75,7 +75,15 @@
         "nsis",
         "portable"
       ],
-      "icon": "resources/icon.ico"
+      "icon": "resources/icon.ico",
+      "fileAssociations": [
+        {
+          "ext": "opbs",
+          "name": "OPBS Disk Image",
+          "description": "OPBS Disk Image",
+          "icon": "resources/icon.ico"
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,

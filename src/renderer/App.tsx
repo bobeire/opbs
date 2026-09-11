@@ -20,6 +20,7 @@ function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
   const [backupIntent, setBackupIntent] = useState<BackupIntent | null>(null);
   const [restoreIntent, setRestoreIntent] = useState<{ imagePath?: string; mode?: 'restore' | 'clone' } | null>(null);
+  const [browseIntent, setBrowseIntent] = useState<string | null>(null);
 
   useEffect(() => {
     void window.electronAPI.checkForUpdates();
@@ -28,6 +29,19 @@ function App() {
   useEffect(() => {
     const cleanup = window.electronAPI.onNav((page) => {
       if (page === 'backup' || page === 'restore') setCurrentPage(page);
+    });
+    return cleanup;
+  }, []);
+
+  useEffect(() => {
+    const cleanup = window.electronAPI.onOpenImage((payload) => {
+      if (payload.verb === 'restore') {
+        setRestoreIntent({ imagePath: payload.imagePath, mode: 'restore' });
+        setCurrentPage('restore');
+      } else {
+        setBrowseIntent(payload.imagePath);
+        setCurrentPage('browse');
+      }
     });
     return cleanup;
   }, []);
@@ -45,7 +59,7 @@ function App() {
           />
         );
       case 'browse':
-        return <BrowseView onComplete={() => setCurrentPage('dashboard')} />;
+        return <BrowseView key={browseIntent ?? 'empty'} onComplete={() => setCurrentPage('dashboard')} initialImagePath={browseIntent ?? undefined} />;
       case 'media':
         return <MediaView onComplete={() => setCurrentPage('dashboard')} />;
       case 'network':

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, Menu, Notification } from 'electron';
 import path from 'path';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
@@ -18,7 +18,7 @@ import { winfspAvailable } from './imaging/mount-manager';
 import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains, writeManifest } from './backup/retention';
 import { checkDiskHealth } from './utils/disk-health';
 import { runCli } from './cli';
-import { readImageInfo, CIPHER_NONE, deriveImageKey } from './imaging/image-format';
+import { readImageInfo, verifyImage, CIPHER_NONE, deriveImageKey } from './imaging/image-format';
 import { openAnyBrowse as fsOpenBrowseAny, listDirectory, extractPath, BrowseSession } from './imaging/fs/file-browse';
 import { detectMacriumFormat, readMacriumImage } from './imaging/mrimg';
 import { locateAdk, peArchForProcess } from './utils/adk';
@@ -29,6 +29,7 @@ import { getRecentDestinations, addRecentDestination } from './utils/recent';
 import { destinationHealth } from './utils/destination-health';
 import { initErrorReporter, setErrorReporting } from './utils/error-reporter';
 import { resolveImageChain } from './imaging/restore-engine';
+import { registerFileAssociations, unregisterFileAssociations, parseFileActionArgs, FileAction } from './utils/file-associations';
 
 const HELPER_FLAG = '--opbs-helper';
 
@@ -47,6 +48,59 @@ const mountLaunchers = new Map<string, { cancel(): void }>();
 
 // Cached file browsing sessions (parsing the MFT is expensive; reuse per image).
 const browseSessions = new Map<string, BrowseSession>();
+
+// Explorer file-handler action (context-menu verb on an image): delivered to
+// the renderer once it has loaded, or run headless for verify.
+let pendingFileAction: FileAction | null = null;
+
+function notify(title: string, body: string): void {
+  try {
+    new Notification({ title, body }).show();
+  } catch {
+    // Notifications are best-effort (e.g. headless CLI mode).
+  }
+}
+
+async function runHeadlessVerify(imagePath: string): Promise<void> {
+  try {
+    const result = await verifyImage(imagePath, undefined);
+    notify(
+      'OPBS Verification',
+      result.ok
+        ? `Verified: ${result.blocksVerified} block(s) checked OK.`
+        : `Verification failed: ${result.error ?? 'no frame data in the image'}.`
+    );
+  } catch (error) {
+    notify('OPBS Verification', `Verification failed: ${error instanceof Error ? error.message : error}`);
+  }
+}
+
+function deliverFileAction(action: FileAction): void {
+  const imagePath = action.imagePath;
+  if (action.verb === 'verify') {
+    try {
+      const info = readImageInfo(imagePath);
+      if (info.header.cipherId !== CIPHER_NONE) {
+        notify('OPBS Verification', 'This image is encrypted. Open it in OPBS to verify with a passphrase.');
+        mainWindow?.webContents.send('open-image', { verb: 'browse', imagePath });
+        return;
+      }
+    } catch (error) {
+      notify('OPBS Verification', `Could not read the image: ${error instanceof Error ? error.message : error}`);
+    }
+    void runHeadlessVerify(imagePath);
+    return;
+  }
+  mainWindow?.webContents.send('open-image', { verb: action.verb, imagePath });
+}
+
+function queueFileAction(action: FileAction): void {
+  if (mainWindow && !mainWindow.webContents.isLoading()) {
+    deliverFileAction(action);
+    return;
+  }
+  pendingFileAction = action;
+}
 
 function browseCacheKey(imagePath: string, partitionIndex: number, keyHex?: string): string {
   return `${imagePath}#${partitionIndex}${keyHex ? '#' + keyHex : ''}`;
@@ -139,6 +193,13 @@ function createWindow(): void {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
+  });
+
+  mainWindow.webContents.once('did-finish-load', () => {
+    if (pendingFileAction) {
+      deliverFileAction(pendingFileAction);
+      pendingFileAction = null;
+    }
   });
 }
 
@@ -261,14 +322,60 @@ function main(): void {
     return;
   }
 
+  // Headless association management (installer showApp/repair or manual tests).
+  if (process.argv.includes('--register-file-associations')) {
+    app.whenReady().then(() => {
+      const result = registerFileAssociations();
+      console.log(result.ok ? 'OK: file associations registered' : `FAILED: ${result.failures.join('; ')}`);
+      app.exit(result.ok ? 0 : 1);
+    });
+    return;
+  }
+  if (process.argv.includes('--unregister-file-associations')) {
+    app.whenReady().then(() => {
+      const result = unregisterFileAssociations();
+      console.log(result.ok ? 'OK: file associations removed' : `FAILED: ${result.failures.join('; ')}`);
+      app.exit(result.ok ? 0 : 1);
+    });
+    return;
+  }
+
+  const startupFileAction = parseFileActionArgs(process.argv);
+
+  // One window per app instance; a second launch (e.g. another context-menu
+  // click) focuses the existing window and hands it the file action.
+  if (!app.requestSingleInstanceLock()) {
+    app.quit();
+    return;
+  }
+  app.on('second-instance', (_event, argv) => {
+    const action = parseFileActionArgs(argv);
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+    if (action) {
+      queueFileAction(action);
+    }
+  });
+
   app.whenReady().then(() => {
     initErrorReporter(() => settingsManager.getSettings().errorReporting);
+    if (app.isPackaged) {
+      const result = registerFileAssociations();
+      if (!result.ok) {
+        logger.warn(`File association registration failed: ${result.failures.join('; ')}`);
+      }
+    }
     createWindow();
     buildAppMenu();
     setupIpcHandlers();
     setupBackupEvents();
     setupRestoreEvents();
     scheduler.startAll();
+    if (startupFileAction) {
+      queueFileAction(startupFileAction);
+    }
     if (mainWindow) {
       initAutoUpdater(mainWindow);
     }

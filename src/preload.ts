@@ -114,6 +114,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
   },
 
+  // File-handler verbs (Explorer context menu)
+  onOpenImage: (callback: (payload: { verb: string; imagePath: string }) => void) => {
+    const handler = (_event: any, payload: { verb: string; imagePath: string }) => callback(payload);
+    ipcRenderer.on('open-image', handler);
+    return () => {
+      ipcRenderer.removeListener('open-image', handler);
+    };
+  },
+
   // Events
   onActivity: (callback: (event: any) => void) => {
     const handler = (_event: any, activity: any) => callback(activity);

@@ -83,6 +83,7 @@ declare global {
       networkTest: (uncPath: string, create?: boolean) => Promise<{ path: string; ok: boolean; writable?: boolean; reachable?: boolean; created?: boolean; error?: string }>;
       onUpdateStatus: (callback: (status: any) => void) => () => void;
       onNav: (callback: (page: string) => void) => () => void;
+      onOpenImage: (callback: (payload: { verb: string; imagePath: string }) => void) => () => void;
       onActivity: (callback: (event: any) => void) => () => void;
     };
   }

@@ -27,9 +27,10 @@ interface MountStatus {
 
 interface BrowseViewProps {
   onComplete?: () => void;
+  initialImagePath?: string;
 }
 
-function BrowseView({ onComplete }: BrowseViewProps) {
+function BrowseView({ onComplete, initialImagePath }: BrowseViewProps) {
   const [imagePath, setImagePath] = useState('');
   const [info, setInfo] = useState<{ encrypted: boolean; partitions: BrowsePartition[] } | null>(null);
   const [partitionIndex, setPartitionIndex] = useState<number | null>(null);
@@ -88,6 +89,37 @@ function BrowseView({ onComplete }: BrowseViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imagePath, partitionIndex, passphrase]);
 
+  useEffect(() => {
+    if (!initialImagePath) return;
+    let alive = true;
+    Promise.resolve().then(() => {
+      if (alive) void openImage(initialImagePath);
+    });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialImagePath]);
+
+  const openImage = async (path: string) => {
+    setImagePath(path);
+    setPartitionIndex(null);
+    setNodes([]);
+    setCwd('');
+    setNotice('');
+    setError('');
+    try {
+      const loaded = await window.electronAPI.browsePartitions(path);
+      setInfo(loaded);
+      if (loaded.partitions.length > 0) {
+        setPartitionIndex(loaded.partitions[0].partitionIndex);
+      }
+    } catch (e: any) {
+      setError(e?.message ?? 'Failed to read the image');
+      setInfo(null);
+    }
+  };
+
   const handleSelectImage = async () => {
     const path = await window.electronAPI.selectFile({
       filters: [
@@ -97,22 +129,7 @@ function BrowseView({ onComplete }: BrowseViewProps) {
       ]
     });
     if (path) {
-      setImagePath(path);
-      setPartitionIndex(null);
-      setNodes([]);
-      setCwd('');
-      setNotice('');
-      setError('');
-      try {
-        const loaded = await window.electronAPI.browsePartitions(path);
-        setInfo(loaded);
-        if (loaded.partitions.length > 0) {
-          setPartitionIndex(loaded.partitions[0].partitionIndex);
-        }
-      } catch (e: any) {
-        setError(e?.message ?? 'Failed to read the image');
-        setInfo(null);
-      }
+      await openImage(path);
     }
   };
 
