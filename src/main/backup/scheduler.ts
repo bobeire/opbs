@@ -4,8 +4,10 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { BackupManager, BackupConfig } from '../backup/manager';
-import { ScheduledBackup, ScheduledVerification, SettingsManager } from '../utils/settings-manager';
-import { applyRetention, findNewestImage } from './retention';
+import { ScheduledBackup, ScheduledVerification, ScheduledRestoreDrill, SettingsManager } from '../utils/settings-manager';
+import { applyRetention, findNewestImage, scanBackupDirectory } from './retention';
+import { summarizeImage } from '../imaging/restore-engine';
+import { recordDrillResult } from '../utils/drill-history';
 import { tryNotify } from '../utils/notify';
 import { ConsecutiveFailureTracker } from '../utils/failure-tracker';
 import { logger } from '../utils/logger';
@@ -28,6 +30,7 @@ function electronApp(): { isPackaged: boolean; getAppPath: () => string } | null
 
 const VERIFY_TASK_ID = 'scheduled-verify';
 const SCRUB_TASK_ID = 'idle-scrub';
+const DRILL_TASK_ID = 'scheduled-drill';
 
 interface RetryState {
   /** Number of retries already attempted after the original failure. */
@@ -59,6 +62,7 @@ export class BackupScheduler {
   private backupManager: BackupManager;
   private settingsManager: SettingsManager;
   private verifyFailures = new ConsecutiveFailureTracker();
+  private drillFailures = new ConsecutiveFailureTracker();
   private retries: Map<string, RetryState> = new Map();
 
   constructor(backupManager: BackupManager, settingsManager: SettingsManager) {
@@ -77,6 +81,10 @@ export class BackupScheduler {
 
     if (settings.scheduledVerification.enabled && settings.scheduledVerification.destinationPath) {
       this.scheduleVerification(settings.scheduledVerification);
+    }
+
+    if (settings.scheduledDrill.enabled && settings.scheduledDrill.destinationPath) {
+      this.scheduleDrill(settings.scheduledDrill);
     }
 
     if (settings.scrubWhileIdle && settings.backupLocation) {
@@ -185,6 +193,153 @@ export class BackupScheduler {
     this.tasks.set(SCRUB_TASK_ID, task);
     logger.info(`Idle scrub scheduled every ${everyMinutes} minutes`);
     return true;
+  }
+
+  /** Periodic restore drill: prove that the newest image restores + validates. */
+  scheduleDrill(config: ScheduledRestoreDrill): boolean {
+    const existing = this.tasks.get(DRILL_TASK_ID);
+    if (existing) {
+      existing.stop();
+      this.tasks.delete(DRILL_TASK_ID);
+    }
+
+    if (!getCron().validate(config.cronExpression)) {
+      logger.error(`Invalid cron expression for restore drill: ${config.cronExpression}`);
+      return false;
+    }
+
+    const task = getCron().schedule(config.cronExpression, () => {
+      void this.runDrill(config);
+    });
+    this.tasks.set(DRILL_TASK_ID, task);
+    logger.info(`Restore drill scheduled at ${config.cronExpression} (target disk ${config.targetDiskIndex})`);
+    return true;
+  }
+
+  /** Newest unencrypted image in a directory (a delta drills as its full chain). */
+  private pickDrillImage(dir: string): string | undefined {
+    const entries = scanBackupDirectory(dir).filter((entry) => !entry.encrypted);
+    if (entries.length === 0) {
+      return undefined;
+    }
+    entries.sort((a, b) => b.timestamp - a.timestamp);
+    return entries[0].path;
+  }
+
+  /**
+   * Run a restore drill in a detached child (`--cli drill <config> --elevated`).
+   * Restores the newest unencrypted image (with deltas) to the configured
+   * scratch disk, then reads the written filesystems back and validates them.
+   * Encrypted images are skipped — a drill cannot supply a passphrase.
+   */
+  private async runDrill(config: ScheduledRestoreDrill): Promise<void> {
+    const dir = config.destinationPath;
+    const imagePath = this.pickDrillImage(dir);
+    if (!imagePath) {
+      logger.warn(`Restore drill: no unencrypted images in ${dir}; skipping`);
+      return;
+    }
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-drill-'));
+    const configPath = path.join(tmpDir, 'drill.json');
+    const outPath = path.join(tmpDir, 'result.json');
+    try {
+      const summary = summarizeImage(imagePath);
+      const drillConfig = {
+        kind: 'restore-drill',
+        imagePath,
+        targetDiskIndex: config.targetDiskIndex,
+        targetPartitions: summary.partitions.map((p) => p.index),
+        verifyBeforeWrite: config.verifyBeforeWrite !== false,
+        applyDeltas: true,
+        compressionThreads: 0
+      };
+      fs.writeFileSync(configPath, JSON.stringify(drillConfig));
+
+      const args: string[] = [];
+      const app = electronApp();
+      if (app?.isPackaged) {
+        args.push('--cli', 'drill', configPath, '--elevated', '--json', '--json-out', outPath);
+      } else {
+        args.push(
+          app ? app.getAppPath() : process.cwd(),
+          '--cli',
+          'drill',
+          configPath,
+          '--elevated',
+          '--json',
+          '--json-out',
+          outPath
+        );
+      }
+
+      const child = spawn(process.execPath, args, {
+        windowsHide: true,
+        detached: true,
+        stdio: 'ignore'
+      });
+      child.unref();
+      child.on('error', (error) => {
+        logger.error(`Restore drill could not start:`, error);
+      });
+      child.on('close', async () => {
+        try {
+          if (!fs.existsSync(outPath)) {
+            logger.error('Restore drill produced no result');
+            return;
+          }
+          const result = JSON.parse(fs.readFileSync(outPath, 'utf-8')) as {
+            ok: boolean;
+            restored: boolean;
+            validated: boolean;
+            failures: string[];
+            imagePath: string;
+            fsValidation?: Array<{ partitionIndex: number; label: string; ok: boolean; error?: string }>;
+            durationMs: number;
+          };
+
+          if (!result.ok || !result.validated) {
+            const reasons =
+              result.failures?.join('; ') || (result.ok ? 'filesystem validation failed' : 'restore failed');
+            logger.warn(`Restore drill FAILED for ${result.imagePath}: ${reasons}`);
+            recordDrillResult(result.imagePath, { ok: false, failures: result.failures ?? [], targetDiskIndex: config.targetDiskIndex, durationMs: result.durationMs });
+
+            this.drillFailures.record(false);
+            if (config.notifyOnFailure && this.drillFailures.shouldAlert(config.alertAfter ?? 2)) {
+              await this.notify('failure', path.basename(result.imagePath), dir, 0, reasons);
+              this.drillFailures.reset();
+            }
+          } else {
+            logger.info(`Restore drill PASSED for ${result.imagePath} (${result.fsValidation?.length ?? 0} partition(s) validated)`);
+            recordDrillResult(result.imagePath, {
+              ok: true,
+              targetDiskIndex: config.targetDiskIndex,
+              partitionsValidated: result.fsValidation?.length ?? 0,
+              durationMs: result.durationMs
+            });
+            this.drillFailures.record(true);
+            await this.notify('success', path.basename(result.imagePath), dir, 0);
+          }
+        } catch (error) {
+          logger.error(`Restore drill result handling failed:`, error);
+        } finally {
+          try {
+            fs.rmSync(configPath, { force: true });
+            fs.rmSync(outPath, { force: true });
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+          } catch {
+            /* best-effort */
+          }
+        }
+      });
+    } catch (error) {
+      logger.error(`Restore drill setup failed for ${dir}:`, error);
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
   }
 
   /**

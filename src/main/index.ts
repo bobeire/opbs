@@ -30,6 +30,7 @@ import { destinationHealth } from './utils/destination-health';
 import { initErrorReporter, setErrorReporting } from './utils/error-reporter';
 import { resolveImageChain } from './imaging/restore-engine';
 import { registerFileAssociations, unregisterFileAssociations, parseFileActionArgs, FileAction } from './utils/file-associations';
+import { readDrillHistory } from './utils/drill-history';
 
 const HELPER_FLAG = '--opbs-helper';
 
@@ -657,6 +658,7 @@ function setupIpcHandlers(): void {
       incremental: boolean;
       encrypted: boolean;
       verified: boolean;
+      drillTestedAt?: number;
       chain: string[];
     }> = [];
     for (const dir of getRecentDestinations()) {
@@ -666,11 +668,13 @@ function setupIpcHandlers(): void {
       } catch {
         continue; // destination offline (e.g. network share) - skip
       }
+      const drillHistory = readDrillHistory(dir);
       const chains = groupIntoChains(entries);
       for (const e of entries) {
         const chain = chains
           .find((c) => c.items.some((i) => i.path === e.path))
           ?.items.map((i) => i.path);
+        const lastDrill = drillHistory[path.resolve(e.path)];
         out.push({
           id: e.path,
           name: e.name,
@@ -681,6 +685,7 @@ function setupIpcHandlers(): void {
           incremental: e.incremental,
           encrypted: e.encrypted,
           verified: e.verified,
+          drillTestedAt: lastDrill?.ok ? lastDrill.at : undefined,
           chain: Array.isArray(chain) && chain.length ? chain : [e.path]
         });
       }

@@ -29,6 +29,11 @@ created by **RHITCS** — named in honour of a certain well-preserved pickle.
 - **Windows file associations**: per-user `.opbs` registration with a
   right-click menu (Browse / Mount / Restore / Verify) plus a GUI toggle under
   Settings → File Associations
+- **Automated restore drills**: prove restores actually work by periodically
+  restoring the newest backup onto a scratch disk (destructively) and reading
+  the filesystems back from disk — boot sector, `$MFT` record 0 and FAT
+  geometry. Drill results are recorded per image and shown as a "drill-tested"
+  badge in the Dashboard; failures alert after N consecutive misses.
 
 ## Tech Stack
 
@@ -223,6 +228,32 @@ are patched from the image's metadata. Growing is **grow-only** — a size below
 the captured size is refused at job-build time; a target that is not
 cluster-aligned, or a filesystem that is not a simple single-run NTFS layout,
 is reported as a warning and the restore still completes.
+
+### Automated restore drills
+
+Every backup tool promises "you can restore", but that is rarely *proven* until
+disaster strikes. OPBS runs real restore drills: it restores the newest
+unencrypted backup in a directory onto a **scratch disk you dedicate** (its data
+is overwritten), then **reads the filesystems back from the physical disk** and
+validates the boot sector (`0x55AA` signature, OEM id, NTFS `$MFT` record 0
+`FILE` magic and in-use flag, or FAT sector/cluster geometry). A restore that
+completes but fails validation is surfaced as a failed drill.
+
+- Configure a schedule under **Settings → Scheduled Restore Drills** (the script
+  makes its own Windows Task with `--cli drill` when you use the CLI):
+  ```bash
+  # Manual drill: restore the newest unencrypted image in D:\OPBS onto disk 2.
+  OPBS.exe --cli drill --dir D:\OPBS --disk 2 --verify
+  ```
+- Each successful drill records a per-image timestamp in
+  `opbs-drill-history.json` next to the images; the Dashboard shows a
+  "drill-tested" badge per image. Failures alert only after N consecutive misses
+  (default 2) to avoid toast spam while still never silently accepting a broken
+  chain.
+- Encrypted images are skipped (no passphrase in the drill config) — the same
+  policy as scheduled verification. Drills always run with `applyDeltas` and, by
+  default, `verifyBeforeWrite`, so an unverified chain can never be written to
+  your scratch disk.
 
 ## File-level browse / extract
 
@@ -516,8 +547,9 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   fresh partition table), Macrium `.mrimgx`/`.mrimg` browse/extract, read-only
   WinFsp mount of image partitions (GUI + CLI), WinPE media with driver
   injection + headless payload smoke, `.opbs` right-click context menu verbs
-  (browse/mount/restore/verify) with a Settings toggle, 300+ unit/integration
-  tests
+  (browse/mount/restore/verify) with a Settings toggle, automated restore drills
+  (scheduled scratch-disk restore + on-disk filesystem validation, per-image
+  "drill-tested" status), 350+ unit/integration tests
 - **Planned**: see `ROADMAP.md`. Real WinFsp mounts are verified once the
   WinFsp runtime is installed (detected automatically; the mount bridge is
   unit-tested via in-memory browse sessions).

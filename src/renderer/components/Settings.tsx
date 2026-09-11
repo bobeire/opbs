@@ -16,6 +16,16 @@ interface ScheduledVerification {
   alertAfter?: number;
 }
 
+interface ScheduledRestoreDrill {
+  enabled: boolean;
+  cronExpression: string;
+  destinationPath: string;
+  targetDiskIndex: number;
+  notifyOnFailure: boolean;
+  verifyBeforeWrite?: boolean;
+  alertAfter?: number;
+}
+
 interface S3Profile {
   region: string;
   endpoint: string;
@@ -105,6 +115,7 @@ interface Settings {
   keepDeltasPerFull: number;
   notifications: NotificationSettings;
   scheduledVerification: ScheduledVerification;
+  scheduledDrill: ScheduledRestoreDrill;
   scheduledBackups: ScheduledBackup[];
   cloud: CloudSettings;
   errorReporting: { enabled: boolean; endpoint: string };
@@ -132,6 +143,15 @@ const DEFAULT_SETTINGS: Settings = {
     scope: 'newest',
     destinationPath: '',
     notifyOnFailure: true,
+    alertAfter: 2
+  },
+  scheduledDrill: {
+    enabled: false,
+    cronExpression: '0 3 * * 0',
+    destinationPath: '',
+    targetDiskIndex: 0,
+    notifyOnFailure: true,
+    verifyBeforeWrite: true,
     alertAfter: 2
   },
   scheduledBackups: [],
@@ -195,6 +215,7 @@ function Settings() {
     ...loaded,
     notifications: { ...DEFAULT_SETTINGS.notifications, ...(loaded?.notifications || {}) },
     scheduledVerification: { ...DEFAULT_SETTINGS.scheduledVerification, ...(loaded?.scheduledVerification || {}) },
+    scheduledDrill: { ...DEFAULT_SETTINGS.scheduledDrill, ...(loaded?.scheduledDrill || {}) },
     cloud: {
       s3: { ...DEFAULT_SETTINGS.cloud.s3, ...(loaded?.cloud?.s3 || {}) },
       sftp: { ...DEFAULT_SETTINGS.cloud.sftp, ...(loaded?.cloud?.sftp || {}) }
@@ -212,6 +233,13 @@ function Settings() {
     const dir = await window.electronAPI.selectDirectory();
     if (dir) {
       handleChange('scheduledVerification', { ...settings.scheduledVerification, destinationPath: dir });
+    }
+  };
+
+  const handleSelectDrillDir = async () => {
+    const dir = await window.electronAPI.selectDirectory();
+    if (dir) {
+      handleChange('scheduledDrill', { ...settings.scheduledDrill, destinationPath: dir });
     }
   };
 
@@ -685,7 +713,113 @@ function Settings() {
           </>
         )}
       </div>
-      
+
+      <div className="settings-section">
+        <h2>Scheduled Restore Drills</h2>
+        <p className="field-hint">
+          Periodically restores the newest unencrypted backup in a directory onto a
+          scratch disk, reads it back from the disk, and validates the filesystems.
+          This proves "restores work" end to end — restoring is the part you only
+          find out about at the worst moment. <strong>Destructive:</strong> the
+          target disk is overwritten, so dedicate a scratch disk you can afford to lose.
+        </p>
+
+        <div className="setting-item">
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={settings.scheduledDrill.enabled}
+              onChange={(e) =>
+                handleChange('scheduledDrill', {
+                  ...settings.scheduledDrill,
+                  enabled: e.target.checked
+                })
+              }
+            />
+            Enable scheduled restore drills
+          </label>
+        </div>
+
+        {settings.scheduledDrill.enabled && (
+          <>
+            <div className="setting-item">
+              <label>Cron expression:</label>
+              <input
+                type="text"
+                value={settings.scheduledDrill.cronExpression}
+                onChange={(e) =>
+                  handleChange('scheduledDrill', {
+                    ...settings.scheduledDrill,
+                    cronExpression: e.target.value
+                  })
+                }
+                placeholder="0 3 * * 0 (weekly Sunday at 03:00)"
+              />
+            </div>
+            <div className="setting-item">
+              <label>Backup directory:</label>
+              <div className="path-input">
+                <input
+                  type="text"
+                  value={settings.scheduledDrill.destinationPath}
+                  readOnly
+                  placeholder="Select the folder with the image to drill..."
+                />
+                <button onClick={handleSelectDrillDir}>Browse</button>
+              </div>
+            </div>
+            <div className="setting-item">
+              <label>Target (scratch) disk — will be overwritten:</label>
+              <select
+                value={settings.scheduledDrill.targetDiskIndex}
+                onChange={(e) =>
+                  handleChange('scheduledDrill', {
+                    ...settings.scheduledDrill,
+                    targetDiskIndex: Number(e.target.value)
+                  })
+                }
+              >
+                {disks.map((disk) => (
+                  <option key={disk.index} value={disk.index}>
+                    Disk {disk.index} — {disk.model || 'unknown'} ({formatSize(disk.size)})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="setting-item">
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={settings.scheduledDrill.verifyBeforeWrite !== false}
+                  onChange={(e) =>
+                    handleChange('scheduledDrill', {
+                      ...settings.scheduledDrill,
+                      verifyBeforeWrite: e.target.checked
+                    })
+                  }
+                />
+                Verify the chain before writing
+              </label>
+            </div>
+            <div className="setting-item">
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={settings.scheduledDrill.notifyOnFailure}
+                  onChange={(e) =>
+                    handleChange('scheduledDrill', {
+                      ...settings.scheduledDrill,
+                      notifyOnFailure: e.target.checked
+                    })
+                  }
+                />
+                Notify when a drill fails
+              </label>
+            </div>
+          </>
+        )}
+      </div>
+
       <div className="settings-section">
         <h2>Scheduled Backups</h2>
         <p className="field-hint">

@@ -32,6 +32,7 @@ import {
   cipherFromMetadata
 } from '../imaging/image-format';
 import { CompressionPool } from '../imaging/compression-pool';
+import { validateRestoredFilesystem, FsValidation } from '../imaging/drill-validation';
 import { computeChangedBlockIndices } from '../imaging/usn-tracking';
 import { planNtfsGrow, MAX_METADATA_BYTES } from '../imaging/fs/ntfs-resize';
 import { readUsedBlockIndexes } from '../imaging/fs/used-blocks';
@@ -579,6 +580,7 @@ export async function runRestoreJob(
   const native: NativeImagingApi = nativeApi ?? loadNative<NativeImagingApi>();
 
   const warnings: string[] = [];
+  const fsValidation: FsValidation[] = [];
 
   // Build-time warnings (disk-identity hints from the restore engine) are
   // reported on the final result alongside runtime warnings.
@@ -853,6 +855,27 @@ export async function runRestoreJob(
       }
 
       targetsRestored++;
+
+      // Restore drill: read back the written filesystem and validate the boot
+      // sector / $MFT. Failures land in the drill result (not here) so the
+      // physical restore outcome stays accurate.
+      if (job.validateAfterWrite) {
+        if (isCancelled()) {
+          throw new CancelledError();
+        }
+        const check = validateRestoredFilesystem(
+          { readBlocks: native.readBlocks, getPhysicalDrivePath: native.getPhysicalDrivePath },
+          devicePath,
+          {
+            partitionIndex: target.partitionIndex,
+            label: target.label,
+            offset: target.offset,
+            capturedSize: capturedPartition.size
+          }
+        );
+        fsValidation.push(check);
+        writeProgress('writing');
+      }
     }
 
     writeProgress('completed');
@@ -866,7 +889,15 @@ export async function runRestoreJob(
       blocksWritten,
       targetsRestored,
       verifiedBeforeWrite,
-      warnings
+      warnings,
+      fsValidation: fsValidation.length > 0 ? fsValidation : undefined,
+      drill:
+        job.validateAfterWrite && fsValidation.length > 0
+          ? {
+              ok: fsValidation.every((c) => c.ok),
+              failures: fsValidation.filter((c) => !c.ok).map((c) => `${c.label}: ${c.error ?? 'validation failed'}`)
+            }
+          : undefined
     };
     fs.writeFileSync(resultPath, JSON.stringify(result));
   } catch (error) {
@@ -882,7 +913,8 @@ export async function runRestoreJob(
       blocksWritten,
       targetsRestored,
       verifiedBeforeWrite,
-      warnings
+      warnings,
+      fsValidation: fsValidation.length > 0 ? fsValidation : undefined
     };
     fs.writeFileSync(resultPath, JSON.stringify(result));
   } finally {

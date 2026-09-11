@@ -1036,4 +1036,139 @@ describe('incremental and encrypted jobs', () => {
     const info = readImageInfo(deltaPath);
     expect(info.blocks.map((b) => b.blockIndex).sort((a, b) => a - b)).toEqual([32, 33]);
   });
+
+  it('restore drill validates the written NTFS filesystem when validateAfterWrite is set', async () => {
+    const imagePath = path.join(dir, 'drill.opbs');
+    const vol = buildCanonicalNtfsVolumeData({ totalClusters: 64 });
+    vol.writeUInt16LE(0x55aa, 510);
+    const volumeJob: ImagingJob = {
+      type: 'backup',
+      imagePath,
+      blockSize: BLOCK,
+      compressionLevel: 0,
+      verificationEnabled: false,
+      partitions: [
+        {
+          diskIndex: 0,
+          partitionIndex: 0,
+          size: vol.length,
+          offset: 0,
+          label: 'C:',
+          readSource: 'physical'
+        }
+      ]
+    };
+    fs.writeFileSync(jobPath, JSON.stringify(volumeJob));
+    const backupNative: NativeImagingApi = {
+      createSnapshot: vi.fn(() => ({ id: 's', devicePath: '\\\\.\\ShadowCopy1' })),
+      deleteSnapshot: vi.fn(() => true),
+      getPhysicalDrivePath: vi.fn((i) => `\\\\.\\PhysicalDrive${i}`),
+      writeBlocks: vi.fn(() => 0),
+      readBlocks: vi.fn((_device: string, offset: bigint, length: bigint) =>
+        vol.subarray(Number(offset), Number(offset) + Number(length))
+      )
+    };
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, backupNative);
+
+    const targetOffset = 1048576;
+    const target = Buffer.alloc(targetOffset + vol.length);
+    const restoreNative: NativeImagingApi = {
+      createSnapshot: vi.fn(() => ({ id: 's', devicePath: '\\\\.\\ShadowCopy1' })),
+      deleteSnapshot: vi.fn(() => true),
+      getPhysicalDrivePath: vi.fn((i) => `\\\\.\\PhysicalDrive${i}`),
+      writeBlocks: vi.fn((_device: string, offset: bigint, data: Buffer) => {
+        data.copy(target, Number(offset));
+        return 0;
+      }),
+      readBlocks: vi.fn((_device: string, offset: bigint, length: bigint) =>
+        target.subarray(Number(offset), Number(offset) + Number(length))
+      )
+    };
+    fs.writeFileSync(
+      jobPath,
+      JSON.stringify({
+        type: 'restore',
+        imagePath,
+        verifyBeforeWrite: false,
+        validateAfterWrite: true,
+        targets: [{ partitionIndex: 0, diskIndex: 3, offset: targetOffset, label: 'C:' }]
+      } as RestoreJob)
+    );
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, restoreNative);
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as RestoreJobResult;
+    expect(result.ok).toBe(true);
+    expect(result.fsValidation).toHaveLength(1);
+    expect(result.fsValidation![0].ok).toBe(true);
+    expect(result.fsValidation![0].checks.mftMagic).toBe('FILE');
+    expect(result.drill).toBeDefined();
+    expect(result.drill!.ok).toBe(true);
+    expect(result.drill!.failures).toEqual([]);
+  });
+
+  it('restore drill keeps the restore result ok but reports validation failures', async () => {
+    const imagePath = path.join(dir, 'drill.opbs');
+    const vol = buildCanonicalNtfsVolumeData({ totalClusters: 64 });
+    vol.writeUInt16LE(0x55aa, 510);
+    const volumeJob: ImagingJob = {
+      type: 'backup',
+      imagePath,
+      blockSize: BLOCK,
+      compressionLevel: 0,
+      verificationEnabled: false,
+      partitions: [
+        {
+          diskIndex: 0,
+          partitionIndex: 0,
+          size: vol.length,
+          offset: 0,
+          label: 'C:',
+          readSource: 'physical'
+        }
+      ]
+    };
+    fs.writeFileSync(jobPath, JSON.stringify(volumeJob));
+    const backupNative: NativeImagingApi = {
+      createSnapshot: vi.fn(() => ({ id: 's', devicePath: '\\\\.\\ShadowCopy1' })),
+      deleteSnapshot: vi.fn(() => true),
+      getPhysicalDrivePath: vi.fn((i) => `\\\\.\\PhysicalDrive${i}`),
+      writeBlocks: vi.fn(() => 0),
+      readBlocks: vi.fn((_device: string, offset: bigint, length: bigint) =>
+        vol.subarray(Number(offset), Number(offset) + Number(length))
+      )
+    };
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, backupNative);
+
+    // The disk the drill reads back has a corrupted $MFT record 0.
+    const targetOffset = 1048576;
+    const broken = Buffer.alloc(targetOffset + vol.length);
+    vol.copy(broken, targetOffset);
+    broken.write('NOPE', targetOffset + 4 * GR_CLUSTER, 'ascii');
+    const restoreNative: NativeImagingApi = {
+      createSnapshot: vi.fn(() => ({ id: 's', devicePath: '\\\\.\\ShadowCopy1' })),
+      deleteSnapshot: vi.fn(() => true),
+      getPhysicalDrivePath: vi.fn((i) => `\\\\.\\PhysicalDrive${i}`),
+      writeBlocks: vi.fn(() => 0),
+      readBlocks: vi.fn((_device: string, offset: bigint, length: bigint) =>
+        broken.subarray(Number(offset), Number(offset) + Number(length))
+      )
+    };
+    fs.writeFileSync(
+      jobPath,
+      JSON.stringify({
+        type: 'restore',
+        imagePath,
+        verifyBeforeWrite: false,
+        validateAfterWrite: true,
+        targets: [{ partitionIndex: 0, diskIndex: 3, offset: targetOffset, label: 'C:' }]
+      } as RestoreJob)
+    );
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, restoreNative);
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as RestoreJobResult;
+    expect(result.ok).toBe(true);
+    expect(result.drill!.ok).toBe(false);
+    expect(result.drill!.failures[0]).toContain('C:');
+    expect(result.drill!.failures[0]).toContain('magic');
+  });
 });

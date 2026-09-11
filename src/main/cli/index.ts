@@ -61,6 +61,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdBackup(ctx);
       case 'restore':
         return await cmdRestore(ctx);
+      case 'drill':
+        return await cmdDrill(ctx);
       case 'clone':
         return await cmdClone(ctx);
       case 'verify':
@@ -113,6 +115,13 @@ Commands:
   backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only]
                            Run a backup job (config as JSON file).
   restore <config.json> [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk] Run a restore job (config as JSON file).
+  drill <config.json> [--elevated] [--json-out FILE]  Restore the newest image in a directory
+  drill --dir <dir> --disk <targetDiskIndex> [--verify] [--elevated] [--json-out FILE]
+                           Restore drill: writes an image to a scratch disk, reads it
+                           back, and validates the filesystems so "restores work" is
+                           proven. Exits 0 only when the restore AND validation pass.
+                           Without a config it drills the newest unencrypted image in
+                           <dir>; encrypted images are skipped.
   clone <config.json> [--elevated] [--used-blocks-only] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk]
                            Clone live partitions to a different local disk.
   verify <image.opbs> [--passphrase p] Verify a single image (no elevation needed).
@@ -120,6 +129,7 @@ Commands:
                                          Verify images in a directory.
   schedule install-backup <name> --config <config.json> [--time HH:MM|--on-login] [--as-system] [--run-as-user]
   schedule install-verify <name> --dir <dir> [--scope newest|all] [--time HH:MM|--on-login] [--run-as-user]
+  schedule install-drill <name> --dir <dir> --disk <targetDiskIndex> [--verify] [--time HH:MM|--on-login] [--run-as-user]
   schedule list                          List Windows scheduled tasks.
   schedule remove <name>                 Delete a scheduled task.
   prune <directory> [options]            Apply retention/GFS policy.
@@ -416,6 +426,141 @@ async function cmdRestore(ctx: CommandContext): Promise<number> {
   return result.ok ? 0 : 1;
 }
 
+interface DrillOutput {
+  ok: boolean;
+  restored: boolean;
+  validated: boolean;
+  failures: string[];
+  imagePath: string;
+  fsValidation?: Array<{ partitionIndex: number; label: string; ok: boolean; error?: string }>;
+  durationMs: number;
+}
+
+async function cmdDrill(ctx: CommandContext): Promise<number> {
+  const jsonOutPath = flagValue(ctx.argv, '--json-out');
+  const started = Date.now();
+
+  let config: {
+    kind?: string;
+    imagePath: string;
+    targetDiskIndex: number;
+    targetPartitions: number[];
+    verifyBeforeWrite?: boolean;
+    applyDeltas?: boolean;
+    compressionThreads?: number;
+    validateAfterWrite?: boolean;
+  };
+
+  const dirFlag = flagValue(ctx.argv, '--dir');
+  if (dirFlag) {
+    // Inline mode: drill the newest unencrypted image in a directory.
+    const diskFlag = flagValue(ctx.argv, '--disk');
+    if (diskFlag === undefined) {
+      console.error('Usage: drill --dir <directory> --disk <targetDiskIndex> [--verify] [--elevated] [--json-out FILE]');
+      return 1;
+    }
+    const diskIndex = Number(diskFlag);
+    if (!Number.isInteger(diskIndex) || diskIndex < 0) {
+      console.error('--disk must be a non-negative disk index');
+      return 1;
+    }
+    const eligible = scanBackupDirectory(dirFlag)
+      .filter((e) => !e.encrypted)
+      .sort((a, b) => b.timestamp - a.timestamp);
+    if (eligible.length === 0) {
+      console.error(`No unencrypted images in ${dirFlag}; skipping drill`);
+      return 1;
+    }
+    const imagePath = eligible[0].path;
+    const summary = summarizeImage(imagePath);
+    config = {
+      kind: 'restore-drill',
+      imagePath,
+      targetDiskIndex: diskIndex,
+      targetPartitions: summary.partitions.map((p) => p.index),
+      verifyBeforeWrite: ctx.argv.includes('--verify'),
+      applyDeltas: true
+    };
+  } else {
+    const configPath = ctx.argv[0];
+    if (!configPath) {
+      console.error('Usage: drill [<config.json>|--dir <dir> --disk <targetDiskIndex>] [--elevated] [--json-out FILE]');
+      return 1;
+    }
+    config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    if (!config.imagePath || config.targetDiskIndex === undefined) {
+      console.error('Drill config requires imagePath and targetDiskIndex.');
+      return 1;
+    }
+  }
+
+  config.validateAfterWrite = true;
+  config.applyDeltas = config.applyDeltas ?? true;
+
+  const finish = (result: {
+    ok: boolean;
+    error?: string;
+    fsValidation?: Array<{ partitionIndex: number; label: string; ok: boolean; error?: string }>;
+    drill?: { ok: boolean; failures?: string[] };
+  }): number => {
+    const restored = result.ok;
+    const validated = restored && result.drill?.ok === true;
+    const failures = result.drill?.failures ?? (result.ok ? [] : [result.error ?? 'restore failed']);
+    const output: DrillOutput = {
+      ok: restored && validated,
+      restored,
+      validated,
+      failures,
+      imagePath: config.imagePath,
+      fsValidation: result.fsValidation,
+      durationMs: Date.now() - started
+    };
+    if (jsonOutPath) {
+      fs.writeFileSync(jsonOutPath, JSON.stringify(output, null, 2));
+    }
+    if (ctx.opts.json) {
+      console.log(JSON.stringify(output, null, 2));
+    } else if (restored && validated) {
+      console.log(
+        `Drill PASSED: ${path.basename(config.imagePath)} restored to disk ${config.targetDiskIndex} and validated ${result.fsValidation?.length ?? 0} partition(s)`
+      );
+    } else if (restored) {
+      console.error(`Drill FAILED: filesystem validation error(s): ${failures.join('; ')}`);
+    } else {
+      console.error(`Drill FAILED: restore error: ${result.error}`);
+    }
+    return restored && validated ? 0 : 1;
+  };
+
+  if (ctx.argv.includes('--elevated')) {
+    const job = await restoreEngine.buildJob(config);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-drill-inproc-'));
+    const jobPath = path.join(dir, 'job.json');
+    const resultPath = path.join(dir, 'result.json');
+    const progressPath = path.join(dir, 'progress.json');
+    const cancelPath = path.join(dir, 'cancel');
+    try {
+      fs.writeFileSync(jobPath, JSON.stringify(job));
+      await dispatchHelperJob(jobPath, resultPath, progressPath, cancelPath);
+      const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+      return finish(result);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const result = await restoreEngine.runRestore(config, (progress) => {
+    if (!ctx.opts.json) {
+      process.stdout.write(
+        `\r[${progress.phase}] ${progress.percent.toFixed(0)}%  ` +
+          `${progress.currentPartition || ''}  ${formatBytes(progress.bytesDone)} at ` +
+          `${formatBytes(progress.speed)}/s     `
+      );
+    }
+  });
+  return finish(result);
+}
+
 async function cmdClone(ctx: CommandContext): Promise<number> {
   const configPath = ctx.argv[0];
   if (!configPath) {
@@ -655,6 +800,8 @@ async function cmdSchedule(ctx: CommandContext): Promise<number> {
       return cmdScheduleInstallBackup(ctx);
     case 'install-verify':
       return cmdScheduleInstallVerify(ctx);
+    case 'install-drill':
+      return cmdScheduleInstallDrill(ctx);
     case 'remove': {
       const name = ctx.argv[1];
       if (!name) {
@@ -721,6 +868,26 @@ async function cmdScheduleInstallVerify(ctx: CommandContext): Promise<number> {
   const opts = scheduleOptionsOf(ctx);
   const scope = flagValue(ctx.argv, '--scope') ?? 'newest';
   const commandLine = `"${process.execPath}" --cli verify --dir "${dir}" --scope ${scope}`;
+  await registerScheduledTask(name, commandLine, opts);
+  console.log(`Registered task "${name}": ${commandLine}`);
+  return 0;
+}
+
+async function cmdScheduleInstallDrill(ctx: CommandContext): Promise<number> {
+  const name = ctx.argv[1];
+  const dir = flagValue(ctx.argv, '--dir');
+  const disk = flagValue(ctx.argv, '--disk');
+  if (!name || !dir || disk === undefined) {
+    console.error('Usage: schedule install-drill <name> --dir <directory> --disk <targetDiskIndex> [--verify] [--time HH:MM|--on-login]');
+    return 1;
+  }
+  if (!Number.isInteger(Number(disk)) || Number(disk) < 0) {
+    console.error('--disk must be a non-negative disk index');
+    return 1;
+  }
+  const opts = scheduleOptionsOf(ctx);
+  const verify = ctx.argv.includes('--verify') ? ' --verify' : '';
+  const commandLine = `"${process.execPath}" --cli drill --dir "${dir}" --disk ${disk}${verify} --elevated --json`;
   await registerScheduledTask(name, commandLine, opts);
   console.log(`Registered task "${name}": ${commandLine}`);
   return 0;
@@ -1354,5 +1521,18 @@ function cmdNewConfig(ctx: CommandContext): Promise<number> {
   };
   fs.writeFileSync(path.join(path.dirname(output), 'restore-example.json'), JSON.stringify(restoreExample, null, 2));
   console.log(`Restore example written to ${path.join(path.dirname(output), 'restore-example.json')}`);
+
+  console.log('\nDrill example (restore to a scratch disk and validate):');
+  const drillExample = {
+    kind: 'restore-drill',
+    imagePath: 'D:\\OPBS\\img_0_1746300000000.opbs',
+    targetDiskIndex: 1,
+    targetPartitions: [2],
+    verifyBeforeWrite: true,
+    applyDeltas: true,
+    validateAfterWrite: true
+  };
+  fs.writeFileSync(path.join(path.dirname(output), 'drill-example.json'), JSON.stringify(drillExample, null, 2));
+  console.log(`Drill example written to ${path.join(path.dirname(output), 'drill-example.json')}`);
   return Promise.resolve(0);
 }

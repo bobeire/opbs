@@ -15,6 +15,10 @@ export interface AppSettings {
   keepDeltasPerFull: number;
   notifications: NotificationSettings;
   scheduledVerification: ScheduledVerification;
+  /** Restore drills: periodically restore the newest image in a directory to a
+   *  scratch disk and validate the filesystems so "restores work" is proven,
+   *  not assumed. */
+  scheduledDrill: ScheduledRestoreDrill;
   scheduledBackups: ScheduledBackup[];
   /** Reusable named backup configurations loaded into the backup wizard. */
   backupProfiles: BackupProfile[];
@@ -57,6 +61,20 @@ export interface ScheduledVerification {
   scope: 'newest' | 'all';
   destinationPath: string;
   notifyOnFailure: boolean;
+  /** Alert (webhook/toast) only after this many consecutive failures. */
+  alertAfter?: number;
+}
+
+export interface ScheduledRestoreDrill {
+  enabled: boolean;
+  cronExpression: string;
+  /** Directory scanned for the image to drill (the newest unencrypted one). */
+  destinationPath: string;
+  /** Scratch disk the image is restored onto (its data is destructively overwritten). */
+  targetDiskIndex: number;
+  notifyOnFailure: boolean;
+  /** Verify every chain image before writing (default true). */
+  verifyBeforeWrite?: boolean;
   /** Alert (webhook/toast) only after this many consecutive failures. */
   alertAfter?: number;
 }
@@ -118,6 +136,15 @@ const DEFAULT_SETTINGS: AppSettings = {
     scope: 'newest',
     destinationPath: '',
     notifyOnFailure: true,
+    alertAfter: 2
+  },
+  scheduledDrill: {
+    enabled: false,
+    cronExpression: '0 3 * * 0',
+    destinationPath: '',
+    targetDiskIndex: 0,
+    notifyOnFailure: true,
+    verifyBeforeWrite: true,
     alertAfter: 2
   },
   scheduledBackups: [],

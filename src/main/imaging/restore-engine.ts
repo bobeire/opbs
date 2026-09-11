@@ -43,6 +43,8 @@ export interface RestoreJobConfig {
   tableTypeGuids?: Record<number, string>;
   /** Image partition index marked bootable for an MBR layout. */
   tableBootPartition?: number;
+  /** Restore-drill: after writing, read back and validate the filesystems. */
+  validateAfterWrite?: boolean;
 }
 
 export interface RestoreCoordinator {
@@ -290,6 +292,7 @@ export class RestoreEngine implements RestoreCoordinator {
       encryption,
       compressionThreads,
       writeTable,
+      validateAfterWrite: config.validateAfterWrite,
       warnings: warnings.length > 0 ? warnings : undefined
     };
   }

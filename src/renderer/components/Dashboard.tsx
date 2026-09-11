@@ -10,6 +10,7 @@ interface RecentBackup {
   incremental: boolean;
   encrypted: boolean;
   verified: boolean;
+  drillTestedAt?: number;
   chain: string[];
 }
 
@@ -337,6 +338,15 @@ function Dashboard({ onNavigate }: DashboardProps) {
                     <span className={`status-badge ${backup.verified ? 'completed' : 'in_progress'}`}>
                       {backup.verified ? 'verified' : 'unverified'}
                     </span>
+                    {backup.drillTestedAt ? (
+                      <span
+                        className="status-badge completed"
+                        style={{ marginLeft: '4px' }}
+                        title={`Restore drill passed ${new Date(backup.drillTestedAt).toLocaleString()}`}
+                      >
+                        drill-tested
+                      </span>
+                    ) : null}
                   </td>
                   <td className="col-dest" title={backup.destPath}>
                     {backup.destPath}

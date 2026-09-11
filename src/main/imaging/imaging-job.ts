@@ -103,6 +103,9 @@ export interface RestoreJob {
     diskGuid?: string;
     entries: Array<{ offset: number; size: number; typeGuid?: string; name?: string; bootable?: boolean }>;
   };
+  /** Read back the written filesystem after every target and validate the
+   *  boot sector / MFT. The CLI `drill` subcommand sets this flag. */
+  validateAfterWrite?: boolean;
   /**
    * Build-time warnings/hints (e.g. the target disk looks identical to the
    * source) that the helper appends to the restore result's warnings.
@@ -161,6 +164,16 @@ export interface RestoreJobResult {
   targetsRestored: number;
   verifiedBeforeWrite: boolean;
   warnings: string[];
+  /** Per-partition filesystem checks populated when validateAfterWrite is set. */
+  fsValidation?: Array<{
+    partitionIndex: number;
+    label: string;
+    ok: boolean;
+    checks: Record<string, boolean | string | number>;
+    error?: string;
+  }>;
+  /** Aggregate restore-drill outcome. */
+  drill?: { ok: boolean; failures: string[] };
 }
 
 /** A disk-to-disk clone: read selected live partitions and write them straight
