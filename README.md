@@ -26,6 +26,9 @@ created by **RHITCS** — named in honour of a certain well-preserved pickle.
   but not yet supported.
 - **Headless CLI**: run backups/restores/verification/pruning from a script or task scheduler
 - **Simple wizard UI**: step-by-step backup and restore workflows
+- **Windows file associations**: per-user `.opbs` registration with a
+  right-click menu (Browse / Mount / Restore / Verify) plus a GUI toggle under
+  Settings → File Associations
 
 ## Tech Stack
 
@@ -296,6 +299,38 @@ mechanism as backup/restore) and the read/write handlers run in the elevated
 helper. Requires the **WinFsp runtime** (https://winfsp.dev); the GUI shows a
 hint when it is missing.
 
+## Windows file associations & context menu
+
+On Windows, backup images (`.opbs`, plus Macrium `.mrimg`/`.mrimgx`) get a
+right-click context menu when OPBS is installed. Registration is **per-user**
+(`HKCU\Software\Classes`, no admin required) and is refreshed on every launch
+so it stays in sync after updates:
+
+- **Browse with OPBS** — opens the File Browser view on that image (also the
+  double-click default)
+- **Mount with OPBS** — opens the File Browser so a partition can be mounted
+  read-only via WinFsp
+- **Restore with OPBS** — opens the Restore wizard with the image preloaded
+- **Verify with OPBS** — verifies block checksums headless and shows a toast
+  when done (encrypted images open the Browse view instead so you can enter
+  the passphrase)
+
+Choose a verb while OPBS is already running and it focuses the existing window
+and routes the action to it. Association handling itself needs no elevation —
+like verification, listing and pruning.
+
+Turn it on or off at any time in **Settings → File Associations** (default:
+on). Disabling unregisters the `.opbs` handler and verb menu immediately and
+keeps it off across restarts.
+
+For repair/installer flows the associations can also be applied or removed
+headlessly:
+
+```bash
+OPBS.exe --unregister-file-associations   # for uninstall/repair
+OPBS.exe --register-file-associations     # re-apply after a manual registry edit
+```
+
 ## Headless CLI
 
 The app accepts a `--cli` flag that runs a single command and exits:
@@ -480,7 +515,9 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   via NTFS `$Bitmap`, disk-to-disk clone (live VSS copy, dissimilar layout +
   fresh partition table), Macrium `.mrimgx`/`.mrimg` browse/extract, read-only
   WinFsp mount of image partitions (GUI + CLI), WinPE media with driver
-  injection + headless payload smoke, 300+ unit/integration tests
+  injection + headless payload smoke, `.opbs` right-click context menu verbs
+  (browse/mount/restore/verify) with a Settings toggle, 300+ unit/integration
+  tests
 - **Planned**: see `ROADMAP.md`. Real WinFsp mounts are verified once the
   WinFsp runtime is installed (detected automatically; the mount bridge is
   unit-tested via in-memory browse sessions).
