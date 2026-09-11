@@ -361,7 +361,7 @@ function main(): void {
 
   app.whenReady().then(() => {
     initErrorReporter(() => settingsManager.getSettings().errorReporting);
-    if (app.isPackaged) {
+    if (app.isPackaged && settingsManager.getSettings().fileAssociations) {
       const result = registerFileAssociations();
       if (!result.ok) {
         logger.warn(`File association registration failed: ${result.failures.join('; ')}`);
@@ -468,6 +468,14 @@ function setupIpcHandlers(): void {
     }
     if (result.errorReporting) {
       setErrorReporting(result.errorReporting);
+    }
+    if (typeof updates.fileAssociations === 'boolean') {
+      const outcome = updates.fileAssociations
+        ? registerFileAssociations()
+        : unregisterFileAssociations();
+      if (!outcome.ok) {
+        logger.warn(`Failed to apply file associations setting: ${outcome.failures.join('; ')}`);
+      }
     }
     scheduler.resyncFromSettings();
     return result;

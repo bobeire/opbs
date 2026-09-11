@@ -30,7 +30,7 @@ const IMAGE_EXTENSIONS = ['.opbs', '.mrimg', '.mrimgx'];
 /** Registry ProgId + class under HKCU\\Software\\Classes. */
 const PROGID = 'Opbs.Image.1';
 const EXT_KEY = '.opbs';
-const APP_KEY = 'Applications\\OPBS.exe';
+const APP_ID = 'OPBS.exe';
 
 /** A single `reg add` write: a key, optional default value, optional named values. */
 export interface RegEntry {
@@ -47,7 +47,7 @@ export function collectAssociationEntries(
   execPath: string,
   options: { appId?: string; productName?: string } = {}
 ): RegEntry[] {
-  const appId = options.appId ?? 'OPBS.exe';
+  const appId = options.appId ?? APP_ID;
   const productName = options.productName ?? 'OPBS';
   const exe = `"${execPath}"`;
   const entries: RegEntry[] = [
@@ -64,9 +64,10 @@ export function collectAssociationEntries(
     });
   }
   // Let OPBS appear in the "Open with…" dialog as well.
-  entries.push({ key: APP_KEY, default: productName });
+  const appKey = `Applications\\${appId}`;
+  entries.push({ key: appKey, default: productName });
   entries.push({
-    key: `${APP_KEY}\\shell\\open\\command`,
+    key: `${appKey}\\shell\\open\\command`,
     default: `${exe} --file-verb open "%1"`
   });
   return entries;
@@ -121,10 +122,11 @@ export function registerFileAssociations(
 
 /** Remove the user-level association and verbs. */
 export function unregisterFileAssociations(
-  run: (args: string[]) => { status: number | null; error?: string } = execReg
+  run: (args: string[]) => { status: number | null; error?: string } = execReg,
+  appId = APP_ID
 ): AssociatorResult {
   const failures: string[] = [];
-  for (const key of [EXT_KEY, PROGID, 'Applications\\OPBS.exe']) {
+  for (const key of [EXT_KEY, PROGID, `Applications\\${appId}`]) {
     const { status, error } = run(['delete', `HKCU\\Software\\Classes\\${key}`, '/f']);
     if (status !== 0 && status !== null) {
       failures.push(`${key} (${error ?? `exit ${status}`})`);

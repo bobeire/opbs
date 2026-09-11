@@ -22,6 +22,8 @@ export interface AppSettings {
   scrubWhileIdle: boolean;
   /** Anonymous crash/error reporting (opt-in). */
   errorReporting: ErrorReportingConfig;
+  /** Register OPBS as the Windows handler/context menu for `.opbs` images. */
+  fileAssociations: boolean;
   scrubIntervalHours: number;
   /** Cloud destination credentials (used for s3:// backup destinations). */
   cloud: CloudSettings;
@@ -124,6 +126,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     enabled: false,
     endpoint: ''
   },
+  fileAssociations: true,
   scrubWhileIdle: false,
   scrubIntervalHours: 24,
   cloud: {

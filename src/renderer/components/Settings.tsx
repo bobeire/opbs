@@ -108,6 +108,7 @@ interface Settings {
   scheduledBackups: ScheduledBackup[];
   cloud: CloudSettings;
   errorReporting: { enabled: boolean; endpoint: string };
+  fileAssociations: boolean;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -156,7 +157,8 @@ const DEFAULT_SETTINGS: Settings = {
   errorReporting: {
     enabled: false,
     endpoint: ''
-  }
+  },
+  fileAssociations: true
 };
 
 function Settings() {
@@ -1254,7 +1256,26 @@ function Settings() {
           </p>
         </div>
       </div>
-      
+
+      <div className="settings-section">
+        <h2>File Associations</h2>
+        <p className="field-hint">
+          Register OPBS as the Windows handler for .opbs backup images. This enables
+          the right-click menu (browse, mount, restore, verify) plus double-click to
+          open. Changes apply immediately and persist across updates.
+        </p>
+        <div className="setting-item">
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={settings.fileAssociations}
+              onChange={(e) => handleChange('fileAssociations', e.target.checked)}
+            />
+            Associate .opbs images with OPBS
+          </label>
+        </div>
+      </div>
+
       <div className="settings-section">
         <h2>Settings Backup</h2>
         <p className="field-hint">
