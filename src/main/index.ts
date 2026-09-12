@@ -28,6 +28,7 @@ import { S3Store, resolveS3Config } from './utils/s3';
 import { SftpStore, resolveSftpConfig } from './utils/sftp';
 import { getRecentDestinations, addRecentDestination } from './utils/recent';
 import { destinationHealth } from './utils/destination-health';
+import { normalizeBackupLocation } from './utils/location';
 import { initErrorReporter, setErrorReporting } from './utils/error-reporter';
 import { resolveImageChain } from './imaging/restore-engine';
 import { registerFileAssociations, unregisterFileAssociations, parseFileActionArgs, FileAction } from './utils/file-associations';
@@ -485,7 +486,11 @@ function setupIpcHandlers(): void {
 
   // Scheduled backups
   ipcMain.handle('add-scheduled-backup', async (_, config) => {
-    const result = settingsManager.addScheduledBackup(config);
+    const normalized = {
+      ...config,
+      destinationPath: normalizeBackupLocation(config?.destinationPath ?? '')
+    };
+    const result = settingsManager.addScheduledBackup(normalized);
     if (result.enabled) {
       scheduler.scheduleBackup(result);
     }
@@ -493,7 +498,11 @@ function setupIpcHandlers(): void {
   });
 
   ipcMain.handle('update-scheduled-backup', async (_, id, updates) => {
-    const result = settingsManager.updateScheduledBackup(id, updates);
+    const normalized =
+      updates && updates.destinationPath != null
+        ? { ...updates, destinationPath: normalizeBackupLocation(String(updates.destinationPath)) }
+        : updates;
+    const result = settingsManager.updateScheduledBackup(id, normalized);
     if (result) {
       scheduler.resyncFromSettings();
     }

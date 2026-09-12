@@ -15,7 +15,11 @@ created by **RHITCS** — named in honour of a certain well-preserved pickle.
 - **Encryption**: optional AES-256-GCM per-block encryption (master-key-derived via PBKDF2-SHA256)
 - **Verification**: self-check images after write and before restore
 - **Retention / GFS pruning**: keep the newest N full chains plus a bounded number of trailing deltas per chain; old images are pruned leaf-first
-- **Scheduling + notifications**: cron-based scheduled backups with Windows toast + optional webhook notification on success/failure
+- **Scheduling + notifications**: scheduled backups run from a friendly
+  day-picker (daily / chosen weekdays / a specific day of the month + time,
+  with a raw cron editor for power users), with Windows toast + optional
+  webhook notification on success/failure. The same picker works for
+  scheduled backups targeting a network share (UNC or smb://).
 - **Disk health warnings**: SMART/reliability counters surfaced before backup
 - **Network-share destinations**: `destinationPath` accepts local paths, UNC
   (`\\server\share`), and `file://`/`smb://` URIs (normalised to filesystem

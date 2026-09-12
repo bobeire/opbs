@@ -1,4 +1,10 @@
 import { useState, useEffect } from 'react';
+import {
+  buildCronFromFriendly,
+  parseCronToFriendly,
+  describeCron,
+  WEEKDAY_ABBREVS
+} from '../lib/schedule-helpers';
 
 interface ScheduledBackup {
   id: string;
@@ -22,6 +28,11 @@ interface ScheduleForm {
   id?: string;
   name: string;
   cronExpression: string;
+  scheduleType: 'daily' | 'weekly' | 'monthly';
+  scheduleTime: string;
+  scheduleWeekDays: number[];
+  scheduleMonthDay: number;
+  advancedCron: boolean;
   sourceDiskIndex: number;
   sourcePartitions: number[];
   destinationPath: string;
@@ -113,6 +124,11 @@ function Schedules() {
   const defaultScheduleForm = (): ScheduleForm => ({
     name: '',
     cronExpression: '0 2 * * *',
+    scheduleType: 'daily',
+    scheduleTime: '02:00',
+    scheduleWeekDays: [],
+    scheduleMonthDay: 1,
+    advancedCron: false,
     sourceDiskIndex: -1,
     sourcePartitions: [],
     destinationPath: defaults.backupLocation || '',
@@ -137,16 +153,23 @@ function Schedules() {
     setEditingId(job.id);
     setScheduleError(null);
     setCronValid(null);
+    const parsed = parseCronToFriendly(job.cronExpression);
+    const base = defaultScheduleForm();
     setScheduleForm({
       id: job.id,
       name: job.name,
       cronExpression: job.cronExpression,
+      scheduleType: parsed?.type ?? 'daily',
+      scheduleTime: parsed?.time ?? '02:00',
+      scheduleWeekDays: parsed?.weekDays ?? [],
+      scheduleMonthDay: parsed?.monthDay ?? 1,
+      advancedCron: !parsed,
       sourceDiskIndex: job.sourceDiskIndex,
       sourcePartitions: job.sourcePartitions || [],
       destinationPath: job.destinationPath,
       compressionLevel: job.compressionLevel,
       compressionType: job.compressionType || 'zstd',
-      compressionThreads: job.compressionThreads || defaultScheduleForm().compressionThreads,
+      compressionThreads: job.compressionThreads || base.compressionThreads,
       verificationEnabled: job.verificationEnabled,
       incremental: job.incremental,
       passphrase: job.passphrase || '',
@@ -187,6 +210,64 @@ function Schedules() {
     void window.electronAPI.validateCron(value).then((ok) => setCronValid(ok));
   };
 
+  const applyFriendlySchedule = (form: ScheduleForm): ScheduleForm => {
+    const cron = buildCronFromFriendly({
+      type: form.scheduleType,
+      time: form.scheduleTime,
+      weekDays: form.scheduleWeekDays,
+      monthDay: form.scheduleMonthDay
+    });
+    return cron === null ? form : { ...form, cronExpression: cron };
+  };
+
+  const onScheduleTypeChange = (type: ScheduleForm['scheduleType']) => {
+    setScheduleForm((f) => applyFriendlySchedule({ ...(f as ScheduleForm), scheduleType: type }));
+  };
+
+  const onScheduleTimeChange = (time: string) => {
+    setScheduleForm((f) => applyFriendlySchedule({ ...(f as ScheduleForm), scheduleTime: time }));
+  };
+
+  const toggleScheduleWeekDay = (dayIndex: number) => {
+    setScheduleForm((f) => {
+      const form = f as ScheduleForm;
+      const has = form.scheduleWeekDays.includes(dayIndex);
+      return applyFriendlySchedule({
+        ...form,
+        scheduleWeekDays: has
+          ? form.scheduleWeekDays.filter((d) => d !== dayIndex)
+          : [...form.scheduleWeekDays, dayIndex]
+      });
+    });
+  };
+
+  const onScheduleMonthDayChange = (day: number) => {
+    setScheduleForm((f) => applyFriendlySchedule({ ...(f as ScheduleForm), scheduleMonthDay: day }));
+  };
+
+  const toggleAdvancedCron = () => {
+    setScheduleForm((f) => {
+      const form = f as ScheduleForm;
+      if (!form.advancedCron) {
+        return { ...form, advancedCron: true };
+      }
+      const parsed = parseCronToFriendly(form.cronExpression);
+      if (!parsed) {
+        setScheduleError("This cron expression can't be shown in the simple schedule picker.");
+        return form;
+      }
+      setScheduleError(null);
+      return {
+        ...form,
+        scheduleType: parsed.type,
+        scheduleTime: parsed.time,
+        scheduleWeekDays: parsed.weekDays,
+        scheduleMonthDay: parsed.monthDay,
+        advancedCron: false
+      };
+    });
+  };
+
   const handleScheduleDir = async () => {
     const dir = await window.electronAPI.selectDirectory();
     if (dir && scheduleForm) {
@@ -197,7 +278,23 @@ function Schedules() {
   const handleScheduleSave = async () => {
     if (!scheduleForm) return;
     setScheduleError(null);
-    const valid = await window.electronAPI.validateCron(scheduleForm.cronExpression);
+
+    let cronExpression = scheduleForm.cronExpression;
+    if (!scheduleForm.advancedCron) {
+      const rebuilt = buildCronFromFriendly({
+        type: scheduleForm.scheduleType,
+        time: scheduleForm.scheduleTime,
+        weekDays: scheduleForm.scheduleWeekDays,
+        monthDay: scheduleForm.scheduleMonthDay
+      });
+      if (!rebuilt) {
+        setScheduleError('Select at least one day of the week.');
+        return;
+      }
+      cronExpression = rebuilt;
+    }
+
+    const valid = await window.electronAPI.validateCron(cronExpression);
     if (!valid) {
       setScheduleError('Invalid cron expression. Example: 0 2 * * * = every day at 02:00.');
       return;
@@ -217,7 +314,7 @@ function Schedules() {
     }
     const payload = {
       name: scheduleForm.name.trim() || 'Scheduled backup',
-      cronExpression: scheduleForm.cronExpression,
+      cronExpression,
       sourceDiskIndex: disk.index,
       sourcePartitions: scheduleForm.sourcePartitions,
       destinationPath: scheduleForm.destinationPath.trim(),
@@ -329,7 +426,8 @@ function Schedules() {
                 </span>
               </div>
               <div className="schedule-meta">
-                <code>{job.cronExpression}</code>
+                <span>{describeCron(job.cronExpression)}</span>
+                <span> · <code>{job.cronExpression}</code></span>
                 <span> · {scheduleSourceLabel(job)}</span>
                 <span> · {job.incremental ? 'Incremental' : 'Full'}</span>
                 <span> · {job.destinationPath}</span>
@@ -373,23 +471,93 @@ function Schedules() {
           </div>
 
           <div className="setting-item">
-            <label>Cron expression:</label>
-            <input
-              type="text"
-              value={scheduleForm.cronExpression}
-              onChange={(e) => onCronChange(e.target.value)}
-              placeholder="0 2 * * * (daily at 02:00)"
-            />
-            <div className="cron-presets">
-              <button className="btn-secondary btn-small" onClick={() => onCronChange('0 2 * * *')}>Daily 02:00</button>
-              <button className="btn-secondary btn-small" onClick={() => onCronChange('0 2 * * 0')}>Weekly Sun 02:00</button>
-              <button className="btn-secondary btn-small" onClick={() => onCronChange('0 */6 * * *')}>Every 6 hours</button>
-            </div>
-            {scheduleForm.cronExpression.trim() === '' ? null : cronValid === true ? (
-              <p className="field-hint cron-valid">Valid cron expression.</p>
-            ) : cronValid === false ? (
-              <p className="field-hint cron-invalid">Invalid cron expression.</p>
-            ) : null}
+            <label>When to run:</label>
+            {!scheduleForm.advancedCron ? (
+              <div className="schedule-builder">
+                <div className="schedule-builder-row">
+                  <select
+                    value={scheduleForm.scheduleType}
+                    onChange={(e) => onScheduleTypeChange(e.target.value as ScheduleForm['scheduleType'])}
+                  >
+                    <option value="daily">Every day</option>
+                    <option value="weekly">On chosen weekdays</option>
+                    <option value="monthly">Once a month</option>
+                  </select>
+                  <input
+                    type="time"
+                    value={scheduleForm.scheduleTime}
+                    onChange={(e) => onScheduleTimeChange(e.target.value)}
+                  />
+                </div>
+
+                {scheduleForm.scheduleType === 'weekly' && (
+                  <div className="weekday-picker">
+                    {WEEKDAY_ABBREVS.map((abbr, index) => {
+                      const checked = scheduleForm.scheduleWeekDays.includes(index);
+                      return (
+                        <label key={abbr} className={`weekday-chip${checked ? ' on' : ''}`}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleScheduleWeekDay(index)}
+                          />
+                          {abbr}
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {scheduleForm.scheduleType === 'monthly' && (
+                  <div className="schedule-month-day">
+                    <label>
+                      Day of month:
+                      <input
+                        type="number"
+                        min={1}
+                        max={31}
+                        value={scheduleForm.scheduleMonthDay}
+                        onChange={(e) => onScheduleMonthDayChange(parseInt(e.target.value, 10) || 1)}
+                      />
+                    </label>
+                  </div>
+                )}
+
+                <div className="schedule-builder-row">
+                  <button type="button" className="btn-secondary btn-small" onClick={toggleAdvancedCron}>
+                    Edit raw cron expression
+                  </button>
+                </div>
+                <p className="field-hint">
+                  Runs while the app is open. Current schedule:{' '}
+                  <strong>{describeCron(scheduleForm.cronExpression)}</strong> (<code>{scheduleForm.cronExpression}</code>).
+                </p>
+              </div>
+            ) : (
+              <div className="cron-editor">
+                <input
+                  type="text"
+                  value={scheduleForm.cronExpression}
+                  onChange={(e) => onCronChange(e.target.value)}
+                  placeholder="0 2 * * * (daily at 02:00)"
+                />
+                <div className="cron-presets">
+                  <button className="btn-secondary btn-small" onClick={() => onCronChange('0 2 * * *')}>Daily 02:00</button>
+                  <button className="btn-secondary btn-small" onClick={() => onCronChange('0 2 * * 0')}>Weekly Sun 02:00</button>
+                  <button className="btn-secondary btn-small" onClick={() => onCronChange('0 */6 * * *')}>Every 6 hours</button>
+                </div>
+                {scheduleForm.cronExpression.trim() === '' ? null : cronValid === true ? (
+                  <p className="field-hint cron-valid">Valid cron expression.</p>
+                ) : cronValid === false ? (
+                  <p className="field-hint cron-invalid">Invalid cron expression.</p>
+                ) : null}
+                <div className="schedule-builder-row">
+                  <button type="button" className="btn-secondary btn-small" onClick={toggleAdvancedCron}>
+                    Use simple schedule picker
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="setting-item">
@@ -441,10 +609,14 @@ function Schedules() {
                 type="text"
                 value={scheduleForm.destinationPath}
                 onChange={(e) => setScheduleForm({ ...scheduleForm, destinationPath: e.target.value })}
-                placeholder="Local folder, s3:// or sftp://"
+                placeholder='Local folder, network share (\\\\server\\share or smb://), s3:// or sftp://'
               />
               <button onClick={() => void handleScheduleDir()}>Browse</button>
             </div>
+            <p className="field-hint">
+              Network shares (UNC <code>\\server\share</code> or <code>smb://server/share</code>) work as destinations
+              for scheduled backups. Cloud locations (<code>s3://</code>, <code>sftp://</code>) are supported too.
+            </p>
           </div>
 
           <div className="setting-item">
