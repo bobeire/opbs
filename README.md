@@ -576,16 +576,6 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
 
 GPL-3.0 (planned)
 
-## Public web page
-
-The site under [`docs/`](docs/) is a self-contained static landing page
-(Features + Download), served from GitHub Pages (`https://bobeire.github.io/opbs`) or
-`https://opbs.rhitcs.com`. It also mirrors the latest GitHub releases with
-installer/portable download buttons.
-
-Want to drop a real screenshot into the hero? Add `docs/screenshot.png` and
-replace the placeholder `<img>` block in the hero section of
-[`docs/index.html`](docs/index.html) with
 
 ```html
 <img src="screenshot.png" alt="OPBS main window" />
