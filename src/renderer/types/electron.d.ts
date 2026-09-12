@@ -141,6 +141,49 @@ declare global {
         ok: boolean;
         error?: string;
       }>;
+      getVssStatus: () => Promise<{
+        service: string;
+        displayName: string;
+        state: string;
+        stateCode: number;
+        startType: string;
+        running: boolean;
+        queryError?: string;
+      }>;
+      getVssVolumes: () => Promise<string[]>;
+      inspectVss: () => Promise<{
+        operation: 'writers';
+        ok: boolean;
+        writers: Array<{ name: string; id?: string; instanceId?: string; state: string; stateCode: number; lastError: string }>;
+        providers: Array<{ name: string; type?: string; id?: string; version?: string }>;
+        errors: string[];
+      }>;
+      vssSmokeTest: (volume: string) => Promise<{
+        operation: 'smoke-test';
+        ok: boolean;
+        volume?: string;
+        id?: string;
+        devicePath?: string;
+        durationMs?: number;
+        deleted?: boolean;
+        deleteError?: string;
+        error?: string;
+      }>;
+      vssRepair: () => Promise<{
+        operation: 'repair';
+        ok: boolean;
+        results: Array<{ dll: string; ok: boolean; skipped?: boolean; error?: string }>;
+        service?: { running: boolean; state?: string; startError?: string };
+        error?: string;
+      }>;
+      vssServiceControl: (action: 'start' | 'stop') => Promise<{
+        operation: 'start' | 'stop';
+        ok: boolean;
+        already?: string;
+        message?: string;
+        service?: { running: boolean; state?: string; startError?: string };
+        error?: string;
+      }>;
       getStorageHealth: () => Promise<
         Array<{
           path: string;

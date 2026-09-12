@@ -4,13 +4,14 @@ import BackupWizard from './components/BackupWizard';
 import RestoreWizard from './components/RestoreWizard';
 import Settings from './components/Settings';
 import Schedules from './components/Schedules';
+import VssView from './components/VssView';
 import BrowseView from './components/BrowseView';
 import MediaView from './components/MediaView';
 import LogViewer from './components/LogViewer';
 import NetworkView from './components/NetworkView';
 import ToastHost from './components/ToastHost';
 
-type Page = 'dashboard' | 'backup' | 'restore' | 'browse' | 'media' | 'schedules' | 'network' | 'logs' | 'settings';
+type Page = 'dashboard' | 'backup' | 'restore' | 'browse' | 'media' | 'schedules' | 'network' | 'logs' | 'vss' | 'settings';
 
 interface BackupIntent {
   destinationPath?: string;
@@ -29,7 +30,7 @@ function App() {
 
   useEffect(() => {
     const cleanup = window.electronAPI.onNav((page) => {
-      if (page === 'backup' || page === 'restore' || page === 'schedules') setCurrentPage(page);
+      if (page === 'backup' || page === 'restore' || page === 'schedules' || page === 'vss') setCurrentPage(page);
     });
     return cleanup;
   }, []);
@@ -76,6 +77,8 @@ function App() {
         return <LogViewer onClose={() => setCurrentPage('dashboard')} />;
       case 'schedules':
         return <Schedules />;
+      case 'vss':
+        return <VssView />;
       case 'settings':
         return <Settings />;
       default:
@@ -155,6 +158,15 @@ function App() {
             >
               <span className="nav-icon">💿</span>
               Recovery Media
+            </button>
+          </li>
+          <li>
+            <button
+              className={`nav-item ${currentPage === 'vss' ? 'active' : ''}`}
+              onClick={() => setCurrentPage('vss')}
+            >
+              <span className="nav-icon">🧊</span>
+              Volume Shadow Copy
             </button>
           </li>
           <li>

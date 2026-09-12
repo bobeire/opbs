@@ -30,6 +30,7 @@ import { buildChainHealthReport } from '../backup/chain-health';
 import { detectTamper } from '../utils/tamper';
 import { buildStorageHealthReport } from '../utils/storage-health';
 import { runDiskPerfTest, assessWriteSpeed } from '../utils/disk-perf';
+import { queryVssServiceState, normalizeVolumeRoot, VssJob, VssJobResult } from '../utils/vss';
 
 const diskEnumerator = new DiskEnumerator();
 const imagingEngine = new ImagingEngine(diskEnumerator);
@@ -90,6 +91,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdAnomalies(ctx);
       case 'perf':
         return cmdPerf(ctx);
+      case 'vss':
+        return await cmdVss(ctx);
       case 'schedule':
         return await cmdSchedule(ctx);
       case 'prune':
@@ -193,6 +196,17 @@ Commands:
                                           sustained sequential write/read MiB/s and stores the
                                           result in opbs-perf.json for the storage-health score.
                                           Exits 1 when the test cannot run or is unreachable.
+  vss status                              Report the VSS service state and start type (no
+                                          elevation).
+  vss writers                             List VSS writers and storage providers (elevated).
+                                          Exits 1 when a writer is unstable or vssadmin fails.
+  vss smoke-test <volume>                 Create + immediately delete a shadow copy on
+                                          <volume> (e.g. C:\\ or C:) to prove VSS works
+                                          end-to-end (elevated).
+  vss start | vss stop                    Start or stop the Volume Shadow Copy service
+                                          (elevated).
+  vss repair [--yes]                      Re-register the core VSS DLLs and start the service
+                                          if stopped (elevated). Requires --yes.
   schedule install-backup <name> --config <config.json> [--time HH:MM|--on-login] [--as-system] [--run-as-user]
   schedule install-verify <name> --dir <dir> [--scope newest|all] [--time HH:MM|--on-login] [--run-as-user]
   schedule install-drill <name> --dir <dir> --disk <targetDiskIndex> [--verify] [--time HH:MM|--on-login] [--run-as-user]
@@ -1178,6 +1192,155 @@ async function cmdPerf(ctx: CommandContext): Promise<number> {
     console.error(`${result.directory}: write test failed — ${result.error}`);
   }
   return result.ok ? 0 : 1;
+}
+
+async function launchVssCli(job: VssJob): Promise<VssJobResult> {
+  const launcher = launchElevatedJob<VssJob, unknown, VssJobResult>(job);
+  return launcher.promise;
+}
+
+function printVssWriters(result: VssJobResult): void {
+  const failed = (result.writers ?? []).filter((w) => w.stateCode !== 1 || !/no error|no error/i.test(w.lastError));
+  for (const w of result.writers ?? []) {
+    const flag = w.stateCode === 1 ? 'stable' : w.state === 'Unknown' ? 'unknown' : 'problem';
+    console.log(`  ${w.name}  [${flag}]  last error: ${w.lastError || '—'}`);
+  }
+  for (const p of result.providers ?? []) {
+    console.log(`  provider: ${p.name}${p.version ? ` (v${p.version})` : ''}`);
+  }
+  if (result.errors?.length) {
+    for (const e of result.errors) console.error(`  error: ${e}`);
+  }
+  if ((result.writers ?? []).length === 0 && (result.providers ?? []).length === 0) {
+    console.log('  no writers or providers returned');
+  }
+  if (failed.length > 0) {
+    console.error(`  ${failed.length} writer(s) are not stable`);
+  }
+}
+
+async function cmdVss(ctx: CommandContext): Promise<number> {
+  const sub = ctx.argv[0];
+  switch (sub) {
+    case 'status': {
+      const state = await queryVssServiceState();
+      if (ctx.opts.json) {
+        console.log(JSON.stringify(state, null, 2));
+        return 0;
+      }
+      console.log(`VSS service (${state.displayName}):`);
+      console.log(`  state: ${state.state} (code ${state.stateCode}) | start type: ${state.startType}`);
+      if (state.queryError) {
+        console.error(`  error: ${state.queryError}`);
+        return 1;
+      }
+      if (state.running) {
+        console.log('  ready: yes — shadow copies can be created');
+      } else {
+        console.log(`  ready: no — start the service (vss start) or check why it is stopped`);
+      }
+      return 0;
+    }
+    case 'writers': {
+      let result: VssJobResult;
+      try {
+        result = await launchVssCli({ type: 'vss', operation: 'writers' });
+      } catch (e: unknown) {
+        console.error(e instanceof Error ? e.message : String(e));
+        return 1;
+      }
+      if (ctx.opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        printVssWriters(result);
+      }
+      const failed = (result.writers ?? []).some((w) => w.stateCode !== 1) || !result.ok;
+      return failed ? 1 : 0;
+    }
+    case 'smoke-test': {
+      const volume = normalizeVolumeRoot(ctx.argv[1] ?? '');
+      if (!volume) {
+        console.error('Usage: vss smoke-test <volume>  (e.g. "C:" or "C:\\")');
+        return 1;
+      }
+      let result: VssJobResult;
+      try {
+        result = await launchVssCli({ type: 'vss', operation: 'smoke-test', volume });
+      } catch (e: unknown) {
+        console.error(e instanceof Error ? e.message : String(e));
+        return 1;
+      }
+      if (ctx.opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else if (result.ok) {
+        console.log(`Snapshot OK on ${volume} (${result.durationMs ?? '?'} ms): ${result.devicePath ?? result.id ?? ''} — deleted.`);
+      } else {
+        console.error(`Snapshot test failed on ${volume}: ${result.error ?? result.deleteError ?? 'unknown error'}`);
+      }
+      return result.ok ? 0 : 1;
+    }
+    case 'start':
+    case 'stop': {
+      if (sub === 'stop') {
+        // Stopping VSS affects other programs using shadow copies; require confirmation.
+        if (!ctx.argv.includes('--yes')) {
+          console.error('This stops the Volume Shadow Copy service for every program on the machine. Pass --yes to proceed.');
+          return 1;
+        }
+      }
+      let result: VssJobResult;
+      try {
+        result = await launchVssCli({ type: 'vss', operation: sub });
+      } catch (e: unknown) {
+        console.error(e instanceof Error ? e.message : String(e));
+        return 1;
+      }
+      if (ctx.opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else if (result.ok) {
+        console.log(result.message ?? `${sub === 'start' ? 'Started' : 'Stopped'} the VSS service.`);
+      } else {
+        console.error(`${sub === 'start' ? 'Failed to start' : 'Failed to stop'} the VSS service: ${result.error ?? 'unknown error'}`);
+      }
+      return result.ok ? 0 : 1;
+    }
+    case 'repair': {
+      if (!ctx.argv.includes('--yes')) {
+        console.error('vss repair re-registers the core VSS DLLs and starts the service. Pass --yes to proceed.');
+        return 1;
+      }
+      let result: VssJobResult;
+      try {
+        result = await launchVssCli({ type: 'vss', operation: 'repair' });
+      } catch (e: unknown) {
+        console.error(e instanceof Error ? e.message : String(e));
+        return 1;
+      }
+      if (ctx.opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        for (const r of result.results ?? []) {
+          if (r.skipped) {
+            console.log(`  ${r.dll}: not present — skipped`);
+          } else if (r.ok) {
+            console.log(`  ${r.dll}: re-registered`);
+          } else {
+            console.error(`  ${r.dll}: FAILED — ${r.error ?? 'unknown error'}`);
+          }
+        }
+        if (result.service?.running) {
+          console.log('  service: running');
+        } else {
+          console.error(`  service: not running${result.service?.startError ? ` — ${result.service.startError}` : ''}`);
+        }
+        if (result.error) console.error(`  error: ${result.error}`);
+      }
+      return result.ok ? 0 : 1;
+    }
+    default:
+      console.error('Usage: vss <status|writers|smoke-test <volume>|start|stop|repair [--yes]>');
+      return 1;
+  }
 }
 
 async function cmdSchedule(ctx: CommandContext): Promise<number> {

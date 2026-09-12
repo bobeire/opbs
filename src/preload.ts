@@ -54,6 +54,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getBackupAnomalies: () => ipcRenderer.invoke('get-backup-anomalies'),
   runDiskPerf: (directory: string) => ipcRenderer.invoke('run-disk-perf', directory),
 
+  // VSS (Volume Shadow Copy) maintenance
+  getVssStatus: () => ipcRenderer.invoke('get-vss-status'),
+  getVssVolumes: () => ipcRenderer.invoke('get-vss-volumes'),
+  inspectVss: () => ipcRenderer.invoke('inspect-vss'),
+  vssSmokeTest: (volume: string) => ipcRenderer.invoke('vss-smoke-test', volume),
+  vssRepair: () => ipcRenderer.invoke('vss-repair'),
+  vssServiceControl: (action: 'start' | 'stop') => ipcRenderer.invoke('vss-service-control', action),
+
   // Browse backup images (file-level)
   browsePartitions: (imagePath: string) => ipcRenderer.invoke('browse-partitions', imagePath),
   browseList: (imagePath: string, partitionIndex: number, relPath: string, passphrase?: string) =>

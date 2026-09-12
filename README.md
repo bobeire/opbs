@@ -74,6 +74,20 @@ created by **RHITCS** — named in honour of a certain well-preserved pickle.
   <directory> [--size MB] [--json]`, plus a "Write perf" badge + Test button on
   the Dashboard Storage Health panel. Never writes outside the destination and
   always cleans the scratch file up, even on failure.
+- **Volume Shadow Copy (VSS) maintenance**: the engine snapshots its sources
+  through VSS, so a broken VSS install silently kills backups. A dedicated
+  "Volume Shadow Copy" tab shows the service state and start type (unelevated
+  `sc query`), a deep writer/provider inventory (`vssadmin list writers` /
+  `list providers` via the elevated helper), a non-destructive smoke test that
+  creates and immediately deletes a shadow copy on any mounted volume, and a
+  repair action that re-registers the core VSS DLLs (`vssapi.dll`,
+  `vss_ps.dll`, `vsscore.dll`, `vsstrace.dll` — missing files skipped) and
+  ensures the service is running. Starting/stopping the service, the deep
+  inspect, the smoke test and the repair all run through the UAC-elevated
+  helper (the same path the backup engine uses) and always require
+  confirmation. CLI `vss status`, `vss writers`, `vss smoke-test <volume>`,
+  `vss start|stop` and `vss repair --yes`, each exiting 1 when the check or
+  operation fails.
 - **Backup-media quality checks (SMART)**: every backup is gated on the SMART
   health of the physical drive it writes to — backups are refused when the
   drive reports concrete problems (bad health status, high temperature, SSD
@@ -632,7 +646,10 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   throughput and cadence gaps against the analytics history — CLI
   `anomalies check --dir` + Dashboard panel), a non-destructive disk write/read
   benchmark feeding the storage-health score (CLI `perf --dir` + Dashboard
-  "Write perf" badge), age-aware retention (lineage
+  "Write perf" badge), a VSS maintenance tab (service state, writer/provider
+  inventory, snapshot smoke test, DLL re-registration and start/stop via the
+  UAC-elevated helper — CLI `vss status|writers|smoke-test|start|stop|repair`),
+  age-aware retention (lineage
   guard prevents pruning the last surviving restore point of any source disk,
   with prune reminders for keepFull:0 and unverified-image deletion),
   400+ unit/integration tests

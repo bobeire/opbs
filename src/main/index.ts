@@ -14,6 +14,7 @@ import { ImagingEngine } from './imaging/backup-engine';
 import { RestoreEngine } from './imaging/restore-engine';
 import { dispatchHelperJob } from './helper/job-runner';
 import { launchElevatedJob } from './helper/launcher';
+import type { VssJob, VssJobResult } from './utils/vss';
 import { winfspAvailable } from './imaging/mount-manager';
 import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains, writeManifest } from './backup/retention';
 import { checkDiskHealth } from './utils/disk-health';
@@ -943,6 +944,37 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
   ipcMain.handle('run-disk-perf', async (_, directory: string) => {
     const { runDiskPerfTest } = await import('./utils/disk-perf');
     return runDiskPerfTest(String(directory ?? ''));
+  });
+
+  // VSS (Volume Shadow Copy) maintenance.
+  // The deep checks (writers/providers, snapshot smoke test, repair,
+  // start/stop) need elevation and relaunch this app through the UAC prompt,
+  // dispatching to the elevated helper's `vss` job handler.
+  ipcMain.handle('get-vss-status', async () => {
+    const { queryVssServiceState } = await import('./utils/vss');
+    return queryVssServiceState();
+  });
+  ipcMain.handle('get-vss-volumes', async () => {
+    const { enumerateVolumes } = await import('./utils/vss');
+    return enumerateVolumes();
+  });
+  ipcMain.handle('inspect-vss', async () => {
+    return launchElevatedJob<VssJob, unknown, VssJobResult>({ type: 'vss', operation: 'writers' }).promise;
+  });
+  ipcMain.handle('vss-smoke-test', async (_, volume: string) => {
+    const { normalizeVolumeRoot } = await import('./utils/vss');
+    return launchElevatedJob<VssJob, unknown, VssJobResult>({
+      type: 'vss',
+      operation: 'smoke-test',
+      volume: normalizeVolumeRoot(String(volume ?? ''))
+    }).promise;
+  });
+  ipcMain.handle('vss-repair', async () => {
+    return launchElevatedJob<VssJob, unknown, VssJobResult>({ type: 'vss', operation: 'repair' }).promise;
+  });
+  ipcMain.handle('vss-service-control', async (_, action: string) => {
+    const operation = action === 'stop' ? 'stop' : 'start';
+    return launchElevatedJob<VssJob, unknown, VssJobResult>({ type: 'vss', operation }).promise;
   });
 
   // File browsing over a backup image

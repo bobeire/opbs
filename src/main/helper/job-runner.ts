@@ -1321,6 +1321,12 @@ export async function dispatchHelperJob(
     await runCloneJob(jobPath, resultPath, progressPath, cancelPath, nativeApi);
     return;
   }
+  if (raw.type === 'vss') {
+    const { runVssJob } = await import('./vss-job');
+    const result = await runVssJob(raw as { type: 'vss'; operation: 'writers' | 'smoke-test' | 'repair' | 'start' | 'stop'; volume?: string });
+    fs.writeFileSync(resultPath, JSON.stringify(result));
+    return;
+  }
   await runBackupJob(jobPath, resultPath, progressPath, cancelPath, nativeApi);
 }
 
