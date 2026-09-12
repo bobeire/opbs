@@ -109,6 +109,39 @@ declare global {
           };
         }>
       >;
+      getStorageHealth: () => Promise<
+        Array<{
+          path: string;
+          reachable: boolean;
+          error?: string;
+          freeBytes?: number;
+          totalBytes?: number;
+          imageCount: number;
+          chainCount: number;
+          completeChains: number;
+          brokenChains: number;
+          verifiedImages: number;
+          parityProtectedImages: number;
+          newestDate?: number;
+          oldestDate?: number;
+          tamperDrift: boolean;
+          tamperManifestPresent: boolean;
+          imagesScrubbed: number;
+          lastScrubAt?: number;
+          lastScrubOk: boolean | null;
+          lastDrillAt?: number;
+          hasDrill: boolean;
+          smart: {
+            diskIndex?: number;
+            driveLetter?: string;
+            available: boolean;
+            warnings: string[];
+          };
+          score: number;
+          status: 'good' | 'degraded' | 'at-risk';
+          warnings: string[];
+        }>
+      >;
       openPath: (filePath: string) => Promise<{ ok: boolean; error?: string }>;
       copyImage: (imagePath: string, destDir: string) => Promise<{ ok: boolean; copied?: string[]; bytes?: number; destPath?: string; error?: string }>;
       uploadToCloud: (imagePath: string) => Promise<{ ok: boolean; uploaded?: string[]; error?: string }>;

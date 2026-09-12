@@ -788,6 +788,32 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     return { destinations: addRecentDestination(directory) };
   });
 
+  // Storage health dashboard across all known local destinations.
+  ipcMain.handle('get-storage-health', async () => {
+    const { buildStorageHealthReport } = await import('./utils/storage-health');
+    const settings = settingsManager.getSettings();
+    const destinations = getRecentDestinations();
+    const results = [];
+    for (const dir of destinations) {
+      if (dir.startsWith('s3://') || dir.startsWith('sftp://') || dir.startsWith('ftp://')) {
+        continue; // no local disk to measure
+      }
+      try {
+        results.push(
+          await buildStorageHealthReport(dir, {
+            keepFull: settings.keepFull,
+            keepDeltasPerFull: settings.keepDeltasPerFull,
+            retentionDays: settings.retentionDays,
+            autoCleanup: settings.autoCleanup
+          })
+        );
+      } catch {
+        // destination offline — skip
+      }
+    }
+    return results;
+  });
+
   ipcMain.handle('destination-health', async (_, destinations: string[]) => {
     const settings = settingsManager.getSettings();
     const list = Array.isArray(destinations) ? destinations : [];

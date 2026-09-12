@@ -55,6 +55,15 @@ created by **RHITCS** — named in honour of a certain well-preserved pickle.
   `.opbs` files are reported per destination — CLI `chain check --dir` and
   `tamper check --dir`, plus a Dashboard "Backup Integrity" panel. Exits 1 and
   flags the destination whenever drift or broken chains are detected.
+- **Storage health dashboard**: a per-destination reliability snapshot that
+  combines capacity/free space, restore-chain integrity, verification coverage
+  (images stamped `FLAG_VERIFIED` after a successful verify), scrub history,
+  restore-drill coverage, parity protection (`.opar` sidecars), tamper drift,
+  and the SMART health of the physical drive backing the destination (best
+  effort — offline/UNC/elevation limits never penalize the score). Produces a
+  transparent 0–100 "reliability" score with a good/degraded/at-risk status —
+  CLI `storage-health --dir`, plus a Dashboard "Storage Health" panel. Exits 1
+  for at-risk destinations.
 
 ## Tech Stack
 
@@ -575,8 +584,11 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   `analytics` command + Dashboard panel), self-healing scrub with XOR-parity
   repair (`.opar` sidecars, scheduled/manual/CLI, Dashboard "Scrub Health"),
   ransomware/tamper resistance (chain-integrity + manifest-drift checks via CLI
-  `chain check` / `tamper check` and a Dashboard "Backup Integrity" panel),
-  370+ unit/integration tests
+  `chain check` / `tamper check` and a Dashboard "Backup Integrity" panel), a
+  storage-health dashboard (per-destination reliability score combining SMART
+  drive health, verification/scrub/drill/parity coverage, chain integrity and
+  capacity — CLI `storage-health --dir` + Dashboard panel),
+  380+ unit/integration tests
 - **Planned**: see `ROADMAP.md`. Real WinFsp mounts are verified once the
   WinFsp runtime is installed (detected automatically; the mount bridge is
   unit-tested via in-memory browse sessions).

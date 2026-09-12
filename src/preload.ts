@@ -43,6 +43,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startScrub: (directory: string, scope?: string) => ipcRenderer.invoke('start-scrub', directory, scope),
   getScrubStatus: () => ipcRenderer.invoke('get-scrub-status'),
   getBackupIntegrity: () => ipcRenderer.invoke('get-backup-integrity'),
+  getStorageHealth: () => ipcRenderer.invoke('get-storage-health'),
   openPath: (filePath: string) => ipcRenderer.invoke('open-path', filePath),
   copyImage: (imagePath: string, destDir: string) => ipcRenderer.invoke('copy-image', imagePath, destDir),
   uploadToCloud: (imagePath: string) => ipcRenderer.invoke('upload-to-cloud', imagePath),

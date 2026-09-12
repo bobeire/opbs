@@ -28,6 +28,7 @@ import { scrubDirectory, classifyImage } from '../imaging/scrub';
 import { buildParity, verifyParity, repairParityBlock, paritySidecarPath } from '../imaging/parity';
 import { buildChainHealthReport } from '../backup/chain-health';
 import { detectTamper } from '../utils/tamper';
+import { buildStorageHealthReport } from '../utils/storage-health';
 
 const diskEnumerator = new DiskEnumerator();
 const imagingEngine = new ImagingEngine(diskEnumerator);
@@ -82,6 +83,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdChainCheck(ctx);
       case 'tamper':
         return await cmdTamperCheck(ctx);
+      case 'storage-health':
+        return await cmdStorageHealth(ctx);
       case 'schedule':
         return await cmdSchedule(ctx);
       case 'prune':
@@ -165,6 +168,12 @@ Commands:
                                          manifest: missing images, size-changed images, and
                                          unexpected .opbs files are reported (ransomware /
                                          external modification detection). Exits 1 on drift.
+  storage-health --dir <directory> [--json]
+                                         Storage health dashboard: capacity, restore-chain
+                                         integrity, verification/scrub/drill coverage, parity
+                                         protection, tamper drift, SMART health of the backing
+                                         drive, and a 0-100 reliability score. Exits 1 for an
+                                         at-risk destination.
   schedule install-backup <name> --config <config.json> [--time HH:MM|--on-login] [--as-system] [--run-as-user]
   schedule install-verify <name> --dir <dir> [--scope newest|all] [--time HH:MM|--on-login] [--run-as-user]
   schedule install-drill <name> --dir <dir> --disk <targetDiskIndex> [--verify] [--time HH:MM|--on-login] [--run-as-user]
@@ -1045,6 +1054,40 @@ async function cmdTamperCheck(ctx: CommandContext): Promise<number> {
     return report.ok ? 0 : 1;
   }
   return report.ok ? 0 : 1;
+}
+
+async function cmdStorageHealth(ctx: CommandContext): Promise<number> {
+  const dir = flagValue(ctx.argv, '--dir');
+  if (!dir) {
+    console.error('Usage: storage-health --dir <directory> [--json]');
+    return 1;
+  }
+  const report = await buildStorageHealthReport(dir, {
+    keepFull: 0,
+    keepDeltasPerFull: 0,
+    retentionDays: 0,
+    autoCleanup: false
+  });
+  if (ctx.opts.json) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    console.log(`${report.path}\n  reliability: ${report.score}/100 (${report.status})`);
+    for (const warning of report.warnings) {
+      console.log(`  ! ${warning}`);
+    }
+    console.log(
+      `  ${report.imageCount} image(s), ${report.chainCount} chain(s) ` +
+        `(${report.completeChains} complete, ${report.brokenChains} broken), ` +
+        `${report.verifiedImages} verified, ${report.parityProtectedImages} parity-protected, ` +
+        `free ${report.freeBytes != null ? Math.round(((report.freeBytes / Math.max(1, report.totalBytes ?? 1)) * 100)) : '?'}%`
+    );
+    if (report.smart.available) {
+      console.log(`  SMART: ${report.smart.warnings.length === 0 ? 'healthy' : report.smart.warnings.join('; ')}`);
+    } else if (report.smart.driveLetter) {
+      console.log(`  SMART: unavailable for ${report.smart.driveLetter}:`);
+    }
+  }
+  return report.status === 'at-risk' ? 1 : 0;
 }
 
 async function cmdSchedule(ctx: CommandContext): Promise<number> {

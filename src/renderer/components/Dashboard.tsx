@@ -33,6 +33,7 @@ function Dashboard({ onNavigate }: DashboardProps) {
   } | null>(null);
   const [scrubStatus, setScrubStatus] = useState<any[]>([]);
   const [integrity, setIntegrity] = useState<any[]>([]);
+  const [storageHealth, setStorageHealth] = useState<any[]>([]);
   const [now, setNow] = useState(0);
 
   const load = useCallback(async () => {
@@ -56,6 +57,8 @@ function Dashboard({ onNavigate }: DashboardProps) {
       setScrubStatus(Array.isArray(scrubRes) ? scrubRes : []);
       const integrityRes = await window.electronAPI.getBackupIntegrity();
       setIntegrity(Array.isArray(integrityRes) ? integrityRes : []);
+      const storageRes = await window.electronAPI.getStorageHealth();
+      setStorageHealth(Array.isArray(storageRes) ? storageRes : []);
     } catch {
       setBackups([]);
       setHealth([]);
@@ -394,6 +397,88 @@ function Dashboard({ onNavigate }: DashboardProps) {
             <p className="drill-not-tested" style={{ marginTop: '8px' }}>
               Chains with missing delta bases or manifest drift are not restorable / not trustworthy — investigate
               before relying on a restore.
+            </p>
+          )}
+        </div>
+      )}
+
+      {storageHealth.length > 0 && (
+        <div className="recent-backups">
+          <div className="recent-backups-head">
+            <h2>Storage Health</h2>
+          </div>
+          <table className="backup-table">
+            <thead>
+              <tr>
+                <th>Destination</th>
+                <th>Reliability</th>
+                <th>Free space</th>
+                <th>Coverage (verified / parity / scrub)</th>
+                <th>Chains</th>
+                <th>Last drill</th>
+                <th>SMART</th>
+              </tr>
+            </thead>
+            <tbody>
+              {storageHealth.map((entry) => {
+                const freePct =
+                  entry.totalBytes > 0 ? Math.round((entry.freeBytes / entry.totalBytes) * 100) : null;
+                const statusClass =
+                  entry.status === 'good' ? 'badge-ok' : entry.status === 'degraded' ? 'badge-warn' : 'badge-err';
+                return (
+                  <tr key={entry.path}>
+                    <td className="col-dest" title={entry.path}>
+                      {entry.path}
+                    </td>
+                    <td>
+                      <span className={`badge ${statusClass}`} title={entry.warnings.join('\n')}>
+                        {entry.score}/100 {entry.status}
+                      </span>
+                    </td>
+                    <td>
+                      {freePct != null ? `${freePct}%` : entry.reachable ? '—' : 'offline'}
+                    </td>
+                    <td title={`${entry.verifiedImages} verified, ${entry.parityProtectedImages} parity-protected, ${entry.imagesScrubbed} scrubbed`}>
+                      {entry.imageCount > 0
+                        ? `${entry.verifiedImages}/${entry.imageCount} · ${entry.parityProtectedImages}/${entry.imageCount} · ${entry.imagesScrubbed}`
+                        : '—'}
+                    </td>
+                    <td>
+                      {entry.completeChains}/{entry.chainCount}
+                    </td>
+                    <td>
+                      {entry.hasDrill ? (
+                        <span className="badge badge-ok">tested</span>
+                      ) : entry.imageCount > 0 ? (
+                        <span className="drill-not-tested">never tested</span>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                    <td>
+                      {entry.smart?.available ? (
+                        entry.smart.warnings.length === 0 ? (
+                          <span className="badge badge-ok">healthy</span>
+                        ) : (
+                          <span className="badge badge-err" title={entry.smart.warnings.join('\n')}>
+                            at-risk
+                          </span>
+                        )
+                      ) : entry.smart?.driveLetter ? (
+                        <span className="drill-not-tested">n/a ({entry.smart.driveLetter}:)</span>
+                      ) : (
+                        <span className="drill-not-tested">n/a</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {storageHealth.some((e) => e.status === 'at-risk') && (
+            <p className="drill-not-tested" style={{ marginTop: '8px' }}>
+              At-risk destinations flagged for review — see the CLI <code>storage-health --dir</code> for details, or
+              run a scrub / drill on the flagged destination.
             </p>
           )}
         </div>
