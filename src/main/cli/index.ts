@@ -85,6 +85,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdTamperCheck(ctx);
       case 'storage-health':
         return await cmdStorageHealth(ctx);
+      case 'anomalies':
+        return await cmdAnomalies(ctx);
       case 'schedule':
         return await cmdSchedule(ctx);
       case 'prune':
@@ -174,6 +176,13 @@ Commands:
                                          protection, tamper drift, SMART health of the backing
                                          drive, and a 0-100 reliability score. Exits 1 for an
                                          at-risk destination.
+  anomalies check --dir <directory> [--json]
+                                         Detect backup deviations: the latest run is compared
+                                         against a robust baseline built from the analytics
+                                         history (opbs-analytics.json) — size blow-ups/drops
+                                         (type-aware for full vs delta), compression-ratio
+                                         collapse, throughput collapse, and backups that stopped
+                                         arriving. Exits 1 when an anomaly is found.
   schedule install-backup <name> --config <config.json> [--time HH:MM|--on-login] [--as-system] [--run-as-user]
   schedule install-verify <name> --dir <dir> [--scope newest|all] [--time HH:MM|--on-login] [--run-as-user]
   schedule install-drill <name> --dir <dir> --disk <targetDiskIndex> [--verify] [--time HH:MM|--on-login] [--run-as-user]
@@ -1093,6 +1102,45 @@ async function cmdStorageHealth(ctx: CommandContext): Promise<number> {
     }
   }
   return report.status === 'at-risk' ? 1 : 0;
+}
+
+async function cmdAnomalies(ctx: CommandContext): Promise<number> {
+  const action = ctx.argv[0];
+  if (action !== 'check') {
+    console.error('Usage: anomalies check --dir <directory> [--json]');
+    return 1;
+  }
+  const dir = flagValue(ctx.argv, '--dir');
+  if (!dir) {
+    console.error('Usage: anomalies check --dir <directory> [--json]');
+    return 1;
+  }
+  const { detectAnomalies } = await import('../backup/anomaly-detect');
+  const report = detectAnomalies(dir);
+  if (ctx.opts.json) {
+    console.log(JSON.stringify(report, null, 2));
+    return report.ok ? 0 : 1;
+  }
+  console.log(`${report.directory}`);
+  console.log(
+    `  baseline: ${report.historyCount} run(s) in history` +
+      (report.baseline.medianRatio != null ? `, ratio ~${report.baseline.medianRatio.toFixed(2)}` : '') +
+      (report.baseline.medianSpeedMBs != null ? `, speed ~${report.baseline.medianSpeedMBs.toFixed(1)} MB/s` : '') +
+      (report.baseline.medianIntervalMs != null
+        ? `, cadence ~${Math.max(1, Math.round(report.baseline.medianIntervalMs / (24 * 3600 * 1000)))} day(s)`
+        : '')
+  );
+  if (report.anomalies.length === 0) {
+    console.log('  no anomalies');
+  }
+  let failed = false;
+  for (const anomaly of report.anomalies) {
+    const tag = anomaly.severity === 'critical' ? 'CRITICAL' : anomaly.severity === 'warning' ? 'warning' : 'note';
+    const icon = anomaly.severity === 'info' ? '  ' : '! ';
+    console.log(`  ${icon}${tag}: ${anomaly.message}`);
+    if (anomaly.severity !== 'info') failed = true;
+  }
+  return failed ? 1 : 0;
 }
 
 async function cmdSchedule(ctx: CommandContext): Promise<number> {

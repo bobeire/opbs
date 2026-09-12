@@ -921,6 +921,24 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     return inventoryMediaHealth();
   });
 
+  // Anomaly detection across all known local destinations.
+  ipcMain.handle('get-backup-anomalies', async () => {
+    const { detectAnomalies } = await import('./backup/anomaly-detect');
+    const destinations = getRecentDestinations();
+    const results = [];
+    for (const dir of destinations) {
+      if (dir.startsWith('s3://') || dir.startsWith('sftp://') || dir.startsWith('ftp://')) {
+        continue;
+      }
+      try {
+        results.push(detectAnomalies(dir));
+      } catch {
+        // no analytics history — skip
+      }
+    }
+    return results;
+  });
+
   // File browsing over a backup image
   ipcMain.handle('browse-partitions', async (_, imagePath: string) => {
     const format = detectMacriumFormat(imagePath);

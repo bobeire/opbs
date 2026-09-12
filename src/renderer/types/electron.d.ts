@@ -109,6 +109,27 @@ declare global {
           };
         }>
       >;
+      getBackupAnomalies: () => Promise<
+        Array<{
+          directory: string;
+          historyCount: number;
+          baseline: {
+            medianIntervalMs?: number;
+            medianRatio?: number;
+            medianSpeedMBs?: number;
+            medianBytesFull?: number;
+            medianBytesDelta?: number;
+          };
+          anomalies: Array<{
+            kind: 'size' | 'ratio' | 'speed' | 'gap' | 'info';
+            severity: 'critical' | 'warning' | 'info';
+            message: string;
+            metric?: number;
+            baseline?: number;
+          }>;
+          ok: boolean;
+        }>
+      >;
       getStorageHealth: () => Promise<
         Array<{
           path: string;

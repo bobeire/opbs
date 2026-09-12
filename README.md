@@ -73,6 +73,16 @@ created by **RHITCS** — named in honour of a certain well-preserved pickle.
   configured destinations, so a dying backup drive is caught before it is ever
   pointed at — CLI `media smart`, Dashboard "Media Health" panel. Query results
   are cached 5 minutes so repeated runs stay fast.
+- **Anomaly detection (backup deviations)**: the latest backup run is compared
+  against a robust baseline (median + MAD over the last dozen runs) built from
+  the per-destination analytics history (`opbs-analytics.json`). Flags run-size
+  blow-ups/drops (type-aware — fulls against fulls, deltas against deltas),
+  compression-ratio collapse (source turned incompressible, e.g. encryption/
+  ransomware), throughput collapse (degraded destination), and backups that
+  stopped arriving (cadence gap). Pure sidecar reads — no image access — with
+  failures downgraded to informational notes until enough history exists. CLI
+  `anomalies check --dir`, Dashboard "Anomaly Detection" panel. Exits 1 on any
+  detected deviation.
 
 ## Tech Stack
 
@@ -599,7 +609,10 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   capacity — CLI `storage-health --dir` + Dashboard panel), backup-media quality
   checks (pre-backup SMART gate — refuse writing to a failing drive — plus a
   disk-wide `media smart` inventory and Dashboard "Media Health" panel),
-  380+ unit/integration tests
+  anomaly detection (baseline-comparison of run size, compression ratio,
+  throughput and cadence gaps against the analytics history — CLI
+  `anomalies check --dir` + Dashboard panel),
+  390+ unit/integration tests
 - **Planned**: see `ROADMAP.md`. Real WinFsp mounts are verified once the
   WinFsp runtime is installed (detected automatically; the mount bridge is
   unit-tested via in-memory browse sessions).

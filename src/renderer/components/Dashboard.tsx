@@ -35,6 +35,7 @@ function Dashboard({ onNavigate }: DashboardProps) {
   const [integrity, setIntegrity] = useState<any[]>([]);
   const [storageHealth, setStorageHealth] = useState<any[]>([]);
   const [mediaHealth, setMediaHealth] = useState<any[]>([]);
+  const [anomalies, setAnomalies] = useState<any[]>([]);
   const [now, setNow] = useState(0);
 
   const load = useCallback(async () => {
@@ -62,6 +63,8 @@ function Dashboard({ onNavigate }: DashboardProps) {
       setStorageHealth(Array.isArray(storageRes) ? storageRes : []);
       const mediaRes = await window.electronAPI.getMediaHealth();
       setMediaHealth(Array.isArray(mediaRes) ? mediaRes : []);
+      const anomalyRes = await window.electronAPI.getBackupAnomalies();
+      setAnomalies(Array.isArray(anomalyRes) ? anomalyRes : []);
     } catch {
       setBackups([]);
       setHealth([]);
@@ -553,6 +556,66 @@ function Dashboard({ onNavigate }: DashboardProps) {
             <p className="drill-not-tested" style={{ marginTop: '8px' }}>
               A storage drive reports SMART problems. Backups that write to it are refused until the drive is
               healthy — replace or service the media before relying on it.
+            </p>
+          )}
+        </div>
+      )}
+
+      {anomalies.length > 0 && (
+        <div className="recent-backups">
+          <div className="recent-backups-head">
+            <h2>Anomaly Detection</h2>
+          </div>
+          <table className="backup-table">
+            <thead>
+              <tr>
+                <th>Destination</th>
+                <th>History</th>
+                <th>Latest</th>
+                <th>Signal</th>
+              </tr>
+            </thead>
+            <tbody>
+              {anomalies.map((entry) => {
+                const flags = (entry.anomalies ?? []).filter((a: any) => a.severity !== 'info');
+                const notes = (entry.anomalies ?? []).filter((a: any) => a.severity === 'info');
+                const b = entry.baseline ?? {};
+                return (
+                  <tr key={entry.directory}>
+                    <td className="col-dest" title={entry.directory}>
+                      {entry.directory}
+                    </td>
+                    <td>{entry.historyCount} run(s)</td>
+                    <td>
+                      {b.medianIntervalMs != null
+                        ? entry.historyCount >= 3
+                          ? `~${Math.max(1, Math.round(b.medianIntervalMs / (24 * 3600 * 1000)))}d cadence`
+                          : 'too few runs'
+                        : 'no cadence'}
+                    </td>
+                    <td>
+                      {flags.length === 0 ? (
+                        <span className="badge badge-ok">no anomalies</span>
+                      ) : (
+                        <span className="badge badge-err" title={flags.map((f: any) => f.message).join('\n')}>
+                          {flags.map((f: any) => f.kind).join(', ')}
+                        </span>
+                      )}
+                      {notes.length > 0 && (
+                        <span className="drill-not-tested" title={notes.map((n: any) => n.message).join('\n')}>
+                          {" ·"} {notes[0].message}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {anomalies.some((e) => !e.ok) && (
+            <p className="drill-not-tested" style={{ marginTop: '8px' }}>
+              Deviations detected against the run history — see the CLI <code>anomalies check --dir</code> for the
+              full baseline details, and verify the source/disks/retention before continuing.
             </p>
           )}
         </div>
