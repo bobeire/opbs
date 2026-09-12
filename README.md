@@ -575,5 +575,3 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
 ## License
 
 GPL-3.0 (planned)
-e artifacts to a GitHub release — the site's download buttons point at
-the `latest` release assets automatically.
