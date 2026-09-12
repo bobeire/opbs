@@ -64,6 +64,16 @@ created by **RHITCS** — named in honour of a certain well-preserved pickle.
   transparent 0–100 "reliability" score with a good/degraded/at-risk status —
   CLI `storage-health --dir`, plus a Dashboard "Storage Health" panel. Exits 1
   for at-risk destinations.
+- **Disk write/read performance test**: a non-destructive benchmark that writes
+  a scratch file (default 256 MiB in 1 MiB blocks, `fsync`'d, then read back and
+  deleted) to measure sequential write/read throughput for any destination.
+  Results are persisted to `opbs-perf.json` inside the destination (last 20
+  runs, capped) and the latest measurement feeds the storage-health score —
+  fast drives (`>= 100 MiB/s`) are never penalized, slow or critical drives
+  subtract 5–15 points with an explanatory warning. CLI `opbs perf --dir
+  <directory> [--size MB] [--json]`, plus a "Write perf" badge + Test button on
+  the Dashboard Storage Health panel. Never writes outside the destination and
+  always cleans the scratch file up, even on failure.
 - **Backup-media quality checks (SMART)**: every backup is gated on the SMART
   health of the physical drive it writes to — backups are refused when the
   drive reports concrete problems (bad health status, high temperature, SSD
@@ -620,7 +630,9 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   disk-wide `media smart` inventory and Dashboard "Media Health" panel),
   anomaly detection (baseline-comparison of run size, compression ratio,
   throughput and cadence gaps against the analytics history — CLI
-  `anomalies check --dir` + Dashboard panel), age-aware retention (lineage
+  `anomalies check --dir` + Dashboard panel), a non-destructive disk write/read
+  benchmark feeding the storage-health score (CLI `perf --dir` + Dashboard
+  "Write perf" badge), age-aware retention (lineage
   guard prevents pruning the last surviving restore point of any source disk,
   with prune reminders for keepFull:0 and unverified-image deletion),
   400+ unit/integration tests

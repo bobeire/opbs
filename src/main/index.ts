@@ -939,6 +939,12 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     return results;
   });
 
+  // Non-destructive disk write/read performance test for a destination.
+  ipcMain.handle('run-disk-perf', async (_, directory: string) => {
+    const { runDiskPerfTest } = await import('./utils/disk-perf');
+    return runDiskPerfTest(String(directory ?? ''));
+  });
+
   // File browsing over a backup image
   ipcMain.handle('browse-partitions', async (_, imagePath: string) => {
     const format = detectMacriumFormat(imagePath);

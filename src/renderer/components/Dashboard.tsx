@@ -36,6 +36,7 @@ function Dashboard({ onNavigate }: DashboardProps) {
   const [storageHealth, setStorageHealth] = useState<any[]>([]);
   const [mediaHealth, setMediaHealth] = useState<any[]>([]);
   const [anomalies, setAnomalies] = useState<any[]>([]);
+  const [perfRunning, setPerfRunning] = useState<string | null>(null);
   const [now, setNow] = useState(0);
 
   const load = useCallback(async () => {
@@ -87,6 +88,26 @@ function Dashboard({ onNavigate }: DashboardProps) {
       setBusy(null);
     }
   }, [destinations]);
+
+  const runPerf = useCallback(async (directory: string) => {
+    setPerfRunning(directory);
+    try {
+      const result = await window.electronAPI.runDiskPerf(directory);
+      if (result?.ok) {
+        setMessage({
+          kind: 'ok',
+          text: `Write test for ${directory} done: ${result.seqWriteMBs.toFixed(1)} MiB/s write, ${result.seqReadMBs.toFixed(1)} MiB/s read.`
+        });
+      } else {
+        setMessage({ kind: 'err', text: `Write test failed for ${directory}: ${result?.error ?? 'unknown error'}` });
+      }
+      await load();
+    } catch {
+      setMessage({ kind: 'err', text: `Could not run the write test for ${directory}` });
+    } finally {
+      setPerfRunning(null);
+    }
+  }, [load]);
 
   useEffect(() => {
     let cancelled = false;
@@ -423,6 +444,7 @@ function Dashboard({ onNavigate }: DashboardProps) {
                 <th>Chains</th>
                 <th>Last drill</th>
                 <th>SMART</th>
+                <th>Write perf</th>
               </tr>
             </thead>
             <tbody>
@@ -475,6 +497,33 @@ function Dashboard({ onNavigate }: DashboardProps) {
                       ) : (
                         <span className="drill-not-tested">n/a</span>
                       )}
+                    </td>
+                    <td>
+                      {entry.perf?.ok && typeof entry.perf.seqWriteMBs === 'number' ? (
+                        <span
+                          className={`badge ${
+                            entry.perf.seqWriteMBs >= 100
+                              ? 'badge-ok'
+                              : entry.perf.seqWriteMBs >= 40
+                                ? 'badge-warn'
+                                : 'badge-err'
+                          }`}
+                          title={`${entry.perf.seqWriteMBs.toFixed(1)} MiB/s write, ${entry.perf.seqReadMBs?.toFixed(1) ?? '?'} MiB/s read${entry.perf.at ? ` (${new Date(entry.perf.at).toLocaleString()})` : ''}`}
+                        >
+                          {entry.perf.seqWriteMBs.toFixed(0)} MiB/s
+                        </span>
+                      ) : entry.perf?.error ? (
+                        <span className="drill-not-tested" title={entry.perf.error}>failed</span>
+                      ) : (
+                        <span className="drill-not-tested">never tested</span>
+                      )}{' '}
+                      <button
+                        className="btn-secondary btn-small"
+                        disabled={perfRunning != null}
+                        onClick={() => void runPerf(entry.path)}
+                      >
+                        {perfRunning === entry.path ? 'Running…' : 'Test'}
+                      </button>
                     </td>
                   </tr>
                 );

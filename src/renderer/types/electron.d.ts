@@ -130,6 +130,17 @@ declare global {
           ok: boolean;
         }>
       >;
+      runDiskPerf: (directory: string) => Promise<{
+        directory: string;
+        at: number;
+        bytes: number;
+        seqWriteMBs: number;
+        seqReadMBs: number;
+        writeDurationMs: number;
+        readDurationMs: number;
+        ok: boolean;
+        error?: string;
+      }>;
       getStorageHealth: () => Promise<
         Array<{
           path: string;
@@ -158,6 +169,13 @@ declare global {
             available: boolean;
             warnings: string[];
           };
+          perf?: {
+            at?: number;
+            seqWriteMBs?: number;
+            seqReadMBs?: number;
+            ok?: boolean;
+            error?: string;
+          } | null;
           score: number;
           status: 'good' | 'degraded' | 'at-risk';
           warnings: string[];

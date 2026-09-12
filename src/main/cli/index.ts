@@ -29,6 +29,7 @@ import { buildParity, verifyParity, repairParityBlock, paritySidecarPath } from 
 import { buildChainHealthReport } from '../backup/chain-health';
 import { detectTamper } from '../utils/tamper';
 import { buildStorageHealthReport } from '../utils/storage-health';
+import { runDiskPerfTest, assessWriteSpeed } from '../utils/disk-perf';
 
 const diskEnumerator = new DiskEnumerator();
 const imagingEngine = new ImagingEngine(diskEnumerator);
@@ -87,6 +88,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdStorageHealth(ctx);
       case 'anomalies':
         return await cmdAnomalies(ctx);
+      case 'perf':
+        return cmdPerf(ctx);
       case 'schedule':
         return await cmdSchedule(ctx);
       case 'prune':
@@ -183,6 +186,13 @@ Commands:
                                          (type-aware for full vs delta), compression-ratio
                                          collapse, throughput collapse, and backups that stopped
                                          arriving. Exits 1 when an anomaly is found.
+  perf --dir <directory> [--size MB] [--json]
+                                          Non-destructive disk write/read performance test on a
+                                          destination: writes a scratch file (default 256 MiB),
+                                          fsyncs, reads it back, then deletes it. Reports
+                                          sustained sequential write/read MiB/s and stores the
+                                          result in opbs-perf.json for the storage-health score.
+                                          Exits 1 when the test cannot run or is unreachable.
   schedule install-backup <name> --config <config.json> [--time HH:MM|--on-login] [--as-system] [--run-as-user]
   schedule install-verify <name> --dir <dir> [--scope newest|all] [--time HH:MM|--on-login] [--run-as-user]
   schedule install-drill <name> --dir <dir> --disk <targetDiskIndex> [--verify] [--time HH:MM|--on-login] [--run-as-user]
@@ -1141,6 +1151,33 @@ async function cmdAnomalies(ctx: CommandContext): Promise<number> {
     if (anomaly.severity !== 'info') failed = true;
   }
   return failed ? 1 : 0;
+}
+
+async function cmdPerf(ctx: CommandContext): Promise<number> {
+  const dir = flagValue(ctx.argv, '--dir');
+  if (!dir) {
+    console.error('Usage: perf --dir <directory> [--size MB] [--json]');
+    return 1;
+  }
+  const sizeMb = Number(flagValue(ctx.argv, '--size'));
+  const result = runDiskPerfTest(dir, Number.isFinite(sizeMb) && sizeMb > 0 ? { sizeBytes: sizeMb * 1024 * 1024 } : {});
+  if (ctx.opts.json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else if (result.ok) {
+    const { penalty, label } = assessWriteSpeed(result.seqWriteMBs);
+    console.log(
+      `${result.directory}\n  write: ${result.seqWriteMBs.toFixed(1)} MiB/s | read: ${result.seqReadMBs.toFixed(1)} MiB/s | ${result.bytes} bytes`
+    );
+    if (label !== 'good') {
+      console.log(`  note: write speed is ${label} for a backup destination (${result.seqWriteMBs.toFixed(0)} MiB/s)`);
+    }
+    if (penalty !== 0) {
+      console.log(`  note: this will subtract ${Math.abs(penalty)} point(s) from the storage-health score`);
+    }
+  } else {
+    console.error(`${result.directory}: write test failed — ${result.error}`);
+  }
+  return result.ok ? 0 : 1;
 }
 
 async function cmdSchedule(ctx: CommandContext): Promise<number> {

@@ -52,6 +52,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   checkDiskHealth: (diskIndex: number) => ipcRenderer.invoke('check-disk-health', diskIndex),
   getMediaHealth: () => ipcRenderer.invoke('get-media-health'),
   getBackupAnomalies: () => ipcRenderer.invoke('get-backup-anomalies'),
+  runDiskPerf: (directory: string) => ipcRenderer.invoke('run-disk-perf', directory),
 
   // Browse backup images (file-level)
   browsePartitions: (imagePath: string) => ipcRenderer.invoke('browse-partitions', imagePath),

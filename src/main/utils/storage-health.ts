@@ -10,6 +10,7 @@ import { readScrubHistory } from '../imaging/scrub';
 import { readDrillHistory } from './drill-history';
 import { paritySidecarPath } from '../imaging/parity';
 import { queryReliability, assessDiskHealth, DiskReliability } from './disk-health';
+import { latestPerf, assessWriteSpeed } from './disk-perf';
 import { logger } from './logger';
 
 /**
@@ -38,6 +39,8 @@ export interface ReliabilitySignals {
   /** Scrub ran and reported a non-ok result (only meaningful if a scrub exists). */
   scrubFailed: boolean;
   hasDrill: boolean;
+  /** Latest sustained sequential write throughput (MiB/s), if a perf test has run. */
+  perfWriteMBs?: number | null;
 }
 
 export interface StorageHealthSmart {
@@ -61,6 +64,13 @@ export interface StorageHealthReport extends ReliabilitySignals {
   lastScrubOk: boolean | null;
   lastDrillAt?: number;
   smart: StorageHealthSmart;
+  perf?: {
+    at?: number;
+    seqWriteMBs?: number;
+    seqReadMBs?: number;
+    ok?: boolean;
+    error?: string;
+  } | null;
   score: number;
   status: 'good' | 'degraded' | 'at-risk';
   warnings: string[];
@@ -88,6 +98,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *  - <8% free space                       -10
  *  - last scrub failed                    -10
  *  - no restore drill ever run            -5
+ *  - sustained write speed < 100 MiB/s    -5 (a backup drive writing slower than
+ *                                          a healthy drive is a reliability risk)
+ *  - sustained write speed < 40 MiB/s    -10
+ *  - sustained write speed < 15 MiB/s    -15
  */
 export function computeReliabilityScore(signals: ReliabilitySignals): { score: number; status: 'good' | 'degraded' | 'at-risk'; warnings: string[] } {
   const warnings: string[] = [];
@@ -96,6 +110,14 @@ export function computeReliabilityScore(signals: ReliabilitySignals): { score: n
   if (!signals.reachable) {
     warnings.push('Destination is currently unreachable');
     score -= 40;
+  }
+
+  if (signals.perfWriteMBs != null && Number.isFinite(signals.perfWriteMBs)) {
+    const { penalty, label } = assessWriteSpeed(signals.perfWriteMBs);
+    if (penalty !== 0) {
+      warnings.push(`Sustained write speed of ${signals.perfWriteMBs.toFixed(0)} MiB/s is ${label} for a backup destination`);
+      score += penalty;
+    }
   }
 
   if (signals.brokenChains > 0) {
@@ -224,6 +246,8 @@ export async function buildStorageHealthReport(
     hasDrill: false,
     smart: { available: false, warnings: [] },
     smartOk: null,
+    perf: null,
+    perfWriteMBs: null,
     scrubFailed: false,
     score: 0,
     status: 'at-risk',
@@ -307,6 +331,23 @@ export async function buildStorageHealthReport(
     }
   }
   report.smartOk = report.smart.available ? report.smart.warnings.length === 0 : null;
+
+  // Latest disk write-perf result (if a test has been run). Best effort.
+  try {
+    const perf = latestPerf(directory);
+    if (perf) {
+      report.perf = {
+        at: perf.at,
+        seqWriteMBs: perf.seqWriteMBs,
+        seqReadMBs: perf.seqReadMBs,
+        ok: perf.ok,
+        error: perf.error
+      };
+      report.perfWriteMBs = typeof perf.seqWriteMBs === 'number' && perf.ok ? perf.seqWriteMBs : null;
+    }
+  } catch {
+    /* ignore */
+  }
 
   const scored = computeReliabilityScore(report);
   report.score = scored.score;
