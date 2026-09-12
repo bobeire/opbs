@@ -26,6 +26,8 @@ import { NativeImagingApi } from '../imaging/imaging-job';
 import { computeAnalytics } from '../utils/backup-analytics';
 import { scrubDirectory, classifyImage } from '../imaging/scrub';
 import { buildParity, verifyParity, repairParityBlock, paritySidecarPath } from '../imaging/parity';
+import { buildChainHealthReport } from '../backup/chain-health';
+import { detectTamper } from '../utils/tamper';
 
 const diskEnumerator = new DiskEnumerator();
 const imagingEngine = new ImagingEngine(diskEnumerator);
@@ -76,6 +78,10 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdScrub(ctx);
       case 'parity':
         return await cmdParity(ctx);
+      case 'chain':
+        return await cmdChainCheck(ctx);
+      case 'tamper':
+        return await cmdTamperCheck(ctx);
       case 'schedule':
         return await cmdSchedule(ctx);
       case 'prune':
@@ -151,6 +157,14 @@ Commands:
   parity verify <image.opbs>             Recompute group parity and flag mismatches.
   parity repair <image.opbs> [--block N] Rebuild a corrupted block from its parity group
                                          (default: repair every block flagged by a verify).
+  chain check --dir <directory> [--json] Check restore-chain integrity: every incremental's
+                                         base image must still be present. Missing delta
+                                         bases (silent deletes) are reported per chain and
+                                         the command exits 1 when any chain is broken.
+  tamper check --dir <directory> [--json] Compare the directory against the last-known-good
+                                         manifest: missing images, size-changed images, and
+                                         unexpected .opbs files are reported (ransomware /
+                                         external modification detection). Exits 1 on drift.
   schedule install-backup <name> --config <config.json> [--time HH:MM|--on-login] [--as-system] [--run-as-user]
   schedule install-verify <name> --dir <dir> [--scope newest|all] [--time HH:MM|--on-login] [--run-as-user]
   schedule install-drill <name> --dir <dir> --disk <targetDiskIndex> [--verify] [--time HH:MM|--on-login] [--run-as-user]
@@ -966,6 +980,71 @@ async function cmdParity(ctx: CommandContext): Promise<number> {
       console.error('Usage: parity build|verify|repair <image.opbs> [--block N]');
       return 1;
   }
+}
+
+async function cmdChainCheck(ctx: CommandContext): Promise<number> {
+  const dir = flagValue(ctx.argv, '--dir');
+  if (!dir) {
+    console.error('Usage: chain check --dir <directory> [--json]');
+    return 1;
+  }
+  const report = buildChainHealthReport(dir);
+  if (ctx.opts.json) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    for (const chain of report.chains) {
+      if (chain.orphaned) {
+        console.log(`  ! ${chain.rootName}: MISSING base ${chain.missingBaseName ?? '(unset)'} (restore impossible)`);
+      } else if (!chain.complete) {
+        console.log(`  ! ${chain.rootName}: broken chain (${chain.itemCount} image(s))`);
+      } else if (chain.itemCount > 1) {
+        console.log(`  + ${chain.rootName}: chain ok (${chain.itemCount} image(s))`);
+      } else {
+        console.log(`  + ${chain.rootName}: ok`);
+      }
+    }
+    for (const name of report.unparseableImages) {
+      console.log(`  ? ${name}: not parseable as an image`);
+    }
+    console.log(
+      `${report.directory}: ${report.completeChains}/${report.chainCount} chains ok, ` +
+        `${report.missingBases.length} missing base(s), ${report.unparseableImages.length} unparseable`
+    );
+  }
+  return report.brokenChains === 0 ? 0 : 1;
+}
+
+async function cmdTamperCheck(ctx: CommandContext): Promise<number> {
+  const dir = flagValue(ctx.argv, '--dir');
+  if (!dir) {
+    console.error('Usage: tamper check --dir <directory> [--json]');
+    return 1;
+  }
+  const report = detectTamper(dir);
+  if (ctx.opts.json) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    if (!report.manifestPresent) {
+      console.log(`${report.directory}: no manifest yet (run a backup to create one), nothing to compare against`);
+      return 1;
+    }
+    for (const m of report.diff.missing) {
+      console.log(`  ! deleted: ${m.name} (was ${m.manifestSize} bytes)`);
+    }
+    for (const s of report.diff.sizeChanged) {
+      console.log(`  ! modified: ${s.name} (manifest ${s.manifestSize} → disk ${s.diskSize} bytes)`);
+    }
+    for (const u of report.diff.unexpected) {
+      console.log(`  ! unexpected: ${u.name} (${u.size} bytes)`);
+    }
+    console.log(
+      `${report.directory}: manifest ${report.manifestUpdatedAt ?? ''} — ` +
+        `${report.diff.missing.length} missing, ${report.diff.sizeChanged.length} modified, ` +
+        `${report.diff.unexpected.length} unexpected`
+    );
+    return report.ok ? 0 : 1;
+  }
+  return report.ok ? 0 : 1;
 }
 
 async function cmdSchedule(ctx: CommandContext): Promise<number> {

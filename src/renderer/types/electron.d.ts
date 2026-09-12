@@ -76,6 +76,39 @@ declare global {
         oldestDate?: number;
         plannedPrune: number;
       }[]>;
+      getBackupIntegrity: () => Promise<
+        Array<{
+          directory: string;
+          chain: {
+            chainCount: number;
+            completeChains: number;
+            brokenChains: number;
+            chains: Array<{
+              rootName: string;
+              rootPath: string;
+              orphaned: boolean;
+              complete: boolean;
+              itemCount: number;
+              oldestTimestamp: number;
+              newestTimestamp: number;
+              missingBaseName?: string;
+              fullImageName?: string;
+            }>;
+            missingBases: Array<{ imageName: string; basePath: string }>;
+            unparseableImages: string[];
+          };
+          tamper: {
+            manifestPresent: boolean;
+            manifestUpdatedAt?: string;
+            ok: boolean;
+            diff: {
+              missing: Array<{ name: string; manifestSize: number }>;
+              sizeChanged: Array<{ name: string; manifestSize: number; diskSize: number }>;
+              unexpected: Array<{ name: string; size: number }>;
+            };
+          };
+        }>
+      >;
       openPath: (filePath: string) => Promise<{ ok: boolean; error?: string }>;
       copyImage: (imagePath: string, destDir: string) => Promise<{ ok: boolean; copied?: string[]; bytes?: number; destPath?: string; error?: string }>;
       uploadToCloud: (imagePath: string) => Promise<{ ok: boolean; uploaded?: string[]; error?: string }>;

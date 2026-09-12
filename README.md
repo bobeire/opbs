@@ -48,6 +48,13 @@ created by **RHITCS** — named in honour of a certain well-preserved pickle.
   runs (Settings → Scheduled Scrub), a Dashboard "Scrub Health" panel, and CLI
   `scrub` / `parity build|verify|repair` commands cover detection, repair, and
   per-image history in an `opbs-scrub.json` sidecar.
+- **Ransomware / tamper resistance**: a backup-integrity layer compares the live
+  backup directory to the last-known-good manifest (rewritten after every backup
+  and prune) and to the chain structure. Missing delta bases (silent deletes
+  that make a chain unrestorable), modified/unexpected images, and unparseable
+  `.opbs` files are reported per destination — CLI `chain check --dir` and
+  `tamper check --dir`, plus a Dashboard "Backup Integrity" panel. Exits 1 and
+  flags the destination whenever drift or broken chains are detected.
 
 ## Tech Stack
 
@@ -567,7 +574,9 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   compression, dedup footprint, chain efficiency, restore-time estimate — CLI
   `analytics` command + Dashboard panel), self-healing scrub with XOR-parity
   repair (`.opar` sidecars, scheduled/manual/CLI, Dashboard "Scrub Health"),
-  360+ unit/integration tests
+  ransomware/tamper resistance (chain-integrity + manifest-drift checks via CLI
+  `chain check` / `tamper check` and a Dashboard "Backup Integrity" panel),
+  370+ unit/integration tests
 - **Planned**: see `ROADMAP.md`. Real WinFsp mounts are verified once the
   WinFsp runtime is installed (detected automatically; the mount bridge is
   unit-tested via in-memory browse sessions).

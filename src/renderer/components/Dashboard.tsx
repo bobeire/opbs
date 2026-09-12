@@ -32,6 +32,7 @@ function Dashboard({ onNavigate }: DashboardProps) {
     totals: { totalDiskBytes: number; totalImageBytes: number; avgCompressionRatio: number };
   } | null>(null);
   const [scrubStatus, setScrubStatus] = useState<any[]>([]);
+  const [integrity, setIntegrity] = useState<any[]>([]);
   const [now, setNow] = useState(0);
 
   const load = useCallback(async () => {
@@ -53,6 +54,8 @@ function Dashboard({ onNavigate }: DashboardProps) {
       }
       const scrubRes = await window.electronAPI.getScrubStatus();
       setScrubStatus(Array.isArray(scrubRes) ? scrubRes : []);
+      const integrityRes = await window.electronAPI.getBackupIntegrity();
+      setIntegrity(Array.isArray(integrityRes) ? integrityRes : []);
     } catch {
       setBackups([]);
       setHealth([]);
@@ -312,6 +315,87 @@ function Dashboard({ onNavigate }: DashboardProps) {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {integrity.length > 0 && (
+        <div className="recent-backups">
+          <div className="recent-backups-head">
+            <h2>Backup Integrity</h2>
+          </div>
+          <table className="backup-table">
+            <thead>
+              <tr>
+                <th>Destination</th>
+                <th>Chains</th>
+                <th>Missing bases</th>
+                <th>Chain status</th>
+                <th>Tamper check</th>
+                <th>Drift vs manifest</th>
+              </tr>
+            </thead>
+            <tbody>
+              {integrity.map((entry) => {
+                const chain = entry.chain ?? {};
+                const tamper = entry.tamper ?? {};
+                const drift =
+                  (tamper.diff?.missing?.length ?? 0) +
+                  (tamper.diff?.sizeChanged?.length ?? 0) +
+                  (tamper.diff?.unexpected?.length ?? 0);
+                return (
+                  <tr key={entry.directory}>
+                    <td className="col-dest" title={entry.directory}>
+                      {entry.directory}
+                    </td>
+                    <td>
+                      {chain.completeChains}/{chain.chainCount}
+                    </td>
+                    <td>{chain.missingBases?.length ?? 0}</td>
+                    <td>
+                      {chain.brokenChains > 0 ? (
+                        <span className="badge badge-err">broken</span>
+                      ) : (
+                        <span className="badge badge-ok">ok</span>
+                      )}
+                    </td>
+                    <td>
+                      {!tamper.manifestPresent ? (
+                        <span className="drill-not-tested">no manifest</span>
+                      ) : tamper.ok ? (
+                        <span className="badge badge-ok">clean</span>
+                      ) : (
+                        <span className="badge badge-err">drifted</span>
+                      )}
+                    </td>
+                    <td>
+                      {tamper.diff?.missing?.length > 0 && (
+                        <span title={(tamper.diff.missing ?? []).map((m) => m.name).join(', ')}>
+                          {`${tamper.diff.missing.length} deleted, `}
+                        </span>
+                      )}
+                      {tamper.diff?.sizeChanged?.length > 0 && (
+                        <span title={(tamper.diff.sizeChanged ?? []).map((m) => m.name).join(', ')}>
+                          {`${tamper.diff.sizeChanged.length} modified, `}
+                        </span>
+                      )}
+                      {tamper.diff?.unexpected?.length > 0 && (
+                        <span title={(tamper.diff.unexpected ?? []).map((m) => m.name).join(', ')}>
+                          {`${tamper.diff.unexpected.length} unexpected`}
+                        </span>
+                      )}
+                      {drift === 0 && (tamper.ok || !tamper.manifestPresent) ? '—' : null}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {integrity.some((e) => (e.chain?.brokenChains ?? 0) > 0 || !(e.tamper?.ok ?? true)) && (
+            <p className="drill-not-tested" style={{ marginTop: '8px' }}>
+              Chains with missing delta bases or manifest drift are not restorable / not trustworthy — investigate
+              before relying on a restore.
+            </p>
+          )}
         </div>
       )}
 

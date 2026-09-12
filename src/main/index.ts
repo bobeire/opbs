@@ -760,6 +760,30 @@ function setupIpcHandlers(): void {
     return out;
   });
 
+  // Ransomware/tamper resistance: chain integrity (missing delta bases) and
+  // manifest-vs-disk drift across every known local destination.
+  ipcMain.handle('get-backup-integrity', async () => {
+    const { buildChainHealthReport } = await import('./backup/chain-health');
+    const { detectTamper } = await import('./utils/tamper');
+    const destinations = getRecentDestinations();
+    const out = [];
+    for (const dir of destinations) {
+      if (dir.startsWith('s3://') || dir.startsWith('sftp://') || dir.startsWith('ftp://')) {
+        continue; // chain integrity is scanned locally
+      }
+      try {
+        out.push({
+          directory: dir,
+          chain: buildChainHealthReport(dir),
+          tamper: detectTamper(dir)
+        });
+      } catch {
+        // destination offline — skip
+      }
+    }
+    return out;
+  });
+
 ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     return { destinations: addRecentDestination(directory) };
   });
