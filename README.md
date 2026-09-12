@@ -83,6 +83,15 @@ created by **RHITCS** — named in honour of a certain well-preserved pickle.
   failures downgraded to informational notes until enough history exists. CLI
   `anomalies check --dir`, Dashboard "Anomaly Detection" panel. Exits 1 on any
   detected deviation.
+- **Age-aware retention / prune reminders**: retention is lineage-aware and
+  refuses to delete the last surviving restore point of a source disk — chains
+  are grouped by the root full's source identity (serial, then model), and when
+  a policy would fully prune a lineage the newest chain's full is rescued
+  (works for `keepFull: 0` and aggressive GFS setups alike; unidentified
+  legacy images are never guarded). Every prune plan also carries reminders:
+  an explicit warning when `keepFull` is 0, and a heads-up before deleting
+  never-verified images. Reminders print in `opbs prune --dry-run` and
+  propagate through the auto-prune, IPC and Dashboard prune counts.
 
 ## Tech Stack
 
@@ -611,8 +620,10 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   disk-wide `media smart` inventory and Dashboard "Media Health" panel),
   anomaly detection (baseline-comparison of run size, compression ratio,
   throughput and cadence gaps against the analytics history — CLI
-  `anomalies check --dir` + Dashboard panel),
-  390+ unit/integration tests
+  `anomalies check --dir` + Dashboard panel), age-aware retention (lineage
+  guard prevents pruning the last surviving restore point of any source disk,
+  with prune reminders for keepFull:0 and unverified-image deletion),
+  400+ unit/integration tests
 - **Planned**: see `ROADMAP.md`. Real WinFsp mounts are verified once the
   WinFsp runtime is installed (detected automatically; the mount bridge is
   unit-tested via in-memory browse sessions).

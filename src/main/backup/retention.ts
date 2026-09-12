@@ -37,6 +37,7 @@ export interface RetentionPlan {
   prune: BackupImageEntry[];
   chains: RetentionChain[];
   reason: Record<string, string>;
+  reminders: string[];
 }
 
 export function scanBackupDirectory(dir: string): BackupImageEntry[] {
@@ -177,6 +178,56 @@ export function planRetention(input: BackupImageEntry[] | string, options: Reten
     }
   }
 
+  // Age-aware lineage guard: never let retention delete the *last surviving
+  // restore point* of a source disk. Chains are grouped by the root full's
+  // source identity (serial, else model). If every chain of a lineage would be
+  // pruned entirely, the newest chain's root full is rescued. Unidentified
+  // images (no serial/model, or synthetic entries passed to this planner) are
+  // never guarded, so this never blocks on legacy or test data.
+  const reminders: string[] = [];
+  {
+    const resolutionCache = new Map<string, string | undefined>();
+    const identityOf = (rootPath: string): string | undefined => {
+      const key = canonical(rootPath);
+      const hit = resolutionCache.get(key);
+      if (hit !== undefined) return hit;
+      let id: string | undefined;
+      try {
+        const info = readImageInfo(rootPath);
+        id = info.header.sourceDiskSerial || info.header.sourceDiskModel || undefined;
+      } catch {
+        id = undefined;
+      }
+      resolutionCache.set(key, id);
+      return id;
+    };
+
+    const lineageChains = new Map<string, RetentionChain[]>();
+    for (const chain of chains) {
+      const id = identityOf(chain.root.path);
+      if (id == null) continue;
+      const list = lineageChains.get(id) ?? [];
+      list.push(chain);
+      lineageChains.set(id, list);
+    }
+
+    for (const [id, group] of lineageChains) {
+      const anySurvivor = group.some((chain) => chain.items.some((item) => keep.has(canonical(item.path))));
+      if (anySurvivor) continue;
+      const newestChain = [...group].sort((a, b) => b.newestTimestamp - a.newestTimestamp)[0];
+      const rootKey = canonical(newestChain.root.path);
+      keep.add(rootKey);
+      reason[rootKey] = `last surviving backup of source disk ${id} — pruning would leave no restore point for it`;
+      reminders.push(
+        `Retained ${newestChain.root.name}: lone surviving restore point of source disk ${id}.`
+      );
+    }
+
+    if (options.keepFull === 0) {
+      reminders.push('keepFull is 0 — chain retention is disabled; only the age-based grace window protects images from pruning.');
+    }
+  }
+
   // Invariant: never delete a base image that a kept delta still references.
   // Promote such bases into the keep set until stable.
   const byCanon = new Map(entries.map((e) => [canonical(e.path), e]));
@@ -207,8 +258,17 @@ export function planRetention(input: BackupImageEntry[] | string, options: Reten
   // them first never orphanes a still-kept base chain.
   finalPrune.sort((a, b) => b.timestamp - a.timestamp);
 
+  // Soft reminder: never silently delete unverified images (encrypted images
+  // may legitimately lack the flag, so they are excluded from the reminder).
+  const unverifiedPruned = finalPrune.filter((e) => !e.verified && !e.encrypted).length;
+  if (unverifiedPruned > 0) {
+    reminders.push(
+      `${unverifiedPruned} unverified image(s) are scheduled for deletion — run 'opbs verify --dir ${typeof input === 'string' ? input : '<destination>'} --scope all' first if any of them should be preserved.`
+    );
+  }
+
   const keepList = entries.filter((e) => keep.has(canonical(e.path)));
-  return { keep: keepList, prune: finalPrune, chains, reason };
+  return { keep: keepList, prune: finalPrune, chains, reason, reminders };
 }
 
 export async function applyRetention(dir: string, options: RetentionOptions): Promise<RetentionPlan> {

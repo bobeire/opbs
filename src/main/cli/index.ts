@@ -1275,7 +1275,10 @@ async function cmdPrune(ctx: CommandContext): Promise<number> {
     console.log(`  - ${entry.name} (${plan.reason[path.resolve(entry.path)] ?? 'policy'})`);
   }
   console.log(`Kept ${plan.keep.length} image(s).`);
-  return plan.prune.length > 0 && !dryRun ? 0 : 0;
+  for (const reminder of plan.reminders ?? []) {
+    console.log(`  ! ${reminder}`);
+  }
+  return 0;
 }
 
 async function cmdHealth(ctx: CommandContext): Promise<number> {
