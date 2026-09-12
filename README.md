@@ -3,6 +3,8 @@
 A FOSS disk imaging backup solution for Windows, inspired by Macrium Reflect.
 created by **RHITCS** — named in honour of a certain well-preserved pickle.
 
+Website: https://opbs.rhitcs.com
+
 ## Features
 
 - **Disk & partition imaging** with per-block CRC-32 integrity checking

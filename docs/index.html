@@ -274,16 +274,52 @@
       <div class="card">
         <h3><span class="icon">⏰</span> Scheduled backups</h3>
         <p>
-          Cron-based in-app scheduling plus native Windows Task Scheduler
-          integration for fully unattended headless backups and verification.
+          Schedule with a friendly day-picker — every day, chosen weekdays, or
+          a specific day of the month plus a time — with a raw cron editor for
+          power users. Runs in-app while open, and native Windows Task
+          Scheduler integration covers fully unattended headless backups and
+          verification. Network shares (UNC or smb://) work as scheduled
+          destinations too.
         </p>
       </div>
 
       <div class="card">
-        <h3><span class="icon">📊</span> Dashboard & health</h3>
+        <h3><span class="icon">🌐</span> Network-share destinations</h3>
         <p>
-          Destination free-space indicators, SMART/disk-health reporting and
-          destination health checks surfaced before every backup starts.
+          Back up to local folders, network shares (UNC <code>\\server\share</code>),
+          and <code>file://</code> / <code>smb://</code> URIs. S3 buckets write
+          locally then upload (SigV4), and SFTP servers stream the finished
+          image over the ssh2 client.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3><span class="icon">🩺</span> VSS maintenance</h3>
+        <p>
+          Keep Volume Shadow Copy healthy: service state and start type, a deep
+          writer/provider inventory, a non-destructive snapshot smoke test, and
+          one-click repair that re-registers the core VSS DLLs and starts the
+          service.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3><span class="icon">📊</span> Storage health &amp; disk performance</h3>
+        <p>
+          A transparent 0–100 reliability score per destination combining free
+          space, chain integrity, verification, scrub and drill coverage, and
+          SMART health. A non-destructive write/read benchmark (256 MiB scratch
+          file) feeds the score and flags slow or failing drives up front.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3><span class="icon">🧩</span> Parity self-healing</h3>
+        <p>
+          Every backup gets an XOR-parity sidecar (<code>.opar</code>). An idle
+          or scheduled scrub re-reads every block, re-checks CRCs, and rebuilds
+          any single corrupted block in place — bit-rot protection that works
+          on encrypted images without a passphrase.
         </p>
       </div>
 
