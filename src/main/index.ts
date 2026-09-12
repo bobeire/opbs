@@ -723,6 +723,43 @@ function setupIpcHandlers(): void {
     };
   });
 
+  // Self-healing: kick off a scrub (read back + parity repair) in the background.
+  ipcMain.handle('start-scrub', async (_, directory: string, scope?: string) => {
+    if (!directory) {
+      return { started: false, error: 'No directory given' };
+    }
+    void scheduler.runScrub(directory, (scope === 'newest' ? 'newest' : 'all'), {
+      label: 'Manual scrub',
+      notifyOnFailure: true,
+      alertAfter: 2
+    });
+    return { started: true };
+  });
+
+  // Latest scrub history per known destination.
+  ipcMain.handle('get-scrub-status', async () => {
+    const { readScrubHistory } = await import('./imaging/scrub');
+    const destinations = getRecentDestinations();
+    const out = [];
+    for (const dir of destinations) {
+      try {
+        const history = readScrubHistory(dir);
+        const latest = history[0] ?? null;
+        out.push({
+          directory: dir,
+          latest,
+          lastOk: latest ? latest.ok : null,
+          lastScrubAt: latest ? latest.at : 0,
+          totalRepaired: history.reduce((sum, h) => sum + (h.repaired ?? 0), 0),
+          corruptImages: history.filter((h) => !h.ok).length
+        });
+      } catch {
+        // destination offline — skip
+      }
+    }
+    return out;
+  });
+
 ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     return { destinations: addRecentDestination(directory) };
   });

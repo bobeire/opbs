@@ -9,6 +9,8 @@ import { JobProgress, JobResult } from '../imaging/imaging-job';
 import { normalizeBackupLocation } from '../utils/location';
 import { recordBackupDestination } from '../utils/recent';
 import { recordBackupAnalytics } from '../utils/backup-analytics';
+import { buildParity } from '../imaging/parity';
+import { logger } from '../utils/logger';
 
 export type BackupConfig = BackupJobConfig;
 
@@ -76,6 +78,13 @@ export class BackupManager extends EventEmitter {
 
       recordBackupDestination(config.destinationPath);
       recordBackupAnalytics(config.destinationPath, result.imagePath, result);
+
+      // Self-healing: build XOR parity sidecar for bit-rot protection.
+      try {
+        buildParity(result.imagePath);
+      } catch (error) {
+        logger.warn(`Could not build parity for ${result.imagePath}: ${error instanceof Error ? error.message : error}`);
+      }
 
       this.emitProgress({
         phase: 'completed',

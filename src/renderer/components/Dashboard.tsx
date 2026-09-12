@@ -31,6 +31,7 @@ function Dashboard({ onNavigate }: DashboardProps) {
     destinations: any[];
     totals: { totalDiskBytes: number; totalImageBytes: number; avgCompressionRatio: number };
   } | null>(null);
+  const [scrubStatus, setScrubStatus] = useState<any[]>([]);
   const [now, setNow] = useState(0);
 
   const load = useCallback(async () => {
@@ -50,6 +51,8 @@ function Dashboard({ onNavigate }: DashboardProps) {
       if (analyticsRes && Array.isArray(analyticsRes.destinations)) {
         setAnalytics(analyticsRes);
       }
+      const scrubRes = await window.electronAPI.getScrubStatus();
+      setScrubStatus(Array.isArray(scrubRes) ? scrubRes : []);
     } catch {
       setBackups([]);
       setHealth([]);
@@ -57,6 +60,21 @@ function Dashboard({ onNavigate }: DashboardProps) {
       setLoading(false);
     }
   }, []);
+
+  const runScrub = useCallback(async () => {
+    setBusy('scrub');
+    try {
+      const dirs = destinations.length > 0 ? destinations : (await window.electronAPI.listRecentBackups()).destinations ?? [];
+      for (const dir of dirs) {
+        await window.electronAPI.startScrub(dir, 'all');
+      }
+      setMessage({ kind: 'ok', text: `Scrub started in the background for ${dirs.length} destination(s)` });
+    } catch {
+      setMessage({ kind: 'err', text: 'Could not start scrub' });
+    } finally {
+      setBusy(null);
+    }
+  }, [destinations]);
 
   useEffect(() => {
     let cancelled = false;
@@ -249,6 +267,49 @@ function Dashboard({ onNavigate }: DashboardProps) {
                   </tr>
                 );
               })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {scrubStatus.length > 0 && (
+        <div className="recent-backups">
+          <div className="recent-backups-head">
+            <h2>Scrub Health</h2>
+            <button className="btn btn-secondary" disabled={busy === 'scrub'} onClick={() => void runScrub()}>
+              {busy === 'scrub' ? 'Starting…' : 'Run scrub now'}
+            </button>
+          </div>
+          <table className="backup-table">
+            <thead>
+              <tr>
+                <th>Destination</th>
+                <th>Last scrub</th>
+                <th>Status</th>
+                <th>Total repaired</th>
+                <th>Corrupt images</th>
+              </tr>
+            </thead>
+            <tbody>
+              {scrubStatus.map((s) => (
+                <tr key={s.directory}>
+                  <td className="col-dest" title={s.directory}>
+                    {s.directory}
+                  </td>
+                  <td>{s.lastScrubAt ? formatDate(s.lastScrubAt) : 'never'}</td>
+                  <td>
+                    {s.lastScrubAt === 0 ? (
+                      <span className="drill-not-tested">never scrubbed</span>
+                    ) : s.lastOk ? (
+                      <span className="badge badge-ok">ok</span>
+                    ) : (
+                      <span className="badge badge-err">needs attention</span>
+                    )}
+                  </td>
+                  <td>{s.totalRepaired}</td>
+                  <td>{s.corruptImages}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>

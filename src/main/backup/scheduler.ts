@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { BackupManager, BackupConfig } from '../backup/manager';
-import { ScheduledBackup, ScheduledVerification, ScheduledRestoreDrill, SettingsManager } from '../utils/settings-manager';
+import { ScheduledBackup, ScheduledVerification, ScheduledRestoreDrill, ScheduledScrub, SettingsManager } from '../utils/settings-manager';
 import { applyRetention, findNewestImage, scanBackupDirectory } from './retention';
 import { summarizeImage } from '../imaging/restore-engine';
 import { recordDrillResult } from '../utils/drill-history';
@@ -63,6 +63,7 @@ export class BackupScheduler {
   private settingsManager: SettingsManager;
   private verifyFailures = new ConsecutiveFailureTracker();
   private drillFailures = new ConsecutiveFailureTracker();
+  private scrubFailures = new ConsecutiveFailureTracker();
   private retries: Map<string, RetryState> = new Map();
 
   constructor(backupManager: BackupManager, settingsManager: SettingsManager) {
@@ -89,6 +90,10 @@ export class BackupScheduler {
 
     if (settings.scrubWhileIdle && settings.backupLocation) {
       this.scheduleScrub(settings.scrubIntervalHours);
+    }
+
+    if (settings.scheduledScrub.enabled && settings.scheduledScrub.destinationPath) {
+      this.scheduleConfiguredScrub(settings.scheduledScrub);
     }
 
     logger.info(`Scheduler started with ${this.tasks.size} tasks`);
@@ -183,15 +188,39 @@ export class BackupScheduler {
     const task = getCron().schedule(`*/${everyMinutes} * * * *`, () => {
       const settings = this.settingsManager.getSettings();
       if (!settings.backupLocation) return;
-      void this.runVerify(settings.backupLocation, 'newest', {
+      void this.runScrub(settings.backupLocation, 'newest', {
         label: 'Idle scrub',
         notifyOnFailure: true,
-        alertAfter: 2,
-        prune: true
+        alertAfter: 2
       });
     });
     this.tasks.set(SCRUB_TASK_ID, task);
-    logger.info(`Idle scrub scheduled every ${everyMinutes} minutes`);
+    logger.info(`Idle scrub scheduled every ${everyMinutes} minutes (with parity repair)`);
+    return true;
+  }
+
+  /** Scheduled scrub with its own cron expression, scope and destination. */
+  scheduleConfiguredScrub(config: ScheduledScrub): boolean {
+    const existing = this.tasks.get(SCRUB_TASK_ID);
+    if (existing) {
+      existing.stop();
+      this.tasks.delete(SCRUB_TASK_ID);
+    }
+
+    if (!getCron().validate(config.cronExpression)) {
+      logger.error(`Invalid cron expression for scrub: ${config.cronExpression}`);
+      return false;
+    }
+
+    const task = getCron().schedule(config.cronExpression, () => {
+      void this.runScrub(config.destinationPath, config.scope, {
+        label: 'Scheduled scrub',
+        notifyOnFailure: config.notifyOnFailure,
+        alertAfter: config.alertAfter ?? 2
+      });
+    });
+    this.tasks.set(SCRUB_TASK_ID, task);
+    logger.info(`Scheduled scrub at ${config.cronExpression} (scope: ${config.scope}, repair enabled)`);
     return true;
   }
 
@@ -449,6 +478,107 @@ export class BackupScheduler {
                 logger.error(`${opts.label} retention prune failed:`, error);
               }
             }
+          }
+        } catch (error) {
+          logger.error(`${opts.label} result handling failed:`, error);
+        } finally {
+          try {
+            fs.rmSync(outPath, { force: true });
+          } catch {
+            /* best-effort */
+          }
+          resolve();
+        }
+      });
+    });
+  }
+
+  /**
+   * Self-healing scrub in a detached child (`--cli scrub --dir ... --repair`):
+   * read back every block, rebuild corrupted blocks from `.opar` parity, and
+   * alert only after `alertAfter` consecutive runs that still fail.
+   */
+  runScrub(
+    destinationPath: string,
+    scope: 'newest' | 'all',
+    opts: { label: string; notifyOnFailure: boolean; alertAfter: number }
+  ): Promise<void> {
+    const outPath = path.join(os.tmpdir(), `opbs-scrub-${Date.now()}.json`);
+
+    const args: string[] = [];
+    const app = electronApp();
+    if (app?.isPackaged) {
+      args.push('--cli', 'scrub', '--dir', destinationPath, '--scope', scope, '--repair', '--json', '--json-out', outPath);
+    } else {
+      args.push(
+        app ? app.getAppPath() : process.cwd(),
+        '--cli', 'scrub', '--dir', destinationPath, '--scope', scope, '--repair', '--json', '--json-out', outPath
+      );
+    }
+
+    return new Promise<void>((resolve) => {
+      const child = spawn(process.execPath, args, {
+        windowsHide: true,
+        detached: true,
+        stdio: 'ignore'
+      });
+      child.unref();
+      child.on('error', (error) => {
+        logger.error(`${opts.label} could not start:`, error);
+        resolve();
+      });
+
+      child.on('close', async () => {
+        try {
+          if (!fs.existsSync(outPath)) {
+            logger.error(`${opts.label} produced no result`);
+            return;
+          }
+          const result = JSON.parse(fs.readFileSync(outPath, 'utf-8')) as {
+            ok: boolean;
+            checked: number;
+            failed: number;
+            skippedEncrypted: number;
+            repairedBlocks: number;
+          };
+          if (result.repairedBlocks > 0) {
+            logger.info(
+              `${opts.label} self-healed ${result.repairedBlocks} block(s) from parity in ${destinationPath}`
+            );
+          }
+          logger.info(
+            `${opts.label} finished: ${result.checked} checked, ${result.failed} still failing, ` +
+              `${result.repairedBlocks} repaired, ${result.skippedEncrypted} skipped (encrypted)`
+          );
+
+          if (result.failed > 0) {
+            this.scrubFailures.record(false);
+            if (opts.notifyOnFailure && this.scrubFailures.shouldAlert(opts.alertAfter)) {
+              const settings = this.settingsManager.getSettings();
+              const body = `${result.failed} image(s) still failed scrub in ${destinationPath} ` +
+                `after ${result.repairedBlocks} parity repair(s). Restore may be impossible.`;
+              broadcastActivity({
+                kind: 'failure',
+                title: 'OPBS scrub FAILED',
+                body,
+                backupName: opts.label,
+                bytesWritten: 0,
+                destinationPath,
+                error: body,
+                timestamp: new Date().toISOString()
+              });
+              await tryNotify(
+                {
+                  title: 'OPBS scrub FAILED',
+                  body,
+                  severity: 'error'
+                },
+                settings.notifications.webhookUrl || ''
+              );
+              this.scrubFailures.reset();
+            }
+          } else {
+            this.scrubFailures.record(true);
           }
         } catch (error) {
           logger.error(`${opts.label} result handling failed:`, error);

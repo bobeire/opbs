@@ -53,6 +53,17 @@ declare global {
         }>;
         totals: { totalDiskBytes: number; totalImageBytes: number; avgCompressionRatio: number };
       }>;
+      startScrub: (directory: string, scope?: string) => Promise<{ started: boolean; error?: string }>;
+      getScrubStatus: () => Promise<
+        Array<{
+          directory: string;
+          latest: any;
+          lastOk: boolean | null;
+          lastScrubAt: number;
+          totalRepaired: number;
+          corruptImages: number;
+        }>
+      >;
       destinationHealth: (destinations: string[]) => Promise<{
         path: string;
         reachable: boolean;

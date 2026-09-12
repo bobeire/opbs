@@ -24,6 +24,8 @@ export interface AppSettings {
   backupProfiles: BackupProfile[];
   /** Idle background scrub: proactively re-verify the newest images. */
   scrubWhileIdle: boolean;
+  /** Scheduled self-healing scrub: read back + repair from `.opar` parity. */
+  scheduledScrub: ScheduledScrub;
   /** Anonymous crash/error reporting (opt-in). */
   errorReporting: ErrorReportingConfig;
   /** Register OPBS as the Windows handler/context menu for `.opbs` images. */
@@ -76,6 +78,18 @@ export interface ScheduledRestoreDrill {
   /** Verify every chain image before writing (default true). */
   verifyBeforeWrite?: boolean;
   /** Alert (webhook/toast) only after this many consecutive failures. */
+  alertAfter?: number;
+}
+
+export interface ScheduledScrub {
+  enabled: boolean;
+  cronExpression: string;
+  destinationPath: string;
+  scope: 'newest' | 'all';
+  /** Rebuild corrupted blocks from `.opar` parity when available. */
+  repair: boolean;
+  notifyOnFailure: boolean;
+  /** Alert (webhook/toast) only after this many consecutive failing scrubs. */
   alertAfter?: number;
 }
 
@@ -145,6 +159,15 @@ const DEFAULT_SETTINGS: AppSettings = {
     targetDiskIndex: 0,
     notifyOnFailure: true,
     verifyBeforeWrite: true,
+    alertAfter: 2
+  },
+  scheduledScrub: {
+    enabled: false,
+    cronExpression: '0 4 * * 1',
+    destinationPath: '',
+    scope: 'all',
+    repair: true,
+    notifyOnFailure: true,
     alertAfter: 2
   },
   scheduledBackups: [],

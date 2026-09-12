@@ -26,6 +26,16 @@ interface ScheduledRestoreDrill {
   alertAfter?: number;
 }
 
+interface ScheduledScrub {
+  enabled: boolean;
+  cronExpression: string;
+  destinationPath: string;
+  scope: 'newest' | 'all';
+  repair: boolean;
+  notifyOnFailure: boolean;
+  alertAfter?: number;
+}
+
 interface S3Profile {
   region: string;
   endpoint: string;
@@ -116,6 +126,7 @@ interface Settings {
   notifications: NotificationSettings;
   scheduledVerification: ScheduledVerification;
   scheduledDrill: ScheduledRestoreDrill;
+  scheduledScrub: ScheduledScrub;
   scheduledBackups: ScheduledBackup[];
   cloud: CloudSettings;
   errorReporting: { enabled: boolean; endpoint: string };
@@ -152,6 +163,15 @@ const DEFAULT_SETTINGS: Settings = {
     targetDiskIndex: 0,
     notifyOnFailure: true,
     verifyBeforeWrite: true,
+    alertAfter: 2
+  },
+  scheduledScrub: {
+    enabled: false,
+    cronExpression: '0 4 * * 1',
+    destinationPath: '',
+    scope: 'all',
+    repair: true,
+    notifyOnFailure: true,
     alertAfter: 2
   },
   scheduledBackups: [],
@@ -216,6 +236,7 @@ function Settings() {
     notifications: { ...DEFAULT_SETTINGS.notifications, ...(loaded?.notifications || {}) },
     scheduledVerification: { ...DEFAULT_SETTINGS.scheduledVerification, ...(loaded?.scheduledVerification || {}) },
     scheduledDrill: { ...DEFAULT_SETTINGS.scheduledDrill, ...(loaded?.scheduledDrill || {}) },
+    scheduledScrub: { ...DEFAULT_SETTINGS.scheduledScrub, ...(loaded?.scheduledScrub || {}) },
     cloud: {
       s3: { ...DEFAULT_SETTINGS.cloud.s3, ...(loaded?.cloud?.s3 || {}) },
       sftp: { ...DEFAULT_SETTINGS.cloud.sftp, ...(loaded?.cloud?.sftp || {}) }
@@ -240,6 +261,13 @@ function Settings() {
     const dir = await window.electronAPI.selectDirectory();
     if (dir) {
       handleChange('scheduledDrill', { ...settings.scheduledDrill, destinationPath: dir });
+    }
+  };
+
+  const handleSelectScrubDir = async () => {
+    const dir = await window.electronAPI.selectDirectory();
+    if (dir) {
+      handleChange('scheduledScrub', { ...settings.scheduledScrub, destinationPath: dir });
     }
   };
 
@@ -814,6 +842,108 @@ function Settings() {
                   }
                 />
                 Notify when a drill fails
+              </label>
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="settings-section">
+        <h2>Scheduled Scrub</h2>
+        <p className="field-hint">
+          Self-healing against bit-rot: read back every block of every image on
+          a schedule and rebuild any corrupted block from the XOR parity
+          sidecar (<code>.opar</code>) written automatically after each backup.
+          A block is repaired — not just reported — whenever parity exists.
+        </p>
+
+        <div className="setting-item">
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={settings.scheduledScrub.enabled}
+              onChange={(e) =>
+                handleChange('scheduledScrub', {
+                  ...settings.scheduledScrub,
+                  enabled: e.target.checked
+                })
+              }
+            />
+            Enable scheduled scrub
+          </label>
+        </div>
+
+        {settings.scheduledScrub.enabled && (
+          <>
+            <div className="setting-item">
+              <label>Cron expression:</label>
+              <input
+                type="text"
+                value={settings.scheduledScrub.cronExpression}
+                onChange={(e) =>
+                  handleChange('scheduledScrub', {
+                    ...settings.scheduledScrub,
+                    cronExpression: e.target.value
+                  })
+                }
+                placeholder="0 4 * * 1 (weekly Monday at 04:00)"
+              />
+            </div>
+            <div className="setting-item">
+              <label>Backup directory:</label>
+              <div className="path-input">
+                <input
+                  type="text"
+                  value={settings.scheduledScrub.destinationPath}
+                  readOnly
+                  placeholder="Select the folder with images to scrub..."
+                />
+                <button onClick={handleSelectScrubDir}>Browse</button>
+              </div>
+            </div>
+            <div className="setting-item">
+              <label>Scope:</label>
+              <select
+                value={settings.scheduledScrub.scope}
+                onChange={(e) =>
+                  handleChange('scheduledScrub', {
+                    ...settings.scheduledScrub,
+                    scope: e.target.value as 'newest' | 'all'
+                  })
+                }
+              >
+                <option value="all">All images</option>
+                <option value="newest">Newest image only</option>
+              </select>
+            </div>
+            <div className="setting-item">
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={settings.scheduledScrub.repair}
+                  onChange={(e) =>
+                    handleChange('scheduledScrub', {
+                      ...settings.scheduledScrub,
+                      repair: e.target.checked
+                    })
+                  }
+                />
+                Repair corrupted blocks from parity when available
+              </label>
+            </div>
+            <div className="setting-item">
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={settings.scheduledScrub.notifyOnFailure}
+                  onChange={(e) =>
+                    handleChange('scheduledScrub', {
+                      ...settings.scheduledScrub,
+                      notifyOnFailure: e.target.checked
+                    })
+                  }
+                />
+                Notify when a scrub still reports failures
               </label>
             </div>
           </>

@@ -24,6 +24,8 @@ import { applyRetentionS3, planRetentionS3 } from '../backup/retention-s3';
 import { loadNative } from '../utils/native-loader';
 import { NativeImagingApi } from '../imaging/imaging-job';
 import { computeAnalytics } from '../utils/backup-analytics';
+import { scrubDirectory, classifyImage } from '../imaging/scrub';
+import { buildParity, verifyParity, repairParityBlock, paritySidecarPath } from '../imaging/parity';
 
 const diskEnumerator = new DiskEnumerator();
 const imagingEngine = new ImagingEngine(diskEnumerator);
@@ -70,6 +72,10 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdClone(ctx);
       case 'verify':
         return await cmdVerify(ctx);
+      case 'scrub':
+        return await cmdScrub(ctx);
+      case 'parity':
+        return await cmdParity(ctx);
       case 'schedule':
         return await cmdSchedule(ctx);
       case 'prune':
@@ -134,6 +140,17 @@ Commands:
   verify <image.opbs> [--passphrase p] Verify a single image (no elevation needed).
   verify --dir <directory> [--scope newest|all] [--passphrase p] [--json-out FILE]
                                          Verify images in a directory.
+  scrub --dir <directory> [--scope newest|all] [--repair] [--passphrase p] [--json] [--json-out FILE]
+                                         Idle scrub: read back every block of every image
+                                         and report bit-rot per block. With --repair, blocks
+                                         with a .opar sidecar are rebuilt from XOR parity
+                                         (a corrupt block is fixed, not just reported) and
+                                         the image is re-verified. Without parity data the
+                                         image is reported as unprotected.
+  parity build <image.opbs>              Build/rebuild the XOR parity sidecar (.opar).
+  parity verify <image.opbs>             Recompute group parity and flag mismatches.
+  parity repair <image.opbs> [--block N] Rebuild a corrupted block from its parity group
+                                         (default: repair every block flagged by a verify).
   schedule install-backup <name> --config <config.json> [--time HH:MM|--on-login] [--as-system] [--run-as-user]
   schedule install-verify <name> --dir <dir> [--scope newest|all] [--time HH:MM|--on-login] [--run-as-user]
   schedule install-drill <name> --dir <dir> --disk <targetDiskIndex> [--verify] [--time HH:MM|--on-login] [--run-as-user]
@@ -840,6 +857,115 @@ async function verifyDirectory(
     );
   }
   return summary.failed === 0 ? 0 : 1;
+}
+
+async function cmdScrub(ctx: CommandContext): Promise<number> {
+  const dir = flagValue(ctx.argv, '--dir');
+  if (!dir) {
+    console.error('Usage: scrub --dir <directory> [--scope newest|all] [--repair] [--passphrase p] [--json] [--json-out FILE]');
+    return 1;
+  }
+  const scope = (flagValue(ctx.argv, '--scope') ?? 'all') as 'newest' | 'all';
+  const repair = ctx.argv.includes('--repair');
+  const passphrase = flagValue(ctx.argv, '--passphrase');
+  const jsonOutPath = flagValue(ctx.argv, '--json-out');
+
+  const summary = scrubDirectory(dir, { scope, repair, passphrase });
+  if (jsonOutPath) {
+    fs.writeFileSync(jsonOutPath, JSON.stringify(summary, null, 2), 'utf-8');
+  }
+  if (ctx.opts.json) {
+    console.log(JSON.stringify(summary, null, 2));
+    return summary.ok ? 0 : 1;
+  }
+  for (const image of summary.images) {
+    if (image.stillFailed > 0) {
+      console.log(`  ! ${image.name}: ${image.firstError ?? 'corrupt blocks remain'}`);
+    } else if (image.repaired > 0) {
+      console.log(`  + ${image.name}: repaired ${image.repaired} block(s)`);
+    } else if (image.parityPresent && image.blocksChecked > 0) {
+      console.log(`  + ${image.name} (${image.blocksChecked} blocks, parity protected)`);
+    } else if (image.blocksChecked > 0) {
+      console.log(`  + ${image.name} (${image.blocksChecked} blocks, no parity sidecar)`);
+    } else {
+      console.log(`  ~ ${image.name} (no block data)`);
+    }
+  }
+  console.log(
+    `${summary.directory}: ${summary.okCount} ok, ${summary.failed} failed, ` +
+      `${summary.skippedEncrypted} skipped (encrypted), ${summary.repairedBlocks} block(s) repaired`
+  );
+  return summary.ok ? 0 : 1;
+}
+
+async function cmdParity(ctx: CommandContext): Promise<number> {
+  const action = ctx.argv[0];
+  const imagePath = ctx.argv[1];
+  if (!action || !imagePath) {
+    console.error('Usage: parity build|verify|repair <image.opbs> [--block N]');
+    return 1;
+  }
+  if (!fs.existsSync(imagePath)) {
+    console.error(`Image does not exist: ${imagePath}`);
+    return 1;
+  }
+
+  switch (action) {
+    case 'build': {
+      const report = buildParity(imagePath);
+      console.log(
+        `Built ${report.groups} parity group(s) covering ${report.blocksProtected} block(s) ` +
+          `(${report.parityBytes} parity bytes) -> ${paritySidecarPath(imagePath)}`
+      );
+      return 0;
+    }
+    case 'verify': {
+      const report = verifyParity(imagePath);
+      if (report.ok) {
+        console.log(`Parity OK (${report.groupsChecked} group(s) matched)`);
+        return 0;
+      }
+      console.error(
+        `Parity mismatch in ${report.mismatchedGroups.length} group(s) — ` +
+          `corruption detected (image or sidecar); run 'parity repair' after confirming block damage`
+      );
+      return 1;
+    }
+    case 'repair': {
+      const blockFlag = flagValue(ctx.argv, '--block');
+      if (blockFlag) {
+        const block = parseInt(blockFlag, 10);
+        if (!Number.isInteger(block)) {
+          console.error('--block must be an integer block index');
+          return 1;
+        }
+        const report = repairParityBlock(imagePath, block);
+        console.log(`Block ${block} repaired: ${report.message ?? 'frame rewritten'}`);
+        return 0;
+      }
+      const scan = classifyImage(imagePath);
+      const bad = scan.checks.filter((c) => !c.ok);
+      if (bad.length === 0) {
+        console.log('No corruption found; nothing to repair');
+        return 0;
+      }
+      let failed = 0;
+      for (const block of bad) {
+        try {
+          const report = repairParityBlock(imagePath, block.blockIndex);
+          console.log(`Repaired block ${block.blockIndex}`);
+          void report;
+        } catch (error) {
+          console.error(`Block ${block.blockIndex} NOT repaired: ${error instanceof Error ? error.message : error}`);
+          failed++;
+        }
+      }
+      return failed === 0 ? 0 : 1;
+    }
+    default:
+      console.error('Usage: parity build|verify|repair <image.opbs> [--block N]');
+      return 1;
+  }
 }
 
 async function cmdSchedule(ctx: CommandContext): Promise<number> {

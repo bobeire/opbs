@@ -40,6 +40,14 @@ created by **RHITCS** — named in honour of a certain well-preserved pickle.
   cached after every backup. Surfaced in the Dashboard and via a CLI
   `analytics <directory>` command. Tells you how much disk a chain truly
   covers and whether your increments are actually shrinking data re-stored.
+- **Self-healing against bit-rot**: every backup gets a `.opar` XOR-parity
+  sidecar (PAR2-style groups of 31 blocks over the stored frame bytes — works
+  for encrypted images too, no passphrase needed to verify or repair). An idle
+  or manual scrub reads every block back, re-checks frame/raw CRCs, and
+  rebuilds any single damaged block in place from the parity group; scheduled
+  runs (Settings → Scheduled Scrub), a Dashboard "Scrub Health" panel, and CLI
+  `scrub` / `parity build|verify|repair` commands cover detection, repair, and
+  per-image history in an `opbs-scrub.json` sidecar.
 
 ## Tech Stack
 
@@ -557,7 +565,9 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   (scheduled scratch-disk restore + on-disk filesystem validation, per-image
   "drill-tested" status), backup analytics/churn forensics (per-chain
   compression, dedup footprint, chain efficiency, restore-time estimate — CLI
-  `analytics` command + Dashboard panel), 350+ unit/integration tests
+  `analytics` command + Dashboard panel), self-healing scrub with XOR-parity
+  repair (`.opar` sidecars, scheduled/manual/CLI, Dashboard "Scrub Health"),
+  360+ unit/integration tests
 - **Planned**: see `ROADMAP.md`. Real WinFsp mounts are verified once the
   WinFsp runtime is installed (detected automatically; the mount bridge is
   unit-tested via in-memory browse sessions).
