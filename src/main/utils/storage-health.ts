@@ -158,7 +158,7 @@ export function computeReliabilityScore(signals: ReliabilitySignals): { score: n
   return { score, status, warnings };
 }
 
-async function resolveDiskFor(directory: string): Promise<{ diskIndex?: number; driveLetter?: string }> {
+export async function resolveDestinationDisk(directory: string): Promise<{ diskIndex?: number; driveLetter?: string }> {
   if (isNonFilesystemLocation(directory)) {
     return {};
   }
@@ -195,7 +195,7 @@ export async function buildStorageHealthReport(
   options: { keepFull: number; keepDeltasPerFull: number; retentionDays: number; autoCleanup: boolean },
   deps: StorageHealthDeps = {}
 ): Promise<StorageHealthReport> {
-  const resolveDisk = deps.resolveDisk ?? resolveDiskFor;
+  const resolveDisk = deps.resolveDisk ?? resolveDestinationDisk;
   const querySmart = deps.querySmart ?? queryReliability;
 
   const capacity = await destinationHealth(directory, options);

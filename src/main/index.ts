@@ -915,6 +915,12 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     return checkDiskHealth(diskIndex);
   });
 
+  // SMART health inventory across every physical disk (not just destinations).
+  ipcMain.handle('get-media-health', async () => {
+    const { inventoryMediaHealth } = await import('./utils/media-health');
+    return inventoryMediaHealth();
+  });
+
   // File browsing over a backup image
   ipcMain.handle('browse-partitions', async (_, imagePath: string) => {
     const format = detectMacriumFormat(imagePath);

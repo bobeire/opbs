@@ -64,6 +64,15 @@ created by **RHITCS** — named in honour of a certain well-preserved pickle.
   transparent 0–100 "reliability" score with a good/degraded/at-risk status —
   CLI `storage-health --dir`, plus a Dashboard "Storage Health" panel. Exits 1
   for at-risk destinations.
+- **Backup-media quality checks (SMART)**: every backup is gated on the SMART
+  health of the physical drive it writes to — backups are refused when the
+  drive reports concrete problems (bad health status, high temperature, SSD
+  wear, unreliable sectors, read errors). Only *reported* problems block:
+  unreadable SMART data (no elevation, remote volumes) passes with a warning.
+  A disk-wide inventory surfaces SMART health for every physical disk, not just
+  configured destinations, so a dying backup drive is caught before it is ever
+  pointed at — CLI `media smart`, Dashboard "Media Health" panel. Query results
+  are cached 5 minutes so repeated runs stay fast.
 
 ## Tech Stack
 
@@ -587,7 +596,9 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   `chain check` / `tamper check` and a Dashboard "Backup Integrity" panel), a
   storage-health dashboard (per-destination reliability score combining SMART
   drive health, verification/scrub/drill/parity coverage, chain integrity and
-  capacity — CLI `storage-health --dir` + Dashboard panel),
+  capacity — CLI `storage-health --dir` + Dashboard panel), backup-media quality
+  checks (pre-backup SMART gate — refuse writing to a failing drive — plus a
+  disk-wide `media smart` inventory and Dashboard "Media Health" panel),
   380+ unit/integration tests
 - **Planned**: see `ROADMAP.md`. Real WinFsp mounts are verified once the
   WinFsp runtime is installed (detected automatically; the mount bridge is

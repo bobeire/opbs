@@ -10,6 +10,8 @@ import { normalizeBackupLocation } from '../utils/location';
 import { recordBackupDestination } from '../utils/recent';
 import { recordBackupAnalytics } from '../utils/backup-analytics';
 import { buildParity } from '../imaging/parity';
+import { checkMediaHealth } from '../utils/media-health';
+import { isNonFilesystemLocation } from '../utils/location';
 import { logger } from '../utils/logger';
 
 export type BackupConfig = BackupJobConfig;
@@ -52,6 +54,25 @@ export class BackupManager extends EventEmitter {
 
     try {
       await this.validateConfig(config);
+
+      // Media-quality gate: refuse to write to a storage device that reports
+      // SMART problems. Only *reported* problems block; drives whose SMART data
+      // cannot be read are allowed through with a warning.
+      if (!isNonFilesystemLocation(config.destinationPath)) {
+        const media = await checkMediaHealth(config.destinationPath);
+        if (media.blocked) {
+          throw new Error(
+            `Backup refused: the drive backing ${config.destinationPath} reports problems (${media.warnings.join(
+              '; '
+            )}). Run 'opbs media check' for the full disk report.`
+          );
+        }
+        if (!media.measured && media.driveLetter) {
+          logger.warn(
+            `Media health not measurable for ${config.destinationPath} (${media.driveLetter}:) — continuing, but the drive's SMART data could not be read.`
+          );
+        }
+      }
 
       this.emitProgress({
         phase: 'preparing',

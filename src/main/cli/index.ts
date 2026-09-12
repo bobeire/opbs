@@ -181,6 +181,11 @@ Commands:
   schedule remove <name>                 Delete a scheduled task.
   prune <directory> [options]            Apply retention/GFS policy.
   health <diskIndex>                     Report SMART/reliability health (no elevation needed).
+  media smart [--json]                   SMART health inventory of every physical disk:
+                                         temperature, SSD wear, unreliable sectors, read errors.
+                                         Exits 1 when any disk reports problems. The same check
+                                         gates every backup: backups are refused when the drive
+                                         they write to reports SMART problems.
   media check                            Verify the WinPE ADK tools are installed.
   media smoke [--node <node.exe>] [--dist <dir>] [--native <addon>]
                                          Stage the media payload headlessly and smoke-test it
@@ -1253,6 +1258,10 @@ async function cmdHealth(ctx: CommandContext): Promise<number> {
 async function cmdMedia(ctx: CommandContext): Promise<number> {
   const action = ctx.argv[0];
 
+  if (action === 'smart') {
+    return cmdMediaSmart(ctx);
+  }
+
   if (action === 'check') {
     const arch = peArchForProcess();
     const adk = locateAdk(arch, flagValue(ctx.argv, '--adk'));
@@ -1408,6 +1417,34 @@ function printMrimgInfo(info: import('../imaging/mrimg').MacriumImageInfo): void
     const gb = p.blockCount > 0 ? formatBytes(p.blockCount * p.blockSize) : formatBytes(p.geometry.length);
     console.log(`    partition ${p.partitionNumber} (disk ${p.diskIndex + 1}): ${p.fsType || '?'}${p.volumeLabel ? ` "${p.volumeLabel}"` : ''} ${gb}, block size ${p.blockSize} (${p.blockCount} blocks)`);
   }
+}
+
+async function cmdMediaSmart(ctx: CommandContext): Promise<number> {
+  const { inventoryMediaHealth } = await import('../utils/media-health');
+  const entries = await inventoryMediaHealth();
+  if (ctx.opts.json) {
+    console.log(JSON.stringify(entries, null, 2));
+    return entries.some((e) => e.unhealthy) ? 1 : 0;
+  }
+  let anyUnhealthy = false;
+  for (const entry of entries) {
+    const letters = entry.driveLetters.length > 0 ? ` [${entry.driveLetters.join(', ')}:]` : '';
+    if (entry.unhealthy) {
+      anyUnhealthy = true;
+      console.log(`! Disk ${entry.diskIndex} — ${entry.model}${letters}`);
+      for (const warning of entry.health.warnings) {
+        console.log(`    ${warning}`);
+      }
+    } else if (entry.health.data) {
+      console.log(`ok  Disk ${entry.diskIndex} — ${entry.model}${letters} (${entry.health.data.mediaType ?? ''} ${entry.health.data.temperatureCelsius != null ? `${entry.health.data.temperatureCelsius.toFixed(0)}°C ` : ''}${entry.health.data.wear != null ? `${entry.health.data.wear.toFixed(0)}% wear ` : ''}${entry.health.data.healthStatus ?? 'Healthy'})`);
+    } else {
+      console.log(`?   Disk ${entry.diskIndex} — ${entry.model}${letters} (SMART data unavailable — may require elevation)`);
+    }
+  }
+  if (entries.length === 0) {
+    console.log('No physical disks discovered.');
+  }
+  return anyUnhealthy ? 1 : 0;
 }
 
 async function cmdMrimg(ctx: CommandContext): Promise<number> {

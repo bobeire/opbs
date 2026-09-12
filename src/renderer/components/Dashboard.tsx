@@ -34,6 +34,7 @@ function Dashboard({ onNavigate }: DashboardProps) {
   const [scrubStatus, setScrubStatus] = useState<any[]>([]);
   const [integrity, setIntegrity] = useState<any[]>([]);
   const [storageHealth, setStorageHealth] = useState<any[]>([]);
+  const [mediaHealth, setMediaHealth] = useState<any[]>([]);
   const [now, setNow] = useState(0);
 
   const load = useCallback(async () => {
@@ -59,6 +60,8 @@ function Dashboard({ onNavigate }: DashboardProps) {
       setIntegrity(Array.isArray(integrityRes) ? integrityRes : []);
       const storageRes = await window.electronAPI.getStorageHealth();
       setStorageHealth(Array.isArray(storageRes) ? storageRes : []);
+      const mediaRes = await window.electronAPI.getMediaHealth();
+      setMediaHealth(Array.isArray(mediaRes) ? mediaRes : []);
     } catch {
       setBackups([]);
       setHealth([]);
@@ -479,6 +482,77 @@ function Dashboard({ onNavigate }: DashboardProps) {
             <p className="drill-not-tested" style={{ marginTop: '8px' }}>
               At-risk destinations flagged for review — see the CLI <code>storage-health --dir</code> for details, or
               run a scrub / drill on the flagged destination.
+            </p>
+          )}
+        </div>
+      )}
+
+      {mediaHealth.length > 0 && (
+        <div className="recent-backups">
+          <div className="recent-backups-head">
+            <h2>Media Health</h2>
+          </div>
+          <table className="backup-table">
+            <thead>
+              <tr>
+                <th>Disk</th>
+                <th>Model</th>
+                <th>Size</th>
+                <th>Volumes</th>
+                <th>Health</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mediaHealth.map((entry) => {
+                const data = entry.health?.data ?? null;
+                const warnings = entry.health?.warnings ?? [];
+                return (
+                  <tr key={entry.diskIndex}>
+                    <td>{entry.diskIndex}</td>
+                    <td>{entry.model}</td>
+                    <td>{entry.size > 0 ? `${(entry.size / 1e9).toFixed(0)} GB` : '—'}</td>
+                    <td>{entry.driveLetters?.length > 0 ? `${entry.driveLetters.join(', ')}:` : '—'}</td>
+                    <td>
+                      {data ? (
+                        entry.unhealthy ? (
+                          <span className="badge badge-err" title={warnings.join('\n')}>
+                            at-risk
+                          </span>
+                        ) : (
+                          <span className="badge badge-ok">healthy</span>
+                        )
+                      ) : (
+                        <span className="drill-not-tested" title="SMART data unavailable (drive may not support it or requires elevation)">
+                          n/a
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      {data
+                        ? [
+                            data.healthStatus && data.healthStatus !== 'Healthy'
+                              ? data.healthStatus
+                              : null,
+                            data.temperatureCelsius != null ? `${data.temperatureCelsius.toFixed(0)}°C` : null,
+                            data.wear != null ? `${data.wear.toFixed(0)}% wear` : null,
+                            data.unreliableSectors != null && data.unreliableSectors > 0
+                              ? `${data.unreliableSectors} bad sectors`
+                              : null
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')
+                        : warnings.join(' · ')}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {mediaHealth.some((e) => e.unhealthy) && (
+            <p className="drill-not-tested" style={{ marginTop: '8px' }}>
+              A storage drive reports SMART problems. Backups that write to it are refused until the drive is
+              healthy — replace or service the media before relying on it.
             </p>
           )}
         </div>

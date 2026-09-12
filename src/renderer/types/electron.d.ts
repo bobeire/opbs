@@ -146,6 +146,31 @@ declare global {
       copyImage: (imagePath: string, destDir: string) => Promise<{ ok: boolean; copied?: string[]; bytes?: number; destPath?: string; error?: string }>;
       uploadToCloud: (imagePath: string) => Promise<{ ok: boolean; uploaded?: string[]; error?: string }>;
       checkDiskHealth: (diskIndex: number) => Promise<any>;
+      getMediaHealth: () => Promise<
+        Array<{
+          diskIndex: number;
+          model: string;
+          serial: string;
+          size: number;
+          driveLetters: string[];
+          health: {
+            data?: {
+              model?: string;
+              healthStatus?: string;
+              mediaType?: string;
+              powerOnHours?: number;
+              temperatureCelsius?: number;
+              wear?: number;
+              readErrors?: number;
+              writeErrors?: number;
+              unreliableSectors?: number;
+            } | null;
+            reliable: boolean;
+            warnings: string[];
+          };
+          unhealthy: boolean;
+        }>
+      >;
       browsePartitions: (imagePath: string) => Promise<{ encrypted: boolean; partitions: any[] }>;
       browseList: (imagePath: string, partitionIndex: number, relPath: string, passphrase?: string) => Promise<any[]>;
       browseExtract: (imagePath: string, partitionIndex: number, relPath: string, outPath: string, passphrase?: string) => Promise<any>;
