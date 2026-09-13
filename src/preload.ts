@@ -72,6 +72,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Read-only mount of an image partition (WinFsp, elevated helper)
   winfspStatus: () => ipcRenderer.invoke('winfsp-status'),
+  winfspInstall: () => ipcRenderer.invoke('winfsp-install'),
   mountImage: (config: any) => ipcRenderer.invoke('mount-image', config),
   unmountImage: (id: string) => ipcRenderer.invoke('unmount-image', id),
   onMountStatus: (callback: (status: any) => void) => {

@@ -1,7 +1,8 @@
-import { spawn, execFileSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { psQuote, runElevatedPowerShell as runPowershell } from './elevated';
 import { locateAdk, peArchForProcess, PeArch } from './adk';
 
 /**
@@ -308,10 +309,6 @@ function buildWinpeEntry(): string {
   ].join('\n');
 }
 
-function psQuote(value: string): string {
-  return "'" + value.replace(/'/g, "''") + "'";
-}
-
 function base64(value: string): string {
   return Buffer.from(value, 'utf-8').toString('base64');
 }
@@ -394,36 +391,6 @@ export function buildElevatedScript(options: {
   lines.push('Write-Result @{ok=$true;output=' + psQuote(outputArg) + '}');
   lines.push('exit 0');
   return lines.join('\r\n');
-}
-
-function runPowershell(script: string): Promise<{ code: number }> {
-  const powershell = path.join(
-    process.env.SystemRoot ?? 'C:\\Windows',
-    'System32',
-    'WindowsPowerShell',
-    'v1.0',
-    'powershell.exe'
-  );
-  return new Promise((resolve, reject) => {
-    const wrapper =
-      `$p = Start-Process -FilePath ${psQuote(powershell)} -ArgumentList @(${[
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        script
-      ]
-        .map(psQuote)
-        .join(', ')}) -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ErrorAction SilentlyContinue; ` +
-      `if ($null -eq $p) { exit 5 }; exit $p.ExitCode`;
-    const child = spawn(powershell, ['-NoProfile', '-NonInteractive', '-Command', wrapper], {
-      windowsHide: true,
-      stdio: 'ignore'
-    });
-    child.on('error', reject);
-    child.on('close', (code) => resolve({ code: code ?? 1 }));
-  });
 }
 
 /** Create the recovery media. Requires a UAC confirmation for the ADK steps. */
@@ -559,7 +526,7 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
         output: options.output,
         arch,
         error:
-          `Elevated ADK step did not produce a result (UAC exit code ${elevated.code}; declined or the window ` +
+          `Elevated ADK step did not produce a result (UAC exit code ${elevated}; declined or the window ` +
           `closed early). Work kept at ${work} (run ${script} from an elevated PowerShell to retry).`
       };
     }

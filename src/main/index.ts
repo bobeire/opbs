@@ -25,6 +25,7 @@ import { detectMacriumFormat, readMacriumImage } from './imaging/mrimg';
 import { locateAdk, peArchForProcess } from './utils/adk';
 import { createRecoveryMedia, resolveNodeExe, MediaCreateOptions } from './utils/winpe-media';
 import { installAdkExe } from './utils/adk-install';
+import { installWinfsp } from './utils/winfsp-install';
 import { S3Store, resolveS3Config } from './utils/s3';
 import { SftpStore, resolveSftpConfig } from './utils/sftp';
 import { getRecentDestinations, addRecentDestination } from './utils/recent';
@@ -1117,6 +1118,18 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
   // Silent Windows ADK install (bootstraps downloaded, installed via one UAC prompt)
   ipcMain.handle('adk-install', async (_, options?: { adkSetup?: string; adkWinPe?: string; installPath?: string }) => {
     return installAdkExe(options ?? {});
+  });
+
+  // Silent WinFsp runtime install, then re-check availability
+  ipcMain.handle('winfsp-install', async () => {
+    const result = await installWinfsp();
+    let available: boolean;
+    try {
+      available = winfspAvailable();
+    } catch {
+      available = false;
+    }
+    return { ...result, available };
   });
 
   // Cloud S3 connection check using the saved cloud profile

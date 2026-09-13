@@ -37,6 +37,9 @@ function Dashboard({ onNavigate }: DashboardProps) {
   const [mediaHealth, setMediaHealth] = useState<any[]>([]);
   const [anomalies, setAnomalies] = useState<any[]>([]);
   const [perfRunning, setPerfRunning] = useState<string | null>(null);
+  const [winfspMissing, setWinfspMissing] = useState(false);
+  const [winfspPhase, setWinfspPhase] = useState<'idle' | 'installing' | 'error'>('idle');
+  const [winfspError, setWinfspError] = useState('');
   const [now, setNow] = useState(0);
 
   const load = useCallback(async () => {
@@ -138,11 +141,37 @@ function Dashboard({ onNavigate }: DashboardProps) {
       .catch(() => {
         // ignore
       });
+    window.electronAPI
+      .winfspStatus()
+      .then((status) => {
+        if (!cancelled) setWinfspMissing(status?.available === false);
+      })
+      .catch(() => {
+        // ignore
+      });
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
   }, [load]);
+
+  const installWinfsp = useCallback(async () => {
+    setWinfspPhase('installing');
+    setWinfspError('');
+    try {
+      const result = await window.electronAPI.winfspInstall();
+      if (result && result.available) {
+        setWinfspMissing(false);
+        setWinfspPhase('idle');
+      } else {
+        setWinfspError(result?.error ?? 'WinFsp installation failed.');
+        setWinfspPhase('error');
+      }
+    } catch (e: any) {
+      setWinfspError(e?.message ?? 'WinFsp installation failed.');
+      setWinfspPhase('error');
+    }
+  }, []);
 
   const toggleSelected = (id: string) => {
     setSelected((prev) => {
@@ -244,6 +273,26 @@ function Dashboard({ onNavigate }: DashboardProps) {
           <p className="stat-value">{backups.length}</p>
         </div>
       </div>
+
+      {winfspMissing && (
+        <div className="dashboard-banner">
+          <div className="dashboard-banner-text">
+            <strong>WinFsp runtime not installed</strong>
+            <span>Needed to mount backup partitions as read-only drives.</span>
+          </div>
+          {winfspPhase === 'installing' && (
+            <span className="busy-spinner">Installing… (confirm the UAC prompt)</span>
+          )}
+          {winfspPhase === 'error' && <span className="banner-error">{winfspError}</span>}
+          <button
+            className="btn-secondary"
+            disabled={winfspPhase === 'installing'}
+            onClick={() => void installWinfsp()}
+          >
+            {winfspPhase === 'installing' ? 'Installing…' : 'Install WinFsp now'}
+          </button>
+        </div>
+      )}
 
       {analytics && analytics.totals.totalDiskBytes > 0 && (
         <div className="recent-backups">

@@ -201,7 +201,7 @@ function App() {
         
         <div className="sidebar-footer">
           <button className="version-btn" onClick={() => window.electronAPI.showAbout()}>
-            v0.1.0
+            v0.2.0
           </button>
           <button className="version-btn" onClick={() => void window.electronAPI.checkForUpdates()}>
             Check for updates

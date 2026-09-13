@@ -1,6 +1,6 @@
 {
   "name": "opbs-native",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Native C++ addon for OPBS disk imaging",
   "main": "build/Release/opbs_native.node",
   "scripts": {

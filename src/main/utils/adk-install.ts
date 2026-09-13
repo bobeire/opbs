@@ -1,8 +1,8 @@
-import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { locateAdk, peArchForProcess } from './adk';
+import { psQuote, runElevatedPowerShell } from './elevated';
 import { logger } from './logger';
 
 /**
@@ -48,10 +48,6 @@ export interface AdkInstallScriptPlan {
   resultPath: string;
 }
 
-function psQuote(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
 /**
  * Build the elevated PowerShell payload that runs both ADK bootstraps silently
  * and records each step's exit code (and an overall status) to `resultPath`.
@@ -79,36 +75,6 @@ export function buildAdkInstallScript(plan: AdkInstallScriptPlan): string {
     '[IO.File]::WriteAllText($resultPath, $steps | ConvertTo-Json -Compress)',
     'exit $overall'
   ].join('\r\n');
-}
-
-function runElevatedPowerShell(scriptPath: string): Promise<number> {
-  const powershell = path.join(
-    process.env.SystemRoot ?? 'C:\\Windows',
-    'System32',
-    'WindowsPowerShell',
-    'v1.0',
-    'powershell.exe'
-  );
-  return new Promise((resolve, reject) => {
-    const wrapper =
-      `$p = Start-Process -FilePath ${psQuote(powershell)} -ArgumentList @(${[
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        scriptPath
-      ]
-        .map(psQuote)
-        .join(', ')}) -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ErrorAction SilentlyContinue; ` +
-      `if ($null -eq $p) { exit 5 }; exit $p.ExitCode`;
-    const child = spawn(powershell, ['-NoProfile', '-NonInteractive', '-Command', wrapper], {
-      windowsHide: true,
-      stdio: 'ignore'
-    });
-    child.on('error', reject);
-    child.on('close', (code) => resolve(code ?? -1));
-  });
 }
 
 async function downloadToFile(url: string, dest: string): Promise<void> {

@@ -265,6 +265,7 @@ declare global {
       onBackupProgress: (callback: (progress: any) => void) => () => void;
       onRestoreProgress: (callback: (progress: any) => void) => () => void;
       winfspStatus: () => Promise<{ available: boolean }>;
+      winfspInstall: () => Promise<{ ok: boolean; code?: number; available?: boolean; error?: string }>;
       mountImage: (config: any) => Promise<{ ok: boolean; id?: string; error?: string }>;
       unmountImage: (id: string) => Promise<{ ok: boolean; error?: string }>;
       onMountStatus: (callback: (status: any) => void) => () => void;
