@@ -1512,3 +1512,52 @@ body {
   border-radius: 6px;
   font: inherit;
 }
+
+/* ---------- Modal overlay (ADK preflight) ---------- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-card {
+  background: var(--bg-color, #1f2937);
+  color: var(--text-color, #f9fafb);
+  border: 1px solid var(--border-color, #374151);
+  border-radius: 10px;
+  padding: 22px 26px;
+  max-width: 460px;
+  width: calc(100% - 40px);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
+}
+
+.modal-card h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+
+.modal-card p {
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+
+.modal-note {
+  color: var(--muted-color, #9ca3af);
+  font-size: 13px;
+}
+
+.modal-error {
+  color: #f87171;
+  font-size: 13px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}

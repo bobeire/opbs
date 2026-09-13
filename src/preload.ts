@@ -91,6 +91,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // WinPE recovery media
   mediaCheck: () => ipcRenderer.invoke('media-check'),
   mediaCreate: (options: any) => ipcRenderer.invoke('media-create', options),
+  adkInstall: (options: any) => ipcRenderer.invoke('adk-install', options),
 
   // Cloud S3
   verifyS3: () => ipcRenderer.invoke('verify-s3'),

@@ -10,6 +10,7 @@ import MediaView from './components/MediaView';
 import LogViewer from './components/LogViewer';
 import NetworkView from './components/NetworkView';
 import ToastHost from './components/ToastHost';
+import AdkPrompt from './components/AdkPrompt';
 
 type Page = 'dashboard' | 'backup' | 'restore' | 'browse' | 'media' | 'schedules' | 'network' | 'logs' | 'vss' | 'settings';
 
@@ -213,6 +214,7 @@ function App() {
       </main>
 
       <ToastHost />
+      <AdkPrompt />
     </div>
   );
 }

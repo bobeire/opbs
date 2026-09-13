@@ -24,6 +24,7 @@ import { openAnyBrowse as fsOpenBrowseAny, listDirectory, extractPath, BrowseSes
 import { detectMacriumFormat, readMacriumImage } from './imaging/mrimg';
 import { locateAdk, peArchForProcess } from './utils/adk';
 import { createRecoveryMedia, resolveNodeExe, MediaCreateOptions } from './utils/winpe-media';
+import { installAdkExe } from './utils/adk-install';
 import { S3Store, resolveS3Config } from './utils/s3';
 import { SftpStore, resolveSftpConfig } from './utils/sftp';
 import { getRecentDestinations, addRecentDestination } from './utils/recent';
@@ -1111,6 +1112,11 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
 
   ipcMain.handle('media-create', async (_, options: MediaCreateOptions) => {
     return createRecoveryMedia(options);
+  });
+
+  // Silent Windows ADK install (bootstraps downloaded, installed via one UAC prompt)
+  ipcMain.handle('adk-install', async (_, options?: { adkSetup?: string; adkWinPe?: string; installPath?: string }) => {
+    return installAdkExe(options ?? {});
   });
 
   // Cloud S3 connection check using the saved cloud profile

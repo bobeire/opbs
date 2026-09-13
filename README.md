@@ -560,6 +560,10 @@ OPBS.exe --cli media create --iso D:\recovery\opbs-winpe.iso --script-only
 OPBS.exe --cli media smoke [--node <node.exe>] [--dist <dir>] [--native <addon>]
 ```
 
+If the ADK is missing, the GUI detects it at startup and offers to download and
+silently install the Deployment Tools + WinPE add-on automatically (one UAC
+confirmation for the whole install).
+
 The generated script: `copype` a WinPE working dir, layer OPBS under
 `media\OPBS\` (dist + codecs + `opbs_native.node` + `node.exe`), optionally
 `dism /Image ... /Add-Driver /Recurse` each `--driver` folder, inject a

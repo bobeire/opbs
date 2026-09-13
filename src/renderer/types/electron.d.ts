@@ -259,6 +259,7 @@ declare global {
       browseClose: () => Promise<void>;
       mediaCheck: () => Promise<any>;
       mediaCreate: (options: any) => Promise<any>;
+      adkInstall: (options: any) => Promise<{ ok: boolean; adkRoot: string | null; steps: Array<{ name: string; exitCode: number }>; error?: string }>;
       verifyS3: () => Promise<any>;
       verifySftp: () => Promise<any>;
       onBackupProgress: (callback: (progress: any) => void) => () => void;
