@@ -34,6 +34,7 @@ export interface CloneJobConfig {
 }
 
 export interface CloneCoordinator {
+  buildJob(config: CloneJobConfig): Promise<CloneJob>;
   runClone(config: CloneJobConfig, onProgress: (p: CloneJobProgress) => void): Promise<CloneJobResult>;
   cancel(): Promise<void>;
 }

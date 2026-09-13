@@ -12,6 +12,8 @@ import { initAutoUpdater, checkForUpdates, quitAndInstall } from './utils/auto-u
 import { discoverNetworkMachines, enumerateShares, testNetworkDestination } from './utils/network';
 import { ImagingEngine } from './imaging/backup-engine';
 import { RestoreEngine } from './imaging/restore-engine';
+import { CloneEngine } from './imaging/clone-engine';
+import { CloneManager } from './clone/manager';
 import { dispatchHelperJob } from './helper/job-runner';
 import { launchElevatedJob } from './helper/launcher';
 import type { VssJob, VssJobResult } from './utils/vss';
@@ -45,6 +47,7 @@ const diskEnumerator = new DiskEnumerator();
 const imagingEngine = new ImagingEngine(diskEnumerator);
 const backupManager = new BackupManager(imagingEngine);
 const restoreManager = new RestoreManager(new RestoreEngine(diskEnumerator));
+const cloneManager = new CloneManager(new CloneEngine(diskEnumerator));
 const settingsManager = new SettingsManager();
 const scheduler = new BackupScheduler(backupManager, settingsManager);
 
@@ -377,6 +380,7 @@ function main(): void {
     setupIpcHandlers();
     setupBackupEvents();
     setupRestoreEvents();
+    setupCloneEvents();
     scheduler.startAll();
     if (startupFileAction) {
       queueFileAction(startupFileAction);
@@ -411,6 +415,12 @@ function setupBackupEvents(): void {
 function setupRestoreEvents(): void {
   restoreManager.on('progress', (progress) => {
     mainWindow?.webContents.send('restore-progress', progress);
+  });
+}
+
+function setupCloneEvents(): void {
+  cloneManager.on('progress', (progress) => {
+    mainWindow?.webContents.send('clone-progress', progress);
   });
 }
 
@@ -459,6 +469,19 @@ function setupIpcHandlers(): void {
 
   ipcMain.handle('restore-preflight', async (_, config) => {
     return restoreManager.preflight(config);
+  });
+
+  // Partition copy (disk-to-disk clone)
+  ipcMain.handle('start-clone', async (_, config) => {
+    return cloneManager.startClone(config);
+  });
+
+  ipcMain.handle('cancel-clone', async () => {
+    return cloneManager.cancelClone();
+  });
+
+  ipcMain.handle('clone-preflight', async (_, config) => {
+    return cloneManager.preflight(config);
   });
 
   // Settings

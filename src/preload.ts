@@ -15,6 +15,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   restorePreflight: (config: any) => ipcRenderer.invoke('restore-preflight', config),
   getImageInfo: (imagePath: string) => ipcRenderer.invoke('get-image-info', imagePath),
 
+  // Partition copy (disk-to-disk clone)
+  startClone: (config: any) => ipcRenderer.invoke('start-clone', config),
+  cancelClone: () => ipcRenderer.invoke('cancel-clone'),
+  clonePreflight: (config: any) => ipcRenderer.invoke('clone-preflight', config),
+
   // Settings
   getSettings: () => ipcRenderer.invoke('get-settings'),
   updateSettings: (updates: any) => ipcRenderer.invoke('update-settings', updates),
@@ -163,6 +168,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('restore-progress', handler);
     return () => {
       ipcRenderer.removeListener('restore-progress', handler);
+    };
+  },
+  onCloneProgress: (callback: (progress: any) => void) => {
+    const handler = (_event: any, progress: any) => callback(progress);
+    ipcRenderer.on('clone-progress', handler);
+    return () => {
+      ipcRenderer.removeListener('clone-progress', handler);
     };
   }
 });

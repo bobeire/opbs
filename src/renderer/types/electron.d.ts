@@ -24,6 +24,20 @@ declare global {
         passphraseRequired?: boolean;
       }>;
       getImageInfo: (imagePath: string) => Promise<any>;
+      startClone: (config: any) => Promise<void>;
+      cancelClone: () => Promise<void>;
+      clonePreflight: (config: any) => Promise<{
+        ok: boolean;
+        error?: string;
+        requiredBytes?: number;
+        targetDiskBytes?: number;
+        targetDiskModel?: string;
+        targetDiskPartitionCount?: number;
+        targets?: Array<{ partitionIndex: number; offset: number; size: number }>;
+        writeTableScheme?: string | null;
+        warnings?: string[];
+        sameDisk?: boolean;
+      }>;
       getSettings: () => Promise<any>;
       updateSettings: (updates: any) => Promise<any>;
       addScheduledBackup: (config: any) => Promise<any>;
@@ -264,6 +278,7 @@ declare global {
       verifySftp: () => Promise<any>;
       onBackupProgress: (callback: (progress: any) => void) => () => void;
       onRestoreProgress: (callback: (progress: any) => void) => () => void;
+      onCloneProgress: (callback: (progress: any) => void) => () => void;
       winfspStatus: () => Promise<{ available: boolean }>;
       winfspInstall: () => Promise<{ ok: boolean; code?: number; available?: boolean; error?: string }>;
       mountImage: (config: any) => Promise<{ ok: boolean; id?: string; error?: string }>;

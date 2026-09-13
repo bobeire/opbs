@@ -9,10 +9,22 @@ import BrowseView from './components/BrowseView';
 import MediaView from './components/MediaView';
 import LogViewer from './components/LogViewer';
 import NetworkView from './components/NetworkView';
+import PartitionCopy from './components/PartitionCopy';
 import ToastHost from './components/ToastHost';
 import AdkPrompt from './components/AdkPrompt';
 
-type Page = 'dashboard' | 'backup' | 'restore' | 'browse' | 'media' | 'schedules' | 'network' | 'logs' | 'vss' | 'settings';
+type Page =
+  | 'dashboard'
+  | 'backup'
+  | 'restore'
+  | 'copy'
+  | 'browse'
+  | 'media'
+  | 'schedules'
+  | 'network'
+  | 'logs'
+  | 'vss'
+  | 'settings';
 
 interface BackupIntent {
   destinationPath?: string;
@@ -31,7 +43,9 @@ function App() {
 
   useEffect(() => {
     const cleanup = window.electronAPI.onNav((page) => {
-      if (page === 'backup' || page === 'restore' || page === 'schedules' || page === 'vss') setCurrentPage(page);
+      if (page === 'backup' || page === 'restore' || page === 'schedules' || page === 'vss' || page === 'copy') {
+        setCurrentPage(page);
+      }
     });
     return cleanup;
   }, []);
@@ -61,6 +75,8 @@ function App() {
             mode={restoreIntent?.mode ?? 'restore'}
           />
         );
+      case 'copy':
+        return <PartitionCopy onComplete={() => setCurrentPage('dashboard')} />;
       case 'browse':
         return <BrowseView key={browseIntent ?? 'empty'} onComplete={() => setCurrentPage('dashboard')} initialImagePath={browseIntent ?? undefined} />;
       case 'media':
@@ -132,6 +148,15 @@ function App() {
             >
               <span className="nav-icon">♻️</span>
               Restore
+            </button>
+          </li>
+          <li>
+            <button
+              className={`nav-item ${currentPage === 'copy' ? 'active' : ''}`}
+              onClick={() => setCurrentPage('copy')}
+            >
+              <span className="nav-icon">📤</span>
+              Partition Copy
             </button>
           </li>
           <li>

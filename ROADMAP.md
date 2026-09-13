@@ -132,6 +132,12 @@ implemented; **Investigate** items need spike work first.
   P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout]
   [--no-write-table] [--acknowledge-same-disk]`; `runCloneJob` dispatched from
   `type: 'clone'` jobs.
+- ✅ GUI **Partition Copy**: `CloneManager` (start/cancel/preflight + progress)
+  wired to IPC, and a drag-and-drop screen (`PartitionCopy.tsx`) — pick a
+  target disk, drag partition chips onto it or “Copy all partitions”, preview
+  the auto-sequential 1 MiB-aligned layout (`utils/clone-layout.ts`) with
+  optional grow-to-fill, preflight through the engine, confirm the erase
+  warning, and stream `clone-progress` to a live bar.
 
 ### Used-blocks-only capture (NTFS $Bitmap)
 - ✅ `readNtfsBitmap` (`imaging/fs/ntfs.ts`): MFT record 6 (`$Bitmap`), non-
