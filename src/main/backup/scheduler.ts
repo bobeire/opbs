@@ -5,7 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { BackupManager, BackupConfig } from '../backup/manager';
 import { ScheduledBackup, ScheduledVerification, ScheduledRestoreDrill, ScheduledScrub, SettingsManager } from '../utils/settings-manager';
-import { applyRetention, findNewestImage, scanBackupDirectory } from './retention';
+import { applyRetention, findNewestImage, resolveScheduledRetention, scanBackupDirectory } from './retention';
 import { summarizeImage } from '../imaging/restore-engine';
 import { recordDrillResult } from '../utils/drill-history';
 import { tryNotify } from '../utils/notify';
@@ -628,13 +628,11 @@ export class BackupScheduler {
     try {
       const result = await this.backupManager.startBackup(backupConfig);
 
-      // Retention/GFS pruning after a successful run when enabled.
-      if (settings.autoCleanup) {
-        const plan = await applyRetention(config.destinationPath, {
-          keepFull: settings.keepFull,
-          keepDeltasPerFull: settings.keepDeltasPerFull,
-          retentionDays: settings.retentionDays
-        });
+      // Retention/GFS pruning after a successful run: either the global
+      // auto-cleanup setting or a per-schedule retention policy.
+      const retention = resolveScheduledRetention(config, settings);
+      if (retention.active) {
+        const plan = await applyRetention(config.destinationPath, retention.options);
         if (plan.prune.length > 0) {
           logger.info(`Retention pruned ${plan.prune.length} old image(s) from ${config.destinationPath}`);
         }

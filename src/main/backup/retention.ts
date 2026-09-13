@@ -288,6 +288,37 @@ export async function applyRetention(dir: string, options: RetentionOptions): Pr
   return plan;
 }
 
+/** Per-schedule retention override fields stored on a ScheduledBackup. */
+export interface ScheduleRetentionOverride {
+  retentionApplied?: boolean;
+  retentionKeepFull?: number;
+  retentionKeepDeltasPerFull?: number;
+  retentionDays?: number;
+}
+
+export interface ScheduleRetentionGlobals {
+  autoCleanup: boolean;
+  keepFull: number;
+  keepDeltasPerFull: number;
+  retentionDays: number;
+}
+
+/** Resolve whether a backup run should prune, and with which numbers. */
+export function resolveScheduledRetention(
+  schedule: ScheduleRetentionOverride,
+  globals: ScheduleRetentionGlobals
+): { active: boolean; options: RetentionOptions } {
+  const active = globals.autoCleanup || schedule.retentionApplied === true;
+  return {
+    active,
+    options: {
+      keepFull: schedule.retentionKeepFull ?? globals.keepFull,
+      keepDeltasPerFull: schedule.retentionKeepDeltasPerFull ?? globals.keepDeltasPerFull,
+      retentionDays: schedule.retentionDays ?? globals.retentionDays
+    }
+  };
+}
+
 export interface BackupManifest {
   updatedAt: string;
   directory: string;

@@ -113,6 +113,14 @@ export interface ScheduledBackup {
   maxRetries?: number;
   /** Base delay between retries in minutes; doubles each attempt (default 5). */
   retryDelayMinutes?: number;
+  /** Per-schedule retention toggle; overrides the global auto-cleanup setting. */
+  retentionApplied?: boolean;
+  /** Number of most recent full chains kept when this schedule prunes. */
+  retentionKeepFull?: number;
+  /** Max trailing deltas kept per retained chain for this schedule. */
+  retentionKeepDeltasPerFull?: number;
+  /** Never delete images newer than this many days for this schedule. */
+  retentionDays?: number;
 }
 
 export interface BackupProfile {

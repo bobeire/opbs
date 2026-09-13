@@ -22,6 +22,12 @@ interface ScheduledBackup {
   enabled: boolean;
   lastRun?: string;
   nextRun?: string;
+  maxRetries?: number;
+  retryDelayMinutes?: number;
+  retentionApplied?: boolean;
+  retentionKeepFull?: number;
+  retentionKeepDeltasPerFull?: number;
+  retentionDays?: number;
 }
 
 interface ScheduleForm {
@@ -44,6 +50,10 @@ interface ScheduleForm {
   passphrase: string;
   maxRetries: number;
   retryDelayMinutes: number;
+  retentionApplied: boolean;
+  retentionKeepFull: number;
+  retentionKeepDeltasPerFull: number;
+  retentionDays: number;
 }
 
 interface DiskInfo {
@@ -69,13 +79,21 @@ interface ScheduleDefaults {
   backupLocation: string;
   defaultCompression: number;
   defaultVerification: boolean;
+  keepFull: number;
+  keepDeltasPerFull: number;
+  retentionDays: number;
+  autoCleanup: boolean;
 }
 
 function mergeDefaults(loaded: any): ScheduleDefaults {
   return {
     backupLocation: loaded?.backupLocation ?? '',
     defaultCompression: loaded?.defaultCompression ?? 3,
-    defaultVerification: loaded?.defaultVerification ?? true
+    defaultVerification: loaded?.defaultVerification ?? true,
+    keepFull: loaded?.keepFull ?? 3,
+    keepDeltasPerFull: loaded?.keepDeltasPerFull ?? 3,
+    retentionDays: loaded?.retentionDays ?? 30,
+    autoCleanup: loaded?.autoCleanup ?? false
   };
 }
 
@@ -139,7 +157,11 @@ function Schedules() {
     incremental: false,
     passphrase: '',
     maxRetries: 2,
-    retryDelayMinutes: 5
+    retryDelayMinutes: 5,
+    retentionApplied: false,
+    retentionKeepFull: defaults.keepFull,
+    retentionKeepDeltasPerFull: defaults.keepDeltasPerFull,
+    retentionDays: defaults.retentionDays
   });
 
   const openNewSchedule = () => {
@@ -174,7 +196,11 @@ function Schedules() {
       incremental: job.incremental,
       passphrase: job.passphrase || '',
       maxRetries: job.maxRetries ?? 2,
-      retryDelayMinutes: job.retryDelayMinutes ?? 5
+      retryDelayMinutes: job.retryDelayMinutes ?? 5,
+      retentionApplied: job.retentionApplied ?? false,
+      retentionKeepFull: job.retentionKeepFull ?? base.retentionKeepFull,
+      retentionKeepDeltasPerFull: job.retentionKeepDeltasPerFull ?? base.retentionKeepDeltasPerFull,
+      retentionDays: job.retentionDays ?? base.retentionDays
     });
   };
 
@@ -325,7 +351,15 @@ function Schedules() {
       incremental: scheduleForm.incremental,
       maxRetries: scheduleForm.maxRetries,
       retryDelayMinutes: scheduleForm.retryDelayMinutes,
-      ...(scheduleForm.passphrase.trim() ? { passphrase: scheduleForm.passphrase.trim() } : {})
+      ...(scheduleForm.passphrase.trim() ? { passphrase: scheduleForm.passphrase.trim() } : {}),
+      retentionApplied: scheduleForm.retentionApplied,
+      ...(scheduleForm.retentionApplied
+        ? {
+            retentionKeepFull: scheduleForm.retentionKeepFull,
+            retentionKeepDeltasPerFull: scheduleForm.retentionKeepDeltasPerFull,
+            retentionDays: scheduleForm.retentionDays
+          }
+        : {})
     };
     try {
       if (editingId) {
@@ -710,6 +744,72 @@ function Schedules() {
               }
             />
             <p className="field-hint">Base delay between attempts; doubles on each retry.</p>
+          </div>
+
+          <div className="setting-item">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={scheduleForm.retentionApplied}
+                onChange={(e) =>
+                  setScheduleForm({ ...scheduleForm, retentionApplied: e.target.checked })
+                }
+              />
+              Apply a retention policy after each run
+            </label>
+            <p className="field-hint">
+              Enable per-schedule pruning. When off, only the global Settings → auto-cleanup
+              applies (currently {defaults.autoCleanup ? 'enabled' : 'disabled'}).
+            </p>
+            {scheduleForm.retentionApplied && (
+              <div className="retention-fields">
+                <label>
+                  Keep full chains:
+                  <input
+                    type="number"
+                    min={1}
+                    max={50}
+                    value={scheduleForm.retentionKeepFull}
+                    onChange={(e) =>
+                      setScheduleForm({
+                        ...scheduleForm,
+                        retentionKeepFull: Math.max(1, parseInt(e.target.value) || 1)
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Deltas per full chain:
+                  <input
+                    type="number"
+                    min={0}
+                    max={50}
+                    value={scheduleForm.retentionKeepDeltasPerFull}
+                    onChange={(e) =>
+                      setScheduleForm({
+                        ...scheduleForm,
+                        retentionKeepDeltasPerFull: Math.max(0, parseInt(e.target.value) || 0)
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Always keep newest (days):
+                  <input
+                    type="number"
+                    min={0}
+                    max={3650}
+                    value={scheduleForm.retentionDays}
+                    onChange={(e) =>
+                      setScheduleForm({
+                        ...scheduleForm,
+                        retentionDays: Math.max(0, parseInt(e.target.value) || 0)
+                      })
+                    }
+                  />
+                </label>
+              </div>
+            )}
           </div>
 
           <div className="setting-item">

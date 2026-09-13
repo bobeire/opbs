@@ -25,7 +25,8 @@ import {
   applyRetention,
   writeManifest,
   manifestFilePath,
-  selectImagesForVerify
+  selectImagesForVerify,
+  resolveScheduledRetention
 } from '../../src/main/backup/retention';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -191,5 +192,42 @@ describe('retention planning', () => {
   it('selectImagesForVerify returns empty for an empty directory', () => {
     expect(selectImagesForVerify(scanBackupDirectory(dir), 'newest')).toEqual([]);
     expect(selectImagesForVerify(scanBackupDirectory(dir), 'all')).toEqual([]);
+  });
+});
+
+describe('resolveScheduledRetention', () => {
+  const globals = { autoCleanup: false, keepFull: 3, keepDeltasPerFull: 3, retentionDays: 30 };
+
+  it('is inactive when global auto-cleanup is off and no per-schedule policy is set', () => {
+    const result = resolveScheduledRetention({}, globals);
+    expect(result.active).toBe(false);
+  });
+
+  it('is active when global auto-cleanup is on', () => {
+    const result = resolveScheduledRetention({}, { ...globals, autoCleanup: true });
+    expect(result.active).toBe(true);
+  });
+
+  it('is active when the schedule requests its own retention policy', () => {
+    const result = resolveScheduledRetention({ retentionApplied: true }, globals);
+    expect(result.active).toBe(true);
+  });
+
+  it('falls back to global numbers when the schedule does not override them', () => {
+    const result = resolveScheduledRetention({ retentionApplied: true }, globals);
+    expect(result.options).toEqual({ keepFull: 3, keepDeltasPerFull: 3, retentionDays: 30 });
+  });
+
+  it('prefers per-schedule numbers when provided', () => {
+    const result = resolveScheduledRetention(
+      { retentionApplied: true, retentionKeepFull: 5, retentionKeepDeltasPerFull: 7, retentionDays: 90 },
+      globals
+    );
+    expect(result.options).toEqual({ keepFull: 5, keepDeltasPerFull: 7, retentionDays: 90 });
+  });
+
+  it('mixes overrides with global fallbacks per field', () => {
+    const result = resolveScheduledRetention({ retentionApplied: true, retentionKeepFull: 2 }, globals);
+    expect(result.options).toEqual({ keepFull: 2, keepDeltasPerFull: 3, retentionDays: 30 });
   });
 });

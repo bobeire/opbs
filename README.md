@@ -16,7 +16,7 @@ Website: https://opbs.rhitcs.com
 - **Disk-to-disk clone**: `clone` copies selected live partitions straight onto a different local disk (VSS snapshots, optional dissimilar layout + fresh GPT/MBR table, optional grow-on-restore), with no image file or cloud upload.
 - **Encryption**: optional AES-256-GCM per-block encryption (master-key-derived via PBKDF2-SHA256)
 - **Verification**: self-check images after write and before restore
-- **Retention / GFS pruning**: keep the newest N full chains plus a bounded number of trailing deltas per chain; old images are pruned leaf-first
+- **Retention / GFS pruning**: keep the newest N full chains plus a bounded number of trailing deltas per chain; old images are pruned leaf-first. Retention runs after backup/verification when global auto-cleanup is on, and each scheduled backup can opt into its own retention policy (keep counts + age floor) independent of the global setting.
 - **Scheduling + notifications**: scheduled backups run from a friendly
   day-picker (daily / chosen weekdays / a specific day of the month + time,
   with a raw cron editor for power users), with Windows toast + optional
