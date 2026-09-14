@@ -10,6 +10,7 @@ import MediaView from './components/MediaView';
 import LogViewer from './components/LogViewer';
 import NetworkView from './components/NetworkView';
 import PartitionCopy from './components/PartitionCopy';
+import DiskTools from './components/DiskTools';
 import ToastHost from './components/ToastHost';
 import AdkPrompt from './components/AdkPrompt';
 
@@ -18,6 +19,7 @@ type Page =
   | 'backup'
   | 'restore'
   | 'copy'
+  | 'disks'
   | 'browse'
   | 'media'
   | 'schedules'
@@ -43,7 +45,7 @@ function App() {
 
   useEffect(() => {
     const cleanup = window.electronAPI.onNav((page) => {
-      if (page === 'backup' || page === 'restore' || page === 'schedules' || page === 'vss' || page === 'copy') {
+      if (page === 'backup' || page === 'restore' || page === 'schedules' || page === 'vss' || page === 'copy' || page === 'disks') {
         setCurrentPage(page);
       }
     });
@@ -77,6 +79,8 @@ function App() {
         );
       case 'copy':
         return <PartitionCopy onComplete={() => setCurrentPage('dashboard')} />;
+      case 'disks':
+        return <DiskTools onComplete={() => setCurrentPage('dashboard')} />;
       case 'browse':
         return <BrowseView key={browseIntent ?? 'empty'} onComplete={() => setCurrentPage('dashboard')} initialImagePath={browseIntent ?? undefined} />;
       case 'media':
@@ -157,6 +161,15 @@ function App() {
             >
               <span className="nav-icon">📤</span>
               Partition Copy
+            </button>
+          </li>
+          <li>
+            <button
+              className={`nav-item ${currentPage === 'disks' ? 'active' : ''}`}
+              onClick={() => setCurrentPage('disks')}
+            >
+              <span className="nav-icon">🔧</span>
+              Disk Tools
             </button>
           </li>
           <li>

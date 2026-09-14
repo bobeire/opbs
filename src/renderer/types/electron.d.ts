@@ -279,6 +279,18 @@ declare global {
       onBackupProgress: (callback: (progress: any) => void) => () => void;
       onRestoreProgress: (callback: (progress: any) => void) => () => void;
       onCloneProgress: (callback: (progress: any) => void) => () => void;
+
+      // Disk tools
+      getMbrInfo: (diskIndex: number) => Promise<any>;
+      getMbrRaw: (diskIndex: number) => Promise<any>;
+      bootRecFixMbr: () => Promise<any>;
+      bootRecRebuildBcd: () => Promise<any>;
+      chkdskScan: (volume: string) => Promise<any>;
+      chkdskFix: (volume: string) => Promise<any>;
+      chkdskBadSectors: (volume: string) => Promise<any>;
+      getTrimStatus: () => Promise<any>;
+      retrimVolume: (volume: string) => Promise<any>;
+      getSmartAllDisks: () => Promise<any[]>;
       winfspStatus: () => Promise<{ available: boolean }>;
       winfspInstall: () => Promise<{ ok: boolean; code?: number; available?: boolean; error?: string }>;
       mountImage: (config: any) => Promise<{ ok: boolean; id?: string; error?: string }>;

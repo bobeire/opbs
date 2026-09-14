@@ -956,6 +956,57 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     return inventoryMediaHealth();
   });
 
+  // Disk tools
+  ipcMain.handle('get-mbr-info', async (_, diskIndex: number) => {
+    const { getMbrInfo } = await import('./utils/disk-tools');
+    return getMbrInfo(diskIndex);
+  });
+
+  ipcMain.handle('get-mbr-raw', async (_, diskIndex: number) => {
+    const { getMbrRaw } = await import('./utils/disk-tools');
+    return getMbrRaw(diskIndex);
+  });
+
+  ipcMain.handle('bootrec-fix-mbr', async () => {
+    const { bootRecFixMbr } = await import('./utils/disk-tools');
+    return bootRecFixMbr();
+  });
+
+  ipcMain.handle('bootrec-rebuild-bcd', async () => {
+    const { bootRecRebuildBcd } = await import('./utils/disk-tools');
+    return bootRecRebuildBcd();
+  });
+
+  ipcMain.handle('chkdsk-scan', async (_, volume: string) => {
+    const { chkdskScan } = await import('./utils/disk-tools');
+    return chkdskScan(volume);
+  });
+
+  ipcMain.handle('chkdsk-fix', async (_, volume: string) => {
+    const { chkdskFix } = await import('./utils/disk-tools');
+    return chkdskFix(volume);
+  });
+
+  ipcMain.handle('chkdsk-bad-sectors', async (_, volume: string) => {
+    const { chkdskBadSectors } = await import('./utils/disk-tools');
+    return chkdskBadSectors(volume);
+  });
+
+  ipcMain.handle('get-trim-status', async () => {
+    const { getTrimStatus } = await import('./utils/disk-tools');
+    return getTrimStatus();
+  });
+
+  ipcMain.handle('retrim-volume', async (_, volume: string) => {
+    const { retrimVolume } = await import('./utils/disk-tools');
+    return retrimVolume(volume);
+  });
+
+  ipcMain.handle('get-smart-all-disks', async () => {
+    const { getSmartAllDisks } = await import('./utils/disk-tools');
+    return getSmartAllDisks();
+  });
+
   // Anomaly detection across all known local destinations.
   ipcMain.handle('get-backup-anomalies', async () => {
     const { detectAnomalies } = await import('./backup/anomaly-detect');

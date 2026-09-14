@@ -15,7 +15,7 @@ interface RecentBackup {
 }
 
 interface DashboardProps {
-  onNavigate: (page: 'backup' | 'restore' | 'clone' | 'copy', intent?: { imagePath?: string }) => void;
+  onNavigate: (page: 'backup' | 'restore' | 'clone' | 'copy' | 'disks', intent?: { imagePath?: string }) => void;
 }
 
 function Dashboard({ onNavigate }: DashboardProps) {
@@ -278,8 +278,11 @@ function Dashboard({ onNavigate }: DashboardProps) {
         <button className="btn-primary btn-small" onClick={() => onNavigate('copy')}>
           📤 Partition Copy
         </button>
+        <button className="btn-secondary btn-small" onClick={() => onNavigate('disks')}>
+          🔧 Disk Tools
+        </button>
         <span className="dashboard-actions-note">
-          Drag partitions onto another disk to copy them without creating an image first.
+          Drag partitions to copy them, or run disk health checks and MBR repair.
         </span>
       </div>
 

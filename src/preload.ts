@@ -176,5 +176,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => {
       ipcRenderer.removeListener('clone-progress', handler);
     };
-  }
+  },
+
+  // Disk tools
+  getMbrInfo: (diskIndex: number) => ipcRenderer.invoke('get-mbr-info', diskIndex),
+  getMbrRaw: (diskIndex: number) => ipcRenderer.invoke('get-mbr-raw', diskIndex),
+  bootRecFixMbr: () => ipcRenderer.invoke('bootrec-fix-mbr'),
+  bootRecRebuildBcd: () => ipcRenderer.invoke('bootrec-rebuild-bcd'),
+  chkdskScan: (volume: string) => ipcRenderer.invoke('chkdsk-scan', volume),
+  chkdskFix: (volume: string) => ipcRenderer.invoke('chkdsk-fix', volume),
+  chkdskBadSectors: (volume: string) => ipcRenderer.invoke('chkdsk-bad-sectors', volume),
+  getTrimStatus: () => ipcRenderer.invoke('get-trim-status'),
+  retrimVolume: (volume: string) => ipcRenderer.invoke('retrim-volume', volume),
+  getSmartAllDisks: () => ipcRenderer.invoke('get-smart-all-disks')
 });
