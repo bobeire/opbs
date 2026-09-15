@@ -6,7 +6,7 @@ import { ImagingEngine } from '../imaging/backup-engine';
 import { RestoreEngine } from '../imaging/restore-engine';
 import { CloneEngine } from '../imaging/clone-engine';
 import { summarizeImage } from '../imaging/restore-engine';
-import { verifyImage, readImageInfo, deriveImageKey } from '../imaging/image-format';
+import { verifyImage, readImageInfo, deriveImageKey, scanPartialImage, DEFAULT_BLOCK_SIZE } from '../imaging/image-format';
 import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains, writeManifest, selectImagesForVerify, RetentionPlan } from '../backup/retention';
 import { checkDiskHealth } from '../utils/disk-health';
 import { registerScheduledTask, removeScheduledTask, listScheduledTasks } from '../utils/task-scheduler';
@@ -66,6 +66,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdPartitions(ctx);
       case 'list':
         return await cmdList(ctx);
+      case 'resume-list':
+        return await cmdResumeList(ctx);
       case 'backup':
         return await cmdBackup(ctx);
       case 'restore':
@@ -139,6 +141,9 @@ Commands:
   disks                                  List physical disks.
   partitions <diskIndex>                 List partitions on a disk.
   list [directory]                       List backups in a directory (default: backup location).
+  resume-list [directory]                List interrupted (resumable) images in a directory
+                                         (default: backup location). Shows how many frames were
+                                         already written so a later backup --resume can continue.
   backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume]
                            Run a backup job (config as JSON file).
   restore <config.json> [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk] Run a restore job (config as JSON file).
@@ -332,6 +337,97 @@ async function cmdList(ctx: CommandContext): Promise<number> {
   return 0;
 }
 
+/**
+ * List interrupted backups in a directory. Interrupted images are `.opbs`
+ * files that exist but never received their final block index (writing the
+ * index is the very last step of a run), so `scanPartialImage` reports them
+ * as incomplete. Each entry also shows how many block frames are already on
+ * disk, which is the work a `backup --resume` run will keep.
+ */
+async function cmdResumeList(ctx: CommandContext): Promise<number> {
+  const { SettingsManager } = await import('../utils/settings-manager');
+  const dir = ctx.argv[0] ?? new SettingsManager().getSettings().backupLocation;
+  if (!dir) {
+    console.error('No backup directory given and no backup location configured.');
+    return 1;
+  }
+  if (!fs.existsSync(dir)) {
+    console.error(`Backup directory does not exist: ${dir}`);
+    return 1;
+  }
+
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.opbs'));
+  const partials: Array<{
+    name: string;
+    path: string;
+    size: number;
+    modified: string;
+    partitionCount: number;
+    blockSize: number;
+    totalBytes: number;
+    framesWritten: number;
+    confirmedBytes: number;
+    encrypted: boolean;
+  }> = [];
+
+  for (const name of files) {
+    const filePath = path.join(dir, name);
+    try {
+      const scan = scanPartialImage(filePath, [], DEFAULT_BLOCK_SIZE);
+      if (scan.complete) continue; // finished image, not a partial
+      const header = scan.header;
+      // Re-scan with a synthetic single partition covering the header's total
+      // size so every valid frame in the file is counted regardless of the
+      // real partition layout (unknown without the source disk config).
+      const counted = scanPartialImage(
+        filePath,
+        [{ size: header.totalBytes, partitionIndex: 0 }],
+        header.blockSize
+      );
+      partials.push({
+        name,
+        path: filePath,
+        size: fs.statSync(filePath).size,
+        modified: new Date(fs.statSync(filePath).mtimeMs).toISOString(),
+        partitionCount: header.partitionCount,
+        blockSize: header.blockSize,
+        totalBytes: header.totalBytes,
+        framesWritten: counted.blocks.length,
+        confirmedBytes: counted.blocks.reduce((s, b) => s + b.rawSize, 0),
+        encrypted: header.cipherId !== 0
+      });
+    } catch {
+      // Not a valid OPBS header (or an already-complete/different product's
+      // file): not something a --resume run could continue.
+    }
+  }
+
+  partials.sort((a, b) => (a.modified < b.modified ? 1 : -1));
+
+  if (ctx.opts.json) {
+    console.log(JSON.stringify({ directory: dir, partials }, null, 2));
+    return 0;
+  }
+
+  if (partials.length === 0) {
+    console.log(`No interrupted images found in ${dir}`);
+    return 0;
+  }
+
+  console.log(`Interrupted backups in ${dir} (` +
+    `resume with 'backup <config> --resume'):`);
+  for (const p of partials) {
+    const fractional = p.totalBytes > 0 ? (p.confirmedBytes / p.totalBytes) * 100 : 0;
+    console.log(
+      `${p.name}\t${p.modified}\t${p.framesWritten} frame(s), ` +
+      `${formatBytes(p.confirmedBytes)} of ${formatBytes(p.totalBytes)} ` +
+      `(${fractional.toFixed(0)}%)${p.encrypted ? '\t[encrypted]' : ''}`
+    );
+  }
+  console.log(`\n${partials.length} interrupted image(s)`);
+  return 0;
+}
+
 function cmdAnalytics(ctx: CommandContext): Promise<number> {
   const dir = ctx.argv[0];
   if (!dir) {
@@ -410,13 +506,17 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
       process.stdout.write(
         `\r[${progress.phase}] ${progress.percent.toFixed(0)}%  ` +
           `${progress.currentPartition || ''}  ${formatBytes(progress.bytesDone)} at ` +
-          `${formatBytes(progress.speed)}/s     `
+          `${formatBytes(progress.speed)}/s` +
+          `${progress.resuming ? '  (resuming)' : ''}     `
       );
     }
   });
   if (!ctx.opts.json) {
     process.stdout.write('\n');
     console.log(result.ok ? `Backup OK (${formatBytes(result.bytesWritten)})` : `Backup FAILED: ${result.error}`);
+    if (result.ok && result.resumed) {
+      console.log('[resumed] continued an interrupted partial image; completed partitions kept.');
+    }
     if (result.warnings?.length) {
       for (const warning of result.warnings) {
         console.log(`warning: ${warning}`);

@@ -249,6 +249,12 @@ table + block index) and stamped `FLAG_RESUMED`. Any leftover partial image is
 targets local destinations; streaming destinations (S3/SFTP/FTP) always start
 fresh.
 
+CLI `resume-list [directory]` lists every interrupted image in a directory and
+shows how many block frames have already been written (and how many bytes those
+frames represent), so you can judge how close a partial image was to finishing.
+Run `backup --resume <config.json>` to continue from where it stopped. The
+Backup Wizard also offers a **Resume an interrupted backup** checkbox.
+
 ## How a clone runs
 
 A **clone** copies selected live partitions straight onto another local disk

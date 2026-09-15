@@ -1500,6 +1500,16 @@ body {
   margin-bottom: 8px;
 }
 
+.progress-resume-note {
+  font-size: 13px;
+  color: #8a6d1a;
+  background: #fdf3d7;
+  border: 1px solid #f0dc9a;
+  border-radius: 4px;
+  padding: 6px 10px;
+  margin-bottom: 10px;
+}
+
 .path-input {
   display: flex;
   gap: 8px;

@@ -25,6 +25,8 @@ export interface BackupProgress {
   estimatedTimeRemaining: number;
   currentPartition: string;
   error?: string;
+  /** True while a backup is continuing a previously interrupted image. */
+  resuming?: boolean;
 }
 
 export class BackupManager extends EventEmitter {

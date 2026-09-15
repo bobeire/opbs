@@ -29,6 +29,7 @@ interface BackupConfig {
   verificationEnabled: boolean;
   baseImagePath?: string;
   passphrase?: string;
+  resume?: boolean;
 }
 
 interface BackupProgress {
@@ -39,6 +40,7 @@ interface BackupProgress {
   speed: number;
   estimatedTimeRemaining: number;
   currentPartition: string;
+  resuming?: boolean;
 }
 
 interface BackupWizardProps {
@@ -63,6 +65,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
   );
   const [verificationEnabled, setVerificationEnabled] = useState(true);
   const [incrementalEnabled, setIncrementalEnabled] = useState(false);
+  const [resumeEnabled, setResumeEnabled] = useState(false);
   const [passphrase, setPassphrase] = useState('');
   const [baseImagePath, setBaseImagePath] = useState<string | undefined>(undefined);
   const [baseImageName, setBaseImageName] = useState<string | undefined>(undefined);
@@ -171,6 +174,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
     );
     setVerificationEnabled(profile.verificationEnabled ?? true);
     setIncrementalEnabled(profile.incremental ?? false);
+    setResumeEnabled(profile.resume ?? false);
     setPassphrase(profile.passphrase ?? '');
     setProfileMsg({ kind: 'ok', text: `Profile "${profile.name}" applied.` });
   };
@@ -205,6 +209,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
       compressionThreads,
       verificationEnabled,
       incremental: incrementalEnabled,
+      ...(resumeEnabled ? { resume: true } : {}),
       ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {})
     };
     const created = await window.electronAPI.addBackupProfile(payload);
@@ -227,7 +232,8 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
       compressionType,
       compressionThreads,
       verificationEnabled,
-      ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {})
+      ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {}),
+      ...(resumeEnabled ? { resume: true } : {})
     };
 
     try {
@@ -528,6 +534,22 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
               </div>
 
               <div className="option-group">
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={resumeEnabled}
+                    onChange={(e) => setResumeEnabled(e.target.checked)}
+                  />
+                  Resume an interrupted backup if one exists
+                </label>
+                <p className="field-hint">
+                  If a previous backup to this destination was interrupted, its completed
+                  partitions are kept and the run continues from where it stopped instead of
+                  starting over. Only works for local destinations.
+                </p>
+              </div>
+
+              <div className="option-group">
                 <label>Encryption Passphrase:</label>
                 <input
                   type="password"
@@ -575,6 +597,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
                 <li>Compression: Level {compressionLevel} ({compressionType}{compressionThreads > 1 ? `, ${compressionThreads} threads` : ''})</li>
                 <li>Verification: {verificationEnabled ? 'Enabled' : 'Disabled'}</li>
                 <li>Incremental: {incrementalEnabled && baseImagePath ? 'Enabled' : 'Full backup'}</li>
+                <li>Resume: {resumeEnabled ? 'Enabled (continues interrupted backups)' : 'Disabled'}</li>
                 <li>Encryption: {passphrase.trim() ? 'AES-256-GCM' : 'None'}</li>
               </ul>
             </div>
@@ -597,6 +620,12 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
             
             <div className="progress-container">
               {diskLabel && <p className="progress-disk-label">{diskLabel}</p>}
+              {progress?.resuming && (
+                <p className="progress-resume-note">
+                  Resuming from an interrupted backup — previously completed partitions are
+                  being kept.
+                </p>
+              )}
               <div className="progress-bar">
                 <div
                   className="progress-fill"

@@ -364,6 +364,7 @@ export function mapJobProgress(jobProgress: JobProgress): {
   speed: number;
   estimatedTimeRemaining: number;
   currentPartition: string;
+  resuming?: boolean;
 } {
   let phase: 'preparing' | 'snapshotting' | 'backing_up' | 'verifying' | 'completed' | 'error';
   switch (jobProgress.phase) {
@@ -397,6 +398,7 @@ export function mapJobProgress(jobProgress: JobProgress): {
     totalBytes: jobProgress.totalBytes,
     speed,
     estimatedTimeRemaining,
-    currentPartition: jobProgress.currentPartition
+    currentPartition: jobProgress.currentPartition,
+    ...(jobProgress.resuming ? { resuming: true } : {})
   };
 }

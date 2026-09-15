@@ -126,7 +126,8 @@ export async function runBackupJob(
     totalBytes,
     speed: 0,
     currentPartition: job.partitions[0]?.label ?? '',
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    resuming: false
   };
 
   let lastProgressWrite = Date.now();
@@ -240,6 +241,8 @@ export async function runBackupJob(
         job.resumeCheckpoint = undefined;
       }
     }
+
+    progress.resuming = isResume;
 
     if (!isResume) {
       const placeholderHeader = encodeHeader(header);

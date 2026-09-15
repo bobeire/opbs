@@ -315,8 +315,9 @@ implemented; **Investigate** items need spike work first.
 - ✅ CLI `--resume` flag on `backup`, unit tests for `scanPartialImage`
   (complete, truncated, corrupt-CRC, multi-partition) and for a resumed
   `runBackupJob` (partial image, kept frames, `FLAG_RESUMED`, verify).
-- ⬜ **Remaining**: optional UI toggle in the backup wizard, resume-specific
-  progress messaging, CLI `resume-list` to show interrupted images.
+- ✅ Backup wizard resume toggle, CLI `resume-list` to show interrupted
+  images with frame-count progress, and resume-specific progress messages
+  (`[resuming]` in CLI progress bar, highlighted UI banner).
 
 ### Hardware-accelerated crypto / native hashing
 - ✅ Native CRC-32 (`crc32`) added to the addon and wired into `image-format`

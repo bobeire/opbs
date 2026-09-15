@@ -148,6 +148,8 @@ export interface JobProgress {
   speed: number;
   currentPartition: string;
   createdAt: number;
+  /** True while a backup is continuing a previously interrupted image. */
+  resuming?: boolean;
 }
 
 export interface JobResult {
