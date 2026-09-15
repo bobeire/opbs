@@ -205,7 +205,16 @@ implemented; **Investigate** items need spike work first.
   over either backend (shared `CloudStore` interface). ssh2 works without its
   install script (pure-JS fallback), so the `allow-scripts` guard is not a
   blocker.
-- ⬜ **Remaining**: none for SFTP — this was the last cloud destination.
+- ⬜ **Remaining**: none for SFTP.
+- ✅ FTP/FTPS backend: `utils/ftp.ts` (`parseFtpLocation`, `resolveFtpConfig`
+  with `FTP_USER`/`FTP_PASSWORD`/`FTP_SECURE` env fallbacks, `FtpStore` — an
+  `SftpStore`-compatible object store over the `basic-ftp` client, streamed
+  uploads + ranged reads). `ftp://user@host/path` (and `ftps://` implicit)
+  destinations write to a temp dir then stream up after the job; `Settings →
+  Cloud (FTP/FTPS)` holds the profile with a Test Connection handler and a TLS
+  mode selector (Explicit TLS default; implicit; plain opt-in). The CLI
+  `store put/get/list/verify` and `prune` commands work over FTP too. Images
+  stay AES-256-GCM encrypted regardless of transport.
 
 ### Native partition-table builder (dissimilar-hardware restore)
 - ✅ Native addon `buildPartitionTable(scheme, lbaCount, entries, {diskGuid})`

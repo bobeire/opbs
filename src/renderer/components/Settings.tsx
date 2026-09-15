@@ -55,9 +55,19 @@ interface SftpProfile {
   remotePath: string;
 }
 
+interface FtpProfile {
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  remotePath: string;
+  secure: 'plain' | 'explicit' | 'implicit';
+}
+
 interface CloudSettings {
   s3: S3Profile;
   sftp: SftpProfile;
+  ftp: FtpProfile;
 }
 
 interface DiskInfo {
@@ -155,6 +165,14 @@ const DEFAULT_SETTINGS: Settings = {
       password: '',
       privateKey: '',
       remotePath: ''
+    },
+    ftp: {
+      host: '',
+      port: 21,
+      username: '',
+      password: '',
+      remotePath: '',
+      secure: 'explicit'
     }
   },
   errorReporting: {
@@ -171,6 +189,8 @@ function Settings() {
   const [s3Result, setS3Result] = useState<{ ok: boolean; count?: number; error?: string } | null>(null);
   const [sftpChecking, setSftpChecking] = useState(false);
   const [sftpResult, setSftpResult] = useState<{ ok: boolean; count?: number; error?: string } | null>(null);
+  const [ftpChecking, setFtpChecking] = useState(false);
+  const [ftpResult, setFtpResult] = useState<{ ok: boolean; count?: number; error?: string } | null>(null);
   const [exportResult, setExportResult] = useState<{ ok: boolean; message?: string } | null>(null);
   const [importResult, setImportResult] = useState<{ ok: boolean; message?: string } | null>(null);
   const [disks, setDisks] = useState<DiskInfo[]>([]);
@@ -197,7 +217,8 @@ function Settings() {
     scheduledScrub: { ...DEFAULT_SETTINGS.scheduledScrub, ...(loaded?.scheduledScrub || {}) },
     cloud: {
       s3: { ...DEFAULT_SETTINGS.cloud.s3, ...(loaded?.cloud?.s3 || {}) },
-      sftp: { ...DEFAULT_SETTINGS.cloud.sftp, ...(loaded?.cloud?.sftp || {}) }
+      sftp: { ...DEFAULT_SETTINGS.cloud.sftp, ...(loaded?.cloud?.sftp || {}) },
+      ftp: { ...DEFAULT_SETTINGS.cloud.ftp, ...(loaded?.cloud?.ftp || {}) }
     },
     errorReporting: { ...DEFAULT_SETTINGS.errorReporting, ...(loaded?.errorReporting || {}) }
   });
@@ -252,6 +273,11 @@ function Settings() {
     setHasChanges(true);
   };
 
+  const handleFtpChange = (key: keyof FtpProfile, value: any) => {
+    setSettings({ ...settings, cloud: { ...settings.cloud, ftp: { ...settings.cloud.ftp, [key]: value } } });
+    setHasChanges(true);
+  };
+
   const handleTestS3 = async () => {
     setS3Checking(true);
     setS3Result(null);
@@ -279,6 +305,21 @@ function Settings() {
       setSftpResult({ ok: false, error: e?.message ?? 'Connection failed' });
     } finally {
       setSftpChecking(false);
+    }
+  };
+
+  const handleTestFtp = async () => {
+    setFtpChecking(true);
+    setFtpResult(null);
+    try {
+      const saved = await window.electronAPI.updateSettings(settings);
+      setSettings(mergeSettings(saved));
+      const result = await window.electronAPI.verifyFtp();
+      setFtpResult(result.ok ? { ok: true, count: result.count ?? 0 } : { ok: false, error: result.error });
+    } catch (e: any) {
+      setFtpResult({ ok: false, error: e?.message ?? 'Connection failed' });
+    } finally {
+      setFtpChecking(false);
     }
   };
 
@@ -898,6 +939,93 @@ function Settings() {
         <div className="setting-item">
           <button className="btn-secondary" onClick={() => void handleTestSftp()} disabled={sftpChecking}>
             {sftpChecking ? 'Testing…' : 'Test Connection'}
+          </button>
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <h2>Cloud (FTP/FTPS)</h2>
+        <p className="field-hint">
+          Credentials for backing up to <code>ftp://user@host/path</code> destinations.
+          The destination URI in the backup wizard still determines the host and folder;
+          the profile here supplies credentials, a fallback path and the TLS mode.
+          <code>FTP_USER</code>/<code>FTP_PASSWORD</code> environment variables take
+          precedence when set. Plain FTP passes credentials and file names in cleartext —
+          prefer <strong>Explicit TLS</strong> (<code>ftps://</code>) unless the server is
+          legacy-only. Images themselves stay AES-256-GCM encrypted regardless.
+        </p>
+
+        <div className="setting-item">
+          <label>Host:</label>
+          <input
+            type="text"
+            value={settings.cloud.ftp.host}
+            onChange={(e) => handleFtpChange('host', e.target.value)}
+            placeholder="backup.example.com"
+          />
+        </div>
+        <div className="setting-item">
+          <label>Port:</label>
+          <input
+            type="number"
+            value={settings.cloud.ftp.port}
+            onChange={(e) => handleFtpChange('port', parseInt(e.target.value) || 21)}
+          />
+        </div>
+        <div className="setting-item">
+          <label>Username:</label>
+          <input
+            type="text"
+            value={settings.cloud.ftp.username}
+            onChange={(e) => handleFtpChange('username', e.target.value)}
+            autoComplete="off"
+          />
+        </div>
+        <div className="setting-item">
+          <label>Password:</label>
+          <input
+            type="password"
+            value={settings.cloud.ftp.password}
+            onChange={(e) => handleFtpChange('password', e.target.value)}
+            autoComplete="off"
+          />
+        </div>
+        <div className="setting-item">
+          <label>Default remote path:</label>
+          <input
+            type="text"
+            value={settings.cloud.ftp.remotePath}
+            onChange={(e) => handleFtpChange('remotePath', e.target.value)}
+            placeholder="opbs"
+          />
+        </div>
+        <div className="setting-item">
+          <label>Connection security:</label>
+          <select
+            value={settings.cloud.ftp.secure}
+            onChange={(e) => handleFtpChange('secure', e.target.value)}
+          >
+            <option value="explicit">Explicit TLS (ftps://, recommended)</option>
+            <option value="implicit">Implicit TLS (port 990)</option>
+            <option value="plain">Plain FTP (unencrypted)</option>
+          </select>
+        </div>
+
+        {ftpResult && (
+          ftpResult.ok ? (
+            <div className="success-message">
+              <p>Connected — {ftpResult.count} file(s) listed in the default location.</p>
+            </div>
+          ) : (
+            <div className="error-message">
+              <p>Connection failed: {ftpResult.error}</p>
+            </div>
+          )
+        )}
+
+        <div className="setting-item">
+          <button className="btn-secondary" onClick={() => void handleTestFtp()} disabled={ftpChecking}>
+            {ftpChecking ? 'Testing…' : 'Test Connection'}
           </button>
         </div>
       </div>

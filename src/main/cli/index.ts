@@ -20,6 +20,7 @@ import { openAnyBrowse, listDirectory, extractPath, formatTimestamp, resolvePath
 import { detectMacriumFormat, readMacriumImage } from '../imaging/mrimg';
 import { S3Store, parseS3Location } from '../utils/s3';
 import { SftpStore, parseSftpLocation, resolveSftpConfig } from '../utils/sftp';
+import { FtpStore, resolveFtpConfig } from '../utils/ftp';
 import { applyRetentionS3, planRetentionS3 } from '../backup/retention-s3';
 import { loadNative } from '../utils/native-loader';
 import { NativeImagingApi } from '../imaging/imaging-job';
@@ -238,13 +239,13 @@ Commands:
   mrimg info <image.mrimgx|image.mrimg>
                                          Show the structure of a Macrium Reflect image
                                          (both .mrimgx and .mrimg Reflect 7/8 containers).
-  store put <s3://bucket/prefix|sftp://user@host/path> <file> [--region R]
+store put <s3://bucket/prefix|sftp://user@host/path|ftp://user@host/path> <file> [--region R]
                                          Upload a file to the object store (AWS_* / SFTP_* env vars).
-  store get <s3://bucket/prefix|sftp://user@host/path> <file> [--region R]
+  store get <s3://bucket/prefix|sftp://user@host/path|ftp://user@host/path> <file> [--region R]
                                          Download an object from the store.
-  store list <s3://bucket/prefix|sftp://user@host/path> [--region R]
+  store list <s3://bucket/prefix|sftp://user@host/path|ftp://user@host/path> [--region R]
                                          List objects under a store prefix.
-  store verify <s3://bucket/prefix|sftp://user@host/path> [--key K] [--passphrase p] [--region R]
+  store verify <s3://bucket/prefix|sftp://user@host/path|ftp://user@host/path> [--key K] [--passphrase p] [--region R]
                                          Download + verify S3 objects (per-block CRC).
   usn-changes <volume> [--count N]       List recent NTFS USN journal changes (elevation needed).
   mount <image> --partition N [--letter X:] [--label L] [--passphrase p] [--check]
@@ -1456,7 +1457,7 @@ async function cmdPrune(ctx: CommandContext): Promise<number> {
   const options = { keepFull, keepDeltasPerFull: keepDeltas, retentionDays: days, dryRun };
 
   let plan: RetentionPlan;
-  if (dir.startsWith('s3://') || dir.startsWith('sftp://')) {
+  if (dir.startsWith('s3://') || dir.startsWith('sftp://') || dir.startsWith('ftp://')) {
     const store = cloudStoreFromLocation(dir, flagValue(ctx.argv, '--region'));
     plan = dryRun ? await planRetentionS3(store, options) : await applyRetentionS3(store, options);
   } else {
@@ -1880,8 +1881,8 @@ function s3StoreFromLocation(uri: string, region?: string): S3Store {
   });
 }
 
-/** Object-store client for a `s3://` or `sftp://` location. */
-function cloudStoreFromLocation(uri: string, region?: string): S3Store | SftpStore {
+/** Object-store client for an `s3://`, `sftp://` or `ftp://` location. */
+function cloudStoreFromLocation(uri: string, region?: string): S3Store | SftpStore | FtpStore {
   if (uri.trim().startsWith('sftp://')) {
     const config = resolveSftpConfig(undefined, uri);
     if (!config.username) {
@@ -1892,6 +1893,16 @@ function cloudStoreFromLocation(uri: string, region?: string): S3Store | SftpSto
     }
     return new SftpStore({ config });
   }
+  if (uri.trim().startsWith('ftp://')) {
+    const config = resolveFtpConfig(undefined, uri);
+    if (!config.username) {
+      throw new Error(`ftp:// location requires a username (ftp://user@host/path) or FTP_USER`);
+    }
+    if (!config.password) {
+      throw new Error('FTP credentials are required (FTP_PASSWORD)');
+    }
+    return new FtpStore({ config });
+  }
   return s3StoreFromLocation(uri, region);
 }
 
@@ -1900,11 +1911,11 @@ async function cmdStore(ctx: CommandContext): Promise<number> {
   const uri = ctx.argv[1];
   const file = ctx.argv[2];
   const region = flagValue(ctx.argv, '--region');
-  const store = uri && (uri.startsWith('s3://') || uri.startsWith('sftp://')) ? cloudStoreFromLocation(uri, region) : undefined;
+  const store = uri && (uri.startsWith('s3://') || uri.startsWith('sftp://') || uri.startsWith('ftp://')) ? cloudStoreFromLocation(uri, region) : undefined;
 
   if (action === 'put' && store && file) {
     const key = file.includes('/') ? path.basename(file) : file;
-    if (store instanceof SftpStore) {
+    if (store instanceof SftpStore || store instanceof FtpStore) {
       await store.uploadFile(file, key);
     } else {
       const data = fs.readFileSync(file);
@@ -1969,7 +1980,7 @@ async function cmdStore(ctx: CommandContext): Promise<number> {
     }
   }
 
-  console.error('Usage: store put <s3://bucket/prefix|sftp://user@host/path> <file> [--region R] | store get <uri> <file> [--region R] | store list <uri> [--region R] | store verify <uri> [--key K] [--passphrase p]');
+  console.error('Usage: store put <s3://bucket/prefix|sftp://user@host/path|ftp://user@host/path> <file> [--region R] | store get <uri> <file> [--region R] | store list <uri> [--region R] | store verify <uri> [--key K] [--passphrase p]');
   return 1;
 }
 

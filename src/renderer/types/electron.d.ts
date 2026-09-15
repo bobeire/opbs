@@ -276,6 +276,7 @@ declare global {
       adkInstall: (options: any) => Promise<{ ok: boolean; adkRoot: string | null; steps: Array<{ name: string; exitCode: number }>; error?: string }>;
       verifyS3: () => Promise<any>;
       verifySftp: () => Promise<any>;
+      verifyFtp: () => Promise<any>;
       onBackupProgress: (callback: (progress: any) => void) => () => void;
       onRestoreProgress: (callback: (progress: any) => void) => () => void;
       onCloneProgress: (callback: (progress: any) => void) => () => void;

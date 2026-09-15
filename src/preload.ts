@@ -105,6 +105,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Cloud SFTP
   verifySftp: () => ipcRenderer.invoke('verify-sftp'),
 
+  // Cloud FTP/FTPS
+  verifyFtp: () => ipcRenderer.invoke('verify-ftp'),
+
   // Logs
   getLogs: () => ipcRenderer.invoke('get-logs'),
   readLogFile: (filePath: string) => ipcRenderer.invoke('read-log-file', filePath),

@@ -214,11 +214,22 @@ describe('ImagingEngine', () => {
         engine.buildJob({
           sourceDiskIndex: 0,
           sourcePartitions: [0],
-          destinationPath: 'ftp://host/path',
+          destinationPath: 'webdav://host/path',
           compressionLevel: 3,
           verificationEnabled: false
         })
-      ).rejects.toThrow(/not a filesystem path/i);
+      ).rejects.toThrow(/Destination is not an existing directory/i);
+    });
+
+    it('uses a local temp dir for FTP destinations', async () => {
+      const job = await engine.buildJob({
+        sourceDiskIndex: 0,
+        sourcePartitions: [0],
+        destinationPath: 'ftp://user@host/backups',
+        compressionLevel: 3,
+        verificationEnabled: false
+      });
+      expect(job.imagePath).toMatch(/opbs-stream-/);
     });
 
     it('uses a local temp dir for S3 destinations', async () => {

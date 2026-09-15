@@ -8,6 +8,7 @@ import { launchElevatedJob } from '../helper/launcher';
 import { normalizeBackupLocation, isNonFilesystemLocation } from '../utils/location';
 import { S3Store, resolveS3Config, S3Config } from '../utils/s3';
 import { SftpStore, resolveSftpConfig, SftpConfig } from '../utils/sftp';
+import { FtpStore, resolveFtpConfig, FtpConfig } from '../utils/ftp';
 import { logger } from '../utils/logger';
 
 export interface BackupJobConfig {
@@ -35,6 +36,9 @@ export interface BackupJobConfig {
   s3Profile?: Partial<S3Config>;
   /** Cloud SFTP profile (host/port/user/credentials) for sftp:// destinations. */
   sftpProfile?: Partial<SftpConfig>;
+  /** Cloud FTP/FTPS profile (host/port/user/password/TLS mode) for ftp://
+   *  destinations. The destination URI still determines the remote path. */
+  ftpProfile?: Partial<FtpConfig>;
 }
 
 export interface BackupCoordinator {
@@ -94,15 +98,15 @@ export class ImagingEngine implements BackupCoordinator {
     }
 
     const destinationDir = normalizeBackupLocation(config.destinationPath);
-    // Non-filesystem destinations (S3/SFTP): write the image to a local temp
+    // Non-filesystem destinations (S3/SFTP/FTP): write the image to a local temp
     // dir, then upload it after the job completes.
     let streamTempDir: string | undefined;
     if (isNonFilesystemLocation(config.destinationPath)) {
-      if (config.destinationPath.startsWith('s3://') || config.destinationPath.startsWith('sftp://')) {
+      if (config.destinationPath.startsWith('s3://') || config.destinationPath.startsWith('sftp://') || config.destinationPath.startsWith('ftp://')) {
         streamTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-stream-'));
       } else {
         throw new Error(
-          `Destination '${config.destinationPath}' is not a filesystem path; S3 and SFTP are supported, FTP is not yet`
+          `Destination '${config.destinationPath}' is not a filesystem path; S3, SFTP and FTP are supported`
         );
       }
     }
@@ -190,6 +194,8 @@ export class ImagingEngine implements BackupCoordinator {
         await this.uploadImageToS3(config.destinationPath, result.imagePath, config.s3Profile);
       } else if (result.ok && config.destinationPath.startsWith('sftp://')) {
         await this.uploadImageToSftp(config.destinationPath, result.imagePath, config.sftpProfile);
+      } else if (result.ok && config.destinationPath.startsWith('ftp://')) {
+        await this.uploadImageToFtp(config.destinationPath, result.imagePath, config.ftpProfile);
       }
       return result;
     } finally {
@@ -239,6 +245,33 @@ export class ImagingEngine implements BackupCoordinator {
     const store = new SftpStore({ config });
     const key = path.basename(imagePath);
     logger.info(`Uploading ${imagePath} to sftp://${config.host}${config.remotePath ? '/' + config.remotePath : ''}/${key}`);
+    await store.uploadFile(imagePath, key);
+    try {
+      fs.rmSync(path.dirname(imagePath), { recursive: true, force: true });
+    } catch {
+      /* best-effort temp cleanup */
+    }
+  }
+
+  /** Upload a locally-written image to FTP/FTPS and remove the temp directory. */
+  private async uploadImageToFtp(
+    uri: string,
+    imagePath: string,
+    profile?: Partial<FtpConfig>
+  ): Promise<void> {
+    const config = resolveFtpConfig(profile, uri);
+    if (!config.host) {
+      throw new Error('FTP destination requires a host (set the cloud profile in Settings or use ftp://user@host/path)');
+    }
+    if (!config.username) {
+      throw new Error('FTP destination requires a username (set the cloud profile in Settings or use ftp://user@host/path)');
+    }
+    if (!config.password) {
+      throw new Error('FTP credentials are required (set the cloud profile in Settings or FTP_PASSWORD)');
+    }
+    const store = new FtpStore({ config });
+    const key = path.basename(imagePath);
+    logger.info(`Uploading ${imagePath} to ftp://${config.host}${config.remotePath ? '/' + config.remotePath : ''}/${key} (${config.secure})`);
     await store.uploadFile(imagePath, key);
     try {
       fs.rmSync(path.dirname(imagePath), { recursive: true, force: true });

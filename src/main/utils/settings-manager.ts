@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { app } from 'electron';
 import { SftpProfileSettings } from './sftp';
+import { FtpProfileSettings } from './ftp';
 import { ErrorReportingConfig } from './error-reporter';
 
 export interface AppSettings {
@@ -38,6 +39,7 @@ export interface AppSettings {
 export interface CloudSettings {
   s3: S3ProfileSettings;
   sftp: SftpProfileSettings;
+  ftp: FtpProfileSettings;
 }
 
 export interface S3ProfileSettings {
@@ -204,6 +206,14 @@ const DEFAULT_SETTINGS: AppSettings = {
       password: '',
       privateKey: '',
       remotePath: ''
+    },
+    ftp: {
+      host: '',
+      port: 21,
+      username: '',
+      password: '',
+      remotePath: '',
+      secure: 'explicit'
     }
   }
 };
@@ -227,7 +237,17 @@ export class SettingsManager {
       if (fs.existsSync(this.settingsFile)) {
         const data = fs.readFileSync(this.settingsFile, 'utf-8');
         const parsed = JSON.parse(data);
-        return { ...DEFAULT_SETTINGS, ...parsed };
+        return {
+          ...DEFAULT_SETTINGS,
+          ...parsed,
+          cloud: {
+            ...DEFAULT_SETTINGS.cloud,
+            ...(parsed?.cloud || {}),
+            s3: { ...DEFAULT_SETTINGS.cloud.s3, ...(parsed?.cloud?.s3 || {}) },
+            sftp: { ...DEFAULT_SETTINGS.cloud.sftp, ...(parsed?.cloud?.sftp || {}) },
+            ftp: { ...DEFAULT_SETTINGS.cloud.ftp, ...(parsed?.cloud?.ftp || {}) }
+          }
+        };
       }
     } catch (error) {
       console.error('Failed to load settings:', error);

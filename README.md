@@ -29,8 +29,10 @@ Website: https://opbs.rhitcs.com
   paths). `s3://bucket/prefix` destinations write locally then upload to S3
   (SigV4, `AWS_*` env vars); `sftp://user@host/path` destinations stream the
   finished image over the `ssh2` SFTP client (`SFTP_USER`/`SFTP_PASSWORD`/
-  `SFTP_PRIVATE_KEY` env vars or the Settings cloud profiles). FTP is detected
-  but not yet supported.
+  `SFTP_PRIVATE_KEY` env vars or the Settings cloud profiles); `ftp://` and
+  `ftps://` destinations stream over the `basic-ftp` client (FTPS — explicit
+  TLS by default — or opt-in plain FTP; `FTP_USER`/`FTP_PASSWORD`/`FTP_SECURE`
+  env vars or the Settings cloud profile).
 - **Headless CLI**: run backups/restores/verification/pruning from a script or task scheduler
 - **Simple wizard UI**: step-by-step backup and restore workflows
 - **Windows file associations**: per-user `.opbs` registration with a

@@ -30,6 +30,7 @@ import { installAdkExe } from './utils/adk-install';
 import { installWinfsp } from './utils/winfsp-install';
 import { S3Store, resolveS3Config } from './utils/s3';
 import { SftpStore, resolveSftpConfig } from './utils/sftp';
+import { FtpStore, resolveFtpConfig } from './utils/ftp';
 import { getRecentDestinations, addRecentDestination } from './utils/recent';
 import { destinationHealth } from './utils/destination-health';
 import { normalizeBackupLocation } from './utils/location';
@@ -157,6 +158,19 @@ function sftpProfileFromSettings() {
     password: sftp.password || undefined,
     privateKey: sftp.privateKey || undefined,
     remotePath: sftp.remotePath
+  };
+}
+
+function ftpProfileFromSettings() {
+  const ftp = settingsManager.getSettings().cloud?.ftp;
+  if (!ftp) return undefined;
+  return {
+    host: ftp.host,
+    port: ftp.port,
+    username: ftp.username,
+    password: ftp.password || undefined,
+    remotePath: ftp.remotePath,
+    secure: ftp.secure
   };
 }
 
@@ -446,7 +460,9 @@ function setupIpcHandlers(): void {
         ? { ...config, s3Profile: s3ProfileFromSettings() }
         : config?.destinationPath?.startsWith('sftp://')
           ? { ...config, sftpProfile: sftpProfileFromSettings() }
-          : config;
+          : config?.destinationPath?.startsWith('ftp://')
+            ? { ...config, ftpProfile: ftpProfileFromSettings() }
+            : config;
     return backupManager.startBackup(merged);
   });
 
@@ -912,12 +928,14 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       const chain = resolveImageChain(src);
       const profileS3 = s3ProfileFromSettings();
       const profileSftp = sftpProfileFromSettings();
+      const profileFtp = ftpProfileFromSettings();
       const useS3 = !!(profileS3?.accessKeyId && profileS3.bucket);
       const useSftp = !!(profileSftp?.host && profileSftp.username);
-      if (!useS3 && !useSftp) {
+      const useFtp = !!(profileFtp?.host && profileFtp.username);
+      if (!useS3 && !useSftp && !useFtp) {
         return {
           ok: false,
-          error: 'No cloud profile configured. Set S3 or SFTP credentials in Settings.'
+          error: 'No cloud profile configured. Set S3, SFTP or FTP credentials in Settings.'
         };
       }
       const uploaded: string[] = [];
@@ -937,6 +955,17 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
           if (!fs.existsSync(item)) continue;
           await store.put(path.basename(item), fs.readFileSync(item));
           uploaded.push(path.basename(item));
+        }
+      }
+      if (useFtp) {
+        const store = new FtpStore({ config: resolveFtpConfig(profileFtp, `ftp://${profileFtp.host}`) });
+        for (const item of chain) {
+          if (!fs.existsSync(item)) continue;
+          const key = path.basename(item);
+          // put() streams from an in-memory buffer for consistency with S3/SFTP
+          // paths; images are large, so hand the path to uploadFile instead.
+          await store.uploadFile(item, key);
+          uploaded.push(key);
         }
       }
       return { ok: true, uploaded };
@@ -1244,6 +1273,29 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       const store = new SftpStore({ config });
       const keys = await store.list();
       return { ok: true, count: keys.length };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Connection failed' };
+    }
+  });
+
+  // Cloud FTP/FTPS connection check using the saved cloud profile
+  ipcMain.handle('verify-ftp', async () => {
+    const profile = ftpProfileFromSettings();
+    try {
+      if (!profile?.host) {
+        throw new Error('FTP host is not configured');
+      }
+      if (!profile.username) {
+        throw new Error('FTP username is not configured');
+      }
+      if (!profile.password) {
+        throw new Error('FTP password is not configured');
+      }
+      const uri = `ftp://${profile.host}${profile.remotePath ? '/' + profile.remotePath : ''}`;
+      const config = resolveFtpConfig(profile, uri);
+      const store = new FtpStore({ config });
+      const keys = await store.list();
+      return { ok: true, count: keys.length, secure: config.secure };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : 'Connection failed' };
     }
