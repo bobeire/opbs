@@ -42,6 +42,24 @@ export interface JobEncryption {
   keyHex: string;
 }
 
+export interface ResumeCheckpoint {
+  imagePath: string;
+  /** File offset where the next compressed frame should be written. */
+  cursor: number;
+  /** Number of partitions whose blocks are fully written. */
+  completedPartitions: number;
+  /** Source bytes written for the current (partially written) partition. */
+  partitionBytes: number;
+  /** Next source block index to read within the current partition. */
+  sourceBlockIndex: number;
+  /** Total compressed blocks written so far. */
+  blocksWritten: number;
+  /** Total source bytes read and written so far. */
+  bytesWritten: number;
+  /** Blocks skipped (USN/incremental/used-blocks filtering). */
+  skippedBlocks: number;
+}
+
 export interface ImagingJob {
   type: 'backup';
   imagePath: string;
@@ -67,6 +85,12 @@ export interface ImagingJob {
   usedBlocksOnly?: boolean;
   /** Identity of the disk being imaged, persisted in the image header. */
   sourceDisk?: { model: string; serial: string };
+  /** When set, the backup may be resumed from a partial image. Completed
+   *  partitions are kept on failure so a later run continues from the same
+   *  target path. */
+  resume?: boolean;
+  /** When set, resume the backup from this checkpoint instead of starting fresh. */
+  resumeCheckpoint?: ResumeCheckpoint;
 }
 
 export interface RestoreTarget {
@@ -139,6 +163,7 @@ export interface JobResult {
   verifiedBlocks: number;
   skippedBlocks?: number;
   incremental?: boolean;
+  resumed?: boolean;
   warnings: string[];
 }
 

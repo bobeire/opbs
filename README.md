@@ -11,6 +11,7 @@ Website: https://opbs.rhitcs.com
 - **VSS support**: back up live systems using Windows Volume Shadow Copy Service
 - **Compression**: Zstandard (zstd) with multithreaded worker-thread compression, plus classic zlib deflate for backward compatibility; multiple levels to balance speed vs. size
 - **Incremental backups**: deltas capture only changed blocks against a base image; restore chains replay base + deltas in order. Optionally the NTFS **USN journal** (`useUsnJournal`) is used to read only the blocks touched by changed files instead of scanning the whole volume (falls back to a full scan if the journal is unavailable).
+- **Resumable imaging**: `resume` (CLI `--resume`) continues an interrupted local backup from the partial image already at the target path — completed partitions are kept and the run resumes at the next partition boundary instead of restarting from scratch.
 - **Used-blocks-only capture**: `usedBlocksOnly` (CLI `--used-blocks-only`) reads the NTFS `$Bitmap` and stores only blocks containing allocated clusters, dropping free space; non-NTFS partitions fall back to a full capture.
 - **Read-only mount via WinFsp**: mount a partition from a `.opbs` or Macrium image as a virtual drive letter with **zero extra disk usage** — file reads are served lazily by decompressing only the covering blocks. Requires the free WinFsp runtime (https://winfsp.dev).
 - **Disk-to-disk clone**: `clone` copies selected live partitions straight onto a different local disk (VSS snapshots, optional dissimilar layout + fresh GPT/MBR table, optional grow-on-restore), with no image file or cloud upload. The GUI **Partition Copy** screen makes this drag-and-drop: pick a target disk, drag partition chips onto it (or “Copy all partitions”), preview the auto-sequential 1 MiB-aligned layout with optional grow-to-fill, confirm the erase warning, and watch live progress.
@@ -233,6 +234,20 @@ Skipped blocks are simply absent from the image (the same gap mechanism
 incrementals already use), so the `.opbs` format is unchanged and restores
 leave spare space untouched. CLI: `backup --used-blocks-only` /
 `clone --used-blocks-only`.
+
+### Resumable imaging (`resume`)
+
+A backup that is interrupted (power loss, cancellation, crash) can continue
+where it left off instead of restarting: `resume` (CLI `--resume`, or
+`config.resume`) makes the next run detect the partial `.opbs` already at the
+target path and reuse every **fully written partition**. Completed partitions'
+frames are recovered from the file itself (each frame is self-describing), and
+the interrupted partition is restarted from its first block — so a resume only
+re-does at most one partition. The image is then finalized normally (partition
+table + block index) and stamped `FLAG_RESUMED`. Any leftover partial image is
+*kept* on failure while `resume` is enabled and deleted otherwise. `resume`
+targets local destinations; streaming destinations (S3/SFTP/FTP) always start
+fresh.
 
 ## How a clone runs
 

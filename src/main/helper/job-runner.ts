@@ -23,10 +23,12 @@ import {
   FLAG_HAS_BLOCK_INDEX,
   FLAG_VERIFIED,
   FLAG_INCREMENTAL,
+  FLAG_RESUMED,
   HEADER_SIZE,
   PARTITION_TABLE_ENTRY_SIZE,
   BLOCK_INDEX_ENTRY_SIZE,
   crc32,
+  scanPartialImage,
   ImageCipher,
   CIPHER_NONE,
   cipherFromMetadata
@@ -174,9 +176,19 @@ export async function runBackupJob(
     snapshotCache.clear();
   };
 
-  const fd = fs.openSync(job.imagePath, 'w+');
+  const resumeCheckpoint = job.resumeCheckpoint;
+  let isResume = !!resumeCheckpoint;
+
+  const fd = fs.openSync(job.imagePath, isResume ? 'r+' : 'w+');
 
   try {
+    // Resume support: when a partial image exists at the destination, keep the
+    // frames already written for completed partitions, skip those partitions in
+    // the capture loop and continue appending from the resume cursor.
+    let blocks: BlockRecord[] = [];
+    const partitionEntries: PartitionEntryMeta[] = [];
+    let cursor = 0;
+
     const header: ImageHeader = {
       version: IMAGE_VERSION,
       timestamp: Date.now(),
@@ -193,16 +205,56 @@ export async function runBackupJob(
       sourceDiskModel: job.sourceDisk?.model ?? '',
       sourceDiskSerial: job.sourceDisk?.serial ?? ''
     };
-    const placeholderHeader = encodeHeader(header);
-    fs.writeSync(fd, placeholderHeader, 0, HEADER_SIZE, 0);
 
-    // Reserve space for the partition table.
-    const tableSize = job.partitions.length * PARTITION_TABLE_ENTRY_SIZE;
-    const zeroTable = Buffer.alloc(tableSize);
-    fs.writeSync(fd, zeroTable, 0, tableSize, HEADER_SIZE);
+    if (isResume && resumeCheckpoint) {
+      // Validate the partial file and recover the frames we keep.
+      const scan = scanPartialImage(job.imagePath, job.partitions, blockSize);
+      if (!scan.complete) {
+        const keepFrom = Math.min(resumeCheckpoint.completedPartitions, job.partitions.length);
+        // Real (disk) partition indices that are fully written; the scanned
+        // frames carry the real index so they are matched regardless of the
+        // selected-subset ordering in `job.partitions`.
+        const keptIndexes = new Set<number>();
+        for (let i = 0; i < keepFrom; i++) {
+          keptIndexes.add(job.partitions[i].partitionIndex);
+        }
+        blocks = scan.blocks.filter((b) => keptIndexes.has(b.partitionIndex));
+        for (let i = 0; i < keepFrom; i++) {
+          const part = job.partitions[i];
+          partitionEntries.push({
+            partitionIndex: part.partitionIndex,
+            size: part.size,
+            offsetOnDisk: part.offset,
+            firstBlockFileOffset: scan.partitionStartOffsets[i] ?? 0,
+            blockCount: blocks.filter((b) => b.partitionIndex === part.partitionIndex).length
+          });
+        }
+        cursor = resumeCheckpoint.cursor;
+        bytesWritten = resumeCheckpoint.bytesWritten;
+        blocksWritten = resumeCheckpoint.blocksWritten;
+        skippedBlocks = resumeCheckpoint.skippedBlocks;
+        progress.bytesDone = resumeCheckpoint.bytesWritten;
+      } else {
+        // The file turned out to be a complete image; fall back to a fresh run.
+        isResume = false;
+        job.resumeCheckpoint = undefined;
+      }
+    }
 
-    const dataOffset = HEADER_SIZE + tableSize;
-    let cursor = dataOffset;
+    if (!isResume) {
+      const placeholderHeader = encodeHeader(header);
+      fs.writeSync(fd, placeholderHeader, 0, HEADER_SIZE, 0);
+
+      // Reserve space for the partition table.
+      const tableSize = job.partitions.length * PARTITION_TABLE_ENTRY_SIZE;
+      const zeroTable = Buffer.alloc(tableSize);
+      fs.writeSync(fd, zeroTable, 0, tableSize, HEADER_SIZE);
+    }
+
+    const dataOffset = HEADER_SIZE + job.partitions.length * PARTITION_TABLE_ENTRY_SIZE;
+    if (!isResume) {
+      cursor = dataOffset;
+    }
 
     try {
       createSnapshots(job);
@@ -211,10 +263,12 @@ export async function runBackupJob(
       throw new Error(`Failed to create VSS snapshot: ${errorMessage(error)}`, { cause: error });
     }
 
-    const blocks: BlockRecord[] = [];
-    const partitionEntries: PartitionEntryMeta[] = [];
-
-    for (const part of job.partitions) {
+    for (let pi = 0; pi < job.partitions.length; pi++) {
+      const part = job.partitions[pi];
+      // Resume: partitions whose frames are already on disk are skipped.
+      if (isResume && resumeCheckpoint && pi < resumeCheckpoint.completedPartitions) {
+        continue;
+      }
       if (isCancelled()) {
         throw new CancelledError();
       }
@@ -476,11 +530,14 @@ export async function runBackupJob(
       }
     }
 
-    // Mark the image as verified.
+    // Mark the image as verified (and record that it was resumed, if so).
     const verifyFd = fs.openSync(job.imagePath, 'r+');
     const finalBuf = Buffer.alloc(HEADER_SIZE);
     fs.readSync(verifyFd, finalBuf, 0, HEADER_SIZE, 0);
-    const flags = finalBuf.readUInt32LE(36) | FLAG_VERIFIED;
+    let flags = finalBuf.readUInt32LE(36) | FLAG_VERIFIED;
+    if (isResume) {
+      flags |= FLAG_RESUMED;
+    }
     finalBuf.writeUInt32LE(flags, 36);
     fs.writeSync(verifyFd, finalBuf, 0, HEADER_SIZE, 0);
     fs.closeSync(verifyFd);
@@ -511,6 +568,7 @@ export async function runBackupJob(
       verifiedBlocks,
       skippedBlocks,
       incremental: !!job.baseImagePath,
+      resumed: isResume,
       warnings
     };
     fs.writeFileSync(resultPath, JSON.stringify(result));
@@ -535,13 +593,18 @@ export async function runBackupJob(
       verifiedBlocks,
       skippedBlocks,
       incremental: !!job.baseImagePath,
+      resumed: isResume,
       warnings
     };
-    // Remove the partial image so it is never mistaken for a good backup.
-    try {
-      fs.unlinkSync(job.imagePath);
-    } catch {
-      /* best-effort */
+    // Keep the partial image when resume is enabled so a later run can continue
+    // from where this one stopped; otherwise remove it so it is never mistaken
+    // for a good backup. scanPartialImage / buildJob determine resumability.
+    if (!job.resume) {
+      try {
+        fs.unlinkSync(job.imagePath);
+      } catch {
+        /* best-effort */
+      }
     }
     fs.writeFileSync(resultPath, JSON.stringify(result));
     return;

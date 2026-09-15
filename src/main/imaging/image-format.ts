@@ -39,6 +39,7 @@ export type CompressionType = 'none' | 'deflate' | 'zstd';
 export const FLAG_HAS_BLOCK_INDEX = 0x1;
 export const FLAG_VERIFIED = 0x2;
 export const FLAG_INCREMENTAL = 0x4;
+export const FLAG_RESUMED = 0x8;
 
 /** Byte offset of the flags field inside the 256-byte image header. */
 export const FLAGS_OFFSET = 36;
@@ -487,6 +488,135 @@ export function readImageInfo(imagePath: string): ImageInfo {
     }
 
     return { header, partitions, blocks, dataOffset };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+export interface ResumeScanResult {
+  header: ImageHeader;
+  /** Valid block frames found, in file order (pre-resume records). */
+  blocks: BlockRecord[];
+  /** File offset of the first invalid/truncated frame (the resume cursor). */
+  cursor: number;
+  /** Number of fully-written partitions (frames cover every block). */
+  completedPartitions: number;
+  /** Frames belonging to the last (partially written) partition, if any. */
+  resumePartitionFrames: number;
+  /** File offset where each partition's frames start. */
+  partitionStartOffsets: number[];
+  /** True if the image has a complete block index (i.e. not a partial image). */
+  complete: boolean;
+}
+
+/**
+ * Scan a (possibly partial) image file to recover the exact resume position
+ * and the block records already written. Frames are self-describing (raw size,
+ * compressed size and both CRCs in the 16-byte header), so a valid prefix can
+ * be walked without the block index that is only written at the very end.
+ *
+ * Frame headers are decoded structurally (no key required even for encrypted
+ * images, whose payload is opaque) and, for plaintext images, the stored
+ * compressed CRC is cross-checked so a truncated tail frame is rejected.
+ */
+export function scanPartialImage(
+  imagePath: string,
+  partitions: Array<{ size: number; partitionIndex?: number }>,
+  blockSize: number
+): ResumeScanResult {
+  const fd = fs.openSync(imagePath, 'r');
+  try {
+    const fileSize = fs.fstatSync(fd).size;
+    if (fileSize < HEADER_SIZE) {
+      throw new Error(`Image file too small to be a partial backup: ${imagePath}`);
+    }
+    const headerBuf = Buffer.alloc(HEADER_SIZE);
+    fs.readSync(fd, headerBuf, 0, HEADER_SIZE, 0);
+    const header = parseHeader(headerBuf);
+    if (header.version !== IMAGE_VERSION) {
+      throw new Error(`Unsupported image version: ${header.version}`);
+    }
+
+    const encrypted = header.cipherId === CIPHER_AES256_GCM;
+    const frameExtra = encrypted ? GCM_IV_LENGTH + GCM_TAG_LENGTH : 0;
+    const dataOffset = HEADER_SIZE + header.partitionCount * PARTITION_TABLE_ENTRY_SIZE;
+
+    if (dataOffset > fileSize) {
+      throw new Error(`Image header/table extends past the end of the file: ${imagePath}`);
+    }
+
+    const complete = header.blockIndexOffset > 0 && (header.flags & FLAG_HAS_BLOCK_INDEX) !== 0;
+    if (complete) {
+      return { header, blocks: [], cursor: dataOffset, completedPartitions: 0, resumePartitionFrames: 0, partitionStartOffsets: [], complete: true };
+    }
+
+    // Expected frame count per partition, in job order.
+    const perPartitionBlocks = partitions.map((p) => Math.ceil(p.size / blockSize));
+    const blocks: BlockRecord[] = [];
+    const partitionStartOffsets: number[] = [];
+    let cursor = dataOffset;
+    let partIndex = 0;
+    let framesInPart = 0;
+    let sawValidFrame = false;
+
+    while (partIndex < partitions.length) {
+      if (cursor + 16 > fileSize) break;
+      const head = Buffer.alloc(16);
+      const headRead = fs.readSync(fd, head, 0, 16, cursor);
+      if (headRead < 16) break;
+
+      const rawSize = head.readUInt32LE(0);
+      const compSize = head.readUInt32LE(4);
+      const rawCrc = head.readUInt32LE(8);
+      const compCrc = head.readUInt32LE(12);
+
+      // Structural sanity: a raw block can never exceed blockSize, and an
+      // implausible compressed size means garbage or a torn tail.
+      if (rawSize === 0 || rawSize > blockSize * 4 || compSize === 0 || compSize > 1024 * 1024 * 1024) break;
+
+      const frameEnd = cursor + 16 + frameExtra + compSize;
+      if (frameEnd > fileSize) break;
+
+      if (!encrypted) {
+        const comp = Buffer.alloc(compSize);
+        const compRead = fs.readSync(fd, comp, 0, compSize, cursor + 16);
+        if (compRead !== compSize || crc32(comp) !== compCrc) break;
+      }
+
+      if (!sawValidFrame) {
+        partitionStartOffsets[0] = cursor;
+        sawValidFrame = true;
+      }
+
+      blocks.push({
+        partitionIndex: partitions[partIndex]?.partitionIndex ?? partIndex,
+        blockIndex: framesInPart,
+        fileOffset: cursor,
+        rawSize,
+        compSize,
+        rawCrc32: rawCrc
+      });
+      cursor = frameEnd;
+      framesInPart++;
+
+      if (framesInPart >= (perPartitionBlocks[partIndex] ?? Infinity)) {
+        partIndex++;
+        framesInPart = 0;
+        if (partIndex < partitions.length) {
+          partitionStartOffsets[partIndex] = cursor;
+        }
+      }
+    }
+
+    return {
+      header,
+      blocks,
+      cursor,
+      completedPartitions: Math.min(partIndex, partitions.length),
+      resumePartitionFrames: partIndex < partitions.length ? framesInPart : 0,
+      partitionStartOffsets,
+      complete: false
+    };
   } finally {
     fs.closeSync(fd);
   }

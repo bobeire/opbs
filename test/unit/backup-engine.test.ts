@@ -3,6 +3,18 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { ImagingEngine, mapJobProgress } from '../../src/main/imaging/backup-engine';
+import {
+  ImageHeader,
+  IMAGE_VERSION,
+  FLAG_HAS_BLOCK_INDEX,
+  CIPHER_NONE,
+  PARTITION_TABLE_ENTRY_SIZE,
+  HEADER_SIZE,
+  COMPRESSION_DEFLATE,
+  encodeHeader,
+  encodeBlockFrame,
+  compressBlock
+} from '../../src/main/imaging/image-format';
 import { DiskEnumerator } from '../../src/main/utils/disk-enumerator';
 import { JobProgress } from '../../src/main/imaging/imaging-job';
 
@@ -179,7 +191,7 @@ describe('ImagingEngine', () => {
         engine.buildJob({
           sourceDiskIndex: 0,
           sourcePartitions: [9],
-          destinationPath: dir,
+destinationPath: dir,
           compressionLevel: 3,
           verificationEnabled: false
         })
@@ -242,8 +254,89 @@ describe('ImagingEngine', () => {
       });
       expect(job.imagePath).toMatch(/opbs-stream-/);
     });
+
+    it('does not resume when the resume flag is off, even with a partial image present', async () => {
+      // A partial image at the target path exists, but resume is not requested:
+      // buildJob must NOT attach a resumeCheckpoint.
+      const path = await buildPartialImageAtDefaultName(engine, dir);
+      const job = await engine.buildJob({
+        sourceDiskIndex: 0,
+        sourcePartitions: [0],
+        destinationPath: dir,
+        compressionLevel: 3,
+        verificationEnabled: false
+      });
+      expect(job.imagePath).toBe(path);
+      expect(job.resumeCheckpoint).toBeUndefined();
+      expect(job.resume).toBeUndefined();
+    });
+
+    it('attaches a resume checkpoint when resume is enabled and a compatible partial exists', async () => {
+      const path = await buildPartialImageAtDefaultName(engine, dir);
+      const job = await engine.buildJob({
+        sourceDiskIndex: 0,
+        sourcePartitions: [0],
+        destinationPath: dir,
+        compressionLevel: 3,
+        verificationEnabled: false,
+        resume: true
+      });
+      expect(job.imagePath).toBe(path);
+      expect(job.resume).toBe(true);
+      expect(job.resumeCheckpoint).toBeDefined();
+      // Partition 0 is fully written in the partial image so the checkpoint
+      // resumes with completedPartitions=1 and the counted blocks preserved.
+      expect(job.resumeCheckpoint!.completedPartitions).toBe(1);
+      expect(job.resumeCheckpoint!.blocksWritten).toBe(100);
+      expect(job.resumeCheckpoint!.cursor).toBeGreaterThan(0);
+    });
   });
 });
+
+/** Writes a valid partial (unfinished) image to the default target name. */
+async function buildPartialImageAtDefaultName(eng: ImagingEngine, destDir: string): Promise<string> {
+  const job = await eng.buildJob({
+    sourceDiskIndex: 0,
+    sourcePartitions: [0],
+    destinationPath: destDir,
+    compressionLevel: 3,
+    verificationEnabled: false
+  });
+  const defaultPath = job.imagePath;
+
+  // Header + table for the single selected partition (100 MiB at 1 MiB blocks,
+  // deflate, no encryption) matching what buildJob itself produces.
+  const part = job.partitions[0];
+  const blockCount = Math.ceil(part.size / job.blockSize);
+  const header: ImageHeader = {
+    version: IMAGE_VERSION,
+    timestamp: Date.now(),
+    totalBytes: part.size,
+    blockSize: job.blockSize,
+    compressionId: COMPRESSION_DEFLATE,
+    partitionCount: 1,
+    flags: FLAG_HAS_BLOCK_INDEX,
+    blockIndexOffset: 0,
+    cipherId: CIPHER_NONE,
+    kdfIterations: 0,
+    salt: Buffer.alloc(0),
+    baseImagePath: ''
+  };
+  const tableSize = 1 * PARTITION_TABLE_ENTRY_SIZE;
+  const fd = fs.openSync(defaultPath, 'w+');
+  fs.writeSync(fd, encodeHeader(header), 0, HEADER_SIZE, 0);
+  fs.writeSync(fd, Buffer.alloc(tableSize), 0, tableSize, HEADER_SIZE);
+  // Write every block so the partition counts as complete; an unfinished image
+  // only differs by lacking the block index at the end.
+  const raw = Buffer.alloc(job.blockSize, 0xab);
+  const comp = compressBlock(raw, COMPRESSION_DEFLATE, 3);
+  const frame = encodeBlockFrame(raw, comp);
+  for (let b = 0; b < blockCount; b++) {
+    fs.writeSync(fd, frame, 0, frame.length, HEADER_SIZE + tableSize + b * frame.length);
+  }
+  fs.closeSync(fd);
+  return defaultPath;
+}
 
 describe('mapJobProgress', () => {
   const base: JobProgress = {

@@ -292,6 +292,32 @@ implemented; **Investigate** items need spike work first.
   channel, so degradation is caught proactively even without a configured
   verification schedule.
 
+### Resumable imaging (interrupted backups)
+- ✅ `scanPartialImage()` (`image-format.ts`): walks a partial image file
+  (no block index yet) by reading self-describing compressed block frames,
+  validates CRCs for plaintext, structurally validates encrypted frames, and
+  returns completed partition counts, a resume cursor, and recovered
+  `BlockRecord[]` for frames already written. `ResumeCheckpoint` type tracks
+  the cursor and counters to seed a resumed run.
+- ✅ `BackupJobConfig.resume?: boolean` gates resume detection in
+  `buildJob()`: when set, a partial image at the target path is scanned
+  and, if compatible (partition count, block size, compression, cipher match),
+  the job carries a `resumeCheckpoint` through to the elevated helper.
+- ✅ `runBackupJob` resume path: opens the image `'r+'` (not truncate),
+  pre-seeds `blocks`/`partitionEntries` for completed partitions from the
+  scan, skips those partitions in the capture loop, appends new frames from
+  the interrupted partition's start offset, and writes the final block index
+  as usual. `FLAG_RESUMED` is set in the header on completion and
+  `JobResult.resumed` reflects the flag.
+- ✅ Failure-path cleanup: when `job.resume` is true the partial image is
+  *kept* on failure so a later `--resume` run can continue; otherwise it is
+  deleted (default behaviour).
+- ✅ CLI `--resume` flag on `backup`, unit tests for `scanPartialImage`
+  (complete, truncated, corrupt-CRC, multi-partition) and for a resumed
+  `runBackupJob` (partial image, kept frames, `FLAG_RESUMED`, verify).
+- ⬜ **Remaining**: optional UI toggle in the backup wizard, resume-specific
+  progress messaging, CLI `resume-list` to show interrupted images.
+
 ### Hardware-accelerated crypto / native hashing
 - ✅ Native CRC-32 (`crc32`) added to the addon and wired into `image-format`
   (lazy, graceful JS fallback) so per-block hashing during backup/verify runs in

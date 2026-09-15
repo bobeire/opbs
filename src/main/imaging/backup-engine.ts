@@ -2,8 +2,19 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { DiskEnumerator } from '../utils/disk-enumerator';
-import { defaultImagePath, DEFAULT_BLOCK_SIZE, newImageCipher, metadataFromCipher, readImageInfo } from './image-format';
-import { ImagingJob, JobProgress, JobResult, ImagingPartition, JobEncryption } from './imaging-job';
+import {
+  defaultImagePath,
+  DEFAULT_BLOCK_SIZE,
+  newImageCipher,
+  metadataFromCipher,
+  readImageInfo,
+  scanPartialImage,
+  getCompressionId,
+  CIPHER_NONE,
+  FLAG_HAS_BLOCK_INDEX,
+  FLAG_RESUMED
+} from './image-format';
+import { ImagingJob, JobProgress, JobResult, ImagingPartition, JobEncryption, ResumeCheckpoint } from './imaging-job';
 import { launchElevatedJob } from '../helper/launcher';
 import { normalizeBackupLocation, isNonFilesystemLocation } from '../utils/location';
 import { S3Store, resolveS3Config, S3Config } from '../utils/s3';
@@ -39,6 +50,11 @@ export interface BackupJobConfig {
   /** Cloud FTP/FTPS profile (host/port/user/password/TLS mode) for ftp://
    *  destinations. The destination URI still determines the remote path. */
   ftpProfile?: Partial<FtpConfig>;
+  /** When set, an interrupted backup to a local filesystem destination is
+   *  continued from the partial image already present at the target path
+   *  instead of starting fresh. Completed partitions are kept and the run
+   *  resumes at the next partition boundary. */
+  resume?: boolean;
 }
 
 export interface BackupCoordinator {
@@ -158,9 +174,60 @@ export class ImagingEngine implements BackupCoordinator {
       }
     }
 
+    // Resume support: if a partial image already exists at the target path and
+    // its format settings match this job, resume from where the previous run
+    // left off instead of starting fresh. Only block counts that are exactly
+    // recoverable are reused (frames have self-describing headers); the block
+    // index is rewritten at the end as usual.
+    const imagePath = defaultImagePath(destDir, diskIndex);
+    let resumeCheckpoint: ResumeCheckpoint | undefined;
+    if (config.resume && fs.existsSync(imagePath)) {
+      try {
+        const scan = scanPartialImage(imagePath, items, config.blockSize ?? DEFAULT_BLOCK_SIZE);
+        const compatible =
+          !scan.complete &&
+          scan.header.partitionCount === items.length &&
+          scan.header.blockSize === (config.blockSize ?? DEFAULT_BLOCK_SIZE) &&
+          scan.header.compressionId === getCompressionId(config.compressionLevel, config.compressionType) &&
+          scan.header.cipherId === (encryption ? encryption.cipherId : CIPHER_NONE);
+
+        if (compatible && scan.completedPartitions <= items.length && scan.blocks.length > 0) {
+          const completed = scan.completedPartitions;
+          const restartAtPartition = Math.min(completed, items.length);
+          // Real (disk) partition indices that are fully written, so blocks kept
+          // from the partial image are matched regardless of the selected subset
+          // ordering in `items`.
+          const keptIndexes = new Set<number>();
+          for (let i = 0; i < restartAtPartition; i++) {
+            keptIndexes.add(items[i].partitionIndex);
+          }
+          // Drop the partially-written frames of the interrupted partition so
+          // that partition is restarted from a clean partition boundary.
+          const keptBlocks = scan.blocks.filter((b) => keptIndexes.has(b.partitionIndex));
+          const restartOffset =
+            restartAtPartition < items.length
+              ? (scan.partitionStartOffsets[restartAtPartition] ?? scan.cursor)
+              : scan.cursor;
+
+          resumeCheckpoint = {
+            imagePath,
+            cursor: restartOffset,
+            completedPartitions: restartAtPartition,
+            partitionBytes: 0,
+            sourceBlockIndex: 0,
+            blocksWritten: keptBlocks.length,
+            bytesWritten: keptBlocks.reduce((s, b) => s + b.rawSize, 0),
+            skippedBlocks: 0
+          };
+        }
+      } catch {
+        resumeCheckpoint = undefined; // not a resumable partial image
+      }
+    }
+
     return {
       type: 'backup',
-      imagePath: defaultImagePath(destDir, diskIndex),
+      imagePath,
       blockSize: config.blockSize ?? DEFAULT_BLOCK_SIZE,
       compressionLevel,
       compressionType: config.compressionType,
@@ -169,6 +236,8 @@ export class ImagingEngine implements BackupCoordinator {
       partitions: items,
       baseImagePath: config.baseImagePath,
       encryption,
+      ...(config.resume ? { resume: true } : {}),
+      ...(resumeCheckpoint ? { resumeCheckpoint } : {}),
       ...(config.usedBlocksOnly ? { usedBlocksOnly: true } : {}),
       ...(useUsnJournal && usnVolume ? { useUsnJournal, usnVolume, usnLastUsn } : {}),
       sourceDisk: sourceDiskIdentity

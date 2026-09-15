@@ -39,7 +39,8 @@ import {
   GCM_IV_LENGTH,
   GCM_TAG_LENGTH,
   newImageCipher,
-  deriveImageKey
+  deriveImageKey,
+  scanPartialImage
 } from '../../src/main/imaging/image-format';
 
 function randomData(size: number): Buffer {
@@ -543,6 +544,150 @@ describe('image-format', () => {
       const p = defaultImagePath('C:\\backups', 0, new Date('2026-09-07T10:15:30.000Z').getTime());
       expect(p).toMatch(/^C:\\backups\\opbs-disk0-2026-09-07T10-15-30\.opbs$/);
       expect(DEFAULT_BLOCK_SIZE).toBe(1024 * 1024);
+    });
+  });
+
+  describe('scanPartialImage', () => {
+    // Partitions in array order; real disk partition indices differ from slots.
+    const partitions = [
+      { partitionIndex: 2, size: 1024 * 2 },
+      { partitionIndex: 4, size: 1024 * 4 }
+    ];
+    const tableSize = partitions.length * PARTITION_TABLE_ENTRY_SIZE;
+    const dataStart = HEADER_SIZE + tableSize;
+
+    // Writes a header + zero table and then `fullPartitions` completed
+    // partitions (no block index), optionally followed by `partialFrames`
+    // frames of the next partition. Returns the exact boundary offsets so
+    // assertions never depend on compressed sizes.
+    function writePartialImage(
+      imagePath: string,
+      fullPartitions: number,
+      partialFrames: number
+    ): { perPartitionEnds: number[] } {
+      const blockSize = 1024;
+      const header: ImageHeader = {
+        version: IMAGE_VERSION,
+        timestamp: Date.now(),
+        totalBytes: blockSize * 6,
+        blockSize,
+        compressionId: COMPRESSION_DEFLATE,
+        partitionCount: partitions.length,
+        flags: FLAG_HAS_BLOCK_INDEX,
+        blockIndexOffset: 0,
+        cipherId: CIPHER_NONE,
+        kdfIterations: 0,
+        salt: Buffer.alloc(SALT_LENGTH),
+        baseImagePath: ''
+      };
+      const fd = fs.openSync(imagePath, 'w+');
+      fs.writeSync(fd, encodeHeader(header), 0, HEADER_SIZE, 0);
+      fs.writeSync(fd, Buffer.alloc(tableSize), 0, tableSize, HEADER_SIZE);
+
+      const framesFor = (partitionIndex: number): number => partitions[partitionIndex].size / 1024;
+      function writeFrames(count: number): void {
+        for (let b = 0; b < count; b++) {
+          const raw = randomData(1024);
+          const comp = compressBlock(raw, COMPRESSION_DEFLATE, 3);
+          const frame = encodeBlockFrame(raw, comp);
+          fs.writeSync(fd, frame, 0, frame.length, cursor);
+          cursor += frame.length;
+        }
+      }
+      const perPartitionEnds: number[] = [];
+      let cursor = dataStart;
+      for (let p = 0; p < fullPartitions; p++) {
+        writeFrames(framesFor(p));
+        perPartitionEnds.push(cursor);
+      }
+      writeFrames(partialFrames);
+      fs.closeSync(fd);
+      return { perPartitionEnds };
+    }
+
+    it('reports complete for an image with a block index', () => {
+      const { path: completePath } = writeValidImage(dir, 1024);
+      const scan = scanPartialImage(completePath, partitions, 1024);
+      expect(scan.complete).toBe(true);
+      expect(scan.blocks.length).toBe(0);
+    });
+
+    it('rejects a file too small to hold the header', () => {
+      const p = path.join(dir, 'tiny.opbs');
+      fs.writeFileSync(p, Buffer.alloc(16));
+      expect(() => scanPartialImage(p, partitions, 1024)).toThrow(/too small/i);
+    });
+
+    it('recovers an interrupted partition-0 prefix and no completed partitions', () => {
+      const p = path.join(dir, 'partial0.opbs');
+      writePartialImage(p, 0, 1);
+      const scan = scanPartialImage(p, partitions, 1024);
+      expect(scan.complete).toBe(false);
+      expect(scan.completedPartitions).toBe(0);
+      expect(scan.blocks.length).toBe(1);
+      expect(scan.blocks[0].partitionIndex).toBe(2); // real disk index, not slot
+      expect(scan.blocks[0].blockIndex).toBe(0);
+      expect(scan.partitionStartOffsets[0]).toBe(dataStart);
+    });
+
+    it('recovers completed partition 0 with the correct resume cursor', () => {
+      const p = path.join(dir, 'partial1.opbs');
+      const { perPartitionEnds } = writePartialImage(p, 1, 0);
+      const scan = scanPartialImage(p, partitions, 1024);
+      expect(scan.complete).toBe(false);
+      expect(scan.completedPartitions).toBe(1);
+      expect(scan.blocks.length).toBe(2);
+      expect(scan.blocks.map((b) => b.partitionIndex)).toEqual([2, 2]);
+      expect(scan.blocks.map((b) => b.blockIndex)).toEqual([0, 1]);
+      // Cursor is exactly partition 1's first-frame offset so a resumed run
+      // appends there without gaps.
+      expect(scan.cursor).toBe(perPartitionEnds[0]);
+      expect(scan.partitionStartOffsets[1]).toBe(perPartitionEnds[0]);
+    });
+
+    it('recovers multiple completed partitions mapping to real indices', () => {
+      const p = path.join(dir, 'patch2.opbs');
+      const { perPartitionEnds } = writePartialImage(p, 2, 0);
+      const scan = scanPartialImage(p, partitions, 1024);
+      expect(scan.complete).toBe(false);
+      expect(scan.completedPartitions).toBe(2);
+      expect(scan.blocks.length).toBe(6);
+      expect(scan.blocks.slice(0, 2).map((b) => b.partitionIndex)).toEqual([2, 2]);
+      expect(scan.blocks.slice(2).map((b) => b.partitionIndex)).toEqual([4, 4, 4, 4]);
+      expect(scan.partitionStartOffsets[1]).toBe(perPartitionEnds[0]);
+      expect(scan.cursor).toBe(perPartitionEnds[1]);
+    });
+
+    it('stops at a truncated tail and still recovers completed partitions', () => {
+      const p = path.join(dir, 'truncated.opbs');
+      const { perPartitionEnds } = writePartialImage(p, 1, 1);
+      // Truncate the file inside the incomplete partition's first frame.
+      fs.truncateSync(p, perPartitionEnds[0] + 8);
+      const scan = scanPartialImage(p, partitions, 1024);
+      expect(scan.complete).toBe(false);
+      expect(scan.completedPartitions).toBe(1);
+      expect(scan.blocks.length).toBe(2);
+      // Cursor is the start of the truncated frame: partition 0's end.
+      expect(scan.cursor).toBe(perPartitionEnds[0]);
+      expect(scan.resumePartitionFrames).toBe(0);
+    });
+
+    it('stops at a corrupt payload (CRC mismatch) without losing prior frames', () => {
+      const p = path.join(dir, 'crc.opbs');
+      const { perPartitionEnds } = writePartialImage(p, 1, 1);
+      // Flip a byte inside the incomplete partition's payload. The scan has
+      // already validated partition 0, so it should stop at that frame's start
+      // rather than scanning garbage.
+      const partialStart = perPartitionEnds[0];
+      const fd = fs.openSync(p, 'r+');
+      fs.writeSync(fd, Buffer.from([0x00]), 0, 1, partialStart + 18);
+      fs.closeSync(fd);
+      const scan = scanPartialImage(p, partitions, 1024);
+      expect(scan.complete).toBe(false);
+      expect(scan.completedPartitions).toBe(1);
+      expect(scan.blocks.length).toBe(2);
+      expect(scan.cursor).toBe(partialStart);
+      expect(scan.resumePartitionFrames).toBe(0);
     });
   });
 });

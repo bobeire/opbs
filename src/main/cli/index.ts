@@ -139,7 +139,7 @@ Commands:
   disks                                  List physical disks.
   partitions <diskIndex>                 List partitions on a disk.
   list [directory]                       List backups in a directory (default: backup location).
-  backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only]
+  backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume]
                            Run a backup job (config as JSON file).
   restore <config.json> [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk] Run a restore job (config as JSON file).
   drill <config.json> [--elevated] [--json-out FILE]  Restore the newest image in a directory
@@ -377,7 +377,7 @@ function cmdAnalytics(ctx: CommandContext): Promise<number> {
 async function cmdBackup(ctx: CommandContext): Promise<number> {
   const configPath = ctx.argv[0];
   if (!configPath) {
-    console.error('Usage: backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only]');
+    console.error('Usage: backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume]');
     return 1;
   }
   const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
@@ -387,6 +387,9 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   }
   if (ctx.argv.includes('--used-blocks-only')) {
     config.usedBlocksOnly = true;
+  }
+  if (ctx.argv.includes('--resume')) {
+    config.resume = true;
   }
   const threadsFlag = flagValue(ctx.argv, '--threads');
   if (threadsFlag !== undefined) {

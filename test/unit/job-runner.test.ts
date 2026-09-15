@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as zlib from 'zlib';
 import { runBackupJob, runRestoreJob } from '../../src/main/helper/job-runner';
-import { verifyImage, readImageInfo, encodeHeader, encodeBlockFrame, encodePartitionEntry, encodeBlockIndexEntry, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, FLAG_VERIFIED, FLAGS_OFFSET, FLAG_INCREMENTAL, COMPRESSION_DEFLATE, COMPRESSION_ZSTD, crc32, newImageCipher, metadataFromCipher } from '../../src/main/imaging/image-format';
+import { verifyImage, readImageInfo, encodeHeader, encodeBlockFrame, encodePartitionEntry, encodeBlockIndexEntry, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, FLAG_VERIFIED, FLAGS_OFFSET, FLAG_INCREMENTAL, FLAG_RESUMED, COMPRESSION_DEFLATE, COMPRESSION_ZSTD, crc32, newImageCipher, metadataFromCipher, scanPartialImage, compressBlock } from '../../src/main/imaging/image-format';
 import { ImagingJob, RestoreJob, NativeImagingApi, JobResult, RestoreJobResult } from '../../src/main/imaging/imaging-job';
 import { buildNtfsVolumeData, CLUSTER as NTFS_CLUSTER } from '../helpers/ntfs-fixture';
 import { buildCanonicalNtfsVolumeData, GR_CLUSTER, GR_SPC } from '../helpers/ntfs-resize-fixture';
@@ -283,6 +283,198 @@ describe('runBackupJob', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/snapshot/i);
     expect(fs.existsSync(imagePath)).toBe(false);
+  });
+
+  describe('runBackupJob with resume', () => {
+    const resumeNative = (): NativeImagingApi =>
+      ({
+        createSnapshot: vi.fn((volumePath: string) => ({
+          id: `snap-${volumePath}`,
+          devicePath: volumePath.includes('vol-1') ? '\\\\.\\ShadowCopy1' : '\\\\.\\ShadowCopy2'
+        })),
+        deleteSnapshot: vi.fn(() => true),
+        getPhysicalDrivePath: vi.fn((diskIndex: number) => `\\\\.\\PhysicalDrive${diskIndex}`),
+        writeBlocks: vi.fn(() => 0),
+        readBlocks: vi.fn((devicePath: string, offset: bigint, length: bigint): Buffer => {
+          const seed = devicePath.includes('ShadowCopy1') ? 1 : devicePath.includes('ShadowCopy2') ? 2 : 3;
+          return blockPattern(seed, Number(length));
+        })
+      }) as NativeImagingApi;
+
+    // Builds a partial image with partition 0 complete and partition 1 not
+    // started at all (the frames stop exactly at partition 1's data offset).
+    function writePartialImage(path: string, blockSize: number, partitionCount: number): number {
+      const fd = fs.openSync(path, 'w+');
+      const header = {
+        version: IMAGE_VERSION,
+        timestamp: Date.now(),
+        totalBytes: blockSize * 3,
+        blockSize,
+        compressionId: COMPRESSION_DEFLATE,
+        partitionCount,
+        flags: FLAG_HAS_BLOCK_INDEX,
+        blockIndexOffset: 0,
+        cipherId: 0,
+        kdfIterations: 0,
+        salt: Buffer.alloc(0),
+        baseImagePath: ''
+      };
+      fs.writeSync(fd, encodeHeader(header as never), 0, HEADER_SIZE, 0);
+      const tableSize = partitionCount * PARTITION_TABLE_ENTRY_SIZE;
+      fs.writeSync(fd, Buffer.alloc(tableSize), 0, tableSize, HEADER_SIZE);
+
+      let cursor = HEADER_SIZE + tableSize;
+      // Partition 0 (real index 2): three blocks, fully written.
+      for (let b = 0; b < 3; b++) {
+        const raw = blockPattern(2, blockSize);
+        const comp = compressBlock(raw, COMPRESSION_DEFLATE, 3);
+        const frame = encodeBlockFrame(raw, comp);
+        fs.writeSync(fd, frame, 0, frame.length, cursor);
+        cursor += frame.length;
+      }
+      fs.closeSync(fd);
+      return cursor;
+    }
+
+    it('resumes from a partial image, keeps completed frames and marks the image', async () => {
+      const blockSize = BLOCK;
+      const partitions: ImagingJob['partitions'] = [
+        {
+          diskIndex: 0,
+          partitionIndex: 2,
+          size: blockSize * 3,
+          offset: 122683392,
+          label: 'Partition 2',
+          readSource: 'volume',
+          volumeDevicePath: '\\\\?\\Volume{vol-1}\\'
+        },
+        {
+          diskIndex: 0,
+          partitionIndex: 4,
+          size: blockSize * 2,
+          offset: 999669366784,
+          label: 'Partition 4',
+          readSource: 'physical'
+        }
+      ];
+
+      // Write a partial image: partition 0 complete, partition 1 absent.
+      const partialCursor = writePartialImage(imagePath, blockSize, 2);
+      const scan = scanPartialImage(
+        imagePath,
+        [
+          { partitionIndex: 2, size: blockSize * 3 },
+          { partitionIndex: 4, size: blockSize * 2 }
+        ],
+        blockSize
+      );
+      expect(scan.complete).toBe(false);
+      expect(scan.completedPartitions).toBe(1);
+      expect(scan.cursor).toBe(partialCursor);
+
+      // buildJob mirrors this: it derives the checkpoint from the scan. The
+      // kept blocks are those of the completed partitions (real index 2).
+      const keptBlocks = scan.blocks.filter((b) => b.partitionIndex === 2);
+      const resumeCheckpoint = {
+        imagePath,
+        cursor: scan.cursor,
+        completedPartitions: 1,
+        partitionBytes: 0,
+        sourceBlockIndex: 0,
+        blocksWritten: keptBlocks.length,
+        bytesWritten: keptBlocks.reduce((s, b) => s + b.rawSize, 0),
+        skippedBlocks: 0
+      };
+
+      // Resume from that partial image.
+      writeJob({ type: 'backup', imagePath, blockSize, compressionLevel: 3, verificationEnabled: true, resume: true, resumeCheckpoint, partitions });
+      await runBackupJob(jobPath, resultPath, progressPath, cancelPath, resumeNative());
+
+      const result = readResult();
+      expect(result.ok).toBe(true);
+      expect(result.resumed).toBe(true);
+      // Completed partition 0's 3 blocks are kept; partition 1 adds 2.
+      expect(result.blocksWritten).toBe(5);
+
+      // The finished image verifies and contains both partitions.
+      const verified = await verifyImage(imagePath);
+      expect(verified.ok).toBe(true);
+      expect(verified.blocksVerified).toBe(5);
+
+      const info = readImageInfo(imagePath);
+      expect(info.header.partitionCount).toBe(2);
+      expect(info.partitions.map((p) => p.blockCount)).toEqual([3, 2]);
+      expect(info.header.flags & FLAG_RESUMED).toBe(FLAG_RESUMED);
+
+      // The block index must preserve the kept partition-0 frames.
+      expect(info.blocks.filter((b) => b.partitionIndex === 2)).toHaveLength(3);
+      expect(info.blocks.filter((b) => b.partitionIndex === 4)).toHaveLength(2);
+    });
+
+    it('keeps the partial image on failure when resume is enabled', async () => {
+      writeJob({
+        type: 'backup',
+        imagePath,
+        blockSize: BLOCK,
+        compressionLevel: 0,
+        verificationEnabled: false,
+        resume: true,
+        partitions: [
+          {
+            diskIndex: 0,
+            partitionIndex: 2,
+            size: BLOCK * 3,
+            offset: 122683392,
+            label: 'Partition 2',
+            readSource: 'volume',
+            volumeDevicePath: '\\\\?\\Volume{vol-1}\\'
+          }
+        ]
+      });
+      // A hard failure (snapshot creation) aborts the job.
+      const failing: NativeImagingApi = {
+        ...resumeNative(),
+        createSnapshot: vi.fn(() => {
+          throw new Error('VSS_E_VOLUME_NOT_SUPPORTED');
+        })
+      };
+      await runBackupJob(jobPath, resultPath, progressPath, cancelPath, failing);
+      const result = readResult();
+      expect(result.ok).toBe(false);
+      // The partial image must remain for a future resumed run.
+      expect(fs.existsSync(imagePath)).toBe(true);
+    });
+
+    it('removes the partial image on failure when resume is not requested', async () => {
+      writeJob({
+        type: 'backup',
+        imagePath,
+        blockSize: BLOCK,
+        compressionLevel: 0,
+        verificationEnabled: false,
+        partitions: [
+          {
+            diskIndex: 0,
+            partitionIndex: 2,
+            size: BLOCK * 3,
+            offset: 122683392,
+            label: 'Partition 2',
+            readSource: 'volume',
+            volumeDevicePath: '\\\\?\\Volume{vol-1}\\'
+          }
+        ]
+      });
+      const failing: NativeImagingApi = {
+        ...resumeNative(),
+        createSnapshot: vi.fn(() => {
+          throw new Error('VSS_E_VOLUME_NOT_SUPPORTED');
+        })
+      };
+      await runBackupJob(jobPath, resultPath, progressPath, cancelPath, failing);
+      const result = readResult();
+      expect(result.ok).toBe(false);
+      expect(fs.existsSync(imagePath)).toBe(false);
+    });
   });
 });
 describe('runRestoreJob', () => {
