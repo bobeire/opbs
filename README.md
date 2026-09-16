@@ -695,4 +695,6 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
 
 ## License
 
-GPL-3.0 (planned)
+GPL-3.0
+User runs at own risk
+Backup is not guaranteed - always test restores
