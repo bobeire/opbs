@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { EventEmitter } from 'events';
 import { logger } from '../utils/logger';
+import { resolvePowershell } from '../utils/elevated';
 
 export const HELPER_FLAG = '--opbs-helper';
 
@@ -121,7 +122,7 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
     `-Verb RunAs -WindowStyle Hidden -PassThru`;
 
   logger.info(`Launching elevated helper: ${psScript}`);
-  const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psScript], {
+  const ps = spawn(resolvePowershell(), ['-NoProfile', '-NonInteractive', '-Command', psScript], {
     windowsHide: true
   });
 

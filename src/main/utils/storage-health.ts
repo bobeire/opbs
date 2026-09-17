@@ -10,6 +10,7 @@ import { readScrubHistory } from '../imaging/scrub';
 import { readDrillHistory } from './drill-history';
 import { paritySidecarPath } from '../imaging/parity';
 import { queryReliability, assessDiskHealth, DiskReliability } from './disk-health';
+import { resolvePowershell } from './elevated';
 import { latestPerf, assessWriteSpeed } from './disk-perf';
 import { logger } from './logger';
 
@@ -193,7 +194,7 @@ export async function resolveDestinationDisk(directory: string): Promise<{ diskI
   try {
     const out = await new Promise<string>((resolve, reject) => {
       execFile(
-        'powershell',
+        resolvePowershell(),
         [
           '-NoProfile',
           '-NonInteractive',

@@ -372,6 +372,11 @@ body {
   color: var(--text-muted);
 }
 
+.disk-card .disk-image-all {
+  margin-top: 12px;
+  width: 100%;
+}
+
 /* Partition Selection */
 .partition-selection {
   margin-top: 20px;

@@ -70,6 +70,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
   const [baseImagePath, setBaseImagePath] = useState<string | undefined>(undefined);
   const [baseImageName, setBaseImageName] = useState<string | undefined>(undefined);
   const [progress, setProgress] = useState<BackupProgress | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [diskLabel, setDiskLabel] = useState<string | null>(null);
   const [networkOpen, setNetworkOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -225,6 +226,8 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
 
   const handleStartBackup = async () => {
     setCurrentStep('progress');
+    setErrorMsg(null);
+    setProgress(null);
 
     const common: Omit<BackupConfig, 'sourceDiskIndex' | 'sourcePartitions'> = {
       destinationPath,
@@ -262,7 +265,8 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
       setCurrentStep('complete');
     } catch (error) {
       console.error('Backup failed:', error);
-      setCurrentStep('select_source');
+      const msg = error instanceof Error ? error.message : String(error ?? 'Backup failed');
+      setErrorMsg(msg);
     }
   };
 
@@ -351,6 +355,17 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
                     <h3>{disk.model}</h3>
                     <p>Size: {formatSize(disk.size)}</p>
                     <p>Partitions: {disk.partitions.length}</p>
+                    <button
+                      className="btn-primary btn-small disk-image-all"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedDisk(disk);
+                        setSelectedPartitions(disk.partitions.map((p) => p.partitionIndex));
+                        setCurrentStep('select_destination');
+                      }}
+                    >
+                      Image this entire disk
+                    </button>
                   </div>
                 ))}
               </div>
@@ -614,6 +629,31 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
         );
         
       case 'progress':
+        if (errorMsg) {
+          return (
+            <div className="wizard-step">
+              <h2>Backup Failed</h2>
+              <div className="error-message">
+                <p>{errorMsg}</p>
+              </div>
+              <p className="field-hint">
+                The backup did not start. See the Logs page for details, then check that
+                the destination folder exists and is writable.
+              </p>
+              <div className="wizard-actions">
+                <button
+                  className="btn-secondary"
+                  onClick={() => {
+                    setErrorMsg(null);
+                    setCurrentStep('select_source');
+                  }}
+                >
+                  Back to source
+                </button>
+              </div>
+            </div>
+          );
+        }
         return (
           <div className="wizard-step">
             <h2>Backup in Progress</h2>

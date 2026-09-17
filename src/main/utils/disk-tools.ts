@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process';
-import { psQuote, runElevatedPowerShell } from './elevated';
+import { psQuote, resolvePowershell, runElevatedPowerShell } from './elevated';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -36,7 +36,7 @@ export function partitionTypeLabel(t: number): string {
 }
 
 function run(args: string[], timeoutMs = 30000): string {
-  return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ...args], {
+  return execFileSync(resolvePowershell(), ['-NoProfile', '-NonInteractive', '-Command', ...args], {
     encoding: 'utf-8',
     timeout: timeoutMs,
     windowsHide: true

@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import * as fs from 'fs';
 import * as path from 'path';
 
 /**
@@ -11,14 +12,21 @@ export function psQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+/**
+ * Resolve the full path to Windows PowerShell. Spawning `powershell.exe` by
+ * bare name fails with ENOENT when the environment's PATH does not include
+ * System32 (e.g. a process launched from a Git Bash / msys2 shell), which
+ * silently broke elevated jobs. system32 is the standard location on modern
+ * Windows; fall back to the bare name if it is somehow missing.
+ */
+export function resolvePowershell(): string {
+  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR ?? 'C:\\Windows';
+  const full = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  return fs.existsSync(full) ? full : 'powershell.exe';
+}
+
 export function runElevatedPowerShell(scriptPath: string): Promise<number> {
-  const powershell = path.join(
-    process.env.SystemRoot ?? 'C:\\Windows',
-    'System32',
-    'WindowsPowerShell',
-    'v1.0',
-    'powershell.exe'
-  );
+  const powershell = resolvePowershell();
   return new Promise((resolve, reject) => {
     const wrapper =
       `$p = Start-Process -FilePath ${psQuote(powershell)} -ArgumentList @(${[

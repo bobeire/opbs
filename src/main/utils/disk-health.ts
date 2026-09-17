@@ -1,5 +1,6 @@
 import { execFileSync } from 'child_process';
 import { logger } from './logger';
+import { resolvePowershell } from './elevated';
 
 export interface DiskReliability {
   model?: string;
@@ -63,7 +64,7 @@ $rc = $disk | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue
 export function queryReliability(diskIndex: number): DiskReliability | null {
   try {
     const out = execFileSync(
-      'powershell',
+      resolvePowershell(),
       ['-NoProfile', '-NonInteractive', '-Command', `$diskIndex = ${diskIndex}; ${PS_SCRIPT}`],
       { encoding: 'utf-8', windowsHide: true, timeout: 20_000 }
     );

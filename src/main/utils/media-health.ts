@@ -3,6 +3,7 @@ import { checkDiskHealth, DiskHealth, DiskReliability } from './disk-health';
 import { resolveDestinationDisk } from './storage-health';
 import { DiskEnumerator, DiskInfo } from './disk-enumerator';
 import { isNonFilesystemLocation } from './location';
+import { resolvePowershell } from './elevated';
 import { logger } from './logger';
 
 /**
@@ -127,7 +128,7 @@ async function resolveDriveLetters(diskIndex: number): Promise<string[]> {
   try {
     const out = await new Promise<string>((resolve, reject) => {
       execFile(
-        'powershell',
+        resolvePowershell(),
         [
           '-NoProfile',
           '-NonInteractive',
