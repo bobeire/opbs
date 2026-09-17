@@ -8,7 +8,7 @@ import { resolvePowershell } from '../utils/elevated';
 
 export const HELPER_FLAG = '--opbs-helper';
 
-const STARTED_TIMEOUT_MS = 20000;
+const STARTED_TIMEOUT_MS = 45000;
 const POLL_INTERVAL_MS = 250;
 const JOB_DIR_PREFIX = 'opbs-job-';
 
