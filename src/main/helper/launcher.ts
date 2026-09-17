@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { EventEmitter } from 'events';
+import { app } from 'electron';
 import { logger } from '../utils/logger';
 import { resolvePowershell } from '../utils/elevated';
 
@@ -108,7 +109,14 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
 
   // The child process is our own binary. It must run elevated for raw disk
   // access and VSS, so it is relaunched through the UAC prompt.
+  //
+  // Packaged: execPath is OPBS.exe (app embedded) - flags alone are enough.
+  // Dev (repo, bare electron.exe): Electron treats the FIRST positional arg
+  // as the app path; with none, it would try to load job.json as the app and
+  // exit before runAsHelper ever runs. So in dev we hand it our app path
+  // positionally and keep the helper flags for the dispatch.
   const args = [
+    ...(app.isPackaged ? [] : [app.getAppPath()]),
     HELPER_FLAG,
     jobPath,
     resultPath,
