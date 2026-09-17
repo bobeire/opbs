@@ -28,10 +28,24 @@ describe('buildAdkInstallScript', () => {
 
   it('tracks per-step exit codes and writes the combined result to resultPath', () => {
     const script = buildAdkInstallScript(plan());
-    expect(script).toContain('$script:steps += [pscustomobject]@{ name = $Name; exitCode = $p.ExitCode }');
+    expect(script).toContain('$script:steps += [pscustomobject]@{ name = $Name; exitCode = $code }');
     expect(script).toContain("'C:\\temp\\result.json'");
     expect(script).toContain('ConvertTo-Json');
     expect(script).toContain('if ($code1 -ne 0 -or $code2 -ne 0) { $overall = 1 }');
+  });
+
+  it('does NOT use $Args as the argument parameter (reserved automatic variable)', () => {
+    const script = buildAdkInstallScript(plan());
+    // Using $Args as a function parameter silently never binds, so the
+    // installers would run with an empty command line and fail instantly.
+    expect(script).not.toContain('[string[]]$Args');
+    expect(script).toContain('param([string]$Name, [string]$Exe, [string[]]$CmdArgs)');
+    expect(script).toContain('-ArgumentList $CmdArgs');
+  });
+
+  it('normalizes a null argument array so Start-Process never rejects it', () => {
+    const script = buildAdkInstallScript(plan());
+    expect(script).toContain("if ($null -eq $CmdArgs) { $CmdArgs = @() }");
   });
 
   it('adds /installpath after the feature flags when one is provided', () => {
@@ -49,5 +63,16 @@ describe('buildAdkInstallScript', () => {
   it('doubles single quotes when a path contains an apostrophe', () => {
     const script = buildAdkInstallScript(plan({ installPath: "C:\\It's a path" }));
     expect(script).toContain("'C:\\It''s a path'");
+  });
+
+  it('adds /log capture switches when log paths are provided', () => {
+    const script = buildAdkInstallScript({
+      ...plan(),
+      adkSetupLog: 'C:\\temp\\adksetup.log',
+      adkWinPeLog: 'C:\\temp\\adkwinpesetup.log'
+    });
+    expect(script).toContain("'/log'");
+    expect(script).toContain("'C:\\temp\\adksetup.log'");
+    expect(script).toContain("'C:\\temp\\adkwinpesetup.log'");
   });
 });
