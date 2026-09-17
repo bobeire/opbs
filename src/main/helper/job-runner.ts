@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { logger } from '../utils/logger';
 import { loadNative } from '../utils/native-loader';
 import {
   ImageHeader,
@@ -576,13 +577,17 @@ export async function runBackupJob(
     };
     fs.writeFileSync(resultPath, JSON.stringify(result));
     return;
-  } catch (error) {
-    try {
-      fs.closeSync(fd);
-    } catch {
-      /* already closed */
-    }
-    const cancelled = error instanceof CancelledError;
+    } catch (error) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* already closed */
+      }
+      logger.error(`Backup job failed: ${errorMessage(error)}`, {
+        error,
+        cause: error instanceof Error ? error.cause : undefined
+      });
+      const cancelled = error instanceof CancelledError;
     const result: JobResult = {
       ok: false,
       error: cancelled ? 'Backup cancelled by user' : errorMessage(error),
