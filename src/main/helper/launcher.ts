@@ -6,6 +6,7 @@ import { EventEmitter } from 'events';
 import { app } from 'electron';
 import { logger } from '../utils/logger';
 import { resolvePowershell } from '../utils/elevated';
+import { ensureHelperTaskRegistered, triggerHelperTask } from '../utils/task-scheduler';
 
 export const HELPER_FLAG = '--opbs-helper';
 
@@ -108,49 +109,78 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
   };
 
   // The child process is our own binary. It must run elevated for raw disk
-  // access and VSS, so it is relaunched through the UAC prompt.
+  // access and VSS.  Primary path: trigger a pre-registered Windows scheduled
+  // task running as the current user with /RL HIGHEST (no UAC prompt).
+  // Fallback: the legacy PowerShell Start-Process -Verb RunAs path (one UAC
+  // prompt per backup — still works if task registration failed).
   //
   // Packaged: execPath is OPBS.exe (app embedded) - flags alone are enough.
   // Dev (repo, bare electron.exe): Electron treats the FIRST positional arg
   // as the app path; with none, it would try to load job.json as the app and
   // exit before runAsHelper ever runs. So in dev we hand it our app path
   // positionally and keep the helper flags for the dispatch.
-  const args = [
-    ...(app.isPackaged ? [] : [app.getAppPath()]),
-    HELPER_FLAG,
-    jobPath,
-    resultPath,
-    progressPath,
-    cancelPath
-  ].map(quotePowerShell);
-
   const exe = process.execPath;
-  const psScript =
-    `Start-Process -FilePath ${quotePowerShell(exe)} -ArgumentList @(${args.join(', ')}) ` +
-    `-Verb RunAs -WindowStyle Hidden -PassThru`;
-
-  logger.info(`Launching elevated helper: ${psScript}`);
-  const ps = spawn(resolvePowershell(), ['-NoProfile', '-NonInteractive', '-Command', psScript], {
-    windowsHide: true
-  });
+  const appPath = app.isPackaged ? undefined : app.getAppPath();
 
   const startedAt = Date.now();
+  let helperStarted = false;
   const startupTimer = setInterval(() => {
-    if (fs.existsSync(resultPath)) {
+    // The helper writes progress.json early (snapshotting phase) and
+    // result.json only when the entire job completes.  Confirm elevation on
+    // EITHER file — progress appearing means the helper is alive and working,
+    // not that the job is done.
+    if (!helperStarted && (fs.existsSync(progressPath) || fs.existsSync(resultPath))) {
+      helperStarted = true;
       clearInterval(startupTimer);
+    }
+    // If result.json appears before the timer confirms, settle immediately
+    // (fast-failure jobs like setup errors write result.json in <1 s).
+    if (fs.existsSync(resultPath)) {
       settle();
       return;
     }
-    if (Date.now() - startedAt > STARTED_TIMEOUT_MS) {
+    if (!helperStarted && Date.now() - startedAt > STARTED_TIMEOUT_MS) {
       clearInterval(startupTimer);
       fail(new Error('Elevation was not confirmed. The job did not start.'));
     }
   }, 300);
 
-  ps.on('error', (error) => {
-    clearInterval(startupTimer);
-    fail(error);
-  });
+  // Fire-and-forget: either the task scheduler or the UAC fallback spawns the
+  // child.  Errors are forwarded through the `fail` path.
+  (async (): Promise<void> => {
+    try {
+      // Register the helper task once (first backup may trigger one UAC).
+      await ensureHelperTaskRegistered(exe, appPath);
+      // Update the task's command with this job's temp-file paths, then run.
+      await triggerHelperTask(exe, jobPath, resultPath, progressPath, cancelPath, appPath);
+      logger.info('Launched helper via scheduled task (no UAC).');
+    } catch (taskError) {
+      // Task scheduler failed — fall back to the legacy UAC path.
+      logger.warn('Scheduled task launch failed, falling back to UAC:', taskError);
+      const args = [
+        ...(appPath ? [appPath] : []),
+        HELPER_FLAG,
+        jobPath,
+        resultPath,
+        progressPath,
+        cancelPath
+      ].map(quotePowerShell);
+
+      const psScript =
+        `Start-Process -FilePath ${quotePowerShell(exe)} -ArgumentList @(${args.join(', ')}) ` +
+        `-Verb RunAs -WindowStyle Hidden -PassThru`;
+
+      logger.info(`Launching elevated helper (UAC fallback): ${psScript}`);
+      const ps = spawn(resolvePowershell(), ['-NoProfile', '-NonInteractive', '-Command', psScript], {
+        windowsHide: true
+      });
+
+      ps.on('error', (error) => {
+        clearInterval(startupTimer);
+        fail(error);
+      });
+    }
+  })();
 
   const cancel = (): void => {
     if (cancelled) return;

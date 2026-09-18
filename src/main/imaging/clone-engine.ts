@@ -4,6 +4,7 @@ import { CloneJob, CloneJobProgress, CloneJobResult, ImagingPartition, RestoreTa
 import { buildRestoreTablePlan, RestoreTableOptions } from './partition-table';
 import { launchElevatedJob } from '../helper/launcher';
 import { logger } from '../utils/logger';
+import { canUseVssSnapshot } from '../utils/disk-tools';
 
 export interface CloneJobConfig {
   /** Source (imaged) disk. */
@@ -58,7 +59,10 @@ export class CloneEngine implements CloneCoordinator {
 
     const items: ImagingPartition[] = [];
     for (const part of selected) {
-      const volumeDevicePath = await this.diskEnumerator.getVolumePath(config.sourceDiskIndex, part.offset);
+      const ineligibleRawType = !part.driveLetter && !canUseVssSnapshot(part);
+      const volumeDevicePath = ineligibleRawType
+        ? null
+        : await this.diskEnumerator.getVolumePath(config.sourceDiskIndex, part.offset);
       items.push({
         diskIndex: config.sourceDiskIndex,
         partitionIndex: part.partitionIndex,

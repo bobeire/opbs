@@ -8,6 +8,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Backup operations
   startBackup: (config: any) => ipcRenderer.invoke('start-backup', config),
   cancelBackup: () => ipcRenderer.invoke('cancel-backup'),
+  isBackupRunning: () => ipcRenderer.invoke('is-backup-running'),
+  isHelperTaskRegistered: () => ipcRenderer.invoke('is-helper-task-registered'),
+  registerHelperTask: () => ipcRenderer.invoke('register-helper-task'),
+  registerUnattendedBackupTask: (scheduleId: string, schedule: any) => ipcRenderer.invoke('register-unattended-backup-task', scheduleId, schedule),
+  unregisterUnattendedBackupTask: (scheduleId: string) => ipcRenderer.invoke('unregister-unattended-backup-task', scheduleId),
+  listUnattendedBackupTasks: () => ipcRenderer.invoke('list-unattended-backup-tasks'),
 
   // Restore operations
   startRestore: (config: any) => ipcRenderer.invoke('start-restore', config),

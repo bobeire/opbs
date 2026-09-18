@@ -28,9 +28,10 @@ interface MountStatus {
 interface BrowseViewProps {
   onComplete?: () => void;
   initialImagePath?: string;
+  autoMount?: boolean;
 }
 
-function BrowseView({ onComplete, initialImagePath }: BrowseViewProps) {
+function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps) {
   const [imagePath, setImagePath] = useState('');
   const [info, setInfo] = useState<{ encrypted: boolean; partitions: BrowsePartition[] } | null>(null);
   const [partitionIndex, setPartitionIndex] = useState<number | null>(null);
@@ -88,6 +89,14 @@ function BrowseView({ onComplete, initialImagePath }: BrowseViewProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [imagePath, partitionIndex, passphrase]);
+
+  // Auto-mount triggered by context menu "Mount image" verb
+  useEffect(() => {
+    if (autoMount && imagePath && partitionIndex !== null && !mountId && !mounting) {
+      void handleMount();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoMount, imagePath, partitionIndex]);
 
   useEffect(() => {
     if (!initialImagePath) return;

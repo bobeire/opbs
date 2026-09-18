@@ -290,7 +290,7 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
           </div>
           <div className="progress-info">
             <p>Phase: {progress?.phase || 'Preparing…'}</p>
-            <p>Progress: {progress?.percentComplete || 0}%</p>
+            <p>Progress: {Math.round((progress?.percentComplete || 0) * 10) / 10}%</p>
             {progress?.currentPartition && <p>Partition: {progress.currentPartition}</p>}
           </div>
         </div>

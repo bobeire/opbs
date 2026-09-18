@@ -33,14 +33,34 @@ interface BackupIntent {
   allDisks?: boolean;
 }
 
+interface BrowseIntent {
+  imagePath: string;
+  autoMount?: boolean;
+}
+
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
   const [backupIntent, setBackupIntent] = useState<BackupIntent | null>(null);
   const [restoreIntent, setRestoreIntent] = useState<{ imagePath?: string; mode?: 'restore' | 'clone' } | null>(null);
-  const [browseIntent, setBrowseIntent] = useState<string | null>(null);
+  const [browseIntent, setBrowseIntent] = useState<BrowseIntent | null>(null);
+  const [backupRunning, setBackupRunning] = useState(false);
+  const [lastBackupProgress, setLastBackupProgress] = useState<any>(null);
 
   useEffect(() => {
     void window.electronAPI.checkForUpdates();
+  }, []);
+
+  // Track backup state globally so it persists across navigation
+  useEffect(() => {
+    void window.electronAPI.isBackupRunning().then((running) => setBackupRunning(running));
+    const cleanup = window.electronAPI.onBackupProgress((p: any) => {
+      setBackupRunning(true);
+      setLastBackupProgress(p);
+      if (p.phase === 'completed' || p.phase === 'error') {
+        setBackupRunning(false);
+      }
+    });
+    return cleanup;
   }, []);
 
   useEffect(() => {
@@ -58,7 +78,7 @@ function App() {
         setRestoreIntent({ imagePath: payload.imagePath, mode: 'restore' });
         setCurrentPage('restore');
       } else {
-        setBrowseIntent(payload.imagePath);
+        setBrowseIntent({ imagePath: payload.imagePath, autoMount: payload.verb === 'mount' });
         setCurrentPage('browse');
       }
     });
@@ -68,7 +88,7 @@ function App() {
   const renderPage = () => {
     switch (currentPage) {
       case 'backup':
-        return <BackupWizard onComplete={() => setCurrentPage('dashboard')} initialDestination={backupIntent?.destinationPath} initialAllDisks={backupIntent?.allDisks} />;
+        return <BackupWizard onComplete={() => setCurrentPage('dashboard')} initialDestination={backupIntent?.destinationPath} initialAllDisks={backupIntent?.allDisks} activeProgress={lastBackupProgress} backupRunning={backupRunning} />;
       case 'restore':
         return (
           <RestoreWizard
@@ -82,7 +102,7 @@ function App() {
       case 'disks':
         return <DiskTools onComplete={() => setCurrentPage('dashboard')} />;
       case 'browse':
-        return <BrowseView key={browseIntent ?? 'empty'} onComplete={() => setCurrentPage('dashboard')} initialImagePath={browseIntent ?? undefined} />;
+        return <BrowseView key={browseIntent?.imagePath ?? 'empty'} onComplete={() => setCurrentPage('dashboard')} initialImagePath={browseIntent?.imagePath} autoMount={browseIntent?.autoMount} />;
       case 'media':
         return <MediaView onComplete={() => setCurrentPage('dashboard')} />;
       case 'network':
@@ -143,6 +163,7 @@ function App() {
             >
               <span className="nav-icon">💾</span>
               New Backup
+              {backupRunning && <span className="nav-badge">Running</span>}
             </button>
           </li>
           <li>

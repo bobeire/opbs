@@ -1,6 +1,9 @@
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
+import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
+import { app } from 'electron';
 import { logger } from './logger';
 
 const execFileAsync = promisify(execFile);
@@ -19,6 +22,11 @@ export interface ScheduledTaskOptions {
   /** 24h HH:MM start time for daily tasks (ignored with onLogin). */
   time?: string;
   onLogin?: boolean;
+  /** Schedule type: daily (default), weekly, or monthly. */
+  scheduleType?: 'daily' | 'weekly' | 'monthly';
+  /** For weekly: day-of-week names (e.g. ['MON','WED','FRI']).
+   *  For monthly: day-of-month number (e.g. 15). */
+  scheduleDays?: string[] | number;
   /** Run as SYSTEM: no UAC prompt, runs without an interactive logon. */
   asSystem?: boolean;
   /** Run level for user tasks. Defaults to 'high' (runs elevated, no prompt).
@@ -26,6 +34,8 @@ export interface ScheduledTaskOptions {
   runLevel?: 'high' | 'user';
   overwrite?: boolean;
 }
+
+export const UNATTENDED_TASK_PREFIX = 'OPBS Backup';
 
 export interface ScheduledTaskInfo {
   name: string;
@@ -55,7 +65,21 @@ export function buildSchTasksArgs(
   if (options.onLogin) {
     args.push('/SC', 'ONLOGON');
   } else {
-    args.push('/SC', 'DAILY', '/ST', options.time ?? '02:00');
+    const st = options.scheduleType ?? 'daily';
+    const time = options.time ?? '02:00';
+    if (st === 'weekly') {
+      args.push('/SC', 'WEEKLY', '/ST', time);
+      if (options.scheduleDays && Array.isArray(options.scheduleDays)) {
+        args.push('/D', options.scheduleDays.join(','));
+      }
+    } else if (st === 'monthly') {
+      args.push('/SC', 'MONTHLY', '/ST', time);
+      if (options.scheduleDays !== undefined && typeof options.scheduleDays === 'number') {
+        args.push('/D', String(options.scheduleDays));
+      }
+    } else {
+      args.push('/SC', 'DAILY', '/ST', time);
+    }
   }
 
   if (options.asSystem) {
@@ -78,18 +102,22 @@ function runSchTasks(args: string[]): Promise<string> {
 
 function runSchTasksElevated(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const psArgv = args
-      .map((a) => `'${a.replace(/'/g, "''")}'`)
-      .join(', ');
-    const script =
-      `$p = Start-Process -FilePath '${schtasksExe}' -ArgumentList @(${psArgv}) ` +
-      `-Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode`;
-    const child = spawn(powershellExe, ['-NoProfile', '-NonInteractive', '-Command', script], {
+    // Write args to a response file to avoid PowerShell quoting hell.
+    const argFile = path.join(os.tmpdir(), `opbs-schtasks-${Date.now()}.args`);
+    fs.writeFileSync(argFile, args.join('\r\n'));
+    const script = `
+      $args = Get-Content '${argFile.replace(/'/g, "''")}'
+      $p = Start-Process -FilePath '${schtasksExe}' -ArgumentList $args `
+      + `-Verb RunAs -WindowStyle Hidden -Wait -PassThru
+      Remove-Item '${argFile.replace(/'/g, "''")}' -ErrorAction SilentlyContinue
+      exit $p.ExitCode`;
+    const child = spawn(powershellExe, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
       windowsHide: true,
       stdio: 'ignore'
     });
     child.on('error', reject);
     child.on('close', (code) => {
+      try { fs.unlinkSync(argFile); } catch { /* already cleaned */ }
       if (code === 0) {
         resolve('');
       } else {
@@ -148,6 +176,195 @@ export async function listScheduledTasks(): Promise<ScheduledTaskInfo[]> {
     logger.warn(`Failed to list scheduled tasks: ${error instanceof Error ? error.message : error}`);
     return [];
   }
+}
+
+// ---------------------------------------------------------------------------
+// OPBS Helper task: a persistent Windows scheduled task that runs the helper
+// binary elevated (as the current user, /RL HIGHEST) without a UAC prompt.
+// Registered once on first backup; triggered via schtasks /run for each job.
+// ---------------------------------------------------------------------------
+
+const HELPER_TASK_NAME = 'OPBS Helper';
+
+/**
+ * Check whether the OPBS Helper task is already registered.
+ */
+export async function isHelperTaskRegistered(): Promise<boolean> {
+  try {
+    await runSchTasks(['/Query', '/TN', HELPER_TASK_NAME]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Register the OPBS Helper task if it doesn't already exist.  The task is
+ * dormant (/SC ONCE at midnight, never auto-fires) and is only triggered
+ * on-demand via `triggerHelperTask`.  Registration may trigger a one-time UAC
+ * prompt (acceptable — it happens once per machine, not per backup).
+ */
+export async function ensureHelperTaskRegistered(exePath: string, appPath?: string): Promise<void> {
+  if (await isHelperTaskRegistered()) {
+    return;
+  }
+  // The command line will be overwritten by changeHelperTaskCommand before
+  // each run, but schtasks requires /TR at creation time — use a placeholder.
+  const placeholderArgs = appPath
+    ? `"${appPath}" --opbs-helper "" "" "" ""`
+    : `--opbs-helper "" "" "" ""`;
+  const commandLine = `"${exePath}" ${placeholderArgs}`;
+  await registerScheduledTask(HELPER_TASK_NAME, commandLine, {
+    onLogin: false,
+    time: '00:00',
+    runLevel: 'high',
+    overwrite: true
+  });
+  logger.info(`Registered helper task: ${commandLine}`);
+}
+
+/**
+ * Overwrite the helper task's command line so it picks up the right temp-file
+ * paths for the current job, then trigger the task.  No UAC prompt.
+ */
+export async function triggerHelperTask(
+  exePath: string,
+  jobPath: string,
+  resultPath: string,
+  progressPath: string,
+  cancelPath: string,
+  appPath?: string
+): Promise<void> {
+  const args = appPath
+    ? `"${appPath}" --opbs-helper "${jobPath}" "${resultPath}" "${progressPath}" "${cancelPath}"`
+    : `--opbs-helper "${jobPath}" "${resultPath}" "${progressPath}" "${cancelPath}"`;
+  const commandLine = `"${exePath}" ${args}`;
+
+  // Overwrite the task's action with the current job paths.
+  await runSchTasks([
+    '/Change',
+    '/TN', HELPER_TASK_NAME,
+    '/TR', commandLine
+  ]);
+
+  // Trigger the task — runs elevated, no UAC.
+  await runSchTasks(['/Run', '/TN', HELPER_TASK_NAME]);
+}
+
+// ---------------------------------------------------------------------------
+// Unattended backup tasks: per-schedule Windows Task Scheduler entries that
+// run `opbs --cli backup <config.json> --elevated` on a cron-like cadence.
+// ---------------------------------------------------------------------------
+
+function getUnattendedTaskDir(): string {
+  const dir = path.join(
+    process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'),
+    'opbs', 'tasks'
+  );
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function taskNameForSchedule(scheduleId: string): string {
+  return `${UNATTENDED_TASK_PREFIX} ${scheduleId}`;
+}
+
+/**
+ * Write a job-config JSON for the given schedule and register a Windows
+ * scheduled task.  When `incremental` is true the config is written WITHOUT
+ * a `baseImagePath` — the CLI resolves the newest image at run time via
+ * `findNewestImage()` so each run picks up the latest full+delta chain.
+ */
+export async function registerUnattendedBackupTask(
+  scheduleId: string,
+  schedule: {
+    cronExpression: string;
+    sourceDiskIndex: number;
+    sourcePartitions: number[];
+    destinationPath: string;
+    compressionLevel: number;
+    compressionType?: string;
+    compressionThreads?: number;
+    verificationEnabled: boolean;
+    incremental: boolean;
+    passphrase?: string;
+  }
+): Promise<void> {
+  const taskDir = getUnattendedTaskDir();
+  const configPath = path.join(taskDir, `${scheduleId}.json`);
+
+  // Build the config the CLI backup command will read.
+  const config: Record<string, unknown> = {
+    sourceDiskIndex: schedule.sourceDiskIndex,
+    sourcePartitions: schedule.sourcePartitions,
+    destinationPath: schedule.destinationPath,
+    compressionLevel: schedule.compressionLevel,
+    compressionType: schedule.compressionType ?? 'zstd',
+    compressionThreads: schedule.compressionThreads ?? 1,
+    verificationEnabled: schedule.verificationEnabled,
+    incremental: schedule.incremental,
+    // For incremental: omit baseImagePath — the CLI resolves it dynamically
+    // via findNewestImage() so each run picks the latest chain.
+  };
+  if (schedule.passphrase) {
+    config.passphrase = schedule.passphrase;
+  }
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+  // Determine schedule type + days from the cron expression.
+  const cronParts = schedule.cronExpression.split(/\s+/);
+  const time = `${cronParts[1].padStart(2, '0')}:${cronParts[0].padStart(2, '0')}`;
+  let scheduleType: 'daily' | 'weekly' | 'monthly' = 'daily';
+  let scheduleDays: string[] | number | undefined;
+
+  if (cronParts[4] && cronParts[4] !== '*') {
+    // Day-of-week field is set → weekly
+    scheduleType = 'weekly';
+    const dowMap = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+    scheduleDays = cronParts[4].split(',').map((d) => dowMap[parseInt(d, 10)] ?? d);
+  } else if (cronParts[2] && cronParts[2] !== '*') {
+    // Day-of-month field is set → monthly
+    scheduleType = 'monthly';
+    scheduleDays = parseInt(cronParts[2], 10);
+  }
+
+  const exe = process.execPath;
+  const appArg = app && !app.isPackaged ? `"${app.getAppPath()}" ` : '';
+  const commandLine = `"${exe}" ${appArg}--cli backup "${configPath}" --elevated`;
+
+  await registerScheduledTask(taskNameForSchedule(scheduleId), commandLine, {
+    time,
+    scheduleType,
+    scheduleDays,
+    runLevel: 'high',
+    overwrite: true
+  });
+
+  logger.info(`Registered unattended backup task for schedule ${scheduleId}: ${commandLine}`);
+}
+
+export async function unregisterUnattendedBackupTask(scheduleId: string): Promise<void> {
+  const name = taskNameForSchedule(scheduleId);
+  try {
+    await removeScheduledTask(name);
+  } catch {
+    // Task may not exist — that's fine.
+  }
+  // Clean up the job-config file.
+  const configPath = path.join(getUnattendedTaskDir(), `${scheduleId}.json`);
+  try {
+    fs.unlinkSync(configPath);
+  } catch {
+    /* already gone */
+  }
+  logger.info(`Unregistered unattended backup task for schedule ${scheduleId}`);
+}
+
+export async function listUnattendedBackupTasks(): Promise<string[]> {
+  const tasks = await listScheduledTasks();
+  return tasks
+    .filter((t) => t.name.startsWith(UNATTENDED_TASK_PREFIX))
+    .map((t) => t.name.slice(UNATTENDED_TASK_PREFIX.length + 1));
 }
 
 function parseCsvLine(line: string): ScheduledTaskInfo | null {

@@ -35,6 +35,36 @@ export function partitionTypeLabel(t: number): string {
   return PARTITION_TYPE_MAP[t] ?? `Unknown (0x${t.toString(16).toUpperCase().padStart(2, '0')})`;
 }
 
+/**
+ * True when the given partition's volume can actually be put into a VSS
+ * snapshot set by the System Provider.
+ *
+ * The System Provider can only snapshot volumes that carry a real, mountable,
+ * filesystem-backed filesystem — NTFS, exFAT, FAT32, ReFS. Raw and system
+ * partitions (EFI System 0xEF, MSR/recovery 0x27, GPT protective 0xEE,
+ * Linux 0x83 etc.) expose a volume device path but no snapshot-able
+ * filesystem; handing them to IVssBackupComponents::AddToSnapshotSet makes the
+ * provider veto the whole snapshot set with VSS_E_VOLUME_NOT_SUPPORTED
+ * (0x8004230C). Imaging those partitions requires raw physical block copy.
+ */
+export function canUseVssSnapshot(part: {
+  driveLetter?: string | null;
+  type?: number;
+}): boolean {
+  if (!part.driveLetter) return false;
+  switch (part.type) {
+    case 0xEF: // EFI System (FAT32)
+    case 0xEE: // GPT protective
+    case 0x27: // Microsoft Recovery
+    case 0x82: // Linux swap
+    case 0x83: // Linux
+    case 0x42: // Microsoft MBR
+      return false;
+    default:
+      return true;
+  }
+}
+
 function run(args: string[], timeoutMs = 30000): string {
   return execFileSync(resolvePowershell(), ['-NoProfile', '-NonInteractive', '-Command', ...args], {
     encoding: 'utf-8',

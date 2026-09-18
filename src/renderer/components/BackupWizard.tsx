@@ -47,12 +47,31 @@ interface BackupWizardProps {
   onComplete: () => void;
   initialDestination?: string;
   initialAllDisks?: boolean;
+  activeProgress?: BackupProgress | null;
+  backupRunning?: boolean;
 }
 
 type WizardStep = 'select_source' | 'select_destination' | 'options' | 'progress' | 'complete';
 
-function BackupWizard({ onComplete, initialDestination, initialAllDisks }: BackupWizardProps) {
-  const [currentStep, setCurrentStep] = useState<WizardStep>('select_source');
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.round((seconds % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
+function formatSpeed(bytesPerSec: number): string {
+  if (bytesPerSec >= 1073741824) return `${(bytesPerSec / 1073741824).toFixed(1)} GB/s`;
+  if (bytesPerSec >= 1048576) return `${(bytesPerSec / 1048576).toFixed(1)} MB/s`;
+  if (bytesPerSec >= 1024) return `${(bytesPerSec / 1024).toFixed(0)} KB/s`;
+  return `${Math.round(bytesPerSec)} B/s`;
+}
+
+function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeProgress, backupRunning }: BackupWizardProps) {
+  const [currentStep, setCurrentStep] = useState<WizardStep>(
+    backupRunning && activeProgress ? 'progress' : 'select_source'
+  );
   const [disks, setDisks] = useState<DiskInfo[]>([]);
   const [selectedDisk, setSelectedDisk] = useState<DiskInfo | null>(null);
   const [selectedPartitions, setSelectedPartitions] = useState<number[]>([]);
@@ -69,7 +88,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
   const [passphrase, setPassphrase] = useState('');
   const [baseImagePath, setBaseImagePath] = useState<string | undefined>(undefined);
   const [baseImageName, setBaseImageName] = useState<string | undefined>(undefined);
-  const [progress, setProgress] = useState<BackupProgress | null>(null);
+  const [progress, setProgress] = useState<BackupProgress | null>(activeProgress ?? null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [diskLabel, setDiskLabel] = useState<string | null>(null);
   const [networkOpen, setNetworkOpen] = useState(false);
@@ -675,9 +694,15 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks }: Backu
               
               <div className="progress-info">
                 <p>Phase: {progress?.phase || 'Preparing...'}</p>
-                <p>Progress: {progress?.percentComplete || 0}%</p>
+                <p>Progress: {Math.round((progress?.percentComplete || 0) * 10) / 10}%</p>
                 {progress?.currentPartition && (
                   <p>Current Partition: {progress.currentPartition}</p>
+                )}
+                {progress?.estimatedTimeRemaining > 0 && progress?.estimatedTimeRemaining < Infinity && (
+                  <p>ETA: {formatDuration(progress.estimatedTimeRemaining)}</p>
+                )}
+                {progress?.speed > 0 && (
+                  <p>Speed: {formatSpeed(progress.speed)}</p>
                 )}
               </div>
             </div>

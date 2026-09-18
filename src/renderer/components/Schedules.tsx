@@ -28,6 +28,7 @@ interface ScheduledBackup {
   retentionKeepFull?: number;
   retentionKeepDeltasPerFull?: number;
   retentionDays?: number;
+  unattended?: boolean;
 }
 
 interface ScheduleForm {
@@ -54,6 +55,7 @@ interface ScheduleForm {
   retentionKeepFull: number;
   retentionKeepDeltasPerFull: number;
   retentionDays: number;
+  unattended: boolean;
 }
 
 interface DiskInfo {
@@ -161,7 +163,8 @@ function Schedules() {
     retentionApplied: false,
     retentionKeepFull: defaults.keepFull,
     retentionKeepDeltasPerFull: defaults.keepDeltasPerFull,
-    retentionDays: defaults.retentionDays
+    retentionDays: defaults.retentionDays,
+    unattended: false
   });
 
   const openNewSchedule = () => {
@@ -200,7 +203,8 @@ function Schedules() {
       retentionApplied: job.retentionApplied ?? false,
       retentionKeepFull: job.retentionKeepFull ?? base.retentionKeepFull,
       retentionKeepDeltasPerFull: job.retentionKeepDeltasPerFull ?? base.retentionKeepDeltasPerFull,
-      retentionDays: job.retentionDays ?? base.retentionDays
+      retentionDays: job.retentionDays ?? base.retentionDays,
+      unattended: job.unattended ?? false
     });
   };
 
@@ -362,13 +366,28 @@ function Schedules() {
         : {})
     };
     try {
+      let savedId = editingId;
       if (editingId) {
         await window.electronAPI.updateScheduledBackup(editingId, payload);
         setScheduleMsg({ ok: true, text: 'Scheduled backup updated.' });
       } else {
-        await window.electronAPI.addScheduledBackup(payload);
+        const result = await window.electronAPI.addScheduledBackup(payload);
+        savedId = result?.id;
         setScheduleMsg({ ok: true, text: 'Scheduled backup added and enabled.' });
       }
+
+      // Register or unregister the Windows Task Scheduler entry.
+      if (scheduleForm.unattended && savedId) {
+        try {
+          await window.electronAPI.registerUnattendedBackupTask(savedId, payload);
+          setScheduleMsg({ ok: true, text: 'Scheduled backup updated. Unattended task registered — runs without UAC.' });
+        } catch (taskErr: any) {
+          setScheduleMsg({ ok: false, text: `Schedule saved, but task registration failed: ${taskErr?.message ?? taskErr}. The schedule will still run with UAC when the app is open.` });
+        }
+      } else if (!scheduleForm.unattended && savedId) {
+        await window.electronAPI.unregisterUnattendedBackupTask(savedId).catch(() => {});
+      }
+
       closeScheduleForm();
       await reloadJobs();
     } catch (e: any) {
@@ -382,6 +401,9 @@ function Schedules() {
   };
 
   const handleDeleteSchedule = async (job: ScheduledBackup) => {
+    if (job.unattended) {
+      await window.electronAPI.unregisterUnattendedBackupTask(job.id).catch(() => {});
+    }
     await window.electronAPI.deleteScheduledBackup(job.id);
     if (editingId === job.id) closeScheduleForm();
     setScheduleMsg({ ok: true, text: `Scheduled backup "${job.name}" removed.` });
@@ -426,9 +448,10 @@ function Schedules() {
     <div className="settings">
       <h1>Scheduled Backups</h1>
       <p className="field-hint">
-        Runs the selected backup job on a cron schedule while the app is open
-        (no elevation needed). For backups that must run even when the app is
-        closed, register a Windows Task Scheduler task from the CLI:
+        Runs the selected backup job on a cron schedule while the app is open.
+        A UAC prompt appears each time the backup triggers (same as a manual
+        backup). For unattended backups that run without a UAC prompt, register
+        a Windows Task Scheduler task from the CLI:
         <code> opbs schedule install-backup &lt;name&gt; --config config.json</code>.
         Verification, restore-drill and scrub schedules are managed in Settings.
       </p>
@@ -458,6 +481,11 @@ function Schedules() {
                 <span className={`schedule-badge ${job.enabled ? 'on' : 'off'}`}>
                   {job.enabled ? 'Enabled' : 'Paused'}
                 </span>
+                {job.unattended && (
+                  <span className="schedule-badge on" title="Registered as a Windows Task — runs without UAC, even when the app is closed">
+                    Unattended
+                  </span>
+                )}
               </div>
               <div className="schedule-meta">
                 <span>{describeCron(job.cronExpression)}</span>
@@ -705,6 +733,25 @@ function Schedules() {
               />
               Incremental backup (only changed blocks; falls back to full if no image exists)
             </label>
+          </div>
+
+          <div className="setting-item">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={scheduleForm.unattended}
+                onChange={(e) => setScheduleForm({ ...scheduleForm, unattended: e.target.checked })}
+              />
+              Run unattended (registers a Windows Task — no UAC prompt, runs even when the app is closed)
+            </label>
+            {scheduleForm.unattended && (
+              <p className="field-hint" style={{ marginTop: 4 }}>
+                Registers a Windows Task Scheduler entry for this schedule. The task
+                runs as the current user with highest privileges. For incremental
+                backups, the newest image in the destination is resolved automatically
+                at each run.
+              </p>
+            )}
           </div>
 
           <div className="setting-item">

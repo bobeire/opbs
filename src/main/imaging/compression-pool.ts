@@ -81,11 +81,24 @@ export class CompressionPool {
     // fall back to the package name, which modern Node can require directly.
     const zstdBundle = path.resolve(__dirname, '../zstdify.cjs');
     const zstdRequireExpr = fs.existsSync(zstdBundle) ? `require(${JSON.stringify(zstdBundle)})` : `require('zstdify')`;
+    const fzstdPath = require.resolve('fzstd');
+    const fzstdRequireExpr = `require(${JSON.stringify(fzstdPath)})`;
     const zstdRequires =
-      this.codec === 'zstd' ? `const zstdify = ${zstdRequireExpr};\n      const fzstd = require('fzstd');\n      ` : '';
+      this.codec === 'zstd' ? `const zstdify = ${zstdRequireExpr};\n      const fzstd = ${fzstdRequireExpr};\n      ` : '';
     const compressExpr =
       this.codec === 'zstd'
-        ? `Buffer.from(zstdify.compress(Uint8Array.from(data), { level: ${this.level} }))`
+        ? `(function() {
+            try {
+              return Buffer.from(zstdify.compress(Uint8Array.from(data), { level: ${this.level} }));
+            } catch (e) {
+              var msg = e && e.message ? e.message : String(e);
+              for (var fb of [1, 4, 6]) {
+                if (fb === ${this.level}) continue;
+                try { return Buffer.from(zstdify.compress(Uint8Array.from(data), { level: fb })); } catch (_) {}
+              }
+              throw new Error('zstdify compress failed at all levels: ' + msg);
+            }
+          })()`
         : `Buffer.from(zlib.deflateRawSync(Buffer.from(data), { level: ${this.level} }))`;
     const decompressExpr =
       this.codec === 'zstd'
@@ -117,6 +130,11 @@ export class CompressionPool {
         this.onResult(msg.seq, msg.ok, msg.data, msg.error)
       );
       worker.on('error', (err) => this.onWorkerError(err));
+      worker.on('exit', (code) => {
+        if (code !== 0) {
+          this.onWorkerError(new Error(`Compression worker exited with code ${code}`));
+        }
+      });
       worker.unref();
       this.workers.push(worker);
     }

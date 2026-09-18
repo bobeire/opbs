@@ -90,6 +90,22 @@ body {
   font-size: 1.25rem;
 }
 
+.nav-badge {
+  margin-left: auto;
+  background: #22c55e;
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 10px;
+  animation: pulse-badge 2s ease-in-out infinite;
+}
+
+@keyframes pulse-badge {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 .sidebar-footer {
   padding: 20px;
   border-top: 1px solid var(--border-color);

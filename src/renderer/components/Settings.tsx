@@ -194,6 +194,9 @@ function Settings() {
   const [exportResult, setExportResult] = useState<{ ok: boolean; message?: string } | null>(null);
   const [importResult, setImportResult] = useState<{ ok: boolean; message?: string } | null>(null);
   const [disks, setDisks] = useState<DiskInfo[]>([]);
+  const [helperTaskRegistered, setHelperTaskRegistered] = useState(false);
+  const [helperTaskLoading, setHelperTaskLoading] = useState(false);
+  const [helperTaskError, setHelperTaskError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -203,10 +206,26 @@ function Settings() {
     window.electronAPI.getDisks().then((diskList) => {
       if (alive) setDisks(diskList ?? []);
     });
+    window.electronAPI.isHelperTaskRegistered().then((registered) => {
+      if (alive) setHelperTaskRegistered(registered);
+    });
     return () => {
       alive = false;
     };
   }, []);
+
+  const registerHelperTask = async () => {
+    setHelperTaskLoading(true);
+    setHelperTaskError(null);
+    try {
+      await window.electronAPI.registerHelperTask();
+      setHelperTaskRegistered(true);
+    } catch (e: any) {
+      setHelperTaskError(e?.message ?? 'Registration failed');
+    } finally {
+      setHelperTaskLoading(false);
+    }
+  };
 
   const mergeSettings = (loaded: any): Settings => ({
     ...DEFAULT_SETTINGS,
@@ -468,6 +487,38 @@ function Settings() {
             </div>
           </>
         )}
+      </div>
+      
+      <div className="settings-section">
+        <h2>Backup Elevation</h2>
+        <p className="field-hint">
+          Backups need raw disk access and VSS, which require elevation. Register
+          the OPBS Helper task once — backups and scheduled backups then run
+          elevated without a UAC prompt.
+        </p>
+
+        <div className="setting-item">
+          {helperTaskRegistered ? (
+            <p className="success-message" style={{ margin: 0, padding: '8px 12px' }}>
+              OPBS Helper task is registered. Backups run without UAC prompts.
+            </p>
+          ) : (
+            <>
+              <p className="field-hint" style={{ marginBottom: 8 }}>
+                Not registered — every backup triggers a UAC prompt. Scheduled
+                backups at 2am will fail if nobody is at the machine.
+              </p>
+              <button
+                className="btn-primary"
+                onClick={registerHelperTask}
+                disabled={helperTaskLoading}
+              >
+                {helperTaskLoading ? 'Registering...' : 'Register Helper Task (one-time UAC)'}
+              </button>
+              {helperTaskError && <p className="error-message" style={{ marginTop: 8 }}>{helperTaskError}</p>}
+            </>
+          )}
+        </div>
       </div>
       
       <div className="settings-section">

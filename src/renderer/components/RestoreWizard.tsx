@@ -454,7 +454,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
               
               <div className="progress-info">
                 <p>Phase: {progress?.phase || 'Preparing...'}</p>
-                <p>Progress: {progress?.percentComplete || 0}%</p>
+                <p>Progress: {Math.round((progress?.percentComplete || 0) * 10) / 10}%</p>
               </div>
             </div>
             

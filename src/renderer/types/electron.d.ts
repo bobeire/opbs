@@ -7,6 +7,12 @@ declare global {
       getPartitions: (diskIndex: number) => Promise<any[]>;
       startBackup: (config: any) => Promise<void>;
       cancelBackup: () => Promise<void>;
+      isBackupRunning: () => Promise<boolean>;
+      isHelperTaskRegistered: () => Promise<boolean>;
+      registerHelperTask: () => Promise<boolean>;
+      registerUnattendedBackupTask: (scheduleId: string, schedule: any) => Promise<boolean>;
+      unregisterUnattendedBackupTask: (scheduleId: string) => Promise<boolean>;
+      listUnattendedBackupTasks: () => Promise<string[]>;
       startRestore: (config: any) => Promise<void>;
       cancelRestore: () => Promise<void>;
       restorePreflight: (config: any) => Promise<{

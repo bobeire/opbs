@@ -186,6 +186,26 @@ function runAsHelper(args: string[]): void {
       app.exit(0);
     } catch (error) {
       logger.error('Helper job failed', error);
+      // Safety net: if a job failed before it could write its own result
+      // (e.g. loadNative(), base-chain resolution or openSync() throwing
+      // before the job body's try/catch), leave an explicit error result so
+      // the parent's elevation poll resolves with a real cause instead of
+      // timing out 45 s later with a misleading "Elevation was not confirmed".
+      try {
+        if (!fs.existsSync(resultPath)) {
+          fs.writeFileSync(
+            resultPath,
+            JSON.stringify({
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+              cancelled: false,
+              warnings: []
+            })
+          );
+        }
+      } catch (writeError) {
+        logger.error('Failed to write helper failure result', writeError);
+      }
       app.exit(1);
     }
   });
@@ -468,6 +488,43 @@ function setupIpcHandlers(): void {
 
   ipcMain.handle('cancel-backup', async () => {
     return backupManager.cancelBackup();
+  });
+
+  ipcMain.handle('is-backup-running', async () => {
+    return backupManager.running;
+  });
+
+  ipcMain.handle('is-helper-task-registered', async () => {
+    const { isHelperTaskRegistered } = await import('./utils/task-scheduler');
+    return isHelperTaskRegistered();
+  });
+
+  ipcMain.handle('register-helper-task', async () => {
+    const { ensureHelperTaskRegistered } = await import('./utils/task-scheduler');
+    const exe = process.execPath;
+    const appPath = app.isPackaged ? undefined : app.getAppPath();
+    await ensureHelperTaskRegistered(exe, appPath);
+    return true;
+  });
+
+  ipcMain.handle('register-unattended-backup-task', async (_, scheduleId: string, schedule: any) => {
+    const { registerUnattendedBackupTask } = await import('./utils/task-scheduler');
+    await registerUnattendedBackupTask(scheduleId, schedule);
+    // Mark the schedule as unattended in settings.
+    settingsManager.updateScheduledBackup(scheduleId, { unattended: true } as any);
+    return true;
+  });
+
+  ipcMain.handle('unregister-unattended-backup-task', async (_, scheduleId: string) => {
+    const { unregisterUnattendedBackupTask } = await import('./utils/task-scheduler');
+    await unregisterUnattendedBackupTask(scheduleId);
+    settingsManager.updateScheduledBackup(scheduleId, { unattended: false } as any);
+    return true;
+  });
+
+  ipcMain.handle('list-unattended-backup-tasks', async () => {
+    const { listUnattendedBackupTasks } = await import('./utils/task-scheduler');
+    return listUnattendedBackupTasks();
   });
 
   // Restore operations

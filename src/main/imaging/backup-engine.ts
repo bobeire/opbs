@@ -16,6 +16,7 @@ import {
 } from './image-format';
 import { ImagingJob, JobProgress, JobResult, ImagingPartition, JobEncryption, ResumeCheckpoint } from './imaging-job';
 import { launchElevatedJob } from '../helper/launcher';
+import { canUseVssSnapshot } from '../utils/disk-tools';
 import { normalizeBackupLocation, isNonFilesystemLocation } from '../utils/location';
 import { S3Store, resolveS3Config, S3Config } from '../utils/s3';
 import { SftpStore, resolveSftpConfig, SftpConfig } from '../utils/sftp';
@@ -83,7 +84,10 @@ export class ImagingEngine implements BackupCoordinator {
 
     const items: ImagingPartition[] = [];
     for (const part of selected) {
-      const volumeDevicePath = await this.diskEnumerator.getVolumePath(diskIndex, part.offset);
+      const ineligibleRawType = !part.driveLetter && !canUseVssSnapshot(part);
+      const volumeDevicePath = ineligibleRawType
+        ? null
+        : await this.diskEnumerator.getVolumePath(diskIndex, part.offset);
       items.push({
         diskIndex,
         partitionIndex: part.partitionIndex,

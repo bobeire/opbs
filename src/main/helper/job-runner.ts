@@ -74,8 +74,35 @@ export async function runBackupJob(
   nativeApi?: NativeImagingApi
 ): Promise<void> {
   const start = Date.now();
-  const job = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as ImagingJob;
-  const native: NativeImagingApi = nativeApi ?? loadNative<NativeImagingApi>();
+  let job: ImagingJob;
+  let native: NativeImagingApi;
+  try {
+    job = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as ImagingJob;
+    native = nativeApi ?? loadNative<NativeImagingApi>();
+  } catch (error) {
+    // Everything before the main body's own try/catch (below) used to be
+    // unguarded: loading the native addon or the job file could throw and the
+    // exception would escape runAsHelper, which exits without ever writing
+    // job result.json. The parent then polls fruitlessly for 45 s and reports
+    // a misleading "Elevation was not confirmed. The job did not start."
+    // Write a real, specific failure result immediately instead.
+    const message = errorMessage(error);
+    logger.error(`Backup job failed during setup: ${message}`, { error });
+    try {
+      fs.writeFileSync(
+        resultPath,
+        JSON.stringify({
+          ok: false,
+          error: message,
+          cancelled: false,
+          warnings: []
+        } as unknown as JobResult)
+      );
+    } catch {
+      /* best-effort: parent still gets the timeout as a last resort */
+    }
+    return;
+  }
 
   const warnings: string[] = [];
   const blockSize = job.blockSize > 0 ? job.blockSize : DEFAULT_BLOCK_SIZE;
@@ -1012,8 +1039,36 @@ export async function runCloneJob(
   nativeApi?: NativeImagingApi
 ): Promise<void> {
   const start = Date.now();
-  const job = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as CloneJob;
-  const native: NativeImagingApi = nativeApi ?? loadNative<NativeImagingApi>();
+  let job: CloneJob;
+  let native: NativeImagingApi;
+  try {
+    job = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as CloneJob;
+    native = nativeApi ?? loadNative<NativeImagingApi>();
+  } catch (error) {
+    // Everything before the main body's own try/catch below used to be
+    // unguarded: loading the native addon or the job file could throw and the
+    // exception escaped runBackupJob up to runAsHelper, which exits without
+    // ever writing job result.json. The parent then polled fruitlessly for
+    // 45 s and reported a misleading "Elevation was not confirmed. The job did
+    // not start." Write a real, specific failure result immediately instead.
+    const message = errorMessage(error);
+    logger.error(`Backup job failed during setup: ${message}`, { error });
+    const result: JobResult = {
+      ok: false,
+      error: message,
+      cancelled: false,
+      imagePath: '',
+      totalBytes: 0,
+      bytesWritten: 0,
+      durationMs: Date.now() - start,
+      blocksWritten: 0,
+      snapshotsCreated: 0,
+      verifiedBlocks: 0,
+      warnings: []
+    };
+    fs.writeFileSync(resultPath, JSON.stringify(result));
+    return;
+  }
 
   const warnings: string[] = [...(job.warnings ?? [])];
   const blockSize = job.blockSize > 0 ? job.blockSize : DEFAULT_BLOCK_SIZE;

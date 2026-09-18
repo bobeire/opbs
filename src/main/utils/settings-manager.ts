@@ -123,6 +123,9 @@ export interface ScheduledBackup {
   retentionKeepDeltasPerFull?: number;
   /** Never delete images newer than this many days for this schedule. */
   retentionDays?: number;
+  /** Whether this schedule has a registered Windows Task Scheduler entry
+   *  for unattended execution (no UAC prompt). */
+  unattended?: boolean;
 }
 
 export interface BackupProfile {
