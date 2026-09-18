@@ -28,4 +28,5 @@ declare module 'opbs-native' {
   export function readBlocks(devicePath: string, offset: bigint, length: bigint): Buffer;
   export function writeBlocks(devicePath: string, offset: bigint, data: Buffer): number;
   export function openImageForWrite(path: string): number;
+  export function closeAllHandles(): void;
 }

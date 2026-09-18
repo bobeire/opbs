@@ -9,6 +9,46 @@
 #include <stdexcept>
 #include <sstream>
 
+// Static handle cache — avoids repeated CreateFileW/CloseHandle per 1MB block.
+std::unordered_map<std::string, HANDLE> DiskReader::s_handleCache;
+
+HANDLE DiskReader::GetCachedHandle(const std::string& devicePath, DWORD access) {
+    // Return cached handle if it exists and has compatible access.
+    auto it = s_handleCache.find(devicePath);
+    if (it != s_handleCache.end() && it->second != INVALID_HANDLE_VALUE) {
+        return it->second;
+    }
+
+    // Open with sequential-scan hint for backup/restore read-ahead optimization.
+    // FILE_FLAG_SEQUENTIAL_SCAN tells Windows to aggressively prefetch forward.
+    HANDLE hDevice = CreateFileW(
+        std::wstring(devicePath.begin(), devicePath.end()).c_str(),
+        access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_SEQUENTIAL_SCAN,
+        nullptr
+    );
+
+    if (hDevice == INVALID_HANDLE_VALUE) {
+        throw std::runtime_error("Failed to open device: " + devicePath);
+    }
+
+    s_handleCache[devicePath] = hDevice;
+    return hDevice;
+}
+
+void DiskReader::CloseAllHandles() {
+    for (auto& [path, handle] : s_handleCache) {
+        if (handle != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle);
+            handle = INVALID_HANDLE_VALUE;
+        }
+    }
+    s_handleCache.clear();
+}
+
 std::vector<DiskInfo> DiskReader::EnumerateDisks() {
     std::vector<DiskInfo> disks;
     
@@ -366,19 +406,7 @@ std::string DiskReader::GetPhysicalDrivePath(int diskIndex) {
 }
 
 std::vector<char> DiskReader::ReadBlocks(const std::string& devicePath, uint64_t offset, uint64_t length) {
-    HANDLE hDevice = CreateFileW(
-        std::wstring(devicePath.begin(), devicePath.end()).c_str(),
-        GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr,
-        OPEN_EXISTING,
-        0,
-        nullptr
-    );
-    
-    if (hDevice == INVALID_HANDLE_VALUE) {
-        throw std::runtime_error("Failed to open device: " + devicePath);
-    }
+    HANDLE hDevice = GetCachedHandle(devicePath, GENERIC_READ);
     
     std::vector<char> data(length);
     LARGE_INTEGER fileOffset;
@@ -394,6 +422,8 @@ std::vector<char> DiskReader::ReadBlocks(const std::string& devicePath, uint64_t
         DWORD bytesRead = 0;
         
         if (!ReadFile(hDevice, data.data() + totalRead, toRead, &bytesRead, nullptr)) {
+            // Invalidate the cached handle on error.
+            s_handleCache.erase(devicePath);
             CloseHandle(hDevice);
             throw std::runtime_error("Failed to read from device");
         }
@@ -405,30 +435,18 @@ std::vector<char> DiskReader::ReadBlocks(const std::string& devicePath, uint64_t
         }
     }
     
-    CloseHandle(hDevice);
     data.resize(totalRead);
     return data;
 }
 
 uint64_t DiskReader::WriteBlocks(const std::string& devicePath, uint64_t offset, const char* data, size_t length) {
-    HANDLE hDevice = CreateFileW(
-        std::wstring(devicePath.begin(), devicePath.end()).c_str(),
-        GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr,
-        OPEN_EXISTING,
-        0,
-        nullptr
-    );
-    
-    if (hDevice == INVALID_HANDLE_VALUE) {
-        throw std::runtime_error("Failed to open device for writing: " + devicePath);
-    }
+    HANDLE hDevice = GetCachedHandle(devicePath, GENERIC_READ | GENERIC_WRITE);
     
     LARGE_INTEGER fileOffset;
     fileOffset.QuadPart = static_cast<LONGLONG>(offset);
     
     if (!SetFilePointerEx(hDevice, fileOffset, nullptr, FILE_BEGIN)) {
+        s_handleCache.erase(devicePath);
         CloseHandle(hDevice);
         throw std::runtime_error("Failed to seek to write position");
     }
@@ -441,6 +459,7 @@ uint64_t DiskReader::WriteBlocks(const std::string& devicePath, uint64_t offset,
         DWORD bytesWritten = 0;
         
         if (!WriteFile(hDevice, data + totalWritten, toWrite, &bytesWritten, nullptr)) {
+            s_handleCache.erase(devicePath);
             CloseHandle(hDevice);
             throw std::runtime_error("Failed to write to device");
         }
@@ -451,8 +470,6 @@ uint64_t DiskReader::WriteBlocks(const std::string& devicePath, uint64_t offset,
             break;
         }
     }
-    
-    CloseHandle(hDevice);
     
     if (totalWritten != length) {
         throw std::runtime_error("Incomplete write to device");

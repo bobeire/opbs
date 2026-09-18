@@ -3,6 +3,11 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <unordered_map>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 struct DiskInfo {
     int index;
@@ -44,6 +49,16 @@ public:
     static UsnJournalInfo GetUsnJournalInfo(const std::string& volumePath);
     static uint32_t Crc32(const uint8_t* data, size_t length, uint32_t seed = 0);
 
+    // Close all cached device handles. Call before process exit.
+    static void CloseAllHandles();
+
 private:
     static std::vector<PartitionInfo> EnumeratePartitionsViaVolumes(int diskIndex);
+
+#ifdef _WIN32
+    // Cached device handles keyed by device path. Avoids repeated
+    // CreateFileW/CloseHandle per 1MB block during backup/restore.
+    static HANDLE GetCachedHandle(const std::string& devicePath, DWORD access);
+    static std::unordered_map<std::string, HANDLE> s_handleCache;
+#endif
 };

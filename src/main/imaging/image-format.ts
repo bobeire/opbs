@@ -354,13 +354,20 @@ export function parseBlockIndexEntry(buf: Buffer): BlockRecord {
   };
 }
 
-export function encodeBlockFrame(raw: Uint8Array, compressed: Uint8Array, cipher?: ImageCipher | null): Buffer {
+export function encodeBlockFrame(
+  raw: Uint8Array,
+  compressed: Uint8Array,
+  cipher?: ImageCipher | null,
+  precomputed?: { rawSize: number; rawCrc: number }
+): Buffer {
   const encrypted = cipher && cipher.cipherId !== CIPHER_NONE;
   const extra = encrypted ? GCM_IV_LENGTH + GCM_TAG_LENGTH : 0;
+  const rawSize = precomputed?.rawSize ?? raw.length;
+  const rawCrc = precomputed?.rawCrc ?? crc32(raw);
   const frame = Buffer.alloc(16 + extra + compressed.length);
-  frame.writeUInt32LE(raw.length, 0);
+  frame.writeUInt32LE(rawSize, 0);
   frame.writeUInt32LE(compressed.length, 4);
-  frame.writeUInt32LE(crc32(raw), 8);
+  frame.writeUInt32LE(rawCrc, 8);
   frame.writeUInt32LE(crc32(compressed), 12);
 
   if (!encrypted) {

@@ -16,6 +16,7 @@ import { CloneEngine } from './imaging/clone-engine';
 import { CloneManager } from './clone/manager';
 import { dispatchHelperJob } from './helper/job-runner';
 import { launchElevatedJob } from './helper/launcher';
+import { loadNative } from './utils/native-loader';
 import type { VssJob, VssJobResult } from './utils/vss';
 import { winfspAvailable } from './imaging/mount-manager';
 import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains, writeManifest } from './backup/retention';
@@ -183,9 +184,11 @@ function runAsHelper(args: string[]): void {
     logger.info('Elevated helper mode started');
     try {
       await dispatchHelperJob(jobPath, resultPath, progressPath, cancelPath);
+      try { loadNative<{ closeAllHandles(): void }>().closeAllHandles(); } catch { /* best-effort */ }
       app.exit(0);
     } catch (error) {
       logger.error('Helper job failed', error);
+      try { loadNative<{ closeAllHandles(): void }>().closeAllHandles(); } catch { /* best-effort */ }
       // Safety net: if a job failed before it could write its own result
       // (e.g. loadNative(), base-chain resolution or openSync() throwing
       // before the job body's try/catch), leave an explicit error result so

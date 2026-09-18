@@ -392,6 +392,8 @@ export async function runBackupJob(
       const inFlight: {
         raw: Buffer;
         blockIndex: number;
+        rawSize: number;
+        rawCrc: number;
         promise?: Promise<Buffer>;
       }[] = [];
       const windowSize = pool ? Math.max(2, pool.threads * 4) : 1;
@@ -406,9 +408,12 @@ export async function runBackupJob(
         return inFlight.length >= windowSize;
       };
 
-      const finalizeSync = (item: { raw: Buffer; blockIndex: number }, compressed: Buffer): void => {
+      const finalizeSync = (
+        item: { raw: Buffer; blockIndex: number; rawSize: number; rawCrc: number },
+        compressed: Buffer
+      ): void => {
         const frameOffset = cursor;
-        const frame = encodeBlockFrame(item.raw, compressed, cipher);
+        const frame = encodeBlockFrame(item.raw, compressed, cipher, { rawSize: item.rawSize, rawCrc: item.rawCrc });
         fs.writeSync(fd, frame, 0, frame.length, cursor);
         setCursor(cursor + frame.length);
 
@@ -416,19 +421,21 @@ export async function runBackupJob(
           partitionIndex: part.partitionIndex,
           blockIndex: item.blockIndex,
           fileOffset: frameOffset,
-          rawSize: item.raw.length,
+          rawSize: item.rawSize,
           compSize: compressed.length,
-          rawCrc32: crc32(item.raw)
+          rawCrc32: item.rawCrc
         };
         blocks.push(block);
         entry.blockCount++;
         blocksWritten++;
-        bytesWritten += item.raw.length;
+        bytesWritten += item.rawSize;
       };
 
       const drainOne = async (item: {
         raw: Buffer;
         blockIndex: number;
+        rawSize: number;
+        rawCrc: number;
         promise?: Promise<Buffer>;
       }): Promise<void> => {
         let compressed: Buffer;
@@ -502,14 +509,18 @@ export async function runBackupJob(
         // With the pool, defer compression/write until the window fills; the
         // pool resolves in submission order, so draining stays sequential.
         if (pool) {
-          inFlight.push({ raw, blockIndex, promise: pool.compress(raw) });
+          // Pre-compute CRC before transferring the buffer to the worker.
+          // After transfer the buffer is detached and can't be read.
+          const rawSize = raw.length;
+          const rawCrc = crc32(raw);
+          inFlight.push({ raw, blockIndex, rawSize, rawCrc, promise: pool.compress(raw) });
           while (shouldDrain()) {
             const item = inFlight.shift()!;
             await drainOne(item);
           }
         } else {
           const compressed = compressBlock(raw, compressionId, job.compressionLevel);
-          finalizeSync({ raw, blockIndex }, compressed);
+          finalizeSync({ raw, blockIndex, rawSize: raw.length, rawCrc: crc32(raw) }, compressed);
         }
 
         const elapsedSec = (Date.now() - start) / 1000;

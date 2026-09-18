@@ -226,6 +226,10 @@ Napi::Value OpenImageForWrite(const Napi::CallbackInfo& info) {
 
 Napi::Object RegisterZstd(Napi::Env env, Napi::Object exports);
 
+void CloseAllHandles(const Napi::CallbackInfo& /*info*/) {
+    DiskReader::CloseAllHandles();
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
     RegisterZstd(env, exports);
     RegisterPartitionTable(env, exports);
@@ -242,6 +246,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set("readBlocks", Napi::Function::New(env, ReadBlocks));
     exports.Set("writeBlocks", Napi::Function::New(env, WriteBlocks));
     exports.Set("openImageForWrite", Napi::Function::New(env, OpenImageForWrite));
+    exports.Set("closeAllHandles", Napi::Function::New(env, CloseAllHandles));
     return exports;
 }
 

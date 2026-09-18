@@ -9,6 +9,7 @@ export interface NativeImagingApi {
   queryUsnJournal?(volumePath: string, startUsn?: number): Array<{ usn: bigint; fileReference: bigint; reason: number; fileName: string }>;
   getUsnJournalInfo?(volumePath: string): { firstUsn: bigint; nextUsn: bigint; lowestValidUsn: bigint };
   crc32?(data: Uint8Array, seed?: number): number;
+  closeAllHandles?(): void;
   /**
    * Build a GPT or MBR partition table. Returns the regions (byte offset + data)
    * the elevated helper writes via writeBlocks before restoring partitions.
