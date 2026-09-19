@@ -504,12 +504,16 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                   value={compressionLevel}
                   onChange={(e) => setCompressionLevel(parseInt(e.target.value))}
                 >
-                  <option value={0}>None</option>
-                  <option value={1}>Fast</option>
-                  <option value={3}>Balanced</option>
-                  <option value={6}>Best</option>
-                  <option value={9}>Maximum</option>
+                  <option value={0}>None — fastest, no compression</option>
+                  <option value={1}>Fast — ~200 MB/s, light compression</option>
+                  <option value={3}>Balanced — ~100 MB/s, good ratio (default)</option>
+                  <option value={6}>Best — ~40 MB/s, high compression</option>
+                  <option value={9}>Maximum — ~15 MB/s, smallest size</option>
                 </select>
+                <p className="field-hint">
+                  Higher levels produce smaller images but take longer. With native zstd,
+                  "Balanced" typically sustains 100+ MB/s on modern hardware.
+                </p>
               </div>
 
               <div className="option-group">

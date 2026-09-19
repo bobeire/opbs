@@ -13,6 +13,7 @@ declare global {
       registerUnattendedBackupTask: (scheduleId: string, schedule: any) => Promise<boolean>;
       unregisterUnattendedBackupTask: (scheduleId: string) => Promise<boolean>;
       listUnattendedBackupTasks: () => Promise<string[]>;
+      getTaskStatus: (taskName: string) => Promise<{ name: string; status: string; lastRun: string; lastResult: string; nextRun: string; taskToRun: string } | null>;
       startRestore: (config: any) => Promise<void>;
       cancelRestore: () => Promise<void>;
       restorePreflight: (config: any) => Promise<{

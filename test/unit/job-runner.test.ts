@@ -1363,4 +1363,72 @@ describe('incremental and encrypted jobs', () => {
     expect(result.drill!.failures[0]).toContain('C:');
     expect(result.drill!.failures[0]).toContain('magic');
   });
+
+  it('post-restore CRC verify reads back blocks and reports mismatches', async () => {
+    const imagePath = path.join(dir, 'verify-crc.opbs');
+    const vol = buildCanonicalNtfsVolumeData({ totalClusters: 64 });
+    vol.writeUInt16LE(0x55aa, 510);
+    const volumeJob: ImagingJob = {
+      type: 'backup',
+      imagePath,
+      blockSize: BLOCK,
+      compressionLevel: 0,
+      verificationEnabled: false,
+      partitions: [
+        {
+          diskIndex: 0,
+          partitionIndex: 0,
+          size: vol.length,
+          offset: 0,
+          label: 'C:',
+          readSource: 'physical'
+        }
+      ]
+    };
+    fs.writeFileSync(jobPath, JSON.stringify(volumeJob));
+    const backupNative: NativeImagingApi = {
+      createSnapshot: vi.fn(() => ({ id: 's', devicePath: '\\\\.\\ShadowCopy1' })),
+      deleteSnapshot: vi.fn(() => true),
+      getPhysicalDrivePath: vi.fn((i) => `\\\\.\\PhysicalDrive${i}`),
+      writeBlocks: vi.fn(() => 0),
+      readBlocks: vi.fn((_device: string, offset: bigint, length: bigint) =>
+        vol.subarray(Number(offset), Number(offset) + Number(length))
+      )
+    };
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, backupNative);
+
+    // Restore target: a buffer that returns corrupted data on read-back.
+    const targetOffset = 0;
+    const target = Buffer.alloc(vol.length);
+    const restoreNative: NativeImagingApi = {
+      createSnapshot: vi.fn(() => ({ id: 's', devicePath: '\\\\.\\ShadowCopy1' })),
+      deleteSnapshot: vi.fn(() => true),
+      getPhysicalDrivePath: vi.fn((i) => `\\\\.\\PhysicalDrive${i}`),
+      writeBlocks: vi.fn((_device: string, offset: bigint, data: Buffer) => {
+        data.copy(target, Number(offset));
+        return 0;
+      }),
+      // Read-back returns zeroes instead of the written data → CRC mismatch.
+      readBlocks: vi.fn((_device: string, _offset: bigint, length: bigint) =>
+        Buffer.alloc(Number(length))
+      )
+    };
+    fs.writeFileSync(
+      jobPath,
+      JSON.stringify({
+        type: 'restore',
+        imagePath,
+        verifyBeforeWrite: false,
+        verifyAfterRestore: true,
+        targets: [{ partitionIndex: 0, diskIndex: 3, offset: targetOffset, label: 'C:' }]
+      } as RestoreJob)
+    );
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, restoreNative);
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as RestoreJobResult;
+    expect(result.ok).toBe(true); // restore itself succeeds
+    // But warnings should report CRC mismatches from the post-restore verify.
+    const crcWarnings = result.warnings.filter((w) => w.includes('Post-restore CRC mismatch'));
+    expect(crcWarnings.length).toBeGreaterThan(0);
+  });
 });

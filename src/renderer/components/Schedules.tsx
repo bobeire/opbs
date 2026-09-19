@@ -119,6 +119,21 @@ function Schedules() {
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [scheduleMsg, setScheduleMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [jobs, setJobs] = useState<ScheduledBackup[]>([]);
+  const [taskStatuses, setTaskStatuses] = useState<Record<string, { lastRun: string; lastResult: string; nextRun: string; status: string }>>({});
+
+  const fetchTaskStatuses = async (scheduleList: ScheduledBackup[]) => {
+    const unattended = scheduleList.filter((j) => j.unattended);
+    if (unattended.length === 0) { setTaskStatuses({}); return; }
+    const statuses: Record<string, { lastRun: string; lastResult: string; nextRun: string; status: string }> = {};
+    for (const job of unattended) {
+      const taskName = `OPBS Backup ${job.id}`;
+      const status = await window.electronAPI.getTaskStatus(taskName);
+      if (status) {
+        statuses[job.id] = { lastRun: status.lastRun, lastResult: status.lastResult, nextRun: status.nextRun, status: status.status };
+      }
+    }
+    setTaskStatuses(statuses);
+  };
 
   useEffect(() => {
     let alive = true;
@@ -129,7 +144,11 @@ function Schedules() {
       if (alive) setDisks(diskList ?? []);
     });
     window.electronAPI.getSettings().then((loaded) => {
-      if (alive) setJobs(loaded?.scheduledBackups ?? []);
+      const loadedJobs = loaded?.scheduledBackups ?? [];
+      if (alive) {
+        setJobs(loadedJobs);
+        void fetchTaskStatuses(loadedJobs);
+      }
     });
     return () => {
       alive = false;
@@ -138,7 +157,9 @@ function Schedules() {
 
   const reloadJobs = async () => {
     const loaded = await window.electronAPI.getSettings();
-    setJobs(loaded?.scheduledBackups ?? []);
+    const loadedJobs = loaded?.scheduledBackups ?? [];
+    setJobs(loadedJobs);
+    void fetchTaskStatuses(loadedJobs);
   };
 
   const defaultScheduleForm = (): ScheduleForm => ({
@@ -499,6 +520,20 @@ function Schedules() {
                   Last run: {new Date(job.lastRun).toLocaleString()}
                 </div>
               )}
+              {job.unattended && taskStatuses[job.id] && (
+                <div className="schedule-meta">
+                  <span>Task status: {taskStatuses[job.id].status}</span>
+                  {taskStatuses[job.id].lastRun !== 'N/A' && (
+                    <span> · Last task run: {taskStatuses[job.id].lastRun}</span>
+                  )}
+                  {taskStatuses[job.id].lastResult !== 'N/A' && taskStatuses[job.id].lastResult !== '0' && (
+                    <span> · Last result: {taskStatuses[job.id].lastResult}</span>
+                  )}
+                  {taskStatuses[job.id].nextRun !== 'N/A' && (
+                    <span> · Next run: {taskStatuses[job.id].nextRun}</span>
+                  )}
+                </div>
+              )}
               <div className="schedule-actions">
                 <button className="btn-secondary btn-small" onClick={() => void handleToggleSchedule(job)}>
                   {job.enabled ? 'Pause' : 'Enable'}
@@ -689,11 +724,11 @@ function Schedules() {
                 setScheduleForm({ ...scheduleForm, compressionLevel: parseInt(e.target.value) })
               }
             >
-              <option value={0}>None</option>
-              <option value={1}>Fast</option>
-              <option value={3}>Balanced</option>
-              <option value={6}>Best</option>
-              <option value={9}>Maximum</option>
+              <option value={0}>None — fastest, no compression</option>
+              <option value={1}>Fast — ~200 MB/s, light compression</option>
+              <option value={3}>Balanced — ~100 MB/s, good ratio (default)</option>
+              <option value={6}>Best — ~40 MB/s, high compression</option>
+              <option value={9}>Maximum — ~15 MB/s, smallest size</option>
             </select>
           </div>
 

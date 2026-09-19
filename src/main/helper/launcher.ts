@@ -7,11 +7,12 @@ import { app } from 'electron';
 import { logger } from '../utils/logger';
 import { resolvePowershell } from '../utils/elevated';
 import { ensureHelperTaskRegistered, triggerHelperTask } from '../utils/task-scheduler';
+import { PipeServer, generatePipeName, type PipeMessage } from '../utils/pipe-ipc';
 
 export const HELPER_FLAG = '--opbs-helper';
+export const PIPE_FLAG = '--pipe';
 
 const STARTED_TIMEOUT_MS = 45000;
-const POLL_INTERVAL_MS = 250;
 const JOB_DIR_PREFIX = 'opbs-job-';
 
 export interface JobLaunchOptions<P> {
@@ -28,15 +29,16 @@ function newTempDir(): string {
 }
 
 /**
- * Spawn an elevated instance of this application to execute an imaging job
- * (backup or restore). See runBackupJob/runRestoreJob for the protocol.
+ * Spawn an elevated instance of this application to execute an imaging job.
  *
- * The parent and child communicate over a set of temporary JSON files:
+ * Primary IPC: Windows named pipe (real-time, no polling).
+ * Fallback IPC: temp-file polling (if pipe creation fails).
  *
- *   - job.json     : the job description (written by us)
- *   - result.json  : final result written by the child
- *   - progress.json: updated by the child during the job
- *   - cancel       : cancellation request (written by us; child polls it)
+ * Pipe messages (NDJSON, helper → parent):
+ *   { type: "started" }                         — elevation confirmed
+ *   { type: "progress", phase, percent, ... }   — progress update
+ *   { type: "result", ok, error, ... }          — job complete
+ *   { type: "cancelled" }                       — cancel acknowledged
  */
 export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { promise: Promise<R>; cancel(): void } {
   const dir = newTempDir();
@@ -44,51 +46,37 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
   const resultPath = path.join(dir, 'result.json');
   const progressPath = path.join(dir, 'progress.json');
   const cancelPath = path.join(dir, 'cancel');
+  const pipeName = generatePipeName();
 
   fs.writeFileSync(jobPath, JSON.stringify(job));
 
   const emitter = new EventEmitter();
   let cancelled = false;
   let settled = false;
+  let pipeConnected = false;
+  let pipeFailed = false;
+  let pipeResult: unknown = null;
 
-  const poller = setInterval(() => {
-    let progress: P | null = null;
-    try {
-      if (fs.existsSync(progressPath)) {
-        progress = JSON.parse(fs.readFileSync(progressPath, 'utf-8')) as P;
-      }
-    } catch {
-      progress = null; // partial write; ignore
-    }
-    if (progress) {
-      emitter.emit('progress', progress);
-    }
+  const pipe = new PipeServer(pipeName);
 
-    if (fs.existsSync(resultPath)) {
-      stopPolling();
-      settle();
-    }
-  }, POLL_INTERVAL_MS);
-
-  const stopPolling = (): void => {
-    clearInterval(poller);
-  };
-
+  // --- Promise settlement ---
   let settle: () => void = () => undefined;
   let fail: (error: Error) => void = () => undefined;
   const promise = new Promise<R>((resolve, reject) => {
     settle = () => {
       if (settled) return;
       settled = true;
-      let result: R;
-      try {
-        result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as R;
-      } catch (error) {
-        reject(error instanceof Error ? error : new Error(String(error)));
+      if (pipeResult) {
+        resolve(pipeResult as R);
         cleanup();
         return;
       }
-      resolve(result);
+      try {
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as R;
+        resolve(result);
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
       cleanup();
     };
     fail = (error: Error) => {
@@ -99,42 +87,61 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
     };
   });
 
+  // --- Pipe message handler ---
+  pipe.onMessage((msg: PipeMessage) => {
+    switch (msg.type) {
+      case 'started':
+        if (!helperStarted) {
+          helperStarted = true;
+          clearInterval(startupTimer);
+        }
+        break;
+      case 'progress':
+        emitter.emit('progress', msg);
+        break;
+      case 'result':
+        pipeResult = msg;
+        settle();
+        break;
+      case 'cancelled':
+        break;
+    }
+  });
+
+  pipe.onError((err) => {
+    logger.warn(`Pipe error: ${err.message}`);
+    if (!settled && fs.existsSync(resultPath)) {
+      settle();
+    }
+  });
+
+  pipe.onClose(() => {
+    if (!settled && fs.existsSync(resultPath)) {
+      settle();
+    }
+  });
+
+  // --- Cleanup ---
   const cleanup = (): void => {
-    stopPolling();
+    clearInterval(startupTimer);
+    pipe.close();
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {
-      /* best-effort temp cleanup */
+      /* best-effort */
     }
   };
 
-  // The child process is our own binary. It must run elevated for raw disk
-  // access and VSS.  Primary path: trigger a pre-registered Windows scheduled
-  // task running as the current user with /RL HIGHEST (no UAC prompt).
-  // Fallback: the legacy PowerShell Start-Process -Verb RunAs path (one UAC
-  // prompt per backup — still works if task registration failed).
-  //
-  // Packaged: execPath is OPBS.exe (app embedded) - flags alone are enough.
-  // Dev (repo, bare electron.exe): Electron treats the FIRST positional arg
-  // as the app path; with none, it would try to load job.json as the app and
-  // exit before runAsHelper ever runs. So in dev we hand it our app path
-  // positionally and keep the helper flags for the dispatch.
-  const exe = process.execPath;
-  const appPath = app.isPackaged ? undefined : app.getAppPath();
-
+  // --- Elevation confirmation timer (fallback if pipe doesn't connect) ---
   const startedAt = Date.now();
   let helperStarted = false;
   const startupTimer = setInterval(() => {
-    // The helper writes progress.json early (snapshotting phase) and
-    // result.json only when the entire job completes.  Confirm elevation on
-    // EITHER file — progress appearing means the helper is alive and working,
-    // not that the job is done.
-    if (!helperStarted && (fs.existsSync(progressPath) || fs.existsSync(resultPath))) {
-      helperStarted = true;
-      clearInterval(startupTimer);
+    if (!pipeConnected && !helperStarted) {
+      if (fs.existsSync(progressPath) || fs.existsSync(resultPath)) {
+        helperStarted = true;
+        clearInterval(startupTimer);
+      }
     }
-    // If result.json appears before the timer confirms, settle immediately
-    // (fast-failure jobs like setup errors write result.json in <1 s).
     if (fs.existsSync(resultPath)) {
       settle();
       return;
@@ -145,17 +152,27 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
     }
   }, 300);
 
-  // Fire-and-forget: either the task scheduler or the UAC fallback spawns the
-  // child.  Errors are forwarded through the `fail` path.
+  // --- Spawn helper ---
+  const exe = process.execPath;
+  const appPath = app.isPackaged ? undefined : app.getAppPath();
+
   (async (): Promise<void> => {
+    // Try to start the pipe server.
     try {
-      // Register the helper task once (first backup may trigger one UAC).
+      await pipe.start();
+      logger.info(`Pipe server listening on ${pipeName}`);
+    } catch (pipeError) {
+      pipeFailed = true;
+      logger.warn(`Pipe server creation failed, using file-based IPC: ${pipeError}`);
+    }
+
+    // Spawn the helper via task scheduler (primary) or UAC fallback.
+    try {
       await ensureHelperTaskRegistered(exe, appPath);
-      // Update the task's command with this job's temp-file paths, then run.
-      await triggerHelperTask(exe, jobPath, resultPath, progressPath, cancelPath, appPath);
+      await triggerHelperTask(exe, jobPath, resultPath, progressPath, cancelPath, appPath,
+        pipeFailed ? undefined : pipeName);
       logger.info('Launched helper via scheduled task (no UAC).');
     } catch (taskError) {
-      // Task scheduler failed — fall back to the legacy UAC path.
       logger.warn('Scheduled task launch failed, falling back to UAC:', taskError);
       const args = [
         ...(appPath ? [appPath] : []),
@@ -163,7 +180,8 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
         jobPath,
         resultPath,
         progressPath,
-        cancelPath
+        cancelPath,
+        ...(pipeFailed ? [] : [PIPE_FLAG, pipeName])
       ].map(quotePowerShell);
 
       const psScript =
@@ -182,14 +200,17 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
     }
   })();
 
+  // --- Cancel ---
   const cancel = (): void => {
     if (cancelled) return;
     cancelled = true;
     logger.info('Cancellation requested for elevated job.');
-    try {
-      fs.writeFileSync(cancelPath, '1');
-    } catch {
-      /* best-effort */
+    if (!pipe.send({ type: 'cancel' })) {
+      try {
+        fs.writeFileSync(cancelPath, '1');
+      } catch {
+        /* best-effort */
+      }
     }
   };
 

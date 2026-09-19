@@ -160,6 +160,44 @@ export async function removeScheduledTask(name: string): Promise<string> {
   return output;
 }
 
+export interface ScheduledTaskStatus {
+  name: string;
+  status: string;
+  lastRun: string;
+  lastResult: string;
+  nextRun: string;
+  taskToRun: string;
+}
+
+export async function getTaskStatus(name: string): Promise<ScheduledTaskStatus | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      schtasksExe,
+      ['/Query', '/TN', name, '/FO', 'LIST', '/V'],
+      { windowsHide: true, timeout: 25_000 }
+    );
+    const fields: Record<string, string> = {};
+    for (const line of stdout.split(/\r?\n/)) {
+      const idx = line.indexOf(':');
+      if (idx > 0) {
+        const key = line.slice(0, idx).trim();
+        const val = line.slice(idx + 1).trim();
+        fields[key] = val;
+      }
+    }
+    return {
+      name: fields['TaskName'] ?? name,
+      status: fields['Status'] ?? 'Unknown',
+      lastRun: fields['Last Run Time'] ?? 'N/A',
+      lastResult: fields['Last Result'] ?? 'N/A',
+      nextRun: fields['Next Run Time'] ?? 'N/A',
+      taskToRun: fields['Task To Run'] ?? ''
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function listScheduledTasks(): Promise<ScheduledTaskInfo[]> {
   try {
     const { stdout } = await execFileAsync(
@@ -233,11 +271,13 @@ export async function triggerHelperTask(
   resultPath: string,
   progressPath: string,
   cancelPath: string,
-  appPath?: string
+  appPath?: string,
+  pipeName?: string
 ): Promise<void> {
+  const helperArgs = `--opbs-helper "${jobPath}" "${resultPath}" "${progressPath}" "${cancelPath}"${pipeName ? ` --pipe "${pipeName}"` : ''}`;
   const args = appPath
-    ? `"${appPath}" --opbs-helper "${jobPath}" "${resultPath}" "${progressPath}" "${cancelPath}"`
-    : `--opbs-helper "${jobPath}" "${resultPath}" "${progressPath}" "${cancelPath}"`;
+    ? `"${appPath}" ${helperArgs}`
+    : helperArgs;
   const commandLine = `"${exePath}" ${args}`;
 
   // Overwrite the task's action with the current job paths.

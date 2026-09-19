@@ -87,8 +87,8 @@ describe('ImagingEngine', () => {
       expect(job.partitions[0]).toMatchObject({
         diskIndex: 0,
         partitionIndex: 0,
-        readSource: 'volume',
-        volumeDevicePath: '\\\\?\\Volume{aaaa}\\'
+        readSource: 'physical',
+        volumeDevicePath: undefined
       });
       expect(job.partitions[1]).toMatchObject({
         diskIndex: 0,

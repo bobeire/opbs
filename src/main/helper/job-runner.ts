@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from '../utils/logger';
 import { loadNative } from '../utils/native-loader';
+import type { PipeClient } from '../utils/pipe-ipc';
 import {
   ImageHeader,
   PartitionEntryMeta,
@@ -62,6 +63,16 @@ interface SnapshotHandle {
 const SECTOR_SIZE = 512;
 
 /**
+ * Write a job result to both the result.json file (crash recovery) and the
+ * named pipe (real-time). The pipe message includes the result payload so
+ * the parent can settle immediately without reading the file.
+ */
+function emitResult(resultPath: string, result: Record<string, unknown> | JobResult | RestoreJobResult | CloneJobResult, pipeClient?: PipeClient): void {
+  fs.writeFileSync(resultPath, JSON.stringify(result));
+  pipeClient?.send({ type: 'result', ...result });
+}
+
+/**
  * Backs up a disk to a .opbs image. Runs in the elevated helper process.
  *
  * `nativeApi` is optional and injectable for testing.
@@ -71,7 +82,8 @@ export async function runBackupJob(
   resultPath: string,
   progressPath: string,
   cancelPath: string,
-  nativeApi?: NativeImagingApi
+  nativeApi?: NativeImagingApi,
+  pipeClient?: import('../utils/pipe-ipc').PipeClient
 ): Promise<void> {
   const start = Date.now();
   let job: ImagingJob;
@@ -89,15 +101,8 @@ export async function runBackupJob(
     const message = errorMessage(error);
     logger.error(`Backup job failed during setup: ${message}`, { error });
     try {
-      fs.writeFileSync(
-        resultPath,
-        JSON.stringify({
-          ok: false,
-          error: message,
-          cancelled: false,
-          warnings: []
-        } as unknown as JobResult)
-      );
+      const errorResult = { ok: false, error: message, cancelled: false, warnings: [] };
+      emitResult(resultPath, errorResult, pipeClient);
     } catch {
       /* best-effort: parent still gets the timeout as a last resort */
     }
@@ -169,6 +174,9 @@ export async function runBackupJob(
     progress.percent = percent;
     progress.createdAt = Date.now();
     lastProgressWrite = Date.now();
+    // Send through pipe (primary) — real-time, no polling.
+    pipeClient?.send({ type: 'progress', ...progress });
+    // Also write to file (fallback for file-based IPC).
     try {
       fs.writeFileSync(progressPath, JSON.stringify(progress));
     } catch {
@@ -341,22 +349,23 @@ export async function runBackupJob(
       // prior journal USN, only read the blocks touched by changed files. If the
       // journal cannot be used, `changedBlocks` is null and the full scan runs.
       let changedBlocks: Set<number> | null = null;
-      if (
-        job.useUsnJournal &&
-        job.usnVolume &&
-        job.usnLastUsn !== undefined &&
-        part.readSource === 'volume' &&
-        part.volumeDevicePath
-      ) {
-        changedBlocks = computeChangedBlockIndices({
-          native,
-          volumePath: job.usnVolume,
-          device,
-          baseOffset,
-          partitionSize: part.size,
-          blockSize,
-          lastUsn: job.usnLastUsn
-        });
+      if (job.useUsnJournal && part.readSource === 'volume' && part.volumeDevicePath) {
+        // Per-partition USN takes precedence (multi-volume); fall back to
+        // single-volume legacy fields.
+        const usnEntry = job.perPartitionUsn?.[part.partitionIndex];
+        const volumePath = usnEntry?.volume ?? job.usnVolume;
+        const lastUsn = usnEntry?.lastUsn ?? job.usnLastUsn;
+        if (volumePath && lastUsn !== undefined) {
+          changedBlocks = computeChangedBlockIndices({
+            native,
+            volumePath,
+            device,
+            baseOffset,
+            partitionSize: part.size,
+            blockSize,
+            lastUsn
+          });
+        }
       }
 
       // Used-blocks-only capture: drop blocks that hold no allocated cluster per
@@ -480,9 +489,12 @@ export async function runBackupJob(
 
         let raw: Buffer;
         try {
-          raw = Buffer.from(
-            native.readBlocks(device, baseOffset + BigInt(partitionBytes), readLength)
-          );
+          const readOffset = baseOffset + BigInt(partitionBytes);
+          // Use async I/O when available — frees the event loop during disk
+          // reads so compression workers and progress callbacks can run.
+          raw = native.readBlocksAsync
+            ? await native.readBlocksAsync(device, readOffset, readLength)
+            : Buffer.from(native.readBlocks(device, readOffset, readLength));
         } catch (error) {
           warnings.push(
             `Read failed for ${part.label} at offset ${baseOffset + BigInt(partitionBytes)}: ${errorMessage(error)}`
@@ -587,13 +599,38 @@ export async function runBackupJob(
     writeProgress('completed');
 
     // Record the journal position so the next incremental can use USN tracking.
-    if (job.useUsnJournal && job.usnVolume && native.getUsnJournalInfo) {
+    if (job.useUsnJournal && native.getUsnJournalInfo) {
       try {
-        const info = native.getUsnJournalInfo(job.usnVolume);
-        fs.writeFileSync(
-          `${job.imagePath}.usn`,
-          JSON.stringify({ volume: job.usnVolume, usn: info.nextUsn.toString() })
-        );
+        if (job.perPartitionUsn) {
+          // Multi-volume: query each partition's journal and write v2 sidecar.
+          const entries: Array<{ partitionIndex: number; volume: string; usn: string }> = [];
+          for (const [pi, entry] of Object.entries(job.perPartitionUsn)) {
+            try {
+              const info = native.getUsnJournalInfo(entry.volume);
+              entries.push({
+                partitionIndex: Number(pi),
+                volume: entry.volume,
+                usn: info.nextUsn.toString()
+              });
+            } catch {
+              // Journal query failed for this volume — skip it (will fall back
+              // to full scan on next incremental for this partition).
+            }
+          }
+          if (entries.length > 0) {
+            fs.writeFileSync(
+              `${job.imagePath}.usn`,
+              JSON.stringify({ version: 2, partitions: entries })
+            );
+          }
+        } else if (job.usnVolume) {
+          // Legacy single-volume format.
+          const info = native.getUsnJournalInfo(job.usnVolume);
+          fs.writeFileSync(
+            `${job.imagePath}.usn`,
+            JSON.stringify({ volume: job.usnVolume, usn: info.nextUsn.toString() })
+          );
+        }
       } catch {
         /* best-effort: USN tracking falls back to a full scan next time */
       }
@@ -613,7 +650,7 @@ export async function runBackupJob(
       resumed: isResume,
       warnings
     };
-    fs.writeFileSync(resultPath, JSON.stringify(result));
+    emitResult(resultPath, result, pipeClient);
     return;
     } catch (error) {
       try {
@@ -652,7 +689,7 @@ export async function runBackupJob(
         /* best-effort */
       }
     }
-    fs.writeFileSync(resultPath, JSON.stringify(result));
+    emitResult(resultPath, result, pipeClient);
     return;
   } finally {
     deleteSnapshots();
@@ -682,7 +719,8 @@ export async function runRestoreJob(
   resultPath: string,
   progressPath: string,
   cancelPath: string,
-  nativeApi?: NativeImagingApi
+  nativeApi?: NativeImagingApi,
+  pipeClient?: PipeClient
 ): Promise<void> {
   const start = Date.now();
   const job = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as RestoreJob;
@@ -872,7 +910,7 @@ export async function runRestoreJob(
         const blocksForPartition = info.blocks.filter((b) => b.partitionIndex === target.partitionIndex);
         const useBlockPool = decompPool !== null && info.header.compressionId === sharedCompressionId;
 
-        const writeBlock = (block: { blockIndex: number; rawSize: number; rawCrc32: number }, raw: Buffer): void => {
+        const writeBlock = async (block: { blockIndex: number; rawSize: number; rawCrc32: number }, raw: Buffer): Promise<void> => {
           if (raw.length !== block.rawSize) {
             throw new Error(
               `Decompressed size mismatch for ${target.label} block ${block.blockIndex} (${raw.length} != ${block.rawSize})`
@@ -883,7 +921,11 @@ export async function runRestoreJob(
           }
           const writeOffset = BigInt(target.offset) + BigInt(block.blockIndex * info.header.blockSize);
           try {
-            native.writeBlocks(devicePath, writeOffset, raw);
+            if (native.writeBlocksAsync) {
+              await native.writeBlocksAsync(devicePath, writeOffset, raw);
+            } else {
+              native.writeBlocks(devicePath, writeOffset, raw);
+            }
           } catch (error) {
             warnings.push(
               `Write failed for ${target.label} block ${block.blockIndex} at ${writeOffset}: ${errorMessage(error)}`
@@ -916,7 +958,7 @@ export async function runRestoreJob(
             inFlight.push({ block, promise: decompPool!.decompress(frame.comp) });
             while (inFlight.length >= windowSize) {
               const item = inFlight.shift()!;
-              writeBlock(item.block, await item.promise!);
+              await writeBlock(item.block, await item.promise!);
             }
           } else {
             const raw = readBlockDataFromImage(
@@ -926,12 +968,12 @@ export async function runRestoreJob(
               info.header.cipherId,
               key
             );
-            writeBlock(block, raw);
+            await writeBlock(block, raw);
           }
         }
 
         for (const item of inFlight) {
-          writeBlock(item.block, await item.promise!);
+          await writeBlock(item.block, await item.promise!);
         }
         inFlight.length = 0;
       }
@@ -952,7 +994,11 @@ export async function runRestoreJob(
             if (isCancelled()) {
               throw new CancelledError();
             }
-            native.writeBlocks(devicePath, BigInt(target.offset + region.relativeOffset), region.data);
+            if (native.writeBlocksAsync) {
+              await native.writeBlocksAsync(devicePath, BigInt(target.offset + region.relativeOffset), region.data);
+            } else {
+              native.writeBlocks(devicePath, BigInt(target.offset + region.relativeOffset), region.data);
+            }
           }
           warnings.push(
             `Grew filesystem on ${target.label} from ${capturedPartition.size} to ${target.size} bytes ` +
@@ -964,6 +1010,56 @@ export async function runRestoreJob(
       }
 
       targetsRestored++;
+
+      // Post-restore CRC verify: read back every restored block from the target
+      // disk and compare its CRC against the image's stored CRC. Catches silent
+      // disk write failures that the write-time CRC check cannot detect (e.g.
+      // firmware bugs, controller corruption, bad sectors that accepted the write
+      // but returned garbage on read-back).
+      if (job.verifyAfterRestore) {
+        if (isCancelled()) {
+          throw new CancelledError();
+        }
+        writeProgress('verifying');
+        let verifyErrors = 0;
+        // Collect all blocks for this target across all sources in the chain.
+        // Later sources override earlier ones for the same blockIndex.
+        const blockMap = new Map<number, { rawSize: number; rawCrc32: number }>();
+        for (const src of infos) {
+          for (const b of src.blocks) {
+            if (b.partitionIndex === target.partitionIndex) {
+              blockMap.set(b.blockIndex, { rawSize: b.rawSize, rawCrc32: b.rawCrc32 });
+            }
+          }
+        }
+        const blockSize = infos[0].header.blockSize;
+        for (const [blockIndex, block] of blockMap) {
+          if (isCancelled()) {
+            throw new CancelledError();
+          }
+          const readOffset = BigInt(target.offset) + BigInt(blockIndex * blockSize);
+          try {
+            const readBack = native.readBlocksAsync
+              ? await native.readBlocksAsync(devicePath, readOffset, BigInt(block.rawSize))
+              : Buffer.from(native.readBlocks(devicePath, readOffset, BigInt(block.rawSize)));
+            if (crc32(readBack) !== block.rawCrc32) {
+              warnings.push(
+                `Post-restore CRC mismatch on ${target.label} block ${blockIndex} ` +
+                `(expected 0x${block.rawCrc32.toString(16)}, got 0x${crc32(readBack).toString(16)})`
+              );
+              verifyErrors++;
+            }
+          } catch (error) {
+            warnings.push(
+              `Post-restore read-back failed for ${target.label} block ${blockIndex}: ${errorMessage(error)}`
+            );
+            verifyErrors++;
+          }
+        }
+        if (verifyErrors > 0) {
+          warnings.push(`Post-restore verify: ${verifyErrors} block(s) failed CRC check on ${target.label}`);
+        }
+      }
 
       // Restore drill: read back the written filesystem and validate the boot
       // sector / $MFT. Failures land in the drill result (not here) so the
@@ -1047,7 +1143,8 @@ export async function runCloneJob(
   resultPath: string,
   progressPath: string,
   cancelPath: string,
-  nativeApi?: NativeImagingApi
+  nativeApi?: NativeImagingApi,
+  pipeClient?: PipeClient
 ): Promise<void> {
   const start = Date.now();
   let job: CloneJob;
@@ -1443,7 +1540,8 @@ export async function dispatchHelperJob(
   resultPath: string,
   progressPath: string,
   cancelPath: string,
-  nativeApi?: NativeImagingApi
+  nativeApi?: NativeImagingApi,
+  pipeClient?: import('../utils/pipe-ipc').PipeClient
 ): Promise<void> {
   const raw = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as { type?: string };
   if (raw.type === 'mount') {
@@ -1451,20 +1549,21 @@ export async function dispatchHelperJob(
     return;
   }
   if (raw.type === 'restore') {
-    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, nativeApi);
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, nativeApi, pipeClient);
     return;
   }
   if (raw.type === 'clone') {
-    await runCloneJob(jobPath, resultPath, progressPath, cancelPath, nativeApi);
+    await runCloneJob(jobPath, resultPath, progressPath, cancelPath, nativeApi, pipeClient);
     return;
   }
   if (raw.type === 'vss') {
     const { runVssJob } = await import('./vss-job');
     const result = await runVssJob(raw as { type: 'vss'; operation: 'writers' | 'smoke-test' | 'repair' | 'start' | 'stop'; volume?: string });
     fs.writeFileSync(resultPath, JSON.stringify(result));
+    pipeClient?.send({ type: 'result', ...result });
     return;
   }
-  await runBackupJob(jobPath, resultPath, progressPath, cancelPath, nativeApi);
+  await runBackupJob(jobPath, resultPath, progressPath, cancelPath, nativeApi, pipeClient);
 }
 
 function errorMessage(error: unknown): string {

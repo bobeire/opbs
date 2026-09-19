@@ -69,8 +69,12 @@ parentPort?.on('message', (msg: { seq: number; data: Uint8Array; op: 'compress' 
     const out = msg.op === 'decompress'
       ? decompress(msg.data, msg.codec)
       : compress(msg.data, msg.level, msg.codec);
-    const transferList: ArrayBuffer[] = out.buffer instanceof ArrayBuffer ? [out.buffer] : [];
-    parentPort?.postMessage({ seq: msg.seq, ok: true, data: out }, transferList);
+    // Transfer the buffer to the parent (zero-copy). The compressed/decompressed
+    // output from zstdify/fzstd may have a shared/pooled ArrayBuffer that can't
+    // be transferred — copy to a fresh ArrayBuffer first.
+    const transferable = Buffer.alloc(out.length);
+    out.copy(transferable, 0);
+    parentPort?.postMessage({ seq: msg.seq, ok: true, data: transferable }, [transferable.buffer]);
   } catch (err) {
     parentPort?.postMessage({
       seq: msg.seq,

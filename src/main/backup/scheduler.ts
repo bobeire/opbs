@@ -97,6 +97,11 @@ export class BackupScheduler {
     }
 
     logger.info(`Scheduler started with ${this.tasks.size} tasks`);
+
+    // Catch-up: check for missed schedules while the app was closed.
+    // If a backup's lastRun is older than when it should have last fired,
+    // run it now (once, with a short delay to let the app settle).
+    this.checkMissedSchedules(settings.scheduledBackups);
   }
 
   stopAll(): void {
@@ -104,6 +109,35 @@ export class BackupScheduler {
     this.tasks.clear();
     this.clearRetries();
     logger.info('Scheduler stopped');
+  }
+
+  /**
+   * Check for schedules that should have fired while the app was closed.
+   * If lastRun is older than the most recent scheduled fire time, trigger
+   * the backup now. Runs once at startup with a 30-second delay to let
+   * the app (and disk) settle.
+   */
+  private checkMissedSchedules(backups: ScheduledBackup[]): void {
+    const cronParser = require('cron-parser');
+    const now = Date.now();
+    for (const backup of backups) {
+      if (!backup.enabled) continue;
+      try {
+        const interval = cronParser.parseExpression(backup.cronExpression);
+        const lastScheduled = interval.prev().getTime();
+        const lastRun = backup.lastRun ? new Date(backup.lastRun).getTime() : 0;
+        // If the last scheduled fire is more recent than lastRun, the
+        // schedule was missed. Run it after a short delay.
+        if (lastScheduled > lastRun && now - lastScheduled < 24 * 60 * 60 * 1000) {
+          logger.info(`Catch-up: "${backup.name}" missed its ${new Date(lastScheduled).toLocaleString()} run — scheduling now`);
+          setTimeout(() => {
+            void this.runBackup(backup);
+          }, 30_000);
+        }
+      } catch {
+        /* unparseable cron expression — skip */
+      }
+    }
   }
 
   /** Cancel pending retry timers so a stopped scheduler cannot fire late. */

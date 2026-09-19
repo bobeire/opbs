@@ -45,6 +45,9 @@ export interface RestoreJobConfig {
   tableBootPartition?: number;
   /** Restore-drill: after writing, read back and validate the filesystems. */
   validateAfterWrite?: boolean;
+  /** Post-restore CRC verify: read back every restored block and compare
+   *  against the image's stored CRC. Catches silent disk write failures. */
+  verifyAfterRestore?: boolean;
 }
 
 export interface RestoreCoordinator {
@@ -293,6 +296,7 @@ export class RestoreEngine implements RestoreCoordinator {
       compressionThreads,
       writeTable,
       validateAfterWrite: config.validateAfterWrite,
+      verifyAfterRestore: config.verifyAfterRestore,
       warnings: warnings.length > 0 ? warnings : undefined
     };
   }

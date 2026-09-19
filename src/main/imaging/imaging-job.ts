@@ -5,6 +5,8 @@ export interface NativeImagingApi {
   deleteSnapshot(id: string): boolean;
   readBlocks(devicePath: string, offset: bigint, length: bigint): Buffer;
   writeBlocks(devicePath: string, offset: bigint, data: Buffer): number;
+  readBlocksAsync?(devicePath: string, offset: bigint, length: bigint): Promise<Buffer>;
+  writeBlocksAsync?(devicePath: string, offset: bigint, data: Buffer): Promise<number>;
   getPhysicalDrivePath(diskIndex: number): string;
   queryUsnJournal?(volumePath: string, startUsn?: number): Array<{ usn: bigint; fileReference: bigint; reason: number; fileName: string }>;
   getUsnJournalInfo?(volumePath: string): { firstUsn: bigint; nextUsn: bigint; lowestValidUsn: bigint };
@@ -77,10 +79,14 @@ export interface ImagingJob {
   compressionThreads?: number;
   /** Use the USN journal to read only changed blocks for an incremental. */
   useUsnJournal?: boolean;
-  /** Volume path whose USN journal to query. */
+  /** Volume path whose USN journal to query (single-volume legacy). */
   usnVolume?: string;
-  /** Last backup's journal USN (from the base image sidecar). */
+  /** Last backup's journal USN (single-volume legacy). */
   usnLastUsn?: number;
+  /** Per-partition USN state for multi-volume tracking. Each entry maps a
+   *  partition index to its volume path and journal cursor. When present, this
+   *  takes precedence over usnVolume/usnLastUsn. */
+  perPartitionUsn?: Record<number, { volume: string; lastUsn: number }>;
   /** Only capture blocks containing allocated clusters (NTFS $Bitmap). Free
    *  space is skipped; non-NTFS partitions fall back to a full capture. */
   usedBlocksOnly?: boolean;
@@ -131,6 +137,9 @@ export interface RestoreJob {
   /** Read back the written filesystem after every target and validate the
    *  boot sector / MFT. The CLI `drill` subcommand sets this flag. */
   validateAfterWrite?: boolean;
+  /** Read back every restored block from the target disk and compare its CRC
+   *  against the image's stored CRC. Catches silent disk write failures. */
+  verifyAfterRestore?: boolean;
   /**
    * Build-time warnings/hints (e.g. the target disk looks identical to the
    * source) that the helper appends to the restore result's warnings.

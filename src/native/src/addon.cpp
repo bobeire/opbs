@@ -230,6 +230,120 @@ void CloseAllHandles(const Napi::CallbackInfo& /*info*/) {
     DiskReader::CloseAllHandles();
 }
 
+// ---------------------------------------------------------------------------
+// Async I/O workers — run in libuv thread pool, freeing the event loop.
+// ---------------------------------------------------------------------------
+
+class AsyncReadWorker : public Napi::AsyncWorker {
+public:
+    AsyncReadWorker(Napi::Env env, std::string devicePath, int64_t offset, int64_t length)
+        : Napi::AsyncWorker(env),
+          m_devicePath(std::move(devicePath)),
+          m_offset(offset),
+          m_length(length),
+          m_deferred(Napi::Promise::Deferred::New(env)) {}
+
+    Napi::Promise::Deferred& Deferred() { return m_deferred; }
+
+    void Execute() override {
+        try {
+            m_data = DiskReader::ReadBlocks(m_devicePath, m_offset, m_length);
+        } catch (const std::exception& e) {
+            SetError(e.what());
+        }
+    }
+
+    void OnOK() override {
+        auto buf = Napi::Buffer<char>::Copy(Env(), m_data.data(), m_data.size());
+        m_deferred.Resolve(buf);
+    }
+
+    void OnError(const Napi::Error& error) override {
+        m_deferredReject(error.Value());
+    }
+
+private:
+    void m_deferredReject(const Napi::Value& err) {
+        m_deferred.Reject(err);
+    }
+
+    std::string m_devicePath;
+    int64_t m_offset;
+    int64_t m_length;
+    std::vector<char> m_data;
+    Napi::Promise::Deferred m_deferred;
+};
+
+class AsyncWriteWorker : public Napi::AsyncWorker {
+public:
+    AsyncWriteWorker(Napi::Env env, std::string devicePath, uint64_t offset,
+                     const char* data, size_t length)
+        : Napi::AsyncWorker(env),
+          m_devicePath(std::move(devicePath)),
+          m_offset(offset),
+          m_data(data, data + length),
+          m_deferred(Napi::Promise::Deferred::New(env)) {}
+
+    Napi::Promise::Deferred& Deferred() { return m_deferred; }
+
+    void Execute() override {
+        try {
+            m_written = DiskReader::WriteBlocks(m_devicePath, m_offset,
+                                                 m_data.data(), m_data.size());
+        } catch (const std::exception& e) {
+            SetError(e.what());
+        }
+    }
+
+    void OnOK() override {
+        m_deferred.Resolve(Napi::Number::New(Env(), static_cast<double>(m_written)));
+    }
+
+    void OnError(const Napi::Error& error) override {
+        m_deferred.Reject(error.Value());
+    }
+
+private:
+    std::string m_devicePath;
+    uint64_t m_offset;
+    std::vector<char> m_data; // copy of JS buffer — safe to use in worker thread
+    uint64_t m_written = 0;
+    Napi::Promise::Deferred m_deferred;
+};
+
+// Async readBlocks — returns a Promise<Buffer>.
+Napi::Value ReadBlocksAsync(const Napi::CallbackInfo& info) {
+    std::string devicePath = info[0].As<Napi::String>().Utf8Value();
+    bool lossless = false;
+    int64_t offset = info[1].As<Napi::BigInt>().Int64Value(&lossless);
+    int64_t length = info[2].As<Napi::BigInt>().Int64Value(&lossless);
+
+    auto* worker = new AsyncReadWorker(info.Env(), devicePath, offset, length);
+    auto promise = worker->Deferred().Promise();
+    worker->Queue();
+    return promise;
+}
+
+// Async writeBlocks — returns a Promise<number>.
+Napi::Value WriteBlocksAsync(const Napi::CallbackInfo& info) {
+    std::string devicePath = info[0].As<Napi::String>().Utf8Value();
+
+    uint64_t offset = 0;
+    if (info[1].IsBigInt()) {
+        bool lossless = false;
+        offset = info[1].As<Napi::BigInt>().Uint64Value(&lossless);
+    } else {
+        offset = static_cast<uint64_t>(info[1].As<Napi::Number>().Int64Value());
+    }
+
+    Napi::Buffer<char> buf = info[2].As<Napi::Buffer<char>>();
+
+    auto* worker = new AsyncWriteWorker(info.Env(), devicePath, offset, buf.Data(), buf.Length());
+    auto promise = worker->Deferred().Promise();
+    worker->Queue();
+    return promise;
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
     RegisterZstd(env, exports);
     RegisterPartitionTable(env, exports);
@@ -245,6 +359,8 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set("deleteSnapshot", Napi::Function::New(env, DeleteSnapshot));
     exports.Set("readBlocks", Napi::Function::New(env, ReadBlocks));
     exports.Set("writeBlocks", Napi::Function::New(env, WriteBlocks));
+    exports.Set("readBlocksAsync", Napi::Function::New(env, ReadBlocksAsync));
+    exports.Set("writeBlocksAsync", Napi::Function::New(env, WriteBlocksAsync));
     exports.Set("openImageForWrite", Napi::Function::New(env, OpenImageForWrite));
     exports.Set("closeAllHandles", Napi::Function::New(env, CloseAllHandles));
     return exports;

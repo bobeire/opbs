@@ -27,6 +27,8 @@ declare module 'opbs-native' {
   export function deleteSnapshot(snapshotId: string): boolean;
   export function readBlocks(devicePath: string, offset: bigint, length: bigint): Buffer;
   export function writeBlocks(devicePath: string, offset: bigint, data: Buffer): number;
+  export function readBlocksAsync(devicePath: string, offset: bigint, length: bigint): Promise<Buffer>;
+  export function writeBlocksAsync(devicePath: string, offset: bigint, data: Buffer): Promise<number>;
   export function openImageForWrite(path: string): number;
   export function closeAllHandles(): void;
 }

@@ -8,6 +8,23 @@
 
 #include <stdexcept>
 #include <sstream>
+#include <cstring>
+
+// Format a Windows error code into a human-readable string.
+static std::string FormatWinError(DWORD code) {
+    char buf[512] = {};
+    DWORD len = FormatMessageA(
+        FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        buf, sizeof(buf), nullptr);
+    // Trim trailing whitespace (FormatMessage appends \r\n).
+    while (len > 0 && (buf[len - 1] == '\r' || buf[len - 1] == '\n' || buf[len - 1] == ' ')) {
+        buf[--len] = '\0';
+    }
+    std::ostringstream ss;
+    ss << buf << " (error " << code << " / 0x" << std::hex << code << ")";
+    return ss.str();
+}
 
 // Static handle cache — avoids repeated CreateFileW/CloseHandle per 1MB block.
 std::unordered_map<std::string, HANDLE> DiskReader::s_handleCache;
@@ -32,7 +49,7 @@ HANDLE DiskReader::GetCachedHandle(const std::string& devicePath, DWORD access) 
     );
 
     if (hDevice == INVALID_HANDLE_VALUE) {
-        throw std::runtime_error("Failed to open device: " + devicePath);
+        throw std::runtime_error("Failed to open device " + devicePath + ": " + FormatWinError(GetLastError()));
     }
 
     s_handleCache[devicePath] = hDevice;
@@ -425,7 +442,11 @@ std::vector<char> DiskReader::ReadBlocks(const std::string& devicePath, uint64_t
             // Invalidate the cached handle on error.
             s_handleCache.erase(devicePath);
             CloseHandle(hDevice);
-            throw std::runtime_error("Failed to read from device");
+            std::ostringstream ss;
+            ss << "ReadFile failed on " << devicePath
+               << " at offset " << offset + totalRead << " (" << toRead << " bytes): "
+               << FormatWinError(GetLastError());
+            throw std::runtime_error(ss.str());
         }
         
         totalRead += bytesRead;
@@ -448,7 +469,10 @@ uint64_t DiskReader::WriteBlocks(const std::string& devicePath, uint64_t offset,
     if (!SetFilePointerEx(hDevice, fileOffset, nullptr, FILE_BEGIN)) {
         s_handleCache.erase(devicePath);
         CloseHandle(hDevice);
-        throw std::runtime_error("Failed to seek to write position");
+        std::ostringstream ss;
+        ss << "SetFilePointerEx failed on " << devicePath << " at offset " << offset
+           << ": " << FormatWinError(GetLastError());
+        throw std::runtime_error(ss.str());
     }
     
     uint64_t totalWritten = 0;
@@ -461,7 +485,11 @@ uint64_t DiskReader::WriteBlocks(const std::string& devicePath, uint64_t offset,
         if (!WriteFile(hDevice, data + totalWritten, toWrite, &bytesWritten, nullptr)) {
             s_handleCache.erase(devicePath);
             CloseHandle(hDevice);
-            throw std::runtime_error("Failed to write to device");
+            std::ostringstream ss;
+            ss << "WriteFile failed on " << devicePath
+               << " at offset " << offset + totalWritten << " (" << toWrite << " bytes): "
+               << FormatWinError(GetLastError());
+            throw std::runtime_error(ss.str());
         }
         
         totalWritten += bytesWritten;
@@ -520,7 +548,11 @@ std::vector<UsnRecord> DiskReader::QueryUsnJournal(const std::string& volumePath
     std::vector<char> buffer(bufferSize);
 
     bool firstRead = true;
-    while (records.size() < 2000) {
+    // No hard cap — read until the journal is exhausted.  The caller
+    // (computeChangedBlockIndices) handles large result sets; the risk of
+    // missing changed files from a silent truncation is worse than the
+    // memory cost of a complete enumeration.
+    while (true) {
         if (!DeviceIoControl(hVolume, FSCTL_READ_USN_JOURNAL, &readData, sizeof(readData), buffer.data(), bufferSize, &bytesReturned, nullptr)) {
             if (firstRead) {
                 CloseHandle(hVolume);
@@ -529,10 +561,6 @@ std::vector<UsnRecord> DiskReader::QueryUsnJournal(const std::string& volumePath
             break;
         }
         firstRead = false;
-        // Output layout: first 8 bytes = next USN, then USN records.
-        if (bytesReturned <= sizeof(uint64_t)) {
-            break;
-        }
         // Output layout: first 8 bytes = next USN, then USN records.
         if (bytesReturned <= sizeof(uint64_t)) {
             break;
@@ -555,22 +583,60 @@ std::vector<UsnRecord> DiskReader::QueryUsnJournal(const std::string& volumePath
 }
 
 uint32_t DiskReader::Crc32(const uint8_t* data, size_t length, uint32_t seed) {
-    static uint32_t table[256];
+    // Slice-by-8 CRC32: same polynomial (0xEDB88320, reflected CRC-32/ISO-HDLC)
+    // and same output as the standard byte-at-a-time table, but processes 8
+    // bytes per iteration using 8 precomputed lookup tables. ~8x fewer loop
+    // iterations for large buffers (1MB blocks).
+    static uint32_t table[8][256];
     static bool init = false;
     if (!init) {
+        // Table 0: standard byte-at-a-time CRC table.
         for (uint32_t i = 0; i < 256; i++) {
             uint32_t c = i;
             for (int k = 0; k < 8; k++) {
                 c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
             }
-            table[i] = c;
+            table[0][i] = c;
+        }
+        // Tables 1-7: derived from table 0 by feeding zero bytes.
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = table[0][i];
+            for (int t = 1; t < 8; t++) {
+                c = table[0][(c & 0xFF)] ^ (c >> 8);
+                table[t][i] = c;
+            }
         }
         init = true;
     }
+
     uint32_t crc = seed ^ 0xFFFFFFFFu;
-    for (size_t i = 0; i < length; i++) {
-        crc = table[(crc ^ data[i]) & 0xFFu] ^ (crc >> 8);
+
+    // Process 8 bytes at a time.
+    const uint8_t* p = data;
+    while (length >= 8) {
+        uint32_t one, two;
+        std::memcpy(&one, p, 4);
+        std::memcpy(&two, p + 4, 4);
+        one ^= crc;
+        crc = table[0][(two >> 24) & 0xFF]
+            ^ table[1][(two >> 16) & 0xFF]
+            ^ table[2][(two >> 8) & 0xFF]
+            ^ table[3][two & 0xFF]
+            ^ table[4][(one >> 24) & 0xFF]
+            ^ table[5][(one >> 16) & 0xFF]
+            ^ table[6][(one >> 8) & 0xFF]
+            ^ table[7][one & 0xFF];
+        p += 8;
+        length -= 8;
     }
+
+    // Remaining bytes (0-7): standard byte-at-a-time.
+    while (length > 0) {
+        crc = table[0][(crc ^ *p) & 0xFF] ^ (crc >> 8);
+        p++;
+        length--;
+    }
+
     return crc ^ 0xFFFFFFFFu;
 }
 

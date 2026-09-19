@@ -125,6 +125,10 @@ function openBrowseSession(imagePath: string, partitionIndex: number, passphrase
       header.cipherId !== CIPHER_NONE
         ? deriveImageKey(passphrase ?? '', header.salt, header.kdfIterations)
         : undefined;
+    const partition = info.partitions.find((p) => p.partitionIndex === partitionIndex);
+    if (partition && partition.size === 0) {
+      throw new Error(`Partition ${partitionIndex} is empty (0 bytes) and cannot be browsed.`);
+    }
   }
   const cacheKey = browseCacheKey(imagePath, partitionIndex, key?.toString('hex'));
   let session = browseSessions.get(cacheKey);
@@ -175,40 +179,63 @@ function ftpProfileFromSettings() {
   };
 }
 
-function runAsHelper(args: string[]): void {
+function runAsHelper(args: string[], pipeName?: string): void {
   const [jobPath, resultPath, progressPath, cancelPath] = args;
 
   app.disableHardwareAcceleration();
 
   app.whenReady().then(async () => {
     logger.info('Elevated helper mode started');
+
+    // Connect to the parent's pipe server (if available).
+    let pipeClient: import('./utils/pipe-ipc').PipeClient | null = null;
+    if (pipeName) {
+      try {
+        const { PipeClient } = await import('./utils/pipe-ipc');
+        pipeClient = new PipeClient(pipeName);
+        await pipeClient.connect();
+        pipeClient.send({ type: 'started' });
+        logger.info(`Connected to parent pipe ${pipeName}`);
+      } catch (pipeError) {
+        logger.warn(`Could not connect to pipe ${pipeName}, using file-based IPC: ${pipeError}`);
+        pipeClient = null;
+      }
+    }
+
     try {
-      await dispatchHelperJob(jobPath, resultPath, progressPath, cancelPath);
+      await dispatchHelperJob(jobPath, resultPath, progressPath, cancelPath, undefined, pipeClient ?? undefined);
+      // Send result through pipe before exiting.
+      if (pipeClient?.isConnected && fs.existsSync(resultPath)) {
+        try {
+          const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+          pipeClient.send({ type: 'result', ...result });
+        } catch { /* best-effort */ }
+      }
       try { loadNative<{ closeAllHandles(): void }>().closeAllHandles(); } catch { /* best-effort */ }
+      pipeClient?.close();
       app.exit(0);
     } catch (error) {
       logger.error('Helper job failed', error);
       try { loadNative<{ closeAllHandles(): void }>().closeAllHandles(); } catch { /* best-effort */ }
-      // Safety net: if a job failed before it could write its own result
-      // (e.g. loadNative(), base-chain resolution or openSync() throwing
-      // before the job body's try/catch), leave an explicit error result so
-      // the parent's elevation poll resolves with a real cause instead of
-      // timing out 45 s later with a misleading "Elevation was not confirmed".
+      const errorResult = {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        cancelled: false,
+        warnings: []
+      };
+      // Send error through pipe.
+      if (pipeClient?.isConnected) {
+        try { pipeClient.send({ type: 'result', ...errorResult }); } catch { /* best-effort */ }
+      }
+      // Also write result.json as fallback.
       try {
         if (!fs.existsSync(resultPath)) {
-          fs.writeFileSync(
-            resultPath,
-            JSON.stringify({
-              ok: false,
-              error: error instanceof Error ? error.message : String(error),
-              cancelled: false,
-              warnings: []
-            })
-          );
+          fs.writeFileSync(resultPath, JSON.stringify(errorResult));
         }
       } catch (writeError) {
         logger.error('Failed to write helper failure result', writeError);
       }
+      pipeClient?.close();
       app.exit(1);
     }
   });
@@ -363,7 +390,10 @@ function main(): void {
 
   const helperIndex = process.argv.indexOf(HELPER_FLAG);
   if (helperIndex !== -1) {
-    runAsHelper(process.argv.slice(helperIndex + 1, helperIndex + 5));
+    const helperArgs = process.argv.slice(helperIndex + 1, helperIndex + 5);
+    const pipeFlagIndex = process.argv.indexOf('--pipe', helperIndex);
+    const pipeName = pipeFlagIndex !== -1 ? process.argv[pipeFlagIndex + 1] : undefined;
+    runAsHelper(helperArgs, pipeName);
     return;
   }
 
@@ -528,6 +558,11 @@ function setupIpcHandlers(): void {
   ipcMain.handle('list-unattended-backup-tasks', async () => {
     const { listUnattendedBackupTasks } = await import('./utils/task-scheduler');
     return listUnattendedBackupTasks();
+  });
+
+  ipcMain.handle('get-task-status', async (_, taskName: string) => {
+    const { getTaskStatus } = await import('./utils/task-scheduler');
+    return getTaskStatus(taskName);
   });
 
   // Restore operations
@@ -1172,12 +1207,14 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     return {
       encrypted: info.header.cipherId !== CIPHER_NONE,
       imageFormat: 'opbs',
-      partitions: info.partitions.map((p) => ({
-        partitionIndex: p.partitionIndex,
-        size: p.size,
-        offsetOnDisk: p.offsetOnDisk,
-        blockCount: p.blockCount
-      }))
+      partitions: info.partitions
+        .filter((p) => p.size > 0)
+        .map((p) => ({
+          partitionIndex: p.partitionIndex,
+          size: p.size,
+          offsetOnDisk: p.offsetOnDisk,
+          blockCount: p.blockCount
+        }))
     };
   });
 

@@ -155,23 +155,45 @@ export class ImagingEngine implements BackupCoordinator {
     let useUsnJournal = config.useUsnJournal;
     let usnVolume: string | undefined;
     let usnLastUsn: number | undefined;
+    let perPartitionUsn: Record<number, { volume: string; lastUsn: number }> | undefined;
     if (useUsnJournal) {
       if (config.baseImagePath) {
         try {
-          const sidecar = JSON.parse(fs.readFileSync(`${config.baseImagePath}.usn`, 'utf-8')) as {
-            volume: string;
-            usn: string;
-          };
-          usnVolume = sidecar.volume;
-          usnLastUsn = Number(sidecar.usn);
+          const raw = fs.readFileSync(`${config.baseImagePath}.usn`, 'utf-8');
+          const sidecar = JSON.parse(raw);
+          if (sidecar.version === 2 && Array.isArray(sidecar.partitions)) {
+            // Multi-volume format: { version: 2, partitions: [{ partitionIndex, volume, usn }] }
+            perPartitionUsn = {};
+            for (const entry of sidecar.partitions) {
+              perPartitionUsn[entry.partitionIndex] = {
+                volume: entry.volume,
+                lastUsn: Number(entry.usn)
+              };
+            }
+          } else if (sidecar.volume && sidecar.usn) {
+            // Legacy single-volume format: { volume, usn }
+            usnVolume = sidecar.volume;
+            usnLastUsn = Number(sidecar.usn);
+          }
         } catch {
           useUsnJournal = false; // no sidecar: fall back to a full scan
         }
       }
-      if (!usnVolume) {
-        const volPart = items.find((p) => p.readSource === 'volume' && p.volumeDevicePath);
-        if (volPart?.volumeDevicePath) {
-          usnVolume = volPart.volumeDevicePath;
+      // If no sidecar data, discover volume paths from the partition list.
+      // Build per-partition USN entries for all volume-backed partitions.
+      if (!perPartitionUsn && !usnVolume) {
+        const volParts = items.filter((p) => p.readSource === 'volume' && p.volumeDevicePath);
+        if (volParts.length > 0) {
+          // Multi-volume: build per-partition entries with no prior USN
+          // (first incremental after enabling USN — full scan, but subsequent
+          // runs will have per-partition cursors).
+          perPartitionUsn = {};
+          for (const vp of volParts) {
+            perPartitionUsn[vp.partitionIndex] = {
+              volume: vp.volumeDevicePath!,
+              lastUsn: 0 // 0 = start of journal (full scan for this run)
+            };
+          }
         } else {
           useUsnJournal = false; // no volume path to query
         }
@@ -243,7 +265,11 @@ export class ImagingEngine implements BackupCoordinator {
       ...(config.resume ? { resume: true } : {}),
       ...(resumeCheckpoint ? { resumeCheckpoint } : {}),
       ...(config.usedBlocksOnly ? { usedBlocksOnly: true } : {}),
-      ...(useUsnJournal && usnVolume ? { useUsnJournal, usnVolume, usnLastUsn } : {}),
+      ...(useUsnJournal && perPartitionUsn
+        ? { useUsnJournal: true, perPartitionUsn }
+        : useUsnJournal && usnVolume
+          ? { useUsnJournal, usnVolume, usnLastUsn }
+          : {}),
       sourceDisk: sourceDiskIdentity
     };
   }

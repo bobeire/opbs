@@ -1,6 +1,6 @@
 {
   "name": "opbs",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "OPBS - Open Pickle Backup System: FOSS disk imaging backup for Windows",
   "author": "RHITCS",
   "main": "dist/index.js",
@@ -24,6 +24,7 @@
   "dependencies": {
     "basic-ftp": "^5.3.1",
     "bonjour-service": "^1.4.4",
+    "cron-parser": "^5.10.1",
     "electron-is-dev": "^2.0.0",
     "electron-log": "^5.4.4",
     "electron-updater": "^6.8.9",

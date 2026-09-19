@@ -33,7 +33,15 @@ function resolveAddonPath(): string | undefined {
  * Resolve the path to the compiled worker file.
  */
 function resolveWorkerPath(): string {
-  return path.resolve(__dirname, 'compression-worker.js');
+  // In production, the compiled worker lives next to this file in dist/.
+  // In dev/test, fall back to the dist output so vitest can find it.
+  const candidate = path.resolve(__dirname, 'compression-worker.js');
+  if (fs.existsSync(candidate)) return candidate;
+  // Fallback: look in the dist directory (for test environments where __dirname
+  // points to the source tree).
+  const distCandidate = path.resolve(__dirname, '../../../dist/imaging/compression-worker.js');
+  if (fs.existsSync(distCandidate)) return distCandidate;
+  return candidate; // let it fail with a clear error
 }
 
 /**
@@ -121,16 +129,16 @@ export class CompressionPool {
       const job = this.queue.shift()!;
       const worker = this.getWorker();
       this.inFlight++;
-      // Transfer the buffer to the worker — zero-copy. The buffer becomes
-      // detached in this thread but we don't need it anymore (CRC was already
-      // computed by the caller before submitting).
-      const transferList: ArrayBuffer[] =
-        job.data.buffer instanceof ArrayBuffer
-          ? [job.data.buffer.slice(job.data.byteOffset, job.data.byteOffset + job.data.byteLength)]
-          : [];
+      // Transfer the buffer to the worker (zero-copy). The raw block data
+      // may have a shared/pooled ArrayBuffer (e.g. from fs.readSync or
+      // native.readBlocks) — copy to a fresh ArrayBuffer so the transfer
+      // succeeds reliably. One copy here, but zero copies on the return
+      // path (the worker transfers back its own fresh buffer).
+      const transferable = Buffer.alloc(job.data.length);
+      Buffer.from(job.data).copy(transferable, 0);
       worker.postMessage(
-        { seq: job.seq, data: job.data, op: job.op, codec: this.codec, level: this.level },
-        transferList
+        { seq: job.seq, data: transferable, op: job.op, codec: this.codec, level: this.level },
+        [transferable.buffer]
       );
     }
   }

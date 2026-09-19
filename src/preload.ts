@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   registerUnattendedBackupTask: (scheduleId: string, schedule: any) => ipcRenderer.invoke('register-unattended-backup-task', scheduleId, schedule),
   unregisterUnattendedBackupTask: (scheduleId: string) => ipcRenderer.invoke('unregister-unattended-backup-task', scheduleId),
   listUnattendedBackupTasks: () => ipcRenderer.invoke('list-unattended-backup-tasks'),
+  getTaskStatus: (taskName: string) => ipcRenderer.invoke('get-task-status', taskName),
 
   // Restore operations
   startRestore: (config: any) => ipcRenderer.invoke('start-restore', config),

@@ -69,7 +69,7 @@ describe('USN change tracking', () => {
     expect(changed).toBeNull();
   });
 
-  it('returns null when there are no USN records', () => {
+  it('returns empty set when there are no USN records (nothing changed)', () => {
     const volume = buildNtfsVolumeData();
     const native = mockNative(volume, []);
     const changed = computeChangedBlockIndices({
@@ -81,7 +81,53 @@ describe('USN change tracking', () => {
       blockSize: CLUSTER,
       lastUsn: 1
     });
+    expect(changed).not.toBeNull();
+    expect(changed!.size).toBe(0);
+  });
+
+  it('returns null (full scan) when the journal has been recycled (stale lastUsn)', () => {
+    const volume = buildNtfsVolumeData();
+    const native: NativeImagingApi = {
+      ...mockNative(volume, [8]),
+      getUsnJournalInfo: () => ({
+        firstUsn: 100n,
+        nextUsn: 200n,
+        lowestValidUsn: 150n // lastUsn (1) < lowestValidUsn (150) → stale
+      })
+    };
+    const changed = computeChangedBlockIndices({
+      native,
+      volumePath: 'C:',
+      device: '\\\\.\\PhysicalDrive0',
+      baseOffset: 0n,
+      partitionSize: volume.length,
+      blockSize: CLUSTER,
+      lastUsn: 1 // older than lowestValidUsn
+    });
     expect(changed).toBeNull();
+  });
+
+  it('proceeds normally when lastUsn is within the journal range', () => {
+    const volume = buildNtfsVolumeData();
+    const native: NativeImagingApi = {
+      ...mockNative(volume, [8]),
+      getUsnJournalInfo: () => ({
+        firstUsn: 1n,
+        nextUsn: 200n,
+        lowestValidUsn: 50n // lastUsn (100) >= lowestValidUsn (50) → valid
+      })
+    };
+    const changed = computeChangedBlockIndices({
+      native,
+      volumePath: 'C:',
+      device: '\\\\.\\PhysicalDrive0',
+      baseOffset: 0n,
+      partitionSize: volume.length,
+      blockSize: CLUSTER,
+      lastUsn: 100 // within range
+    });
+    expect(changed).not.toBeNull();
+    expect(changed!.has(32)).toBe(true); // big.bin block
   });
 
   it('returns null when the native addon lacks USN support', () => {

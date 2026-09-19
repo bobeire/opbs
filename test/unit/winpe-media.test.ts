@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
@@ -198,7 +198,9 @@ describe('winpe-media', () => {
   describe('smokeMediaPayload', () => {
     const distDir = path.resolve(__dirname, '../../dist');
     const nativeNode = path.resolve(__dirname, '../../src/native/build/Release/opbs_native.node');
-    const available = fs.existsSync(distDir) && fs.existsSync(nativeNode);
+    let addonLoads = false;
+    try { require(nativeNode); addonLoads = true; } catch { /* needs Electron runtime */ }
+    const available = fs.existsSync(distDir) && fs.existsSync(nativeNode) && addonLoads;
     const opts = () => ({ distDir, nativeNode });
 
     it('rejects a missing native addon without touching the payload root', () => {
