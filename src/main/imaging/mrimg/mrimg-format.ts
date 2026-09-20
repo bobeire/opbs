@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as path from 'path';
 import { createHash } from 'crypto';
 import { decompressBlock, COMPRESSION_ZSTD } from '../image-format';
 import { decompressQuickLz } from './quicklz';
@@ -298,8 +299,74 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
     if (count === 0 || need > sectionEnd || sectionEnd - need > 4096) continue;
     sections.push({ rec0, count });
   }
+
+  // Fallback for chain segments and differential/incremental images: if the
+  // length-prefixed path-text marker scan found nothing, try a broader search.
+  // Chain segments may use a different prefix byte or footer layout, so scan
+  // for ANY occurrence of the path text and validate the block-index section
+  // that follows each one.
   if (sections.length === 0) {
-    throw new Error(`No partition block index found in ${imagePath}.`);
+    let pos = 13 + pathLen; // skip the first (header) occurrence
+    while (pos < bound) {
+      pos = footer.indexOf(pathText, pos);
+      if (pos === -1 || pos >= bound) break;
+      // Try multiple offsets after the path text for the section start.
+      // The primary parser uses MR_V7_PART_REC_TAIL (36 bytes) + 2 pad,
+      // but chain segments may use a different gap. Try common offsets.
+      for (const gap of [MR_V7_PART_REC_TAIL + 2, 2, 4, 6, 8, 10, 12, 14, 16, 18]) {
+        const rec0 = pos + pathLen + gap;
+        if (rec0 + MR_V7_RECORD_SIZE > bound) continue;
+        const count = footer.readUInt32LE(rec0);
+        if (count === 0 || count > 100_000) continue;
+        const need = rec0 + 4 + count * MR_V7_RECORD_SIZE;
+        if (need > bound) continue;
+        const maxOffset = fileSize - MRIMG_V7_TRAILER_SIZE;
+        const firstOffset = Number(footer.readBigUInt64LE(rec0 + 4 + 6));
+        if (firstOffset <= 0 || firstOffset >= maxOffset) continue;
+        sections.push({ rec0: rec0 + 4, count });
+        break;
+      }
+      if (sections.length > 0) break;
+      pos += 1;
+    }
+  }
+
+  // Last resort: scan the footer for the block-index record structure.
+  // The primary parser reads count at rec0+2 (2 bytes pad before u32 count).
+  // We scan for that same pattern: at each offset, try reading the count at
+  // offset+2 (matching the primary parser's 2-byte pad), then validate the
+  // records that follow.
+  if (sections.length === 0) {
+    for (let off = 13 + pathLen; off < bound - 12; off++) {
+      // Try count at off (no pad) and off+2 (2-byte pad, matching primary parser).
+      for (const countOff of [off, off + 2]) {
+        if (countOff + 4 > bound) continue;
+        const count = footer.readUInt32LE(countOff);
+        if (count === 0 || count > 100_000) continue;
+        const rec0 = countOff + 4;
+        const need = rec0 + count * MR_V7_RECORD_SIZE;
+        if (need > bound) continue;
+        // Validate ALL record offsets: within file bounds, monotonically
+        // non-decreasing (blocks written sequentially). A false positive
+        // from random footer bytes would have chaotic offsets.
+        let prevOffset = -1;
+        let valid = true;
+        for (let r = 0; r < count; r++) {
+          const rOff = Number(footer.readBigUInt64LE(rec0 + r * MR_V7_RECORD_SIZE + 6));
+          if (rOff < 0 || rOff >= fileSize) { valid = false; break; }
+          if (rOff < prevOffset) { valid = false; break; }
+          prevOffset = rOff;
+        }
+        if (!valid) continue;
+        sections.push({ rec0, count });
+        break;
+      }
+      if (sections.length > 0) break;
+    }
+  }
+
+  if (sections.length === 0) {
+    throw new Error(`No partition block index found in ${imagePath}. The image may use an unsupported Macrium format.`);
   }
 
   const partitions: MacriumPartitionInfo[] = [];

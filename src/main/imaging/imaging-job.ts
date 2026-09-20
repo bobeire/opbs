@@ -98,6 +98,9 @@ export interface ImagingJob {
   resume?: boolean;
   /** When set, resume the backup from this checkpoint instead of starting fresh. */
   resumeCheckpoint?: ResumeCheckpoint;
+  /** Maximum size in bytes for each volume file (0/undefined = no splitting).
+   *  Used for multi-volume images on FAT32 destinations. */
+  maxVolumeSize?: number;
 }
 
 export interface RestoreTarget {

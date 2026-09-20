@@ -18,6 +18,10 @@ const powershellExe = process.env.SystemRoot
   ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   : 'powershell.exe';
 
+const regExe = process.env.SystemRoot
+  ? path.join(process.env.SystemRoot, 'System32', 'reg.exe')
+  : 'reg';
+
 export interface ScheduledTaskOptions {
   /** 24h HH:MM start time for daily tasks (ignored with onLogin). */
   time?: string;
@@ -102,22 +106,27 @@ function runSchTasks(args: string[]): Promise<string> {
 
 function runSchTasksElevated(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    // Write args to a response file to avoid PowerShell quoting hell.
-    const argFile = path.join(os.tmpdir(), `opbs-schtasks-${Date.now()}.args`);
-    fs.writeFileSync(argFile, args.join('\r\n'));
-    const script = `
-      $args = Get-Content '${argFile.replace(/'/g, "''")}'
-      $p = Start-Process -FilePath '${schtasksExe}' -ArgumentList $args `
-      + `-Verb RunAs -WindowStyle Hidden -Wait -PassThru
-      Remove-Item '${argFile.replace(/'/g, "''")}' -ErrorAction SilentlyContinue
-      exit $p.ExitCode`;
-    const child = spawn(powershellExe, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    // Build a PowerShell script that runs schtasks elevated.
+    // Using a script file avoids quoting hell with Start-Process -ArgumentList.
+    const quotedArgs = args.map((a) => `'${a.replace(/'/g, "''")}'`).join(',');
+    const script = [
+      `$p = Start-Process -FilePath '${schtasksExe}' -ArgumentList @(${quotedArgs}) -Verb RunAs -WindowStyle Hidden -Wait -PassThru`,
+      'exit $p.ExitCode'
+    ].join('\n');
+    const scriptFile = path.join(os.tmpdir(), `opbs-register-${Date.now()}.ps1`);
+    fs.writeFileSync(scriptFile, script);
+    const child = spawn(powershellExe, [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile
+    ], {
       windowsHide: true,
       stdio: 'ignore'
     });
-    child.on('error', reject);
+    child.on('error', (err) => {
+      try { fs.unlinkSync(scriptFile); } catch { /* already cleaned */ }
+      reject(err);
+    });
     child.on('close', (code) => {
-      try { fs.unlinkSync(argFile); } catch { /* already cleaned */ }
+      try { fs.unlinkSync(scriptFile); } catch { /* already cleaned */ }
       if (code === 0) {
         resolve('');
       } else {
@@ -233,6 +242,47 @@ export async function isHelperTaskRegistered(): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Check whether the app is configured to run as administrator via the
+ * Windows registry compatibility layer.  This is an alternative to the
+ * scheduled-task approach that works even when schtasks /Create fails.
+ */
+export function isRunAsAdmin(exePath: string): boolean {
+  try {
+    const { execFileSync } = require('child_process') as typeof import('child_process');
+    const out = execFileSync(
+      regExe,
+      ['query', 'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers', '/v', exePath],
+      { windowsHide: true, timeout: 5000, encoding: 'utf-8' }
+    );
+    return out.includes('RunAsAdmin');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Set the app to run as administrator via the Windows registry compatibility
+ * layer.  HKCU writes don't need elevation, so this completes without UAC.
+ */
+export async function ensureRunAsAdmin(exePath: string): Promise<void> {
+  if (isRunAsAdmin(exePath)) return;
+  try {
+    await execFileAsync(regExe, [
+      'ADD',
+      'HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers',
+      '/v', exePath,
+      '/t', 'REG_SZ',
+      '/d', 'RunAsAdmin',
+      '/f'
+    ], { windowsHide: true, timeout: 10_000 });
+    logger.info(`Set RunAsAdmin for ${exePath}`);
+  } catch (error) {
+    logger.error('Failed to set RunAsAdmin:', error);
+    throw error;
   }
 }
 

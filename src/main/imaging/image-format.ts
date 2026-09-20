@@ -25,10 +25,11 @@ function loadZstdify(): typeof import('zstdify') {
 const zstdify = loadZstdify();
 
 export const IMAGE_MAGIC = 'OPBS';
-export const IMAGE_VERSION = 1;
+export const IMAGE_VERSION = 2;
 export const HEADER_SIZE = 256;
 export const PARTITION_TABLE_ENTRY_SIZE = 64;
-export const BLOCK_INDEX_ENTRY_SIZE = 28;
+export const BLOCK_INDEX_ENTRY_SIZE = 32;
+export const BLOCK_INDEX_ENTRY_SIZE_V1 = 28;
 
 export const COMPRESSION_NONE = 0;
 export const COMPRESSION_DEFLATE = 1;
@@ -40,6 +41,7 @@ export const FLAG_HAS_BLOCK_INDEX = 0x1;
 export const FLAG_VERIFIED = 0x2;
 export const FLAG_INCREMENTAL = 0x4;
 export const FLAG_RESUMED = 0x8;
+export const FLAG_MULTI_VOLUME = 0x10;
 
 /** Byte offset of the flags field inside the 256-byte image header. */
 export const FLAGS_OFFSET = 36;
@@ -80,6 +82,9 @@ export interface ImageHeader {
   /** Model/serial of the disk the image was taken from ('' when unavailable or on old images). */
   sourceDiskModel: string;
   sourceDiskSerial: string;
+  /** Maximum size in bytes for each volume file (0 = single volume, no splitting).
+   *  Stored as uint16 MB in the header at offset 6. */
+  maxVolumeSize?: number;
 }
 
 export interface PartitionEntryMeta {
@@ -97,6 +102,8 @@ export interface BlockRecord {
   rawSize: number;
   compSize: number;
   rawCrc32: number;
+  /** Volume index for multi-volume images (0 for single-volume). */
+  volumeIndex?: number;
 }
 
 export interface ImageInfo {
@@ -261,7 +268,7 @@ export function encodeHeader(header: ImageHeader): Buffer {
   const buf = Buffer.alloc(HEADER_SIZE);
   buf.write(IMAGE_MAGIC, 0, 'ascii');
   buf.writeUInt16LE(header.version, 4);
-  buf.writeUInt16LE(0, 6);
+  buf.writeUInt16LE(header.maxVolumeSize ? Math.ceil(header.maxVolumeSize / (1024 * 1024)) : 0, 6);
   buf.writeBigUInt64LE(BigInt(header.timestamp), 8);
   buf.writeBigUInt64LE(BigInt(header.totalBytes), 16);
   buf.writeUInt32LE(header.blockSize, 24);
@@ -306,18 +313,19 @@ export function parseHeader(buf: Buffer): ImageHeader {
     salt: Buffer.from(buf.subarray(56, 56 + SALT_LENGTH)),
     baseImagePath: decodeBaseImagePath(buf.subarray(BASE_IMAGE_PATH_OFFSET, BASE_IMAGE_PATH_OFFSET + BASE_IMAGE_PATH_LENGTH)),
     sourceDiskModel: decodeAsciiField(buf.subarray(SOURCE_DISK_MODEL_OFFSET, SOURCE_DISK_MODEL_OFFSET + SOURCE_DISK_IDENTITY_LENGTH)),
-    sourceDiskSerial: decodeAsciiField(buf.subarray(SOURCE_DISK_SERIAL_OFFSET, SOURCE_DISK_SERIAL_OFFSET + SOURCE_DISK_IDENTITY_LENGTH))
+    sourceDiskSerial: decodeAsciiField(buf.subarray(SOURCE_DISK_SERIAL_OFFSET, SOURCE_DISK_SERIAL_OFFSET + SOURCE_DISK_IDENTITY_LENGTH)),
+    maxVolumeSize: (() => { const mb = buf.readUInt16LE(6); return mb > 0 ? mb * 1024 * 1024 : undefined; })()
   };
 }
 
 export function encodePartitionEntry(entry: PartitionEntryMeta): Buffer {
   const buf = Buffer.alloc(PARTITION_TABLE_ENTRY_SIZE);
-  buf.writeUInt32LE(entry.partitionIndex, 0);
+  buf.writeUInt32LE(Math.max(0, entry.partitionIndex), 0);
   buf.writeUInt32LE(0, 4);
-  buf.writeBigUInt64LE(BigInt(entry.size), 8);
-  buf.writeBigUInt64LE(BigInt(entry.offsetOnDisk), 16);
-  buf.writeBigUInt64LE(BigInt(entry.firstBlockFileOffset), 24);
-  buf.writeUInt32LE(entry.blockCount, 32);
+  buf.writeBigUInt64LE(BigInt(Math.max(0, entry.size)), 8);
+  buf.writeBigUInt64LE(BigInt(Math.max(0, entry.offsetOnDisk)), 16);
+  buf.writeBigUInt64LE(BigInt(Math.max(0, entry.firstBlockFileOffset)), 24);
+  buf.writeUInt32LE(Math.max(0, entry.blockCount), 32);
   buf.writeUInt32LE(0, 36);
   return buf;
 }
@@ -340,18 +348,25 @@ export function encodeBlockIndexEntry(record: BlockRecord): Buffer {
   buf.writeUInt32LE(record.rawSize, 16);
   buf.writeUInt32LE(record.compSize, 20);
   buf.writeUInt32LE(record.rawCrc32, 24);
+  buf.writeUInt32LE(record.volumeIndex ?? 0, 28);
   return buf;
 }
 
-export function parseBlockIndexEntry(buf: Buffer): BlockRecord {
-  return {
-    partitionIndex: buf.readUInt32LE(0),
-    blockIndex: buf.readUInt32LE(4),
-    fileOffset: Number(buf.readBigUInt64LE(8)),
-    rawSize: buf.readUInt32LE(16),
-    compSize: buf.readUInt32LE(20),
-    rawCrc32: buf.readUInt32LE(24)
+export function parseBlockIndexEntry(buf: Buffer, version: number = IMAGE_VERSION): BlockRecord {
+  const entrySize = version >= 2 ? BLOCK_INDEX_ENTRY_SIZE : BLOCK_INDEX_ENTRY_SIZE_V1;
+  const raw = buf.length >= entrySize ? buf : Buffer.concat([buf, Buffer.alloc(entrySize - buf.length)]);
+  const record: BlockRecord = {
+    partitionIndex: raw.readUInt32LE(0),
+    blockIndex: raw.readUInt32LE(4),
+    fileOffset: Number(raw.readBigUInt64LE(8)),
+    rawSize: raw.readUInt32LE(16),
+    compSize: raw.readUInt32LE(20),
+    rawCrc32: raw.readUInt32LE(24)
   };
+  if (version >= 2 && buf.length >= BLOCK_INDEX_ENTRY_SIZE) {
+    record.volumeIndex = raw.readUInt32LE(28) || undefined;
+  }
+  return record;
 }
 
 export function encodeBlockFrame(
@@ -452,7 +467,7 @@ export function readImageInfo(imagePath: string): ImageInfo {
     fs.readSync(fd, headerBuf, 0, HEADER_SIZE, 0);
     const header = parseHeader(headerBuf);
 
-    if (header.version !== IMAGE_VERSION) {
+    if (header.version !== IMAGE_VERSION && header.version !== 1) {
       throw new Error(`Unsupported image version: ${header.version}`);
     }
     if (
@@ -480,17 +495,18 @@ export function readImageInfo(imagePath: string): ImageInfo {
       const countBuf = Buffer.alloc(8);
       fs.readSync(fd, countBuf, 0, 8, header.blockIndexOffset);
       const count = Number(countBuf.readBigUInt64LE(0));
+      const entrySize = header.version >= 2 ? BLOCK_INDEX_ENTRY_SIZE : BLOCK_INDEX_ENTRY_SIZE_V1;
       blocks = new Array<BlockRecord>(count);
       for (let i = 0; i < count; i++) {
-        const entryBuf = Buffer.alloc(BLOCK_INDEX_ENTRY_SIZE);
+        const entryBuf = Buffer.alloc(entrySize);
         fs.readSync(
           fd,
           entryBuf,
           0,
-          BLOCK_INDEX_ENTRY_SIZE,
-          header.blockIndexOffset + 8 + i * BLOCK_INDEX_ENTRY_SIZE
+          entrySize,
+          header.blockIndexOffset + 8 + i * entrySize
         );
-        blocks[i] = parseBlockIndexEntry(entryBuf);
+        blocks[i] = parseBlockIndexEntry(entryBuf, header.version);
       }
     }
 
@@ -851,6 +867,15 @@ export interface ReadFrameResult {
   rawCrc: number;
   compCrc: number;
   comp: Buffer;
+}
+
+/**
+ * Resolve the file path for a specific volume of a multi-volume image.
+ * Volume 0 is the base image path; volumes 1+ are `.001`, `.002`, etc.
+ */
+export function resolveVolumePath(baseImagePath: string, volumeIndex: number): string {
+  if (volumeIndex === 0) return baseImagePath;
+  return `${baseImagePath}.${String(volumeIndex).padStart(3, '0')}`;
 }
 
 /**

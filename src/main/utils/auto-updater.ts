@@ -3,6 +3,8 @@ import { app, BrowserWindow } from 'electron';
 import { logger } from './logger';
 
 const UPDATE_URL = 'https://opbs.rhitcs.com/updates';
+const GITHUB_OWNER = 'bobeire';
+const GITHUB_REPO = 'opbs';
 
 let updaterWindow: BrowserWindow | null = null;
 let checking = false;
@@ -23,7 +25,13 @@ export function initAutoUpdater(window: BrowserWindow): void {
     return;
   }
 
-  autoUpdater.setFeedURL({ provider: 'generic', url: UPDATE_URL });
+  autoUpdater.setFeedURL({
+    provider: 'github',
+    owner: GITHUB_OWNER,
+    repo: GITHUB_REPO
+  });
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = true;
 
   autoUpdater.on('checking-for-update', () => {
     logger.info('Checking for updates…');
@@ -32,6 +40,10 @@ export function initAutoUpdater(window: BrowserWindow): void {
   autoUpdater.on('update-available', (info) => {
     logger.info('Update available', info.version);
     send('available', { version: info.version });
+    // Auto-download the update.
+    void autoUpdater.downloadUpdate().catch((err) => {
+      logger.error('Update download failed', err);
+    });
   });
   autoUpdater.on('update-not-available', (info) => {
     logger.info('No update available', info?.version);

@@ -1,4 +1,4 @@
-import { readImageInfo, readFrameFromImage, decompressBlock, ImageInfo, PartitionEntryMeta, BlockRecord, DEFAULT_BLOCK_SIZE } from './image-format';
+import { readImageInfo, readFrameFromImage, decompressBlock, ImageInfo, PartitionEntryMeta, BlockRecord, DEFAULT_BLOCK_SIZE, resolveVolumePath } from './image-format';
 
 /** A sequential byte reader over a partition's raw bytes. */
 export interface PartitionReader {
@@ -69,7 +69,10 @@ export class ChainPartitionReader implements PartitionReader {
     if (!selected) {
       throw new Error(`No block ${blockIndex} for partition in the image chain`);
     }
-    const frame = readFrameFromImage(selected.imagePath, selected.block.fileOffset, selected.info.header.cipherId, this.key);
+    const blockImagePath = selected.block.volumeIndex != null
+      ? resolveVolumePath(selected.imagePath, selected.block.volumeIndex)
+      : selected.imagePath;
+    const frame = readFrameFromImage(blockImagePath, selected.block.fileOffset, selected.info.header.cipherId, this.key);
     const raw = decompressBlock(frame.comp, selected.info.header.compressionId);
     this.cache.set(blockIndex, raw);
     return raw;

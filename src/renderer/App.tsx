@@ -129,6 +129,9 @@ function App() {
               if (page === 'restore' || page === 'clone') {
                 setRestoreIntent({ imagePath: intent?.imagePath, mode: page });
                 setCurrentPage('restore');
+              } else if (page === 'browse' && intent?.imagePath) {
+                setBrowseIntent({ imagePath: intent.imagePath });
+                setCurrentPage('browse');
               } else {
                 setCurrentPage(page);
               }

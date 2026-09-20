@@ -15,7 +15,7 @@ interface RecentBackup {
 }
 
 interface DashboardProps {
-  onNavigate: (page: 'backup' | 'restore' | 'clone' | 'copy' | 'disks', intent?: { imagePath?: string }) => void;
+  onNavigate: (page: 'backup' | 'restore' | 'clone' | 'copy' | 'disks' | 'browse', intent?: { imagePath?: string }) => void;
 }
 
 function Dashboard({ onNavigate }: DashboardProps) {
@@ -40,6 +40,8 @@ function Dashboard({ onNavigate }: DashboardProps) {
   const [winfspMissing, setWinfspMissing] = useState(false);
   const [winfspPhase, setWinfspPhase] = useState<'idle' | 'installing' | 'error'>('idle');
   const [winfspError, setWinfspError] = useState('');
+  const [helperTaskRegistered, setHelperTaskRegistered] = useState(true); // assume registered until checked
+  const [helperTaskLoading, setHelperTaskLoading] = useState(false);
   const [now, setNow] = useState(0);
 
   const load = useCallback(async () => {
@@ -149,6 +151,14 @@ function Dashboard({ onNavigate }: DashboardProps) {
       .catch(() => {
         // ignore
       });
+    window.electronAPI
+      .isHelperTaskRegistered()
+      .then((registered) => {
+        if (!cancelled) setHelperTaskRegistered(registered);
+      })
+      .catch(() => {
+        // ignore — assume registered on error
+      });
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -191,10 +201,8 @@ function Dashboard({ onNavigate }: DashboardProps) {
     await load();
   };
 
-  const runOpen = async () => {
-    setBusy('Opening…');
-    await window.electronAPI.openPath(selectedItems[0].path);
-    setBusy(null);
+  const runOpen = () => {
+    onNavigate('browse', { imagePath: selectedItems[0].path });
   };
 
   const runCloudStore = async () => {
@@ -302,6 +310,32 @@ function Dashboard({ onNavigate }: DashboardProps) {
             onClick={() => void installWinfsp()}
           >
             {winfspPhase === 'installing' ? 'Installing…' : 'Install WinFsp now'}
+          </button>
+        </div>
+      )}
+
+      {!helperTaskRegistered && (
+        <div className="dashboard-banner">
+          <div className="dashboard-banner-text">
+            <strong>Backup automation not enabled</strong>
+            <span>Register the helper task once so backups run without a UAC prompt. Scheduled backups at 2am will fail without this.</span>
+          </div>
+          <button
+            className="btn-primary"
+            disabled={helperTaskLoading}
+            onClick={async () => {
+              setHelperTaskLoading(true);
+              try {
+                await window.electronAPI.registerHelperTask();
+                setHelperTaskRegistered(true);
+              } catch {
+                // User cancelled UAC or registration failed — try again next time
+              } finally {
+                setHelperTaskLoading(false);
+              }
+            }}
+          >
+            {helperTaskLoading ? 'Registering…' : 'Register Helper Task'}
           </button>
         </div>
       )}

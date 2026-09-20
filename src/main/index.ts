@@ -528,15 +528,24 @@ function setupIpcHandlers(): void {
   });
 
   ipcMain.handle('is-helper-task-registered', async () => {
-    const { isHelperTaskRegistered } = await import('./utils/task-scheduler');
-    return isHelperTaskRegistered();
+    const { isHelperTaskRegistered, isRunAsAdmin } = await import('./utils/task-scheduler');
+    const exe = process.execPath;
+    return (await isHelperTaskRegistered()) || isRunAsAdmin(exe);
   });
 
   ipcMain.handle('register-helper-task', async () => {
-    const { ensureHelperTaskRegistered } = await import('./utils/task-scheduler');
+    const { ensureHelperTaskRegistered, ensureRunAsAdmin, isRunAsAdmin } = await import('./utils/task-scheduler');
     const exe = process.execPath;
     const appPath = app.isPackaged ? undefined : app.getAppPath();
-    await ensureHelperTaskRegistered(exe, appPath);
+    // Try schtasks first (task scheduler approach).
+    try {
+      await ensureHelperTaskRegistered(exe, appPath);
+      return true;
+    } catch (taskErr) {
+      logger.warn('schtasks registration failed, falling back to RunAsAdmin registry:', taskErr);
+    }
+    // Fallback: set RunAsAdmin in the registry compatibility layer.
+    await ensureRunAsAdmin(exe);
     return true;
   });
 
@@ -1219,8 +1228,16 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
   });
 
   ipcMain.handle('browse-list', async (_, imagePath: string, partitionIndex: number, relPath: string, passphrase?: string) => {
-    const session = openBrowseSession(imagePath, partitionIndex, passphrase);
-    return listDirectory(session, relPath ?? '');
+    try {
+      const session = openBrowseSession(imagePath, partitionIndex, passphrase);
+      return listDirectory(session, relPath ?? '');
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes('Not an NTFS')) {
+        throw new Error('This partition uses a non-NTFS filesystem (FAT32/exFAT/FAT16). Only NTFS partitions can be browsed.');
+      }
+      throw error;
+    }
   });
 
   ipcMain.handle('browse-extract', async (_, imagePath: string, partitionIndex: number, relPath: string, outPath: string, passphrase?: string) => {

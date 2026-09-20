@@ -122,6 +122,8 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
       setInfo(loaded);
       if (loaded.partitions.length > 0) {
         setPartitionIndex(loaded.partitions[0].partitionIndex);
+      } else {
+        setError('This image has no browsable partitions.');
       }
     } catch (e: any) {
       setError(e?.message ?? 'Failed to read the image');

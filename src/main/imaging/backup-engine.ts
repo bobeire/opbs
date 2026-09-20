@@ -17,7 +17,7 @@ import {
 import { ImagingJob, JobProgress, JobResult, ImagingPartition, JobEncryption, ResumeCheckpoint } from './imaging-job';
 import { launchElevatedJob } from '../helper/launcher';
 import { canUseVssSnapshot } from '../utils/disk-tools';
-import { normalizeBackupLocation, isNonFilesystemLocation } from '../utils/location';
+import { normalizeBackupLocation, isNonFilesystemLocation, detectFilesystemType, getMaxVolumeSizeForFs } from '../utils/location';
 import { S3Store, resolveS3Config, S3Config } from '../utils/s3';
 import { SftpStore, resolveSftpConfig, SftpConfig } from '../utils/sftp';
 import { FtpStore, resolveFtpConfig, FtpConfig } from '../utils/ftp';
@@ -43,6 +43,9 @@ export interface BackupJobConfig {
   /** Only capture blocks containing allocated clusters (NTFS $Bitmap). Free
    *  space is skipped; non-NTFS partitions fall back to a full capture. */
   usedBlocksOnly?: boolean;
+  /** Maximum size in bytes for each volume file (0 = no splitting).
+   *  Auto-detected from the destination filesystem (FAT32 → 3.9 GB). */
+  maxVolumeSize?: number;
   /** Cloud S3 profile (region/keys/endpoint) for s3:// destinations. The
    *  destination URI still determines the bucket/prefix. */
   s3Profile?: Partial<S3Config>;
@@ -251,6 +254,18 @@ export class ImagingEngine implements BackupCoordinator {
       }
     }
 
+    // Multi-volume: auto-detect FAT32 and cap volume size at 3.9 GB, or use
+    // the user's explicit maxVolumeSize if set.
+    let maxVolumeSize = config.maxVolumeSize ?? 0;
+    if (!maxVolumeSize && !isNonFilesystemLocation(config.destinationPath)) {
+      const fsType = detectFilesystemType(destDir);
+      logger.info(`Filesystem detection for ${destDir}: ${fsType ?? 'unknown'}`);
+      maxVolumeSize = getMaxVolumeSizeForFs(fsType);
+      if (maxVolumeSize > 0) {
+        logger.info(`Destination filesystem is ${fsType}; splitting image into ${Math.ceil(maxVolumeSize / (1024 * 1024))} MB volumes`);
+      }
+    }
+
     return {
       type: 'backup',
       imagePath,
@@ -270,7 +285,8 @@ export class ImagingEngine implements BackupCoordinator {
         : useUsnJournal && usnVolume
           ? { useUsnJournal, usnVolume, usnLastUsn }
           : {}),
-      sourceDisk: sourceDiskIdentity
+      sourceDisk: sourceDiskIdentity,
+      ...(maxVolumeSize > 0 ? { maxVolumeSize } : {})
     };
   }
 

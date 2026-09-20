@@ -6,7 +6,7 @@ import { EventEmitter } from 'events';
 import { app } from 'electron';
 import { logger } from '../utils/logger';
 import { resolvePowershell } from '../utils/elevated';
-import { ensureHelperTaskRegistered, triggerHelperTask } from '../utils/task-scheduler';
+import { ensureHelperTaskRegistered, triggerHelperTask, isRunAsAdmin } from '../utils/task-scheduler';
 import { PipeServer, generatePipeName, type PipeMessage } from '../utils/pipe-ipc';
 
 export const HELPER_FLAG = '--opbs-helper';
@@ -167,8 +167,13 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
     }
 
     // Spawn the helper via task scheduler (primary) or UAC fallback.
+    // If the app is already running as admin (RunAsAdmin registry key), the
+    // helper inherits elevation — no UAC needed.
+    const alreadyElevated = isRunAsAdmin(exe);
     try {
-      await ensureHelperTaskRegistered(exe, appPath);
+      if (!alreadyElevated) {
+        await ensureHelperTaskRegistered(exe, appPath);
+      }
       await triggerHelperTask(exe, jobPath, resultPath, progressPath, cancelPath, appPath,
         pipeFailed ? undefined : pipeName);
       logger.info('Launched helper via scheduled task (no UAC).');
@@ -182,21 +187,32 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
         progressPath,
         cancelPath,
         ...(pipeFailed ? [] : [PIPE_FLAG, pipeName])
-      ].map(quotePowerShell);
+      ];
 
-      const psScript =
-        `Start-Process -FilePath ${quotePowerShell(exe)} -ArgumentList @(${args.join(', ')}) ` +
-        `-Verb RunAs -WindowStyle Hidden -PassThru`;
+      if (alreadyElevated) {
+        // App is already admin — spawn directly, no UAC.
+        logger.info('App is already elevated, spawning helper directly.');
+        const child = spawn(exe, args, { windowsHide: true, stdio: 'ignore' });
+        child.on('error', (error) => {
+          clearInterval(startupTimer);
+          fail(error);
+        });
+      } else {
+        const psArgs = args.map(quotePowerShell);
+        const psScript =
+          `Start-Process -FilePath ${quotePowerShell(exe)} -ArgumentList @(${psArgs.join(', ')}) ` +
+          `-Verb RunAs -WindowStyle Hidden -PassThru`;
 
-      logger.info(`Launching elevated helper (UAC fallback): ${psScript}`);
-      const ps = spawn(resolvePowershell(), ['-NoProfile', '-NonInteractive', '-Command', psScript], {
-        windowsHide: true
-      });
+        logger.info(`Launching elevated helper (UAC fallback): ${psScript}`);
+        const ps = spawn(resolvePowershell(), ['-NoProfile', '-NonInteractive', '-Command', psScript], {
+          windowsHide: true
+        });
 
-      ps.on('error', (error) => {
-        clearInterval(startupTimer);
-        fail(error);
-      });
+        ps.on('error', (error) => {
+          clearInterval(startupTimer);
+          fail(error);
+        });
+      }
     }
   })();
 

@@ -26,14 +26,17 @@ import {
   FLAG_VERIFIED,
   FLAG_INCREMENTAL,
   FLAG_RESUMED,
+  FLAG_MULTI_VOLUME,
   HEADER_SIZE,
   PARTITION_TABLE_ENTRY_SIZE,
   BLOCK_INDEX_ENTRY_SIZE,
+  BLOCK_INDEX_ENTRY_SIZE_V1,
   crc32,
   scanPartialImage,
   ImageCipher,
   CIPHER_NONE,
-  cipherFromMetadata
+  cipherFromMetadata,
+  resolveVolumePath
 } from '../imaging/image-format';
 import { CompressionPool } from '../imaging/compression-pool';
 import { validateRestoredFilesystem, FsValidation } from '../imaging/drill-validation';
@@ -216,7 +219,32 @@ export async function runBackupJob(
   const resumeCheckpoint = job.resumeCheckpoint;
   let isResume = !!resumeCheckpoint;
 
-  const fd = fs.openSync(job.imagePath, isResume ? 'r+' : 'w+');
+  // Multi-volume support: if maxVolumeSize > 0, split the image into multiple
+  // files at the volume boundary. Each volume has its own header and partition
+  // table; block offsets are volume-relative and the block index includes the
+  // volume index.
+  let maxVolumeSize = job.maxVolumeSize ?? 0;
+  const isMultiVolume = maxVolumeSize > 0;
+  let currentVolume = 0;
+  let currentFd = -1;
+  const volumePaths: string[] = [];
+
+  function volumePath(vol: number): string {
+    if (vol === 0) return job.imagePath;
+    return `${job.imagePath}.${String(vol).padStart(3, '0')}`;
+  }
+
+  function openVolume(vol: number): number {
+    const p = volumePath(vol);
+    volumePaths[vol] = p;
+    return fs.openSync(p, isResume && vol === 0 ? 'r+' : 'w+');
+  }
+
+  const fd = isMultiVolume ? openVolume(0) : fs.openSync(job.imagePath, isResume ? 'r+' : 'w+');
+  if (isMultiVolume) {
+    volumePaths[0] = job.imagePath;
+  }
+  currentFd = fd;
 
   try {
     // Resume support: when a partial image exists at the destination, keep the
@@ -233,14 +261,15 @@ export async function runBackupJob(
       blockSize,
       compressionId,
       partitionCount: job.partitions.length,
-      flags: FLAG_HAS_BLOCK_INDEX | (job.baseImagePath ? FLAG_INCREMENTAL : 0),
+      flags: FLAG_HAS_BLOCK_INDEX | (job.baseImagePath ? FLAG_INCREMENTAL : 0) | (isMultiVolume ? FLAG_MULTI_VOLUME : 0),
       blockIndexOffset: 0,
       cipherId: cipher ? cipher.cipherId : CIPHER_NONE,
       kdfIterations: cipher ? cipher.kdfIterations : 0,
       salt: cipher ? cipher.salt : Buffer.alloc(0),
       baseImagePath: job.baseImagePath ?? '',
       sourceDiskModel: job.sourceDisk?.model ?? '',
-      sourceDiskSerial: job.sourceDisk?.serial ?? ''
+      sourceDiskSerial: job.sourceDisk?.serial ?? '',
+      maxVolumeSize: isMultiVolume ? maxVolumeSize : undefined
     };
 
     if (isResume && resumeCheckpoint) {
@@ -292,6 +321,19 @@ export async function runBackupJob(
 
     const dataOffset = HEADER_SIZE + job.partitions.length * PARTITION_TABLE_ENTRY_SIZE;
     if (!isResume) {
+      cursor = dataOffset;
+    }
+
+    // Multi-volume: open the next volume when the current one exceeds maxVolumeSize.
+    function openNextVolume(): void {
+      if (currentFd >= 0) fs.closeSync(currentFd);
+      currentVolume++;
+      currentFd = openVolume(currentVolume);
+      // Write header + partition table at the start of each new volume.
+      const placeholderHeader = encodeHeader({ ...header, maxVolumeSize });
+      fs.writeSync(currentFd, placeholderHeader, 0, HEADER_SIZE, 0);
+      const tableSize = job.partitions.length * PARTITION_TABLE_ENTRY_SIZE;
+      fs.writeSync(currentFd, Buffer.alloc(tableSize), 0, tableSize, HEADER_SIZE);
       cursor = dataOffset;
     }
 
@@ -421,9 +463,31 @@ export async function runBackupJob(
         item: { raw: Buffer; blockIndex: number; rawSize: number; rawCrc: number },
         compressed: Buffer
       ): void => {
-        const frameOffset = cursor;
         const frame = encodeBlockFrame(item.raw, compressed, cipher, { rawSize: item.rawSize, rawCrc: item.rawCrc });
-        fs.writeSync(fd, frame, 0, frame.length, cursor);
+
+        // Multi-volume: if this frame would exceed the current volume's size
+        // limit, close this volume and open the next one.
+        if (isMultiVolume && maxVolumeSize > 0 && cursor + frame.length > maxVolumeSize && cursor > dataOffset) {
+          openNextVolume();
+        }
+
+        const frameOffset = cursor;
+        try {
+          fs.writeSync(currentFd, frame, 0, frame.length, cursor);
+        } catch (writeErr) {
+          // ENOSPC on FAT32/exFAT: the volume hit its per-file size limit.
+          // Open the next volume and retry the write.
+          if (!isMultiVolume && (writeErr as NodeJS.ErrnoException).code === 'ENOSPC') {
+            logger.info('ENOSPC on write — switching to multi-volume mode');
+            maxVolumeSize = cursor; // use current file size as volume limit
+            header.maxVolumeSize = cursor;
+            header.flags |= FLAG_MULTI_VOLUME;
+            openNextVolume();
+            fs.writeSync(currentFd, frame, 0, frame.length, cursor);
+          } else {
+            throw writeErr;
+          }
+        }
         setCursor(cursor + frame.length);
 
         const block: BlockRecord = {
@@ -432,7 +496,8 @@ export async function runBackupJob(
           fileOffset: frameOffset,
           rawSize: item.rawSize,
           compSize: compressed.length,
-          rawCrc32: item.rawCrc
+          rawCrc32: item.rawCrc,
+          volumeIndex: isMultiVolume ? currentVolume : undefined
         };
         blocks.push(block);
         entry.blockCount++;
@@ -547,33 +612,62 @@ export async function runBackupJob(
       await drainAll();
     }
 
-    // Write the block index at the end of the file.
+    // Write the block index at the end of the current volume.
     writeProgress('writing-index');
     const blockIndexOffset = cursor;
     const countBuf = Buffer.alloc(8);
     countBuf.writeBigUInt64LE(BigInt(blocks.length));
-    fs.writeSync(fd, countBuf, 0, 8, cursor);
+    fs.writeSync(currentFd, countBuf, 0, 8, cursor);
     cursor += 8;
     for (const block of blocks) {
       const entryBuf = encodeBlockIndexEntry(block);
-      fs.writeSync(fd, entryBuf, 0, BLOCK_INDEX_ENTRY_SIZE, cursor);
+      fs.writeSync(currentFd, entryBuf, 0, BLOCK_INDEX_ENTRY_SIZE, cursor);
       cursor += BLOCK_INDEX_ENTRY_SIZE;
     }
 
-    // Patch the partition table with real values.
+    // Patch partition table and header on the current (last) volume.
     for (let i = 0; i < partitionEntries.length; i++) {
       const entry = partitionEntries[i];
       const entryBuf = encodePartitionEntry(entry);
-      fs.writeSync(fd, entryBuf, 0, PARTITION_TABLE_ENTRY_SIZE, HEADER_SIZE + i * PARTITION_TABLE_ENTRY_SIZE);
+      fs.writeSync(currentFd, entryBuf, 0, PARTITION_TABLE_ENTRY_SIZE, HEADER_SIZE + i * PARTITION_TABLE_ENTRY_SIZE);
     }
 
-    // Patch the header with the block index offset.
     const patchedHeader = Buffer.alloc(HEADER_SIZE);
-    fs.readSync(fd, patchedHeader, 0, HEADER_SIZE, 0);
+    fs.readSync(currentFd, patchedHeader, 0, HEADER_SIZE, 0);
     patchedHeader.writeBigUInt64LE(BigInt(blockIndexOffset), 40);
-    fs.writeSync(fd, patchedHeader, 0, HEADER_SIZE, 0);
+    if (isMultiVolume) {
+      patchedHeader.writeUInt32LE(header.flags | FLAG_MULTI_VOLUME, 36);
+      patchedHeader.writeUInt16LE(Math.ceil(maxVolumeSize / (1024 * 1024)), 6);
+    }
+    fs.writeSync(currentFd, patchedHeader, 0, HEADER_SIZE, 0);
 
-    fs.closeSync(fd);
+    fs.closeSync(currentFd);
+
+    // Multi-volume: patch the header AND partition table on each earlier volume.
+    if (isMultiVolume && volumePaths.length > 1) {
+      const tableSize = partitionEntries.length * PARTITION_TABLE_ENTRY_SIZE;
+      const tableBuf = Buffer.alloc(tableSize);
+      for (let i = 0; i < partitionEntries.length; i++) {
+        encodePartitionEntry(partitionEntries[i]).copy(tableBuf, i * PARTITION_TABLE_ENTRY_SIZE);
+      }
+      for (let v = 0; v < volumePaths.length - 1; v++) {
+        const vfd = fs.openSync(volumePaths[v], 'r+');
+        const vhdr = Buffer.alloc(HEADER_SIZE);
+        fs.readSync(vfd, vhdr, 0, HEADER_SIZE, 0);
+        vhdr.writeUInt32LE(header.flags | FLAG_MULTI_VOLUME, 36);
+        vhdr.writeUInt16LE(Math.ceil(maxVolumeSize / (1024 * 1024)), 6);
+        fs.writeSync(vfd, vhdr, 0, HEADER_SIZE, 0);
+        fs.writeSync(vfd, tableBuf, 0, tableSize, HEADER_SIZE);
+        fs.closeSync(vfd);
+      }
+      // Write a manifest file listing all volumes.
+      const manifestPath = `${job.imagePath}.volumes.json`;
+      fs.writeFileSync(manifestPath, JSON.stringify({
+        version: 1,
+        maxVolumeSize,
+        volumes: volumePaths.map((p, i) => ({ index: i, path: path.basename(p) }))
+      }, null, 2));
+    }
 
     if (job.verificationEnabled) {
       writeProgress('verifying');
@@ -954,15 +1048,17 @@ export async function runRestoreJob(
           }
 
           if (useBlockPool) {
-            const frame = readFrameFromImage(sources[s], block.fileOffset, info.header.cipherId, key);
+            const blockImagePath = block.volumeIndex != null ? resolveVolumePath(sources[s], block.volumeIndex) : sources[s];
+            const frame = readFrameFromImage(blockImagePath, block.fileOffset, info.header.cipherId, key);
             inFlight.push({ block, promise: decompPool!.decompress(frame.comp) });
             while (inFlight.length >= windowSize) {
               const item = inFlight.shift()!;
               await writeBlock(item.block, await item.promise!);
             }
           } else {
+            const blockImagePath = block.volumeIndex != null ? resolveVolumePath(sources[s], block.volumeIndex) : sources[s];
             const raw = readBlockDataFromImage(
-              sources[s],
+              blockImagePath,
               block.fileOffset,
               info.header.compressionId,
               info.header.cipherId,
