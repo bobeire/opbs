@@ -96,7 +96,9 @@
     "publish": {
       "provider": "github",
       "owner": "bobeire",
-      "repo": "opbs"
+      "repo": "opbs",
+      "releaseType": "release",
+      "vPrefixedTagName": false
     }
   }
 }
