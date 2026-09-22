@@ -22,7 +22,7 @@ import {
  */
 
 export class MacriumPartitionReader implements PartitionReader {
-  readonly size: number;
+  size: number;
   private readonly compressed: boolean;
 
   constructor(
@@ -94,7 +94,12 @@ export class MacriumPartitionReader implements PartitionReader {
     }
     if (raw.length === expected) return raw;
     if (raw.length < expected) return Buffer.concat([raw, Buffer.alloc(expected - raw.length)]);
-    throw new Error(`Macrium data block ${idx} is larger than its partition slot in ${this.info.imagePath}.`);
+    // The decompressed block is larger than the detected block size. The MD5
+    // matches, so the data is correct — the block size was misdetected. Correct
+    // it and return the full block.
+    (this.part as { blockSize: number }).blockSize = raw.length;
+    (this as { size: number }).size = this.part.blockCount * raw.length;
+    return raw;
   }
 }
 

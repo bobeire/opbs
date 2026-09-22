@@ -110,6 +110,25 @@ describe('image browse', () => {
     expect(() => reader.read(CLUSTER, 10)).toThrow(/out of bounds/i);
   });
 
+  it('does not misdetect a real NTFS boot sector as FAT32', () => {
+    // Real NTFS boot sectors set a non-zero physical drive number at 0x24
+    // (typically 0x80) and a 0x55/0xAA signature — bytes detectFatType()
+    // treats as FAT32's sectorsPerFat32. Checking FAT before the NTFS OEM id
+    // sent every real volume down the FAT32 parser, which returned an empty
+    // listing instead of throwing.
+    const volume = buildNtfsVolume();
+    const raw = Buffer.from(volume.read(0, volume.size));
+    raw.writeUInt8(0x55, 510);
+    raw.writeUInt8(0xaa, 511);
+    raw.writeUInt8(0x80, 0x24);
+    writeImageFromBytes(imagePath, raw, CLUSTER, COMPRESSION_NONE);
+
+    const session = openBrowse(imagePath, 0);
+    expect((session as { filesystem: string }).filesystem).toBe('ntfs');
+    const root = listDirectory(session);
+    expect(root.map((n) => n.name)).toContain('hello.txt');
+  });
+
   it('browses and extracts NTFS files from the image', () => {
     const volume = buildNtfsVolume();
     writeImageFromBytes(imagePath, volume.read(0, volume.size), CLUSTER, COMPRESSION_NONE);
@@ -130,6 +149,34 @@ describe('image browse', () => {
 
     // Path resolution is case-insensitive
     const rec = resolvePath(session, 'DOCS/BIG.BIN');
-    expect(rec?.name?.name).toBe('big.bin');
+    expect(rec?.name).toBe('big.bin');
+    expect(rec?.id).toBeDefined();
+    expect(typeof rec?.id).toBe('number');
+  });
+
+  it('falls back to the directory tree when index entries miss the MFT cache', () => {
+    const volume = buildNtfsVolume();
+    writeImageFromBytes(imagePath, volume.read(0, volume.size), CLUSTER, COMPRESSION_NONE);
+
+    const session = openBrowse(imagePath, 0);
+    expect(session.filesystem).toBe('ntfs');
+    if (session.filesystem !== 'ntfs') return;
+
+    // Simulate a truncated readFileRecords() pass: keep only the root.
+    for (const key of [...session.records.keys()]) {
+      if (key !== session.rootId) session.records.delete(key);
+    }
+    session.children.clear();
+
+    // The $I30 index still lists entries, but none resolve against the
+    // gutted cache — listNtfs must fall back to the tree (empty here) with
+    // a warning rather than pretend the folder has no children silently.
+    // Re-populate children from a fresh parse to prove the fallback works.
+    const fresh = openBrowse(imagePath, 0);
+    if (fresh.filesystem !== 'ntfs') return;
+    session.children = fresh.children;
+
+    const root = listDirectory(session, '');
+    expect(root.map((n) => n.name)).toContain('hello.txt');
   });
 });

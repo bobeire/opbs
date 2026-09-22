@@ -3,8 +3,20 @@ import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { app } from 'electron';
 import { logger } from './logger';
+
+/**
+ * `electron` is required lazily so the WinPE CLI (plain node.exe) can load this
+ * module without crashing. It is only used when the app is unpackaged (dev).
+ */
+function electronApp(): typeof import('electron').app | undefined {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require('electron').app;
+  } catch {
+    return undefined;
+  }
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -299,8 +311,8 @@ export async function ensureHelperTaskRegistered(exePath: string, appPath?: stri
   // The command line will be overwritten by changeHelperTaskCommand before
   // each run, but schtasks requires /TR at creation time — use a placeholder.
   const placeholderArgs = appPath
-    ? `"${appPath}" --opbs-helper "" "" "" ""`
-    : `--opbs-helper "" "" "" ""`;
+    ? `"${appPath}" --opbs-helper ""`
+    : `--opbs-helper ""`;
   const commandLine = `"${exePath}" ${placeholderArgs}`;
   await registerScheduledTask(HELPER_TASK_NAME, commandLine, {
     onLogin: false,
@@ -318,13 +330,12 @@ export async function ensureHelperTaskRegistered(exePath: string, appPath?: stri
 export async function triggerHelperTask(
   exePath: string,
   jobPath: string,
-  resultPath: string,
-  progressPath: string,
-  cancelPath: string,
-  appPath?: string,
-  pipeName?: string
+  appPath?: string
 ): Promise<void> {
-  const helperArgs = `--opbs-helper "${jobPath}" "${resultPath}" "${progressPath}" "${cancelPath}"${pipeName ? ` --pipe "${pipeName}"` : ''}`;
+  // Only the job path is passed on the command line; the result/progress/cancel
+  // paths and pipe name are read by the helper from the sibling io.json. Passing
+  // them here overflows the 261-char schtasks /TR limit.
+  const helperArgs = `--opbs-helper "${jobPath}"`;
   const args = appPath
     ? `"${appPath}" ${helperArgs}`
     : helperArgs;
@@ -419,6 +430,7 @@ export async function registerUnattendedBackupTask(
   }
 
   const exe = process.execPath;
+  const app = electronApp();
   const appArg = app && !app.isPackaged ? `"${app.getAppPath()}" ` : '';
   const commandLine = `"${exe}" ${appArg}--cli backup "${configPath}" --elevated`;
 

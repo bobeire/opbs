@@ -22,9 +22,9 @@ import { winfspAvailable } from './imaging/mount-manager';
 import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains, writeManifest } from './backup/retention';
 import { checkDiskHealth } from './utils/disk-health';
 import { runCli } from './cli';
-import { readImageInfo, verifyImage, CIPHER_NONE, deriveImageKey } from './imaging/image-format';
-import { openAnyBrowse as fsOpenBrowseAny, listDirectory, extractPath, BrowseSession } from './imaging/fs/file-browse';
-import { detectMacriumFormat, readMacriumImage } from './imaging/mrimg';
+import { readImageInfo, verifyImage, CIPHER_NONE, deriveImageKey, clearImageInfoCache } from './imaging/image-format';
+import { openAnyBrowse as fsOpenBrowseAny, listDirectory, extractPath, detectPartitionFilesystem, BrowseSession } from './imaging/fs/file-browse';
+import { detectMacriumFormat, readMacriumImage, closeImageFds, clearMacriumInfoCache } from './imaging/mrimg';
 import { locateAdk, peArchForProcess } from './utils/adk';
 import { createRecoveryMedia, resolveNodeExe, MediaCreateOptions } from './utils/winpe-media';
 import { installAdkExe } from './utils/adk-install';
@@ -390,10 +390,37 @@ function main(): void {
 
   const helperIndex = process.argv.indexOf(HELPER_FLAG);
   if (helperIndex !== -1) {
-    const helperArgs = process.argv.slice(helperIndex + 1, helperIndex + 5);
+    const jobPath = process.argv[helperIndex + 1] ?? '';
+    let resultPath = process.argv[helperIndex + 2] ?? '';
+    let progressPath = process.argv[helperIndex + 3] ?? '';
+    let cancelPath = process.argv[helperIndex + 4] ?? '';
     const pipeFlagIndex = process.argv.indexOf('--pipe', helperIndex);
-    const pipeName = pipeFlagIndex !== -1 ? process.argv[pipeFlagIndex + 1] : undefined;
-    runAsHelper(helperArgs, pipeName);
+    let pipeName: string | undefined = pipeFlagIndex !== -1 ? process.argv[pipeFlagIndex + 1] : undefined;
+
+    // Compact form (used by the scheduled task, whose /TR is capped at 261
+    // chars): only the job path is passed. The remaining paths and the pipe
+    // name live in a sibling io.json written by the launcher.
+    if (jobPath && !resultPath) {
+      try {
+        const ioPath = path.join(path.dirname(jobPath), 'io.json');
+        const io = JSON.parse(fs.readFileSync(ioPath, 'utf-8')) as {
+          resultPath?: string;
+          progressPath?: string;
+          cancelPath?: string;
+          pipeName?: string;
+        };
+        resultPath = io.resultPath ?? path.join(path.dirname(jobPath), 'result.json');
+        progressPath = io.progressPath ?? path.join(path.dirname(jobPath), 'progress.json');
+        cancelPath = io.cancelPath ?? path.join(path.dirname(jobPath), 'cancel');
+        pipeName = pipeName ?? io.pipeName;
+      } catch {
+        const dir = path.dirname(jobPath);
+        resultPath = path.join(dir, 'result.json');
+        progressPath = path.join(dir, 'progress.json');
+        cancelPath = path.join(dir, 'cancel');
+      }
+    }
+    runAsHelper([jobPath, resultPath, progressPath, cancelPath], pipeName);
     return;
   }
 
@@ -677,11 +704,13 @@ function setupIpcHandlers(): void {
   });
 
   // File dialogs
-  ipcMain.handle('select-directory', async () => {
+  ipcMain.handle('select-directory', async (_, options) => {
     const result = await dialog.showOpenDialog(mainWindow!, {
-      properties: ['openDirectory']
+      title: options?.title,
+      defaultPath: options?.defaultPath,
+      properties: ['openDirectory', 'createDirectory']
     });
-    return result.filePaths[0];
+    return result.canceled ? undefined : result.filePaths[0];
   });
 
   ipcMain.handle('select-file', async (_, options) => {
@@ -1203,13 +1232,18 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       return {
         encrypted: info.encryption.enable,
         imageFormat: format === 'mrimgx' ? 'mrimgx' : 'mrimg',
-        partitions: info.partitions.map((p, i) => ({
-          partitionIndex: i,
-          diskIndex: p.diskIndex,
-          size: p.blockCount * p.blockSize,
-          offsetOnDisk: p.dataStart,
-          blockCount: p.blockCount
-        }))
+        partitions: info.partitions.map((p, i) => {
+          const { fsType, browsable } = detectPartitionFilesystem(imagePath, i);
+          return {
+            partitionIndex: i,
+            diskIndex: p.diskIndex,
+            size: p.blockCount * p.blockSize,
+            offsetOnDisk: p.dataStart,
+            blockCount: p.blockCount,
+            fsType,
+            browsable
+          };
+        })
       };
     }
     const info = readImageInfo(imagePath);
@@ -1218,12 +1252,17 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       imageFormat: 'opbs',
       partitions: info.partitions
         .filter((p) => p.size > 0)
-        .map((p) => ({
-          partitionIndex: p.partitionIndex,
-          size: p.size,
-          offsetOnDisk: p.offsetOnDisk,
-          blockCount: p.blockCount
-        }))
+        .map((p) => {
+          const { fsType, browsable } = detectPartitionFilesystem(imagePath, p.partitionIndex);
+          return {
+            partitionIndex: p.partitionIndex,
+            size: p.size,
+            offsetOnDisk: p.offsetOnDisk,
+            blockCount: p.blockCount,
+            fsType,
+            browsable
+          };
+        })
     };
   });
 
@@ -1233,8 +1272,8 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       return listDirectory(session, relPath ?? '');
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      if (msg.includes('Not an NTFS')) {
-        throw new Error('This partition uses a non-NTFS filesystem (FAT32/exFAT/FAT16). Only NTFS partitions can be browsed.');
+      if (msg.includes('Not an NTFS') || msg.includes('Not a FAT32')) {
+        throw new Error('This partition uses an unsupported filesystem. NTFS and FAT32 partitions can be browsed.');
       }
       throw error;
     }
@@ -1248,6 +1287,9 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
 
   ipcMain.handle('browse-close', async () => {
     browseSessions.clear();
+    closeImageFds();
+    clearMacriumInfoCache();
+    clearImageInfoCache();
   });
 
   // Read-only WinFsp mounts of image partitions (elevated helper)
@@ -1304,6 +1346,7 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
   // Select a file to save (browse extraction target)
   ipcMain.handle('select-save-file', async (_, options) => {
     const result = await dialog.showSaveDialog(mainWindow!, {
+      defaultPath: typeof options?.name === 'string' && options.name ? options.name : undefined,
       properties: ['createDirectory', 'showOverwriteConfirmation'],
       filters: options?.filters || []
     });

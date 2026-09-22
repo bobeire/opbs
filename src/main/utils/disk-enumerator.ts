@@ -1,4 +1,51 @@
+import { execFileSync } from 'child_process';
+import * as path from 'path';
 import { loadNative } from './native-loader';
+
+const powershellExe = process.env.SystemRoot
+  ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  : 'powershell.exe';
+
+interface VolumeInfo {
+  driveLetter: string | null;
+  fsType: string;
+  label: string;
+  usedSpace: number;
+}
+
+/** Query drive letter / filesystem / label / used space per partition via PowerShell. */
+function queryVolumes(diskIndex: number): Map<number, VolumeInfo> {
+  const result = new Map<number, VolumeInfo>();
+  try {
+    const script =
+      `Get-Partition -DiskNumber ${diskIndex} -ErrorAction SilentlyContinue | ForEach-Object { ` +
+      `$p=$_; $v = if ($p.DriveLetter) { Get-Volume -DriveLetter $p.DriveLetter -ErrorAction SilentlyContinue } else { $null }; ` +
+      `[pscustomobject]@{ PartitionNumber=$p.PartitionNumber; DriveLetter=[string]$p.DriveLetter; ` +
+      `FileSystem=if($v){[string]$v.FileSystem}else{''}; Label=if($v){[string]$v.FileSystemLabel}else{''}; ` +
+      `Used=if($v -and $v.Size){[int64]($v.Size - $v.SizeRemaining)}else{0} } } | ConvertTo-Json -Compress`;
+    const out = execFileSync(powershellExe, ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf-8',
+      timeout: 15_000,
+      windowsHide: true
+    }).trim();
+    if (!out) return result;
+    const parsed = JSON.parse(out);
+    const arr: any[] = Array.isArray(parsed) ? parsed : [parsed];
+    for (const item of arr) {
+      const pn = Number(item.PartitionNumber);
+      if (!Number.isFinite(pn)) continue;
+      result.set(pn, {
+        driveLetter: item.DriveLetter || null,
+        fsType: item.FileSystem || 'Unknown',
+        label: item.Label || '',
+        usedSpace: Number(item.Used) || 0
+      });
+    }
+  } catch {
+    // PowerShell unavailable — skip enrichment.
+  }
+  return result;
+}
 
 export interface NativePartition {
   diskIndex: number;
@@ -95,16 +142,21 @@ export class DiskEnumerator {
   async getPartitions(diskIndex: number): Promise<PartitionInfo[]> {
     try {
       const partitions = this.native.getPartitions(diskIndex);
+      const volumes = queryVolumes(diskIndex);
 
-      return partitions.map((partition) => ({
-        ...partition,
-        driveLetter: null,
-        label: `Partition ${partition.partitionIndex}`,
-        fsType: 'Unknown',
-        usedSpace: 0,
-        isSystem: false,
-        isBoot: false
-      }));
+      return partitions.map((partition) => {
+        // PartitionNumber is 1-based; partitionIndex is 0-based.
+        const vol = volumes.get(partition.partitionIndex + 1);
+        return {
+          ...partition,
+          driveLetter: vol?.driveLetter ?? null,
+          label: vol?.label || `Partition ${partition.partitionIndex}`,
+          fsType: vol?.fsType || 'Unknown',
+          usedSpace: vol?.usedSpace ?? 0,
+          isSystem: false,
+          isBoot: false
+        };
+      });
     } catch (error) {
       console.error(`Failed to enumerate partitions for disk ${diskIndex}:`, error);
       return [];

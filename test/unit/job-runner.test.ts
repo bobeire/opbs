@@ -252,7 +252,7 @@ describe('runBackupJob', () => {
     expect(result.warnings).toHaveLength(2);
   });
 
-  it('fails the job when a snapshot cannot be created', async () => {
+  it('falls back to a raw physical read when a snapshot cannot be created', async () => {
     writeJob({
       type: 'backup',
       imagePath,
@@ -280,9 +280,9 @@ describe('runBackupJob', () => {
     await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
 
     const result = readResult();
-    expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/snapshot/i);
-    expect(fs.existsSync(imagePath)).toBe(false);
+    expect(result.ok).toBe(true);
+    expect(result.warnings.join(' ')).toMatch(/VSS snapshot unavailable/i);
+    expect(fs.existsSync(imagePath)).toBe(true);
   });
 
   describe('runBackupJob with resume', () => {
@@ -426,16 +426,16 @@ describe('runBackupJob', () => {
             size: BLOCK * 3,
             offset: 122683392,
             label: 'Partition 2',
-            readSource: 'volume',
-            volumeDevicePath: '\\\\?\\Volume{vol-1}\\'
+            readSource: 'physical'
           }
         ]
       });
-      // A hard failure (snapshot creation) aborts the job.
+      // A hard failure (device resolution) aborts the job after the image is
+      // created, exercising the partial-image retention path.
       const failing: NativeImagingApi = {
         ...resumeNative(),
-        createSnapshot: vi.fn(() => {
-          throw new Error('VSS_E_VOLUME_NOT_SUPPORTED');
+        getPhysicalDrivePath: vi.fn(() => {
+          throw new Error('no physical drive');
         })
       };
       await runBackupJob(jobPath, resultPath, progressPath, cancelPath, failing);
@@ -459,15 +459,14 @@ describe('runBackupJob', () => {
             size: BLOCK * 3,
             offset: 122683392,
             label: 'Partition 2',
-            readSource: 'volume',
-            volumeDevicePath: '\\\\?\\Volume{vol-1}\\'
+            readSource: 'physical'
           }
         ]
       });
       const failing: NativeImagingApi = {
         ...resumeNative(),
-        createSnapshot: vi.fn(() => {
-          throw new Error('VSS_E_VOLUME_NOT_SUPPORTED');
+        getPhysicalDrivePath: vi.fn(() => {
+          throw new Error('no physical drive');
         })
       };
       await runBackupJob(jobPath, resultPath, progressPath, cancelPath, failing);

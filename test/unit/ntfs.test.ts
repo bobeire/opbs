@@ -316,6 +316,35 @@ describe('ntfs parser', () => {
     for (let i = CLUSTER; i < 2 * CLUSTER; i++) expect(content[i]).toBe(0x42);
   });
 
+  it('continues past isolated MFT record read failures', () => {
+    const data = buildNtfsVolumeData();
+    const layout = parseBootSector(buildNtfsVolume());
+    const mftBase = layout.mftStartCluster * layout.clusterSize;
+    // Corrupt one record's backing bytes is a parse failure (skipped);
+    // simulate a read failure by making the reader throw for one range.
+    const base: PartitionReader = {
+      size: data.length,
+      read: (offset: number, length: number) => data.subarray(offset, offset + length)
+    };
+    const holeStart = mftBase + 2 * layout.fileRecordSize;
+    const holeEnd = holeStart + layout.fileRecordSize;
+    const reader: PartitionReader = {
+      size: data.length,
+      read: (offset: number, length: number) => {
+        if (offset >= holeStart && offset < holeEnd) {
+          throw new Error('simulated read error');
+        }
+        return base.read(offset, length);
+      }
+    };
+
+    const records = readFileRecords(reader, layout);
+    // The hole must not truncate everything after it.
+    const hello = records.find((r) => r.recordNumber === 6);
+    expect(hello).toBeDefined();
+    expect(hello!.name?.name).toBe('hello.txt');
+  });
+
   it('recovers the $MFT runlist from $MFTMirr when record 0 is corrupt', () => {
     const data = buildNtfsVolumeData();
     const mftCluster = MFT_CLUSTER;

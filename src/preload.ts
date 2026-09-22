@@ -39,7 +39,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteBackupProfile: (id: string) => ipcRenderer.invoke('delete-backup-profile', id),
 
   // File dialogs
-  selectDirectory: () => ipcRenderer.invoke('select-directory'),
+  selectDirectory: (options?: any) => ipcRenderer.invoke('select-directory', options),
   selectFile: (options?: any) => ipcRenderer.invoke('select-file', options),
 
   // Retention & images

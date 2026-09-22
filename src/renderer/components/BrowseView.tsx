@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 
 interface BrowseNode {
-  recordNumber: number;
+  /** MFT record number (NTFS) or start cluster (FAT/exFAT), as sent by main. */
+  id: number;
   name: string;
-  parentRecord: number;
+  parentId: number;
   isDirectory: boolean;
   size: number;
   modified?: number;
@@ -15,6 +16,10 @@ interface BrowsePartition {
   size: number;
   offsetOnDisk: number;
   blockCount: number;
+  /** Detected filesystem (NTFS, FAT32, exFAT, ...). */
+  fsType?: string;
+  /** Whether the built-in browser can read this partition. */
+  browsable?: boolean;
 }
 
 interface MountStatus {
@@ -47,6 +52,10 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
   const [mountId, setMountId] = useState<string | null>(null);
   const [mountPoint, setMountPoint] = useState('');
   const [mountedOf, setMountedOf] = useState('');
+
+  // Whether the currently selected partition can be browsed.
+  const currentPartition = info?.partitions.find((p) => p.partitionIndex === partitionIndex);
+  const currentBrowsable = currentPartition ? currentPartition.browsable !== false : false;
   const [mounting, setMounting] = useState(false);
   const [mountError, setMountError] = useState('');
 
@@ -84,7 +93,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
   }, []);
 
   useEffect(() => {
-    if (imagePath && partitionIndex !== null) {
+    if (imagePath && partitionIndex !== null && currentBrowsable) {
       void loadDirectory('');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -92,7 +101,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
 
   // Auto-mount triggered by context menu "Mount image" verb
   useEffect(() => {
-    if (autoMount && imagePath && partitionIndex !== null && !mountId && !mounting) {
+    if (autoMount && imagePath && partitionIndex !== null && currentBrowsable && !mountId && !mounting) {
       void handleMount();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -120,10 +129,16 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
     try {
       const loaded = await window.electronAPI.browsePartitions(path);
       setInfo(loaded);
-      if (loaded.partitions.length > 0) {
+      const browsable = loaded.partitions.filter((p: BrowsePartition) => p.browsable !== false);
+      if (browsable.length > 0) {
+        setPartitionIndex(browsable[0].partitionIndex);
+      } else if (loaded.partitions.length > 0) {
+        // Partitions exist but none are browsable — still show the list so the
+        // user can see which filesystems are present.
         setPartitionIndex(loaded.partitions[0].partitionIndex);
+        setError('No browsable partitions in this image. Only NTFS and FAT32 partitions can be browsed.');
       } else {
-        setError('This image has no browsable partitions.');
+        setError('This image has no partitions.');
       }
     } catch (e: any) {
       setError(e?.message ?? 'Failed to read the image');
@@ -177,7 +192,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
 
   const onEnterDir = (node: BrowseNode) => {
     if (!node.isDirectory) return;
-    setExpanded((prev) => new Set(prev).add(node.recordNumber));
+    setExpanded((prev) => new Set(prev).add(node.id));
     void loadDirectory(joinPath(cwd, node.name));
   };
 
@@ -188,11 +203,20 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
   const handleExtract = async (node: BrowseNode) => {
     if (partitionIndex === null) return;
     const relPath = joinPath(cwd, node.name);
-    const suggested = node.name.replace(/[<>:"/\\|?*]/g, '_');
-    const outPath = await window.electronAPI.selectSaveFile({
-      filters: [{ name: 'Extracted files', extensions: ['*'] }],
-      name: suggested
-    });
+    let outPath: string | undefined;
+    if (node.isDirectory) {
+      // Folder picker: the chosen folder is the destination root, and the
+      // directory is recreated inside it as <folder>/<name>.
+      outPath = await window.electronAPI.selectDirectory({
+        title: `Choose a folder to extract "${node.name}" into`
+      });
+    } else {
+      const suggested = node.name.replace(/[<>:"/\\|?*]/g, '_');
+      outPath = await window.electronAPI.selectSaveFile({
+        filters: [{ name: 'Extracted files', extensions: ['*'] }],
+        name: suggested
+      });
+    }
     if (!outPath) return;
     setExtracting(node.isDirectory ? `${node.name}/…` : node.name);
     setNotice('');
@@ -283,7 +307,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
           </div>
         )}
 
-        {info && info.partitions.length > 1 && (
+        {info && info.partitions.length > 0 && (
           <div className="setting-item">
             <label>Partition:</label>
             <select
@@ -291,8 +315,14 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
               onChange={(e) => setPartitionIndex(parseInt(e.target.value))}
             >
               {info.partitions.map((p) => (
-                <option key={p.partitionIndex} value={p.partitionIndex}>
+                <option
+                  key={p.partitionIndex}
+                  value={p.partitionIndex}
+                  disabled={p.browsable === false}
+                >
                   Partition {p.partitionIndex} — {formatSize(p.size)}
+                  {p.fsType ? ` (${p.fsType})` : ''}
+                  {p.browsable === false ? ' — not browsable' : ''}
                 </option>
               ))}
             </select>
@@ -311,12 +341,15 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         <div className="mount-bar">
           <button
             className="btn-secondary btn-small"
-            disabled={mounting || partitionIndex === null}
+            disabled={mounting || partitionIndex === null || currentPartition?.fsType !== 'NTFS'}
             onClick={() => void handleMount()}
           >
             {mounting ? 'Mounting…' : 'Mount as drive'}
           </button>
           {!winfspOk && <span className="field-hint">WinFsp not installed — mount unavailable.</span>}
+          {winfspOk && currentPartition && currentPartition.fsType !== 'NTFS' && (
+            <span className="field-hint">Mounting is only supported for NTFS partitions.</span>
+          )}
           {mountError && <span className="error-text">{mountError}</span>}
         </div>
       )}
@@ -333,7 +366,16 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         </div>
       )}
 
-      {(imagePath && partitionIndex !== null) && (
+      {imagePath && partitionIndex !== null && !currentBrowsable && currentPartition && (
+        <div className="error-message">
+          <p>
+            Partition {currentPartition.partitionIndex} uses {currentPartition.fsType ?? 'an unsupported'} — only
+            NTFS, FAT32 and exFAT partitions can be browsed.
+          </p>
+        </div>
+      )}
+
+      {(imagePath && partitionIndex !== null && currentBrowsable) && (
         <div className="file-browser">
           <div className="breadcrumb-bar">
             <button className="btn-secondary btn-small" onClick={onUp} disabled={!cwd}>
@@ -377,7 +419,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
               <p className="table-empty">This directory is empty.</p>
             ) : (
               nodes.map((node) => (
-                <div className="file-row" key={node.recordNumber}>
+                <div className="file-row" key={node.id}>
                   <span
                     className={`col-name node-name ${node.isDirectory ? 'is-dir' : ''}`}
                     onDoubleClick={() => onEnterDir(node)}

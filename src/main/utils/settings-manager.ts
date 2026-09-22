@@ -140,6 +140,8 @@ export interface BackupProfile {
   verificationEnabled: boolean;
   incremental: boolean;
   passphrase?: string;
+  /** Only capture allocated clusters (NTFS/FAT32/exFAT); skip free space. */
+  usedBlocksOnly?: boolean;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {

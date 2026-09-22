@@ -17,7 +17,7 @@ import { logger } from '../utils/logger';
 export type BackupConfig = BackupJobConfig;
 
 export interface BackupProgress {
-  phase: 'preparing' | 'snapshotting' | 'backing_up' | 'verifying' | 'completed' | 'error';
+  phase: 'preparing' | 'snapshotting' | 'backing_up' | 'verifying' | 'finalizing' | 'completed' | 'error';
   percentComplete: number;
   bytesProcessed: number;
   totalBytes: number;
@@ -102,7 +102,24 @@ export class BackupManager extends EventEmitter {
       recordBackupDestination(config.destinationPath);
       recordBackupAnalytics(config.destinationPath, result.imagePath, result);
 
-      // Self-healing: build XOR parity sidecar for bit-rot protection.
+      // Self-healing: build XOR parity sidecar for bit-rot protection. This
+      // re-reads every block of the image and can take a long time on a large
+      // backup. It used to run silently after the helper already reported
+      // 100%/"completed", so the wizard sat on a finished-looking progress
+      // bar with no way to reach the completion screen. Surface it as its
+      // own phase so the user sees real activity, and build parity on the
+      // next tick so the final 'completed' emit + IPC return are not held
+      // hostage by the parity pass.
+      this.emitProgress({
+        phase: 'finalizing',
+        percentComplete: 100,
+        bytesProcessed: result.bytesWritten,
+        totalBytes: result.totalBytes,
+        speed: 0,
+        estimatedTimeRemaining: 0,
+        currentPartition: 'Building parity recovery data…'
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
       try {
         buildParity(result.imagePath);
       } catch (error) {

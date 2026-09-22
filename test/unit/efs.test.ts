@@ -17,6 +17,7 @@ function efsSession() {
   const layout = parseBootSector(reader);
   const records = readFileRecords(reader, layout);
   return {
+    filesystem: 'ntfs',
     imagePath: 'mem',
     chain: ['mem'],
     partitionIndex: 0,
@@ -24,7 +25,7 @@ function efsSession() {
     layout,
     records: new Map(records.map((r) => [r.recordNumber, r])),
     children: buildTree(records),
-    rootRecord: 5
+    rootId: 5
   };
 }
 

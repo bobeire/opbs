@@ -67,145 +67,110 @@ void DiskReader::CloseAllHandles() {
 }
 
 std::vector<DiskInfo> DiskReader::EnumerateDisks() {
+    // Enumerate \\.\PhysicalDriveN directly. The previous SetupDi-based path
+    // derived the drive number from the device instance ID, which is absent on
+    // USB devices ("USBSTOR\DISK&VEN_..." contains no number) — it then fell
+    // back to the enumeration index and reported the WRONG disk (wrong size and
+    // partitions, e.g. a 231 GB USB key shown as 931 GB).
     std::vector<DiskInfo> disks;
-    
-    HDEVINFO deviceInfoSet = SetupDiGetClassDevsW(
-        &GUID_DEVCLASS_DISKDRIVE,
-        nullptr,
-        nullptr,
-        DIGCF_PRESENT
-    );
-    
-    if (deviceInfoSet == INVALID_HANDLE_VALUE) {
-        return disks;
-    }
-    
-    DWORD deviceIndex = 0;
-    while (true) {
-        SP_DEVINFO_DATA deviceInfoData = {};
-        deviceInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
-        
-        if (!SetupDiEnumDeviceInfo(deviceInfoSet, deviceIndex, &deviceInfoData)) {
-            break;
-        }
-        
-        WCHAR buffer[512];
-        DWORD bufferSize = 0;
-        
-        // Get device description
-        if (SetupDiGetDeviceRegistryPropertyW(
-            deviceInfoSet,
-            &deviceInfoData,
-            SPDRP_FRIENDLYNAME,
+
+    for (int i = 0; i < 64; i++) {
+        std::string path = GetPhysicalDrivePath(i);
+        HANDLE hDrive = CreateFileW(
+            std::wstring(path.begin(), path.end()).c_str(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
             nullptr,
-            (PBYTE)buffer,
-            sizeof(buffer),
-            &bufferSize
-        )) {
-            DiskInfo disk;
-            disk.index = static_cast<int>(deviceIndex);
-            disk.model = std::string(buffer, buffer + wcslen(buffer));
-            
-            // Extract the actual disk number from the device instance ID
-            WCHAR instanceId[512];
-            if (SetupDiGetDeviceInstanceIdW(
-                deviceInfoSet,
-                &deviceInfoData,
-                instanceId,
-                sizeof(instanceId) / sizeof(WCHAR),
-                &bufferSize
-            )) {
-                // Parse the instance ID for the disk number
-                std::wstring instId(instanceId);
-                size_t pos = instId.find(L"Disk");
-                if (pos != std::wstring::npos) {
-                    size_t numStart = pos + 4;  // Skip "Disk"
-                    std::wstring numStr;
-                    while (numStart < instId.length() && iswdigit(instId[numStart])) {
-                        numStr += instId[numStart];
-                        numStart++;
-                    }
-                    if (!numStr.empty()) {
-                        disk.index = static_cast<int>(std::stoi(numStr));
-                    }
-                }
-            }
-            
-            // Try to open the drive to get size
-            std::string path = GetPhysicalDrivePath(disk.index);
-            if (!path.empty()) {
-                HANDLE hDrive = CreateFileW(
-                    std::wstring(path.begin(), path.end()).c_str(),
-                    FILE_READ_ATTRIBUTES,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE,
-                    nullptr,
-                    OPEN_EXISTING,
-                    0,
-                    nullptr
-                );
-                
-                if (hDrive != INVALID_HANDLE_VALUE) {
-                    DISK_GEOMETRY_EX geometry = {};
-                    DWORD bytesReturned = 0;
-                    
-                    if (DeviceIoControl(
-                        hDrive,
-                        IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
-                        nullptr,
-                        0,
-                        &geometry,
-                        sizeof(geometry),
-                        &bytesReturned,
-                        nullptr
-                    )) {
-                        disk.size = geometry.DiskSize.QuadPart;
-                    }
-                    
-                    // Get serial number
-                    STORAGE_PROPERTY_QUERY query = {};
-                    query.PropertyId = StorageDeviceProperty;
-                    query.QueryType = PropertyStandardQuery;
-                    
-                    STORAGE_DEVICE_DESCRIPTOR descriptor = {};
-                    BYTE descriptorBuffer[4096];
-                    
-                    if (DeviceIoControl(
-                        hDrive,
-                        IOCTL_STORAGE_QUERY_PROPERTY,
-                        &query,
-                        sizeof(query),
-                        descriptorBuffer,
-                        sizeof(descriptorBuffer),
-                        &bytesReturned,
-                        nullptr
-                    )) {
-                        STORAGE_DEVICE_DESCRIPTOR* desc = (STORAGE_DEVICE_DESCRIPTOR*)descriptorBuffer;
-                        if (desc->SerialNumberOffset > 0) {
-                            const char* serial = (const char*)desc + desc->SerialNumberOffset;
-                            disk.serial = std::string(serial);
-                        }
-                    }
-                    
-                    CloseHandle(hDrive);
-                }
-            }
-            
-            disks.push_back(disk);
+            OPEN_EXISTING,
+            0,
+            nullptr
+        );
+        if (hDrive == INVALID_HANDLE_VALUE) {
+            continue; // no such physical drive
         }
-        
-        deviceIndex++;
+
+        DISK_GEOMETRY_EX geometry = {};
+        DWORD bytesReturned = 0;
+        if (!DeviceIoControl(
+            hDrive,
+            IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
+            nullptr,
+            0,
+            &geometry,
+            sizeof(geometry),
+            &bytesReturned,
+            nullptr
+        )) {
+            CloseHandle(hDrive);
+            continue;
+        }
+
+        DiskInfo disk;
+        disk.index = i;
+        disk.size = geometry.DiskSize.QuadPart;
+
+        STORAGE_PROPERTY_QUERY query = {};
+        query.PropertyId = StorageDeviceProperty;
+        query.QueryType = PropertyStandardQuery;
+
+        std::vector<BYTE> descriptorBuffer(4096);
+        if (DeviceIoControl(
+            hDrive,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            &query,
+            sizeof(query),
+            descriptorBuffer.data(),
+            static_cast<DWORD>(descriptorBuffer.size()),
+            &bytesReturned,
+            nullptr
+        )) {
+            STORAGE_DEVICE_DESCRIPTOR* desc = (STORAGE_DEVICE_DESCRIPTOR*)descriptorBuffer.data();
+            auto readString = [&](DWORD offset) -> std::string {
+                if (offset == 0 || offset >= descriptorBuffer.size()) return std::string();
+                std::string s((const char*)descriptorBuffer.data() + offset);
+                while (!s.empty() && (s.back() == ' ' || s.back() == '\0')) s.pop_back();
+                return s;
+            };
+            disk.model = readString(desc->ProductIdOffset);
+            disk.serial = readString(desc->SerialNumberOffset);
+        }
+        if (disk.model.empty()) {
+            disk.model = "Disk " + std::to_string(i);
+        }
+
+        disks.push_back(disk);
+        CloseHandle(hDrive);
     }
-    
-    SetupDiDestroyDeviceInfoList(deviceInfoSet);
+
     return disks;
+}
+
+// Map a GPT partition type GUID to the equivalent MBR type byte so the VSS
+// gate (which keys off MBR type codes) treats GPT partitions consistently.
+static uint8_t GptTypeToMbr(const GUID& type) {
+    struct GuidMap { GUID guid; uint8_t mbr; };
+    static const GuidMap kMap[] = {
+        { {0xC12A7328, 0xF81F, 0x11D2, {0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B}}, 0xEF }, // EFI System
+        { {0xE3C9E316, 0x0B5C, 0x4DB8, {0x81, 0x7D, 0xF9, 0x2D, 0xF0, 0x02, 0x15, 0xAE}}, 0x27 }, // MSR
+        { {0xDE94BBA4, 0x06D1, 0x4D40, {0xA1, 0x6A, 0xBF, 0xD5, 0x01, 0x79, 0xD6, 0xAC}}, 0x27 }, // Recovery
+        { {0x0FC63DAF, 0x8483, 0x4772, {0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4}}, 0x83 }, // Linux
+        { {0xEBD0A0A2, 0xB9E5, 0x4433, {0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7}}, 0x07 }, // Basic Data
+    };
+    for (const auto& e : kMap) {
+        if (e.guid.Data1 == type.Data1 && e.guid.Data2 == type.Data2 && e.guid.Data3 == type.Data3 &&
+            memcmp(e.guid.Data4, type.Data4, 8) == 0) {
+            return e.mbr;
+        }
+    }
+    return 0xEE; // unknown GPT partition
 }
 
 std::vector<PartitionInfo> DiskReader::EnumeratePartitions(int diskIndex) {
     std::vector<PartitionInfo> partitions;
-    
+
     // Open the physical drive with attributes-only access (works without elevation)
     std::string path = GetPhysicalDrivePath(diskIndex);
-    
+
     HANDLE hDrive = CreateFileW(
         std::wstring(path.begin(), path.end()).c_str(),
         FILE_READ_ATTRIBUTES,
@@ -217,44 +182,47 @@ std::vector<PartitionInfo> DiskReader::EnumeratePartitions(int diskIndex) {
     );
     
     if (hDrive != INVALID_HANDLE_VALUE) {
-        // Try IOCTL_DISK_GET_DRIVE_LAYOUT_EX - may work without raw read permission
-        STORAGE_PROPERTY_QUERY query = {};
-        query.PropertyId = StorageDeviceProperty;
-        query.QueryType = PropertyStandardQuery;
-        
-        BYTE layoutBuffer[sizeof(DRIVE_LAYOUT_INFORMATION_EX) + 4 * sizeof(PARTITION_INFORMATION_EX)];
+        // Try IOCTL_DISK_GET_DRIVE_LAYOUT_EX - may work without raw read permission.
+        // Size the buffer for up to 128 partitions; the old 4-entry buffer made
+        // the IOCTL fail with ERROR_INSUFFICIENT_BUFFER on disks with more
+        // partitions (or GPT disks with many entries), silently yielding none.
+        constexpr DWORD kMaxPartitions = 128;
+        std::vector<BYTE> layoutBuffer(
+            sizeof(DRIVE_LAYOUT_INFORMATION_EX) + kMaxPartitions * sizeof(PARTITION_INFORMATION_EX));
         DWORD bytesReturned = 0;
-        
+
         if (DeviceIoControl(
             hDrive,
             IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
             nullptr,
             0,
-            layoutBuffer,
-            sizeof(layoutBuffer),
+            layoutBuffer.data(),
+            static_cast<DWORD>(layoutBuffer.size()),
             &bytesReturned,
             nullptr
         )) {
-            DRIVE_LAYOUT_INFORMATION_EX* layout = (DRIVE_LAYOUT_INFORMATION_EX*)layoutBuffer;
-            
+            DRIVE_LAYOUT_INFORMATION_EX* layout = (DRIVE_LAYOUT_INFORMATION_EX*)layoutBuffer.data();
+
             if (layout->PartitionStyle == PARTITION_STYLE_GPT) {
                 // GPT layout
-                for (DWORD i = 0; i < layout->PartitionCount && i < 128; i++) {
+                for (DWORD i = 0; i < layout->PartitionCount && i < kMaxPartitions; i++) {
                     PARTITION_INFORMATION_EX* part = &layout->PartitionEntry[i];
-                    
+                    if (part->PartitionLength.QuadPart == 0) continue;
+
                     PartitionInfo partition;
                     partition.diskIndex = diskIndex;
                     partition.partitionIndex = static_cast<int>(part->PartitionNumber - 1);
                     partition.offset = part->StartingOffset.QuadPart;
                     partition.size = part->PartitionLength.QuadPart;
-                    partition.type = 0xEE;  // GPT marker
+                    partition.type = GptTypeToMbr(part->Gpt.PartitionType);
                     partitions.push_back(partition);
                 }
             } else if (layout->PartitionStyle == PARTITION_STYLE_MBR) {
                 // MBR layout
                 for (DWORD i = 0; i < layout->PartitionCount && i < 4; i++) {
                     PARTITION_INFORMATION_EX* part = &layout->PartitionEntry[i];
-                    
+                    if (part->PartitionLength.QuadPart == 0) continue;
+
                     PartitionInfo partition;
                     partition.diskIndex = diskIndex;
                     partition.partitionIndex = static_cast<int>(part->PartitionNumber - 1);
@@ -424,40 +392,60 @@ std::string DiskReader::GetPhysicalDrivePath(int diskIndex) {
 
 std::vector<char> DiskReader::ReadBlocks(const std::string& devicePath, uint64_t offset, uint64_t length) {
     HANDLE hDevice = GetCachedHandle(devicePath, GENERIC_READ);
-    
-    std::vector<char> data(length);
+
+    // Raw disk/volume devices only accept sector-aligned offsets and lengths.
+    // Align the offset down and round the length up, then trim the result so
+    // callers still receive exactly the requested range. Filesystem metadata
+    // reads (e.g. the NTFS $Bitmap) are not sector-multiple sized.
+    const uint64_t sector = 512;
+    const uint64_t alignedOffset = offset - (offset % sector);
+    const uint64_t lead = offset - alignedOffset;
+    const uint64_t alignedLength = ((lead + length + sector - 1) / sector) * sector;
+
+    std::vector<char> data(alignedLength);
     LARGE_INTEGER fileOffset;
-    fileOffset.QuadPart = static_cast<LONGLONG>(offset);
-    
+    fileOffset.QuadPart = static_cast<LONGLONG>(alignedOffset);
+
     SetFilePointerEx(hDevice, fileOffset, nullptr, FILE_BEGIN);
-    
+
     DWORD totalRead = 0;
     const DWORD chunkSize = 1024 * 1024;  // 1MB chunks
-    
-    while (totalRead < length) {
-        DWORD toRead = static_cast<DWORD>(std::min<uint64_t>(chunkSize, length - totalRead));
+
+    while (totalRead < alignedLength) {
+        DWORD toRead = static_cast<DWORD>(std::min<uint64_t>(chunkSize, alignedLength - totalRead));
         DWORD bytesRead = 0;
-        
+
         if (!ReadFile(hDevice, data.data() + totalRead, toRead, &bytesRead, nullptr)) {
             // Invalidate the cached handle on error.
             s_handleCache.erase(devicePath);
             CloseHandle(hDevice);
             std::ostringstream ss;
             ss << "ReadFile failed on " << devicePath
-               << " at offset " << offset + totalRead << " (" << toRead << " bytes): "
+               << " at offset " << alignedOffset + totalRead << " (" << toRead << " bytes): "
                << FormatWinError(GetLastError());
             throw std::runtime_error(ss.str());
         }
-        
+
         totalRead += bytesRead;
-        
+
         if (bytesRead == 0) {
             break;
         }
     }
-    
+
     data.resize(totalRead);
-    return data;
+
+    // Common case (already sector-aligned): return as-is, no extra copy.
+    if (lead == 0 && data.size() == length) {
+        return data;
+    }
+
+    // Trim back to the caller's requested window.
+    if (lead >= data.size()) {
+        return {};
+    }
+    const uint64_t take = std::min<uint64_t>(length, data.size() - lead);
+    return std::vector<char>(data.begin() + lead, data.begin() + lead + take);
 }
 
 uint64_t DiskReader::WriteBlocks(const std::string& devicePath, uint64_t offset, const char* data, size_t length) {

@@ -1,16 +1,49 @@
 import { PartitionReader } from '../image-browse';
 import { parseBootSector, readNtfsBitmap } from './ntfs';
+import { detectFatType, readFat32UsedBlocks } from './fat32';
+import { detectExfat, readExfatUsedBlocks } from './exfat';
+import { logger } from '../../utils/logger';
 
 /**
  * Compute the set of block indices (0-based, `blockSize` each) within the first
  * `partitionSize` bytes of a partition whose clusters are *allocated* according
- * to the NTFS $Bitmap. Blocks that touch no allocated cluster are omitted, so
- * callers can skip reading them entirely (free space needs no backup).
+ * to the filesystem's allocation map (NTFS $Bitmap, FAT32 FAT, exFAT allocation
+ * bitmap). Blocks that touch no allocated cluster are omitted, so callers can
+ * skip reading them entirely (free space needs no backup).
  *
- * Returns null when the partition is not a readable NTFS volume or the bitmap
- * cannot be resolved; callers must then fall back to a full capture.
+ * Returns null when the partition is not a readable volume of a supported
+ * filesystem or its allocation map cannot be resolved; callers must then fall
+ * back to a full capture.
  */
 export function readUsedBlockIndexes(
+  reader: PartitionReader,
+  partitionSize: number,
+  blockSize: number
+): Set<number> | null {
+  let bpb: Buffer;
+  try {
+    bpb = reader.read(0, 512);
+  } catch (e) {
+    logger.warn(`used-blocks: boot sector read failed: ${e instanceof Error ? e.message : e}`);
+    return null;
+  }
+  const oem = bpb.length >= 11 ? bpb.toString('ascii', 3, 11) : '';
+  logger.info(`used-blocks: boot sector OEM="${oem}" length=${bpb.length}`);
+  if (bpb.length >= 11 && oem === 'NTFS    ') {
+    return readNtfsUsedBlocks(reader, partitionSize, blockSize);
+  }
+  if (detectFatType(bpb) === 'FAT32') {
+    return readFat32UsedBlocks(reader, partitionSize, blockSize);
+  }
+  if (detectExfat(bpb)) {
+    return readExfatUsedBlocks(reader, partitionSize, blockSize);
+  }
+  logger.warn(`used-blocks: unrecognised filesystem (OEM="${oem}")`);
+  return null;
+}
+
+/** NTFS: blocks touching an allocated cluster per the $Bitmap. */
+function readNtfsUsedBlocks(
   reader: PartitionReader,
   partitionSize: number,
   blockSize: number
@@ -18,13 +51,15 @@ export function readUsedBlockIndexes(
   let layout;
   try {
     layout = parseBootSector(reader);
-  } catch {
+  } catch (e) {
+    logger.warn(`used-blocks: NTFS boot sector parse failed: ${e instanceof Error ? e.message : e}`);
     return null;
   }
   let bitmap;
   try {
     bitmap = readNtfsBitmap(reader, layout);
-  } catch {
+  } catch (e) {
+    logger.warn(`used-blocks: NTFS $Bitmap read failed: ${e instanceof Error ? e.message : e}`);
     return null;
   }
   const { clusterSize, totalClusters, bitmapBytes } = bitmap;

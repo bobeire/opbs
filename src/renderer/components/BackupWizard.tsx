@@ -23,10 +23,12 @@ interface BackupConfig {
   sourceDiskIndex: number;
   sourcePartitions: number[];
   destinationPath: string;
+  imageName?: string;
   compressionLevel: number;
   compressionType?: 'deflate' | 'zstd';
   compressionThreads?: number;
   verificationEnabled: boolean;
+  usedBlocksOnly?: boolean;
   baseImagePath?: string;
   passphrase?: string;
   resume?: boolean;
@@ -41,6 +43,8 @@ interface BackupProgress {
   estimatedTimeRemaining: number;
   currentPartition: string;
   resuming?: boolean;
+  verifyDone?: number;
+  verifyTotal?: number;
 }
 
 interface BackupWizardProps {
@@ -68,6 +72,25 @@ function formatSpeed(bytesPerSec: number): string {
   return `${Math.round(bytesPerSec)} B/s`;
 }
 
+function phaseLabel(phase?: string): string {
+  switch (phase) {
+    case 'snapshotting':
+      return 'Creating snapshot';
+    case 'backing_up':
+      return 'Backing up';
+    case 'verifying':
+      return 'Verifying image';
+    case 'finalizing':
+      return 'Finalizing (building parity recovery data)';
+    case 'completed':
+      return 'Completed';
+    case 'error':
+      return 'Error';
+    default:
+      return 'Preparing...';
+  }
+}
+
 function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeProgress, backupRunning }: BackupWizardProps) {
   const [currentStep, setCurrentStep] = useState<WizardStep>(
     backupRunning && activeProgress ? 'progress' : 'select_source'
@@ -77,12 +100,14 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   const [selectedPartitions, setSelectedPartitions] = useState<number[]>([]);
   const [allDisks, setAllDisks] = useState(initialAllDisks ?? false);
   const [destinationPath, setDestinationPath] = useState(initialDestination ?? '');
+  const [imageName, setImageName] = useState('');
   const [compressionLevel, setCompressionLevel] = useState(3);
   const [compressionType, setCompressionType] = useState<'deflate' | 'zstd'>('zstd');
   const [compressionThreads, setCompressionThreads] = useState(() =>
     Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1))
   );
   const [verificationEnabled, setVerificationEnabled] = useState(true);
+  const [usedBlocksOnly, setUsedBlocksOnly] = useState(true);
   const [incrementalEnabled, setIncrementalEnabled] = useState(false);
   const [resumeEnabled, setResumeEnabled] = useState(false);
   const [passphrase, setPassphrase] = useState('');
@@ -193,6 +218,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       profile.compressionThreads || Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1))
     );
     setVerificationEnabled(profile.verificationEnabled ?? true);
+    setUsedBlocksOnly(profile.usedBlocksOnly ?? true);
     setIncrementalEnabled(profile.incremental ?? false);
     setResumeEnabled(profile.resume ?? false);
     setPassphrase(profile.passphrase ?? '');
@@ -228,6 +254,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       compressionType,
       compressionThreads,
       verificationEnabled,
+      usedBlocksOnly,
       incremental: incrementalEnabled,
       ...(resumeEnabled ? { resume: true } : {}),
       ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {})
@@ -250,10 +277,12 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
 
     const common: Omit<BackupConfig, 'sourceDiskIndex' | 'sourcePartitions'> = {
       destinationPath,
+      ...(imageName.trim() ? { imageName: imageName.trim() } : {}),
       compressionLevel,
       compressionType,
       compressionThreads,
       verificationEnabled,
+      usedBlocksOnly,
       ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {}),
       ...(resumeEnabled ? { resume: true } : {})
     };
@@ -265,6 +294,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
           setDiskLabel(`Disk ${i + 1} of ${eligibleDisks.length}: ${disk.model}`);
           const config: BackupConfig = {
             ...common,
+            ...(imageName.trim() ? { imageName: `${imageName.trim()}-disk${disk.index}` } : {}),
             sourceDiskIndex: disk.index,
             sourcePartitions: disk.partitions.map((p) => p.partitionIndex),
             ...(incrementalEnabled && baseImagePath ? { baseImagePath } : {})
@@ -475,6 +505,22 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                   upload the finished image with the cloud credentials configured in Settings.
                 </p>
               </div>
+
+              <div className="current-path">
+                <label>Image name:</label>
+                <div className="path-input">
+                  <input
+                    type="text"
+                    value={imageName}
+                    onChange={(e) => setImageName(e.target.value)}
+                    placeholder="Leave blank for opbs-diskN-<date>.opbs"
+                  />
+                </div>
+                <p className="field-hint">
+                  Base name for the image file. <code>.opbs</code> is appended automatically; multi-volume
+                  images add <code>.001</code>, <code>.002</code>, … suffixes.
+                </p>
+              </div>
             </div>
             
             <div className="wizard-actions">
@@ -551,6 +597,21 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                   />
                   Verify backup after completion
                 </label>
+              </div>
+
+              <div className="option-group">
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={usedBlocksOnly}
+                    onChange={(e) => setUsedBlocksOnly(e.target.checked)}
+                  />
+                  Only back up used data (skip free space)
+                </label>
+                <p className="field-hint">
+                  Reads the filesystem allocation map (NTFS, FAT32, exFAT) so free space is skipped
+                  entirely — a mostly-empty 256 GB drive backs up as a few GB instead of the whole disk.
+                </p>
               </div>
 
               <div className="option-group">
@@ -634,6 +695,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                 <li>Destination: {destinationPath}</li>
                 <li>Compression: Level {compressionLevel} ({compressionType}{compressionThreads > 1 ? `, ${compressionThreads} threads` : ''})</li>
                 <li>Verification: {verificationEnabled ? 'Enabled' : 'Disabled'}</li>
+                <li>Used data only: {usedBlocksOnly ? 'Enabled (skips free space)' : 'Disabled (whole partition)'}</li>
                 <li>Incremental: {incrementalEnabled && baseImagePath ? 'Enabled' : 'Full backup'}</li>
                 <li>Resume: {resumeEnabled ? 'Enabled (continues interrupted backups)' : 'Disabled'}</li>
                 <li>Encryption: {passphrase.trim() ? 'AES-256-GCM' : 'None'}</li>
@@ -697,10 +759,17 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
               </div>
               
               <div className="progress-info">
-                <p>Phase: {progress?.phase || 'Preparing...'}</p>
+                <p>Phase: {phaseLabel(progress?.phase)}</p>
                 <p>Progress: {Math.round((progress?.percentComplete || 0) * 10) / 10}%</p>
-                {progress?.currentPartition && (
-                  <p>Current Partition: {progress.currentPartition}</p>
+                {progress?.phase === 'verifying' && progress?.verifyTotal ? (
+                  <p>
+                    Verifying image… {progress.verifyDone?.toLocaleString()} /{' '}
+                    {progress.verifyTotal.toLocaleString()} blocks
+                  </p>
+                ) : (
+                  progress?.currentPartition && (
+                    <p>Current Partition: {progress.currentPartition}</p>
+                  )
                 )}
                 {progress?.estimatedTimeRemaining > 0 && progress?.estimatedTimeRemaining < Infinity && (
                   <p>ETA: {formatDuration(progress.estimatedTimeRemaining)}</p>

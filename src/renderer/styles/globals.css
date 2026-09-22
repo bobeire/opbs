@@ -26,6 +26,11 @@ body {
   line-height: 1.5;
 }
 
+::selection {
+  background-color: var(--primary-color);
+  color: #fff;
+}
+
 .app {
   display: flex;
   min-height: 100vh;
@@ -1077,7 +1082,7 @@ body {
   align-items: center;
   gap: 12px;
   padding: 8px 12px;
-  background: #f7f8fa;
+  background: rgba(255, 255, 255, 0.04);
   border-bottom: 1px solid var(--border-color, #ddd);
 }
 
@@ -1097,7 +1102,7 @@ body {
 }
 
 .crumb:hover {
-  background: #e8eaed;
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .crumb.active {
@@ -1121,17 +1126,17 @@ body {
 .file-table-head {
   font-size: 12px;
   text-transform: uppercase;
-  color: #888;
-  background: #f0f1f3;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.04);
   border-bottom: 1px solid var(--border-color, #ddd);
 }
 
 .file-row {
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .file-row:hover {
-  background: #fafbfc;
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .node-name {
@@ -1151,13 +1156,13 @@ body {
 
 .col-size {
   font-size: 13px;
-  color: #555;
+  color: var(--text-muted);
   text-align: right;
 }
 
 .col-modified {
   font-size: 12px;
-  color: #888;
+  color: var(--text-muted);
 }
 
 .col-actions {
@@ -1185,14 +1190,15 @@ body {
 }
 
 .mount-bar.mount-active {
-  background: #eef7ee;
-  border: 1px solid #cde5cd;
+  background: rgba(22, 163, 74, 0.15);
+  border: 1px solid rgba(22, 163, 74, 0.4);
   border-radius: 6px;
   padding: 8px 12px;
 }
 
 .mount-point {
   font-weight: 500;
+  color: var(--text-color);
 }
 
 .error-text {
@@ -1517,7 +1523,7 @@ body {
 
 .progress-disk-label {
   font-size: 13px;
-  color: #555;
+  color: var(--text-muted);
   margin-bottom: 8px;
 }
 

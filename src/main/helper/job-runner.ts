@@ -28,6 +28,7 @@ import {
   FLAG_RESUMED,
   FLAG_MULTI_VOLUME,
   HEADER_SIZE,
+  clearImageInfoCache,
   PARTITION_TABLE_ENTRY_SIZE,
   BLOCK_INDEX_ENTRY_SIZE,
   BLOCK_INDEX_ENTRY_SIZE_V1,
@@ -171,7 +172,13 @@ export async function runBackupJob(
   const writeProgress = (phase: JobProgress['phase']): void => {
     let percent = progress.totalBytes > 0 ? Math.min(99, (progress.bytesDone / progress.totalBytes) * 100) : 0;
     if (phase === 'writing-index') percent = Math.max(percent, 99);
-    if (phase === 'verifying') percent = 99.5;
+    if (phase === 'verifying') {
+      // Verification re-reads the whole image; show 99→100 so the bar keeps moving.
+      percent =
+        progress.verifyTotal && progress.verifyTotal > 0
+          ? 99 + Math.min(1, (progress.verifyDone ?? 0) / progress.verifyTotal)
+          : 99.5;
+    }
     if (phase === 'completed') percent = 100;
     progress.phase = phase;
     progress.percent = percent;
@@ -198,9 +205,20 @@ export async function runBackupJob(
         seen.add(p.volumeDevicePath);
         progress.currentPartition = `${p.label}: snapshotting`;
         writeProgress('snapshotting');
-        const snap = native.createSnapshot(p.volumeDevicePath);
-        snapshotCache.set(p.volumeDevicePath, snap);
-        snapshotsCreated++;
+        try {
+          const snap = native.createSnapshot(p.volumeDevicePath);
+          snapshotCache.set(p.volumeDevicePath, snap);
+          snapshotsCreated++;
+        } catch (error) {
+          // VSS doesn't support every filesystem (FAT32/exFAT volumes are not
+          // snapshot-able by the System Provider). Fall back to a raw physical
+          // read for this partition instead of failing the whole backup.
+          warnings.push(
+            `${p.label}: VSS snapshot unavailable (${errorMessage(error)}); using raw block read`
+          );
+          p.readSource = 'physical';
+          p.volumeDevicePath = undefined;
+        }
       }
     }
   };
@@ -415,19 +433,33 @@ export async function runBackupJob(
       // so the bit map and the captured bytes are consistent.
       let usedBlocks: Set<number> | null = null;
       if (job.usedBlocksOnly) {
-        usedBlocks = readUsedBlockIndexes(
-          {
-            size: part.size,
-            read: (offset: number, length: number) =>
-              Buffer.from(native.readBlocks(device, baseOffset + BigInt(offset), BigInt(length)))
-          },
-          part.size,
-          blockSize
-        );
+        const readerFor = (dev: string, off: bigint) => ({
+          size: part.size,
+          read: (offset: number, length: number) =>
+            Buffer.from(native.readBlocks(dev, off + BigInt(offset), BigInt(length)))
+        });
+        logger.info(`${part.label}: used-blocks scan starting (readSource=${part.readSource}, device=${device}, baseOffset=${baseOffset}, size=${part.size})`);
+        usedBlocks = readUsedBlockIndexes(readerFor(device, baseOffset), part.size, blockSize);
+        // If the snapshot device didn't yield a readable allocation map, retry
+        // against the physical drive. Some filesystems (exFAT/FAT32) have no
+        // VSS snapshot, and the snapshot device can read back as zeroes.
+        if (!usedBlocks && part.readSource === 'volume') {
+          try {
+            const phys = native.getPhysicalDrivePath(part.diskIndex);
+            logger.info(`${part.label}: retrying used-blocks scan on physical device ${phys}`);
+            usedBlocks = readUsedBlockIndexes(readerFor(phys, BigInt(part.offset)), part.size, blockSize);
+          } catch (e) {
+            logger.warn(`${part.label}: physical used-blocks retry failed: ${e instanceof Error ? e.message : e}`);
+          }
+        }
         if (!usedBlocks) {
+          logger.warn(`${part.label}: used-blocks scan could not resolve the allocation map; capturing the full partition`);
           warnings.push(
-            `${part.label}: used-blocks scan could not read the NTFS $Bitmap; capturing the full partition`
+            `${part.label}: used-blocks scan could not read the filesystem allocation map; capturing the full partition`
           );
+        } else {
+          const totalBlocks = Math.ceil(part.size / blockSize);
+          logger.info(`${part.label}: used-blocks scan found ${usedBlocks.size} of ${totalBlocks} blocks allocated`);
         }
       }
 
@@ -671,7 +703,13 @@ export async function runBackupJob(
 
     if (job.verificationEnabled) {
       writeProgress('verifying');
-      const verified = await verifyImage(job.imagePath, cipher?.key);
+      const verified = await verifyImage(job.imagePath, cipher?.key, (done, total) => {
+        progress.verifyDone = done;
+        progress.verifyTotal = total;
+        if (Date.now() - lastProgressWrite >= 500) {
+          writeProgress('verifying');
+        }
+      });
       verifiedBlocks = verified.blocksVerified;
       if (!verified.ok) {
         throw new Error(`Image verification failed: ${verified.error ?? 'unknown error'}`);
@@ -689,6 +727,10 @@ export async function runBackupJob(
     finalBuf.writeUInt32LE(flags, 36);
     fs.writeSync(verifyFd, finalBuf, 0, HEADER_SIZE, 0);
     fs.closeSync(verifyFd);
+
+    // The image changed on disk; drop any cached header/block-index so later
+    // reads (verify, browse) see the final flags.
+    clearImageInfoCache();
 
     writeProgress('completed');
 
@@ -777,11 +819,13 @@ export async function runBackupJob(
     // from where this one stopped; otherwise remove it so it is never mistaken
     // for a good backup. scanPartialImage / buildJob determine resumability.
     if (!job.resume) {
-      try {
-        fs.unlinkSync(job.imagePath);
-      } catch {
-        /* best-effort */
+      // Remove every volume file (base + .001, .002, ...) and the manifest.
+      for (const p of volumePaths) {
+        try { fs.unlinkSync(p); } catch { /* best-effort */ }
       }
+      try { fs.unlinkSync(job.imagePath); } catch { /* best-effort */ }
+      try { fs.unlinkSync(`${job.imagePath}.volumes.json`); } catch { /* best-effort */ }
+      try { fs.unlinkSync(`${job.imagePath}.usn`); } catch { /* best-effort */ }
     }
     emitResult(resultPath, result, pipeClient);
     return;

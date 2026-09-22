@@ -458,9 +458,99 @@ export function readFrameCompressed(
 }
 
 /**
- * Read an image's header, partition table and block index.
+ * Strip a multi-volume suffix (`.001`, `.002`, ...) to get the base image path.
  */
+export function baseVolumePath(imagePath: string): string {
+  return imagePath.replace(/\.\d{3}$/, '');
+}
+
+/**
+ * Find the last volume file of a multi-volume image by scanning `.001`,
+ * `.002`, ... until a file doesn't exist. Returns the base path when the
+ * image is single-volume.
+ */
+export function lastVolumePath(imagePath: string): string {
+  const base = baseVolumePath(imagePath);
+  let last = base;
+  for (let i = 1; i < 10_000; i++) {
+    const candidate = `${base}.${String(i).padStart(3, '0')}`;
+    if (!fs.existsSync(candidate)) break;
+    last = candidate;
+  }
+  return last;
+}
+
+/**
+ * Read an image's header, partition table and block index.
+ *
+ * For multi-volume images the header/partition table are read from the given
+ * volume, but the block index lives in the LAST volume, so it is resolved
+ * there. Browsing any volume of a multi-volume set therefore works.
+ */
+interface ImageInfoCacheEntry {
+  info: ImageInfo;
+  /** Hex of the header bytes + file size at parse time. */
+  headerSig: string;
+  size: number;
+}
+const imageInfoCache = new Map<string, ImageInfoCacheEntry>();
+
+/** Clear the cached image-info parses (call when browsing ends). */
+export function clearImageInfoCache(): void {
+  imageInfoCache.clear();
+}
+
+/** Cheap change-detector: the first HEADER_SIZE bytes plus the file size. */
+function headerSignature(imagePath: string): { sig: string; size: number } | null {
+  try {
+    const fd = fs.openSync(imagePath, 'r');
+    try {
+      const buf = Buffer.alloc(HEADER_SIZE);
+      const n = fs.readSync(fd, buf, 0, HEADER_SIZE, 0);
+      return { sig: buf.subarray(0, n).toString('hex'), size: fs.fstatSync(fd).size };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
 export function readImageInfo(imagePath: string): ImageInfo {
+  // The header flags (VERIFIED/RESUMED) and the block-index offset are patched
+  // after the frames are written, so a cache keyed only by path would report the
+  // pre-patch state. Re-read the header (256 bytes) to detect the change; the
+  // expensive part — parsing the block index — stays cached.
+  const before = headerSignature(imagePath);
+  const cached = imageInfoCache.get(imagePath);
+  if (before && cached && cached.headerSig === before.sig && cached.size === before.size) {
+    return cached.info;
+  }
+  const info = readImageInfoUncached(imagePath);
+  const after = before ?? headerSignature(imagePath);
+  imageInfoCache.set(imagePath, {
+    info,
+    headerSig: after?.sig ?? '',
+    size: after?.size ?? -1
+  });
+  return info;
+}
+
+function readImageInfoUncached(imagePath: string): ImageInfo {
+  // Clear error when the base volume is missing (e.g. a failed backup whose
+  // base file was removed but continuation volumes remain).
+  if (!fs.existsSync(imagePath)) {
+    const base = baseVolumePath(imagePath);
+    if (base !== imagePath && fs.existsSync(base)) {
+      // The requested path is a volume, the base exists — fall through.
+    } else if (fs.existsSync(`${base}.001`)) {
+      throw new Error(
+        `The base image volume is missing (${base}). This backup is incomplete and cannot be browsed.`
+      );
+    } else {
+      throw new Error(`Image not found: ${imagePath}`);
+    }
+  }
   const fd = fs.openSync(imagePath, 'r');
   try {
     const headerBuf = Buffer.alloc(HEADER_SIZE);
@@ -490,27 +580,64 @@ export function readImageInfo(imagePath: string): ImageInfo {
 
     const dataOffset = HEADER_SIZE + header.partitionCount * PARTITION_TABLE_ENTRY_SIZE;
 
-    let blocks: BlockRecord[] = [];
-    if (header.blockIndexOffset > 0) {
-      const countBuf = Buffer.alloc(8);
-      fs.readSync(fd, countBuf, 0, 8, header.blockIndexOffset);
-      const count = Number(countBuf.readBigUInt64LE(0));
-      const entrySize = header.version >= 2 ? BLOCK_INDEX_ENTRY_SIZE : BLOCK_INDEX_ENTRY_SIZE_V1;
-      blocks = new Array<BlockRecord>(count);
-      for (let i = 0; i < count; i++) {
-        const entryBuf = Buffer.alloc(entrySize);
-        fs.readSync(
-          fd,
-          entryBuf,
-          0,
-          entrySize,
-          header.blockIndexOffset + 8 + i * entrySize
-        );
-        blocks[i] = parseBlockIndexEntry(entryBuf, header.version);
-      }
+    // For multi-volume images, the real partition table and block index live in
+    // the LAST volume. Read metadata from there so browsing any volume works.
+    const isMultiVolume = (header.flags & FLAG_MULTI_VOLUME) !== 0;
+    const metaPath = isMultiVolume ? lastVolumePath(imagePath) : imagePath;
+    let metaFd = fd;
+    let closeMetaFd = false;
+    if (metaPath !== imagePath) {
+      metaFd = fs.openSync(metaPath, 'r');
+      closeMetaFd = true;
     }
 
-    return { header, partitions, blocks, dataOffset };
+    try {
+      // Earlier volumes carry a header whose blockIndexOffset is still 0 (only
+      // the LAST volume's header is patched once the index is written). Re-read
+      // the header from the metadata source so the block index is found.
+      let metaHeader = header;
+      if (closeMetaFd) {
+        const metaHeaderBuf = Buffer.alloc(HEADER_SIZE);
+        fs.readSync(metaFd, metaHeaderBuf, 0, HEADER_SIZE, 0);
+        metaHeader = parseHeader(metaHeaderBuf);
+      }
+
+      // Re-read the partition table from the metadata source if it's a
+      // different file (earlier volumes may have placeholder tables).
+      if (closeMetaFd) {
+        for (let i = 0; i < header.partitionCount; i++) {
+          const entryBuf = Buffer.alloc(PARTITION_TABLE_ENTRY_SIZE);
+          fs.readSync(metaFd, entryBuf, 0, PARTITION_TABLE_ENTRY_SIZE, HEADER_SIZE + i * PARTITION_TABLE_ENTRY_SIZE);
+          partitions[i] = parsePartitionEntry(entryBuf);
+        }
+      }
+
+      let blocks: BlockRecord[] = [];
+      if (metaHeader.blockIndexOffset > 0) {
+        const countBuf = Buffer.alloc(8);
+        fs.readSync(metaFd, countBuf, 0, 8, metaHeader.blockIndexOffset);
+        const count = Number(countBuf.readBigUInt64LE(0));
+        const entrySize = metaHeader.version >= 2 ? BLOCK_INDEX_ENTRY_SIZE : BLOCK_INDEX_ENTRY_SIZE_V1;
+        blocks = new Array<BlockRecord>(count);
+        for (let i = 0; i < count; i++) {
+          const entryBuf = Buffer.alloc(entrySize);
+          fs.readSync(
+            metaFd,
+            entryBuf,
+            0,
+            entrySize,
+            metaHeader.blockIndexOffset + 8 + i * entrySize
+          );
+          blocks[i] = parseBlockIndexEntry(entryBuf, metaHeader.version);
+        }
+      }
+
+      return { header: metaHeader, partitions, blocks, dataOffset };
+    } finally {
+      if (closeMetaFd) {
+        try { fs.closeSync(metaFd); } catch { /* already closed */ }
+      }
+    }
   } finally {
     fs.closeSync(fd);
   }
@@ -725,7 +852,11 @@ export interface VerifyResult {
  *
  * `key` is optional and required only for encrypted images.
  */
-export async function verifyImage(imagePath: string, key?: Buffer): Promise<VerifyResult> {
+export async function verifyImage(
+  imagePath: string,
+  key?: Buffer,
+  onProgress?: (done: number, total: number) => void
+): Promise<VerifyResult> {
   const info = readImageInfo(imagePath);
   const hasIndex = info.header.blockIndexOffset > 0;
   const cipherId = info.header.cipherId;
@@ -742,62 +873,41 @@ export async function verifyImage(imagePath: string, key?: Buffer): Promise<Veri
     };
   }
 
-  const fd = fs.openSync(imagePath, 'r');
+  // Multi-volume images store frames across the base file and `.001`, `.002`,
+  // ... The block index (and its offset) live in the LAST volume, so stream
+  // every volume and compare the total frame count against the index.
+  const base = baseVolumePath(imagePath);
+  const volumes = [base];
+  for (let i = 1; i < 10_000; i++) {
+    const candidate = `${base}.${String(i).padStart(3, '0')}`;
+    if (!fs.existsSync(candidate)) break;
+    volumes.push(candidate);
+  }
+
+  const total = info.blocks.length;
   let verified = 0;
-  try {
-    let pos = info.dataOffset;
-    const limit = hasIndex ? info.header.blockIndexOffset : Number.MAX_SAFE_INTEGER;
-    while (pos + 16 <= limit) {
-      const head = Buffer.alloc(16);
-      const read = fs.readSync(fd, head, 0, 16, pos);
-      if (read < 16) break;
-
-      const rawSize = head.readUInt32LE(0);
-      const compSize = head.readUInt32LE(4);
-      const rawCrc = head.readUInt32LE(8);
-      const compCrc = head.readUInt32LE(12);
-
-      if (compSize > 1024 * 1024 * 1024) {
-        return { ok: false, blocksVerified: verified, error: `Implausible frame size at offset ${pos}` };
+  for (let vi = 0; vi < volumes.length; vi++) {
+    const isLast = vi === volumes.length - 1;
+    const fd = fs.openSync(volumes[vi], 'r');
+    try {
+      const fileSize = fs.fstatSync(fd).size;
+      const limit = isLast && hasIndex ? info.header.blockIndexOffset : fileSize;
+      const result = verifyVolumeFrames(
+        fd,
+        info.dataOffset,
+        limit,
+        cipherId,
+        key,
+        info.header.compressionId,
+        onProgress ? (count) => onProgress(verified + count, total) : undefined
+      );
+      verified += result.verified;
+      if (result.error) {
+        return { ok: false, blocksVerified: verified, error: result.error };
       }
-
-      let comp: Buffer;
-      try {
-        comp = readFrameCompressed(fd, compSize, pos + 16, cipherId, key);
-      } catch (error) {
-        return {
-          ok: false,
-          blocksVerified: verified,
-          error: `${error instanceof Error ? error.message : String(error)} at offset ${pos}`
-        };
-      }
-
-      if (crc32(comp) !== compCrc) {
-        return { ok: false, blocksVerified: verified, error: `Compressed data CRC mismatch at offset ${pos}` };
-      }
-
-      let raw: Buffer;
-      try {
-        raw = decompressBlock(comp, info.header.compressionId);
-      } catch (error) {
-        return {
-          ok: false,
-          blocksVerified: verified,
-          error: `Failed to decompress block at offset ${pos}: ${error instanceof Error ? error.message : String(error)}`
-        };
-      }
-      if (raw.length !== rawSize) {
-        return { ok: false, blocksVerified: verified, error: `Decompressed size mismatch at offset ${pos}` };
-      }
-      if (crc32(raw) !== rawCrc) {
-        return { ok: false, blocksVerified: verified, error: `Raw data CRC mismatch at offset ${pos}` };
-      }
-
-      verified++;
-      pos += 16 + (cipherId !== CIPHER_NONE ? GCM_IV_LENGTH + GCM_TAG_LENGTH : 0) + compSize;
+    } finally {
+      fs.closeSync(fd);
     }
-  } finally {
-    fs.closeSync(fd);
   }
 
   if (hasIndex && verified !== info.blocks.length) {
@@ -809,6 +919,74 @@ export async function verifyImage(imagePath: string, key?: Buffer): Promise<Veri
   }
 
   return { ok: verified > 0, blocksVerified: verified };
+}
+
+interface VolumeVerifyResult {
+  verified: number;
+  error?: string;
+}
+
+/** Stream and CRC-check the block frames in one volume, from `start` to `limit`. */
+function verifyVolumeFrames(
+  fd: number,
+  start: number,
+  limit: number,
+  cipherId: number,
+  key: Buffer | undefined,
+  compressionId: number,
+  onFrame?: (verifiedInVolume: number) => void
+): VolumeVerifyResult {
+  let verified = 0;
+  let pos = start;
+  while (pos + 16 <= limit) {
+    const head = Buffer.alloc(16);
+    const read = fs.readSync(fd, head, 0, 16, pos);
+    if (read < 16) break;
+
+    const rawSize = head.readUInt32LE(0);
+    const compSize = head.readUInt32LE(4);
+    const rawCrc = head.readUInt32LE(8);
+    const compCrc = head.readUInt32LE(12);
+
+    if (compSize > 1024 * 1024 * 1024) {
+      return { verified, error: `Implausible frame size at offset ${pos}` };
+    }
+
+    let comp: Buffer;
+    try {
+      comp = readFrameCompressed(fd, compSize, pos + 16, cipherId, key);
+    } catch (error) {
+      return {
+        verified,
+        error: `${error instanceof Error ? error.message : String(error)} at offset ${pos}`
+      };
+    }
+
+    if (crc32(comp) !== compCrc) {
+      return { verified, error: `Compressed data CRC mismatch at offset ${pos}` };
+    }
+
+    let raw: Buffer;
+    try {
+      raw = decompressBlock(comp, compressionId);
+    } catch (error) {
+      return {
+        verified,
+        error: `Failed to decompress block at offset ${pos}: ${error instanceof Error ? error.message : String(error)}`
+      };
+    }
+    if (raw.length !== rawSize) {
+      return { verified, error: `Decompressed size mismatch at offset ${pos}` };
+    }
+    if (crc32(raw) !== rawCrc) {
+      return { verified, error: `Raw data CRC mismatch at offset ${pos}` };
+    }
+
+    verified++;
+    pos += 16 + (cipherId !== CIPHER_NONE ? GCM_IV_LENGTH + GCM_TAG_LENGTH : 0) + compSize;
+    onFrame?.(verified);
+  }
+  return { verified };
 }
 
 export function defaultImagePath(destinationDirectory: string, diskIndex: number, timestamp = Date.now()): string {

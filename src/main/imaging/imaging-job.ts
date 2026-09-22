@@ -163,6 +163,9 @@ export interface JobProgress {
   createdAt: number;
   /** True while a backup is continuing a previously interrupted image. */
   resuming?: boolean;
+  /** Post-write verification progress (frames verified / total). */
+  verifyDone?: number;
+  verifyTotal?: number;
 }
 
 export interface JobResult {

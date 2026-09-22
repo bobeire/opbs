@@ -2,7 +2,30 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { createHash } from 'crypto';
 import { decompressBlock, COMPRESSION_ZSTD } from '../image-format';
-import { decompressQuickLz } from './quicklz';
+import { decompressQuickLz, parseQuickLzFrame } from './quicklz';
+
+/**
+ * Cached read-only file descriptors for image files. Opening/closing the file
+ * on every block read dominates browse latency for large images; keeping the
+ * fd open makes repeated reads fast.
+ */
+const fdCache = new Map<string, number>();
+
+function getCachedFd(imagePath: string): number {
+  const existing = fdCache.get(imagePath);
+  if (existing !== undefined) return existing;
+  const fd = fs.openSync(imagePath, 'r');
+  fdCache.set(imagePath, fd);
+  return fd;
+}
+
+/** Close all cached image file descriptors (call when browsing ends). */
+export function closeImageFds(): void {
+  for (const fd of fdCache.values()) {
+    try { fs.closeSync(fd); } catch { /* already closed */ }
+  }
+  fdCache.clear();
+}
 
 /**
  * Macrium Reflect image container reader.
@@ -92,19 +115,15 @@ export interface MacriumImageInfo {
 export class MacriumUnsupportedError extends Error {}
 
 function readFileRange(imagePath: string, offset: number, length: number): Buffer {
-  const fd = fs.openSync(imagePath, 'r');
-  try {
-    const buf = Buffer.allocUnsafe(length);
-    let pos = 0;
-    while (pos < length) {
-      const n = fs.readSync(fd, buf, pos, length - pos, offset + pos);
-      if (n <= 0) throw new Error(`Unexpected end of file reading ${imagePath} at ${offset + pos}`);
-      pos += n;
-    }
-    return buf;
-  } finally {
-    fs.closeSync(fd);
+  const fd = getCachedFd(imagePath);
+  const buf = Buffer.allocUnsafe(length);
+  let pos = 0;
+  while (pos < length) {
+    const n = fs.readSync(fd, buf, pos, length - pos, offset + pos);
+    if (n <= 0) throw new Error(`Unexpected end of file reading ${imagePath} at ${offset + pos}`);
+    pos += n;
   }
+  return buf;
 }
 
 /** Read an exact byte range from a file (used across the mrimg modules). */
@@ -331,14 +350,11 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
     }
   }
 
-  // Last resort: scan the footer for the block-index record structure.
-  // The primary parser reads count at rec0+2 (2 bytes pad before u32 count).
-  // We scan for that same pattern: at each offset, try reading the count at
-  // offset+2 (matching the primary parser's 2-byte pad), then validate the
-  // records that follow.
+  // Fallback: scan the footer for the block-index record structure.
+  // Validates by actually reading and decompressing the first block to confirm
+  // the index is real (not random footer bytes).
   if (sections.length === 0) {
     for (let off = 13 + pathLen; off < bound - 12; off++) {
-      // Try count at off (no pad) and off+2 (2-byte pad, matching primary parser).
       for (const countOff of [off, off + 2]) {
         if (countOff + 4 > bound) continue;
         const count = footer.readUInt32LE(countOff);
@@ -346,18 +362,28 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
         const rec0 = countOff + 4;
         const need = rec0 + count * MR_V7_RECORD_SIZE;
         if (need > bound) continue;
-        // Validate ALL record offsets: within file bounds, monotonically
-        // non-decreasing (blocks written sequentially). A false positive
-        // from random footer bytes would have chaotic offsets.
+        // Validate offsets: within data region, monotonically non-decreasing.
         let prevOffset = -1;
         let valid = true;
         for (let r = 0; r < count; r++) {
           const rOff = Number(footer.readBigUInt64LE(rec0 + r * MR_V7_RECORD_SIZE + 6));
-          if (rOff < 0 || rOff >= fileSize) { valid = false; break; }
+          if (rOff <= 0 || rOff >= metaOff) { valid = false; break; }
           if (rOff < prevOffset) { valid = false; break; }
           prevOffset = rOff;
         }
         if (!valid) continue;
+        // Validate by actually decompressing the first block. If it produces
+        // valid data, the index is real. This is expensive but definitive.
+        try {
+          const firstOff = Number(footer.readBigUInt64LE(rec0 + 6));
+          const hdr = readFileRange(imagePath, firstOff, MR_V7_HEADER_LEN);
+          const frame = parseQuickLzFrame(hdr);
+          const stored = readFileRange(imagePath, firstOff, frame.compressedSize);
+          decompressQuickLz(stored);
+        } catch {
+          // First block failed to decompress — not a real block index.
+          continue;
+        }
         sections.push({ rec0, count });
         break;
       }
@@ -366,7 +392,13 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
   }
 
   if (sections.length === 0) {
-    throw new Error(`No partition block index found in ${imagePath}. The image may use an unsupported Macrium format.`);
+    const isChain = /-\d{2}-\d{2}\.mrimg$/i.test(imagePath);
+    if (isChain) {
+      throw new Error(
+        `No partition block index found in ${path.basename(imagePath)}. This may be a chain segment or differential/incremental image that cannot be browsed independently.`
+      );
+    }
+    throw new Error(`No partition block index found in ${imagePath}. The image may be a differential/incremental backup or use an unsupported Macrium format.`);
   }
 
   const partitions: MacriumPartitionInfo[] = [];
@@ -402,17 +434,42 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
     });
   }
 
-  // Detect compression and block size from the first stored block's frame.
-  const firstBlock = partitions
-    .map((p) => p.blocks.find((b) => b.filePosition >= 0))
-    .find((b): b is MacriumIndexElement => !!b);
-  if (!firstBlock) throw new Error(`No stored data block in ${imagePath}.`);
-  const qh = readFileRange(imagePath, firstBlock.filePosition, MR_V7_HEADER_LEN);
-  const flag = qh.readUInt8(0);
-  const compressed = (flag & 0x01) !== 0;
-  const dsize = (flag & 0x02) !== 0 ? qh.readUInt32LE(5) : qh.readUInt8(2);
+  // Detect compression and block size from stored block frames. Scan several
+  // blocks (not just the first) and use the most common decompressed size —
+  // the first block can be a partial/edge block with a smaller size.
+  const candidateBlocks: MacriumIndexElement[] = [];
+  for (const p of partitions) {
+    for (const b of p.blocks) {
+      if (b.filePosition >= 0) candidateBlocks.push(b);
+      if (candidateBlocks.length >= 8) break;
+    }
+    if (candidateBlocks.length >= 8) break;
+  }
+  if (candidateBlocks.length === 0) throw new Error(`No stored data block in ${imagePath}.`);
+
+  const sizeCounts = new Map<number, number>();
+  let compressed = false;
+  for (const b of candidateBlocks) {
+    try {
+      const qh = readFileRange(imagePath, b.filePosition, MR_V7_HEADER_LEN);
+      const flag = qh.readUInt8(0);
+      if ((flag & 0x01) !== 0) compressed = true;
+      const dsize = (flag & 0x02) !== 0 ? qh.readUInt32LE(5) : qh.readUInt8(2);
+      if (dsize >= 4096 && dsize <= 256 << 20 && (dsize & 511) === 0) {
+        sizeCounts.set(dsize, (sizeCounts.get(dsize) ?? 0) + 1);
+      }
+    } catch {
+      // Skip unreadable frames.
+    }
+  }
   let blockSize = 1 << 16;
-  if (dsize >= 4096 && dsize <= 64 << 20 && (dsize & 511) === 0) blockSize = dsize;
+  let bestCount = 0;
+  for (const [size, cnt] of sizeCounts) {
+    if (cnt > bestCount || (cnt === bestCount && size > blockSize)) {
+      bestCount = cnt;
+      blockSize = size;
+    }
+  }
   for (const p of partitions) {
     p.blockSize = blockSize;
     p.geometry.length = p.blockCount * blockSize;
@@ -539,7 +596,22 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
  * Open a `.mrimgx` (Reflect X) image and parse its full structure: footer,
  * metadata chain, $JSON navigation data, and per-partition block indexes.
  */
+const macriumInfoCache = new Map<string, MacriumImageInfo>();
+
+/** Clear the cached Macrium image parses (call when browsing ends). */
+export function clearMacriumInfoCache(): void {
+  macriumInfoCache.clear();
+}
+
 export function readMacriumImage(imagePath: string): MacriumImageInfo {
+  const cached = macriumInfoCache.get(imagePath);
+  if (cached) return cached;
+  const info = readMacriumImageUncached(imagePath);
+  macriumInfoCache.set(imagePath, info);
+  return info;
+}
+
+function readMacriumImageUncached(imagePath: string): MacriumImageInfo {
   const format = detectMacriumFormat(imagePath);
   if (format === 'mrimg-v7') {
     return readMacriumV7Image(imagePath);

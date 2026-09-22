@@ -2,7 +2,6 @@ import { autoUpdater } from 'electron-updater';
 import { app, BrowserWindow } from 'electron';
 import { logger } from './logger';
 
-const UPDATE_URL = 'https://opbs.rhitcs.com/updates';
 const GITHUB_OWNER = 'bobeire';
 const GITHUB_REPO = 'opbs';
 
@@ -14,7 +13,9 @@ function send(status: string, payload?: unknown): void {
 }
 
 function enabled(): boolean {
-  return app.isPackaged && app.getName() === 'OPBS';
+  // app.getName() returns the package.json `name` ("opbs"), not the
+  // electron-builder productName, so compare case-insensitively.
+  return app.isPackaged && app.getName().toLowerCase() === 'opbs';
 }
 
 export function initAutoUpdater(window: BrowserWindow): void {

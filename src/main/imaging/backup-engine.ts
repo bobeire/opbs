@@ -30,6 +30,9 @@ export interface BackupJobConfig {
   compressionLevel: number;
   verificationEnabled: boolean;
   blockSize?: number;
+  /** Custom base name for the image file (without extension). When omitted a
+   *  timestamped default (`opbs-diskN-<date>.opbs`) is used. */
+  imageName?: string;
   /** Full path of a previous image to build an incremental delta against. */
   baseImagePath?: string;
   /** Optional passphrase; enables AES-256-GCM encryption of the image. */
@@ -67,6 +70,18 @@ export interface BackupCoordinator {
 }
 
 type LaunchedBackupJob = ReturnType<typeof launchElevatedJob<ImagingJob, JobProgress, JobResult>>;
+
+/**
+ * Sanitise a user-supplied image name: strip any directory components and
+ * characters that are invalid in Windows filenames, and drop a trailing
+ * `.opbs` extension (it is appended by the caller).
+ */
+function sanitizeImageName(name: string): string {
+  const base = path.basename(name.trim());
+  const withoutExt = base.replace(/\.opbs$/i, '');
+  const cleaned = withoutExt.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '');
+  return cleaned || `opbs-${Date.now()}`;
+}
 
 export class ImagingEngine implements BackupCoordinator {
   private current: LaunchedBackupJob | null = null;
@@ -208,7 +223,9 @@ export class ImagingEngine implements BackupCoordinator {
     // left off instead of starting fresh. Only block counts that are exactly
     // recoverable are reused (frames have self-describing headers); the block
     // index is rewritten at the end as usual.
-    const imagePath = defaultImagePath(destDir, diskIndex);
+    const imagePath = config.imageName
+      ? path.join(destDir, `${sanitizeImageName(config.imageName)}.opbs`)
+      : defaultImagePath(destDir, diskIndex);
     let resumeCheckpoint: ResumeCheckpoint | undefined;
     if (config.resume && fs.existsSync(imagePath)) {
       try {
@@ -295,7 +312,8 @@ export class ImagingEngine implements BackupCoordinator {
 
     logger.info(`Starting elevated backup to ${job.imagePath}`, {
       partitions: job.partitions.length,
-      totalBytes: job.partitions.reduce((s, p) => s + p.size, 0)
+      totalBytes: job.partitions.reduce((s, p) => s + p.size, 0),
+      usedBlocksOnly: !!job.usedBlocksOnly
     });
 
     const launched = launchElevatedJob<ImagingJob, JobProgress, JobResult>(job);
@@ -411,6 +429,8 @@ export function mapJobProgress(jobProgress: JobProgress): {
   estimatedTimeRemaining: number;
   currentPartition: string;
   resuming?: boolean;
+  verifyDone?: number;
+  verifyTotal?: number;
 } {
   let phase: 'preparing' | 'snapshotting' | 'backing_up' | 'verifying' | 'completed' | 'error';
   switch (jobProgress.phase) {
@@ -445,6 +465,7 @@ export function mapJobProgress(jobProgress: JobProgress): {
     speed,
     estimatedTimeRemaining,
     currentPartition: jobProgress.currentPartition,
-    ...(jobProgress.resuming ? { resuming: true } : {})
+    ...(jobProgress.resuming ? { resuming: true } : {}),
+    ...(jobProgress.verifyTotal ? { verifyDone: jobProgress.verifyDone ?? 0, verifyTotal: jobProgress.verifyTotal } : {})
   };
 }

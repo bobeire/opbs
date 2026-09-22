@@ -69,6 +69,7 @@ function fakeSession(): BrowseSession {
   const children = buildTree([rootRec, winDir, fileRec]);
 
   return {
+    filesystem: 'ntfs',
     imagePath: 'fake.opbs',
     chain: ['fake.opbs'],
     partitionIndex: 0,
@@ -84,7 +85,7 @@ function fakeSession(): BrowseSession {
     },
     records,
     children,
-    rootRecord: 5
+    rootId: 5
   };
 }
 

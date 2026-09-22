@@ -3,11 +3,21 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { EventEmitter } from 'events';
-import { app } from 'electron';
 import { logger } from '../utils/logger';
 import { resolvePowershell } from '../utils/elevated';
 import { ensureHelperTaskRegistered, triggerHelperTask, isRunAsAdmin } from '../utils/task-scheduler';
 import { PipeServer, generatePipeName, type PipeMessage } from '../utils/pipe-ipc';
+
+/**
+ * `electron` is required lazily: the WinPE CLI (plain node.exe) imports
+ * backup-engine, which imports this module, and a top-level `require('electron')`
+ * would crash there. `launchElevatedJob` is only ever called from the Electron
+ * main process, where the require resolves.
+ */
+function electronApp(): typeof import('electron').app {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  return require('electron').app;
+}
 
 export const HELPER_FLAG = '--opbs-helper';
 export const PIPE_FLAG = '--pipe';
@@ -46,15 +56,18 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
   const resultPath = path.join(dir, 'result.json');
   const progressPath = path.join(dir, 'progress.json');
   const cancelPath = path.join(dir, 'cancel');
+  const ioPath = path.join(dir, 'io.json');
   const pipeName = generatePipeName();
 
   fs.writeFileSync(jobPath, JSON.stringify(job));
+  // The helper reads its I/O paths (and pipe name) from this sibling file.
+  // Passing them on the command line overflows the 261-char schtasks /TR limit.
+  fs.writeFileSync(ioPath, JSON.stringify({ resultPath, progressPath, cancelPath, pipeName }));
 
   const emitter = new EventEmitter();
   let cancelled = false;
   let settled = false;
   let pipeConnected = false;
-  let pipeFailed = false;
   let pipeResult: unknown = null;
 
   const pipe = new PipeServer(pipeName);
@@ -91,10 +104,9 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
   pipe.onMessage((msg: PipeMessage) => {
     switch (msg.type) {
       case 'started':
-        if (!helperStarted) {
-          helperStarted = true;
-          clearInterval(startupTimer);
-        }
+        // Keep startupTimer running: it doubles as the result.json watchdog
+        // if the pipe later drops before the result message arrives.
+        helperStarted = true;
         break;
       case 'progress':
         emitter.emit('progress', msg);
@@ -108,17 +120,40 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
     }
   });
 
+  // When the pipe dies, the helper may still be flushing result.json (or may
+  // have crashed without writing one). Poll briefly, then fail loudly instead
+  // of hanging the wizard on a progress screen forever.
+  const failAfterPipeLoss = (reason: string): void => {
+    if (settled) return;
+    if (fs.existsSync(resultPath)) {
+      settle();
+      return;
+    }
+    const deadline = Date.now() + 5000;
+    const grace = setInterval(() => {
+      if (settled) {
+        clearInterval(grace);
+        return;
+      }
+      if (fs.existsSync(resultPath)) {
+        clearInterval(grace);
+        settle();
+        return;
+      }
+      if (Date.now() >= deadline) {
+        clearInterval(grace);
+        fail(new Error(`${reason}. The helper exited without reporting a result.`));
+      }
+    }, 200);
+  };
+
   pipe.onError((err) => {
     logger.warn(`Pipe error: ${err.message}`);
-    if (!settled && fs.existsSync(resultPath)) {
-      settle();
-    }
+    failAfterPipeLoss(`The job pipe failed (${err.message})`);
   });
 
   pipe.onClose(() => {
-    if (!settled && fs.existsSync(resultPath)) {
-      settle();
-    }
+    failAfterPipeLoss('The job pipe closed');
   });
 
   // --- Cleanup ---
@@ -150,10 +185,17 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
       clearInterval(startupTimer);
       fail(new Error('Elevation was not confirmed. The job did not start.'));
     }
+    // Helper started but never produced a result and the pipe never settled
+    // us: catch a silently-dead helper so the UI gets an error, not a hang.
+    if (helperStarted && !pipe.connected && Date.now() - startedAt > STARTED_TIMEOUT_MS * 4) {
+      clearInterval(startupTimer);
+      fail(new Error('The backup helper exited without reporting a result.'));
+    }
   }, 300);
 
   // --- Spawn helper ---
   const exe = process.execPath;
+  const app = electronApp();
   const appPath = app.isPackaged ? undefined : app.getAppPath();
 
   (async (): Promise<void> => {
@@ -162,42 +204,33 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
       await pipe.start();
       logger.info(`Pipe server listening on ${pipeName}`);
     } catch (pipeError) {
-      pipeFailed = true;
       logger.warn(`Pipe server creation failed, using file-based IPC: ${pipeError}`);
     }
 
     // Spawn the helper via task scheduler (primary) or UAC fallback.
     // If the app is already running as admin (RunAsAdmin registry key), the
-    // helper inherits elevation — no UAC needed.
+    // helper inherits elevation — spawn it directly, no task/UAC needed.
     const alreadyElevated = isRunAsAdmin(exe);
-    try {
-      if (!alreadyElevated) {
-        await ensureHelperTaskRegistered(exe, appPath);
-      }
-      await triggerHelperTask(exe, jobPath, resultPath, progressPath, cancelPath, appPath,
-        pipeFailed ? undefined : pipeName);
-      logger.info('Launched helper via scheduled task (no UAC).');
-    } catch (taskError) {
-      logger.warn('Scheduled task launch failed, falling back to UAC:', taskError);
-      const args = [
-        ...(appPath ? [appPath] : []),
-        HELPER_FLAG,
-        jobPath,
-        resultPath,
-        progressPath,
-        cancelPath,
-        ...(pipeFailed ? [] : [PIPE_FLAG, pipeName])
-      ];
+    const args = [
+      ...(appPath ? [appPath] : []),
+      HELPER_FLAG,
+      jobPath
+    ];
 
-      if (alreadyElevated) {
-        // App is already admin — spawn directly, no UAC.
-        logger.info('App is already elevated, spawning helper directly.');
-        const child = spawn(exe, args, { windowsHide: true, stdio: 'ignore' });
-        child.on('error', (error) => {
-          clearInterval(startupTimer);
-          fail(error);
-        });
-      } else {
+    if (alreadyElevated) {
+      logger.info('App is already elevated, spawning helper directly.');
+      const child = spawn(exe, args, { windowsHide: true, stdio: 'ignore' });
+      child.on('error', (error) => {
+        clearInterval(startupTimer);
+        fail(error);
+      });
+    } else {
+      try {
+        await ensureHelperTaskRegistered(exe, appPath);
+        await triggerHelperTask(exe, jobPath, appPath);
+        logger.info('Launched helper via scheduled task (no UAC).');
+      } catch (taskError) {
+        logger.warn('Scheduled task launch failed, falling back to UAC:', taskError);
         const psArgs = args.map(quotePowerShell);
         const psScript =
           `Start-Process -FilePath ${quotePowerShell(exe)} -ArgumentList @(${psArgs.join(', ')}) ` +
@@ -221,13 +254,14 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
     if (cancelled) return;
     cancelled = true;
     logger.info('Cancellation requested for elevated job.');
-    if (!pipe.send({ type: 'cancel' })) {
-      try {
-        fs.writeFileSync(cancelPath, '1');
-      } catch {
-        /* best-effort */
-      }
+    // Always write the cancel file: the helper polls it (isCancelled) and does
+    // not consume pipe messages, so the pipe send is best-effort only.
+    try {
+      fs.writeFileSync(cancelPath, '1');
+    } catch {
+      /* best-effort */
     }
+    pipe.send({ type: 'cancel' });
   };
 
   return {

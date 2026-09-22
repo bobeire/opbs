@@ -54,7 +54,7 @@ declare global {
       addBackupProfile: (config: any) => Promise<any>;
       updateBackupProfile: (id: string, updates: any) => Promise<any>;
       deleteBackupProfile: (id: string) => Promise<boolean>;
-      selectDirectory: () => Promise<string | undefined>;
+      selectDirectory: (options?: { title?: string; defaultPath?: string }) => Promise<string | undefined>;
       selectFile: (options?: any) => Promise<string | undefined>;
       selectSaveFile: (options?: any) => Promise<string | undefined>;
       planRetention: (directory: string, options?: any) => Promise<any>;
@@ -274,7 +274,7 @@ declare global {
           unhealthy: boolean;
         }>
       >;
-      browsePartitions: (imagePath: string) => Promise<{ encrypted: boolean; partitions: any[] }>;
+      browsePartitions: (imagePath: string) => Promise<{ encrypted: boolean; partitions: Array<{ partitionIndex: number; size: number; offsetOnDisk: number; blockCount: number; fsType?: string; browsable?: boolean }> }>;
       browseList: (imagePath: string, partitionIndex: number, relPath: string, passphrase?: string) => Promise<any[]>;
       browseExtract: (imagePath: string, partitionIndex: number, relPath: string, outPath: string, passphrase?: string) => Promise<any>;
       browseClose: () => Promise<void>;

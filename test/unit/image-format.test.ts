@@ -15,6 +15,7 @@ import {
   encodeBlockFrame,
   verifyImage,
   readImageInfo,
+  clearImageInfoCache,
   decompressBlock,
   compressBlock,
   defaultImagePath,
@@ -27,6 +28,7 @@ import {
   FLAG_HAS_BLOCK_INDEX,
   FLAG_VERIFIED,
   FLAG_INCREMENTAL,
+  FLAG_MULTI_VOLUME,
   HEADER_SIZE,
   PARTITION_TABLE_ENTRY_SIZE,
   BLOCK_INDEX_ENTRY_SIZE,
@@ -689,5 +691,143 @@ describe('image-format', () => {
       expect(scan.cursor).toBe(partialStart);
       expect(scan.resumePartitionFrames).toBe(0);
     });
+  });
+});
+
+describe('readImageInfo (multi-volume)', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-mv-'));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reads the block index from the last volume when the base header offset is 0', () => {
+    const base = path.join(dir, 'mv.opbs');
+    const last = `${base}.001`;
+    const blockSize = 1024;
+    const partition: PartitionEntryMeta = {
+      partitionIndex: 0,
+      size: blockSize * 2,
+      offsetOnDisk: 0,
+      firstBlockFileOffset: 0,
+      blockCount: 2
+    };
+
+    const writeVolume = (p: string, blockIndexOffset: number, withIndex: boolean): void => {
+      const header: ImageHeader = {
+        version: IMAGE_VERSION,
+        timestamp: Date.now(),
+        totalBytes: blockSize * 2,
+        blockSize,
+        compressionId: COMPRESSION_DEFLATE,
+        partitionCount: 1,
+        flags: FLAG_HAS_BLOCK_INDEX | FLAG_MULTI_VOLUME,
+        blockIndexOffset
+      };
+      const fd = fs.openSync(p, 'w+');
+      fs.writeSync(fd, encodeHeader(header), 0, HEADER_SIZE, 0);
+      fs.writeSync(fd, encodePartitionEntry(partition), 0, PARTITION_TABLE_ENTRY_SIZE, HEADER_SIZE);
+      if (withIndex) {
+        const blocks: BlockRecord[] = [
+          { partitionIndex: 0, blockIndex: 0, fileOffset: 0, rawSize: blockSize, compSize: 10, rawCrc32: 1 },
+          { partitionIndex: 0, blockIndex: 1, fileOffset: 0, rawSize: blockSize, compSize: 10, rawCrc32: 2 }
+        ];
+        let cursor = HEADER_SIZE + PARTITION_TABLE_ENTRY_SIZE;
+        const countBuf = Buffer.alloc(8);
+        countBuf.writeBigUInt64LE(BigInt(blocks.length));
+        fs.writeSync(fd, countBuf, 0, 8, cursor);
+        cursor += 8;
+        for (const b of blocks) {
+          fs.writeSync(fd, encodeBlockIndexEntry(b), 0, BLOCK_INDEX_ENTRY_SIZE, cursor);
+          cursor += BLOCK_INDEX_ENTRY_SIZE;
+        }
+      }
+      fs.closeSync(fd);
+    };
+
+    // The base volume's header has blockIndexOffset 0 (only the LAST volume's
+    // header is patched once the index is written) — the classic multi-volume
+    // browse bug: reading the base header alone finds no block index.
+    writeVolume(base, 0, false);
+    const indexOffset = HEADER_SIZE + PARTITION_TABLE_ENTRY_SIZE;
+    writeVolume(last, indexOffset, true);
+
+    clearImageInfoCache();
+    const info = readImageInfo(base);
+    expect(info.header.blockIndexOffset).toBe(indexOffset);
+    expect(info.blocks).toHaveLength(2);
+    expect(info.blocks[0].partitionIndex).toBe(0);
+  });
+
+  it('verifies frames across every volume of a multi-volume image', async () => {
+    const base = path.join(dir, 'mv-verify.opbs');
+    const last = `${base}.001`;
+    const blockSize = 1024;
+    const partition: PartitionEntryMeta = {
+      partitionIndex: 0,
+      size: blockSize * 3,
+      offsetOnDisk: 0,
+      firstBlockFileOffset: 0,
+      blockCount: 3
+    };
+    const blocks: BlockRecord[] = [];
+
+    const writeVolume = (p: string, frameCount: number, withIndex: boolean): void => {
+      const fd = fs.openSync(p, 'w+');
+      let cursor = HEADER_SIZE + PARTITION_TABLE_ENTRY_SIZE;
+      const header: ImageHeader = {
+        version: IMAGE_VERSION,
+        timestamp: Date.now(),
+        totalBytes: blockSize * 3,
+        blockSize,
+        compressionId: COMPRESSION_NONE,
+        partitionCount: 1,
+        flags: FLAG_HAS_BLOCK_INDEX | FLAG_MULTI_VOLUME,
+        blockIndexOffset: 0
+      };
+      fs.writeSync(fd, encodeHeader(header), 0, HEADER_SIZE, 0);
+      fs.writeSync(fd, encodePartitionEntry(partition), 0, PARTITION_TABLE_ENTRY_SIZE, HEADER_SIZE);
+      for (let i = 0; i < frameCount; i++) {
+        const raw = randomData(blockSize);
+        const comp = compressBlock(raw, COMPRESSION_NONE, 0);
+        const frame = encodeBlockFrame(raw, comp);
+        fs.writeSync(fd, frame, 0, frame.length, cursor);
+        blocks.push({
+          partitionIndex: 0,
+          blockIndex: blocks.length,
+          fileOffset: cursor,
+          rawSize: raw.length,
+          compSize: comp.length,
+          rawCrc32: crc32(raw)
+        });
+        cursor += frame.length;
+      }
+      if (withIndex) {
+        const indexOffset = cursor;
+        const countBuf = Buffer.alloc(8);
+        countBuf.writeBigUInt64LE(BigInt(blocks.length));
+        fs.writeSync(fd, countBuf, 0, 8, cursor);
+        cursor += 8;
+        for (const b of blocks) {
+          fs.writeSync(fd, encodeBlockIndexEntry(b), 0, BLOCK_INDEX_ENTRY_SIZE, cursor);
+          cursor += BLOCK_INDEX_ENTRY_SIZE;
+        }
+        const patch = Buffer.alloc(HEADER_SIZE);
+        fs.readSync(fd, patch, 0, HEADER_SIZE, 0);
+        patch.writeBigUInt64LE(BigInt(indexOffset), 40);
+        fs.writeSync(fd, patch, 0, HEADER_SIZE, 0);
+      }
+      fs.closeSync(fd);
+    };
+
+    writeVolume(base, 2, false);
+    writeVolume(last, 1, true);
+
+    clearImageInfoCache();
+    const result = await verifyImage(base);
+    expect(result.ok).toBe(true);
+    expect(result.blocksVerified).toBe(3);
   });
 });

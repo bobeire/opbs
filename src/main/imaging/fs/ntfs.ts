@@ -1,5 +1,9 @@
 import { PartitionReader } from '../image-browse';
 import { decompressLznt1 } from './lznt1';
+import { logger } from '../../utils/logger';
+
+/** Stop reading the MFT after this many consecutive record-read failures. */
+const MAX_CONSECUTIVE_MFT_READ_FAILURES = 16;
 
 /**
  * A minimal NTFS reader. It does not require a mounted volume: it reads bytes
@@ -547,6 +551,8 @@ export function readFileRecords(reader: PartitionReader, layout: NtfsLayout): Nt
   const records: NtfsFile[] = [];
 
   const recordCount = Math.floor(mftFile.size / layout.fileRecordSize);
+  let consecutiveFailures = 0;
+  let firstFailure = '';
   for (let i = 0; i < recordCount; i++) {
     let raw: Buffer;
     try {
@@ -555,9 +561,25 @@ export function readFileRecords(reader: PartitionReader, layout: NtfsLayout): Nt
       } else {
         raw = reader.read(layout.mftStartCluster * layout.clusterSize + i * layout.fileRecordSize, layout.fileRecordSize);
       }
-    } catch {
-      // A corrupt/sparse record at the end of the MFT; stop reading.
-      break;
+      consecutiveFailures = 0;
+    } catch (error) {
+      // A single bad record (hole, corruption) must not abort the whole MFT —
+      // stopping on the first error truncated the cache, so every later
+      // directory index entry failed to resolve and the browser showed an
+      // empty folder. Only give up after many failures in a row, which means
+      // the runlist itself no longer covers the offset.
+      consecutiveFailures++;
+      if (!firstFailure) {
+        firstFailure = error instanceof Error ? error.message : String(error);
+      }
+      if (consecutiveFailures >= MAX_CONSECUTIVE_MFT_READ_FAILURES) {
+        logger.warn(
+          `readFileRecords: stopping after ${consecutiveFailures} consecutive read failures at record ` +
+            `${i}/${recordCount} (first: ${firstFailure}); ${records.length} records loaded`
+        );
+        break;
+      }
+      continue;
     }
     try {
       records.push(parseFileRecord(raw, i));
@@ -565,6 +587,9 @@ export function readFileRecords(reader: PartitionReader, layout: NtfsLayout): Nt
       // Skip invalid records (e.g. sparse/unallocated MFT slots).
       continue;
     }
+  }
+  if (records.length === 0 && recordCount > 0) {
+    logger.warn(`readFileRecords: loaded 0 of ${recordCount} MFT records (first failure: ${firstFailure || 'none'})`);
   }
   return resolveAttributeLists(records);
 }

@@ -13,7 +13,9 @@ export {
   MRIMG_V7_TRAILER_SIZE,
   MR_V7_RECORD_SIZE,
   MR_V7_PART_REC_TAIL,
-  MR_V7_HEADER_LEN
+  MR_V7_HEADER_LEN,
+  closeImageFds,
+  clearMacriumInfoCache
 } from './mrimg-format';
 export { MacriumPartitionReader, openMacriumPartitionReader } from './mrimg-reader';
 export { parseQuickLzFrame, decompressQuickLz, QuickLzFrameInfo } from './quicklz';
