@@ -359,7 +359,8 @@ export function readFat32UsedBlocks(
     let touched = false;
     for (let c = clusterStart; c < clusterEnd; c++) {
       const off = c * 4;
-      if (off + 4 <= fat.length && fat.readUInt32LE(off) !== 0) {
+      // FAT entries past a short read are unknown — capture the block.
+      if (off + 4 > fat.length || fat.readUInt32LE(off) !== 0) {
         touched = true;
         break;
       }

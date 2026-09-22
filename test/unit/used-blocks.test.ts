@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { PartitionReader } from '../../src/main/imaging/image-browse';
 import { readUsedBlockIndexes } from '../../src/main/imaging/fs/used-blocks';
-import { buildCanonicalNtfsVolumeData, GR_CLUSTER } from '../helpers/ntfs-resize-fixture';
+import { buildCanonicalNtfsVolumeData, GR_CLUSTER, GR_MFT_LCN } from '../helpers/ntfs-resize-fixture';
+import { buildFileRecord, FILE_RECORD, standardInfo, fileNameAttr } from '../helpers/ntfs-fixture';
 
 /** Expose raw NTFS volume bytes as a PartitionReader for the block scanner. */
 function readerOf(buf: Buffer): PartitionReader {
@@ -66,5 +67,59 @@ describe('readUsedBlockIndexes', () => {
     notAnMft.writeBigUInt64LE(71n, 0x38);
     notAnMft.writeInt8(-10, 0x40);
     expect(readUsedBlockIndexes(readerOf(notAnMft), 64 * GR_CLUSTER, GR_CLUSTER)).toBeNull();
+  });
+
+  it('treats bits past a truncated $Bitmap as allocated', () => {
+    // $Bitmap realSize covers only 16 clusters (2 bytes) while the boot
+    // sector claims 64 — clusters 16+ have no bitmap byte and must be
+    // captured, not treated as free (browsing would hit "No block N").
+    const totalClusters = 64;
+    const buf = Buffer.alloc(totalClusters * GR_CLUSTER);
+    const mftBase = GR_MFT_LCN * GR_CLUSTER;
+    const rec0 = buildFileRecord(0, {
+      inUse: true,
+      attrs: [
+        { type: 0x10, nonResident: false, resident: standardInfo(1000) },
+        { type: 0x30, nonResident: false, resident: fileNameAttr(5, '$MFT', 1) },
+        { type: 0x80, nonResident: true, runs: [{ startLcn: GR_MFT_LCN, runLength: 12 }], realSize: 12 * GR_CLUSTER }
+      ]
+    });
+    rec0.copy(buf, mftBase);
+    // realSize=2 → 16 clusters covered by $Bitmap; volume has 64.
+    const rec6 = buildFileRecord(6, {
+      inUse: true,
+      attrs: [
+        { type: 0x10, nonResident: false, resident: standardInfo(3000) },
+        { type: 0x30, nonResident: false, resident: fileNameAttr(5, '$Bitmap', 1) },
+        {
+          type: 0x80,
+          nonResident: true,
+          runs: [{ startLcn: 3, runLength: 1 }],
+          realSize: 2
+        }
+      ]
+    });
+    rec6.copy(buf, mftBase + 6 * FILE_RECORD);
+    buf.write('NTFS    ', 3, 'ascii');
+    buf.writeUInt16LE(512, 0x0b);
+    buf.writeUInt8(8, 0x0d);
+    buf.writeUInt8(0xf8, 0x15);
+    buf.writeBigUInt64LE(BigInt(totalClusters * 8), 0x28);
+    buf.writeBigUInt64LE(BigInt(GR_MFT_LCN), 0x30);
+    buf.writeBigUInt64LE(BigInt(GR_MFT_LCN + 1), 0x38);
+    buf.writeInt8(-10, 0x40);
+    // $Bitmap content: first byte marks clusters 0..7 used; clusters 16+
+    // fall past the 2-byte $Bitmap entirely.
+    const bmBase = 3 * GR_CLUSTER;
+    buf[bmBase] = 0xff;
+
+    const used = readUsedBlockIndexes(readerOf(buf), totalClusters * GR_CLUSTER, GR_CLUSTER);
+    expect(used).not.toBeNull();
+    expect(used!.has(0)).toBe(true);
+    // past $Bitmap coverage → treated allocated
+    expect(used!.has(16)).toBe(true);
+    expect(used!.has(32)).toBe(true);
+    // beyond the boot-sector volume size → still unused
+    expect(used!.has(64)).toBe(false);
   });
 });

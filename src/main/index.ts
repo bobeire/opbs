@@ -56,9 +56,6 @@ const scheduler = new BackupScheduler(backupManager, settingsManager);
 // Read-only image mounts: job launcher per mount id (cancel = unmount).
 const mountLaunchers = new Map<string, { cancel(): void }>();
 
-// Cached file browsing sessions (parsing the MFT is expensive; reuse per image).
-const browseSessions = new Map<string, BrowseSession>();
-
 // Explorer file-handler action (context-menu verb on an image): delivered to
 // the renderer once it has loaded, or run headless for verify.
 let pendingFileAction: FileAction | null = null;
@@ -116,6 +113,23 @@ function browseCacheKey(imagePath: string, partitionIndex: number, keyHex?: stri
   return `${imagePath}#${partitionIndex}${keyHex ? '#' + keyHex : ''}`;
 }
 
+function imageFileSignature(imagePath: string): string {
+  try {
+    const st = fs.statSync(imagePath);
+    return `${st.size}:${st.mtimeMs}`;
+  } catch {
+    return '';
+  }
+}
+
+interface BrowseCacheEntry {
+  session: BrowseSession;
+  /** size:mtime of the image chain head when the session was opened. */
+  signature: string;
+}
+
+const browseSessions = new Map<string, BrowseCacheEntry>();
+
 function openBrowseSession(imagePath: string, partitionIndex: number, passphrase?: string): BrowseSession {
   let key: Buffer | undefined;
   if (!detectMacriumFormat(imagePath)) {
@@ -131,11 +145,19 @@ function openBrowseSession(imagePath: string, partitionIndex: number, passphrase
     }
   }
   const cacheKey = browseCacheKey(imagePath, partitionIndex, key?.toString('hex'));
-  let session = browseSessions.get(cacheKey);
-  if (!session) {
-    session = fsOpenBrowseAny(imagePath, partitionIndex, key);
-    browseSessions.set(cacheKey, session);
+  const signature = imageFileSignature(imagePath);
+  const cached = browseSessions.get(cacheKey);
+  if (cached && cached.signature === signature) {
+    return cached.session;
   }
+  if (cached) {
+    logger.info(
+      `browse: image changed (${cached.signature} -> ${signature || 'missing'}), reopening ${imagePath}#${partitionIndex}`
+    );
+    browseSessions.delete(cacheKey);
+  }
+  const session = fsOpenBrowseAny(imagePath, partitionIndex, key);
+  browseSessions.set(cacheKey, { session, signature: imageFileSignature(imagePath) });
   return session;
 }
 
@@ -543,6 +565,10 @@ function setupIpcHandlers(): void {
           : config?.destinationPath?.startsWith('ftp://')
             ? { ...config, ftpProfile: ftpProfileFromSettings() }
             : config;
+    // A new backup rewrites an image path that may already have a browse
+    // session / image-info cache pointing at the old content.
+    browseSessions.clear();
+    clearImageInfoCache();
     return backupManager.startBackup(merged);
   });
 
@@ -1272,6 +1298,7 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       return listDirectory(session, relPath ?? '');
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
+      logger.error(`browse-list failed: ${imagePath}#${partitionIndex} path="${relPath}": ${msg}`, error);
       if (msg.includes('Not an NTFS') || msg.includes('Not a FAT32')) {
         throw new Error('This partition uses an unsupported filesystem. NTFS and FAT32 partitions can be browsed.');
       }
@@ -1280,9 +1307,18 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
   });
 
   ipcMain.handle('browse-extract', async (_, imagePath: string, partitionIndex: number, relPath: string, outPath: string, passphrase?: string) => {
-    const session = openBrowseSession(imagePath, partitionIndex, passphrase);
-    const files = extractPath(session, relPath, outPath);
-    return { ok: true, files, outPath };
+    try {
+      const session = openBrowseSession(imagePath, partitionIndex, passphrase);
+      const files = extractPath(session, relPath, outPath);
+      return { ok: true, files, outPath };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error(
+        `browse-extract failed: ${imagePath}#${partitionIndex} path="${relPath}" -> "${outPath}": ${msg}`,
+        error
+      );
+      throw error;
+    }
   });
 
   ipcMain.handle('browse-close', async () => {

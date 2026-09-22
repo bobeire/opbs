@@ -67,7 +67,10 @@ export class ChainPartitionReader implements PartitionReader {
       }
     }
     if (!selected) {
-      throw new Error(`No block ${blockIndex} for partition in the image chain`);
+      throw new Error(
+        `No block ${blockIndex} for partition in the image chain ` +
+          `(the backup may have skipped free space, or the image is incomplete)`
+      );
     }
     const blockImagePath = selected.block.volumeIndex != null
       ? resolveVolumePath(selected.imagePath, selected.block.volumeIndex)

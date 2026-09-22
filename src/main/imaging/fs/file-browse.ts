@@ -423,6 +423,9 @@ function listNtfs(session: NtfsBrowseSession, relPath: string): BrowseNode[] {
 
 function listFat32(session: Fat32BrowseSession, relPath: string): BrowseNode[] {
   const target = relPath.trim().length > 0 ? resolveFat32Path(session, relPath) : null;
+  if (relPath.trim().length > 0 && !target) {
+    throw new Error(`Directory not found: ${relPath}`);
+  }
   const cluster = target?.startCluster ?? session.rootCluster;
   let entries = session.directories.get(cluster);
   if (!entries) {
@@ -444,6 +447,9 @@ function listFat32(session: Fat32BrowseSession, relPath: string): BrowseNode[] {
 
 function listExfat(session: ExfatBrowseSession, relPath: string): BrowseNode[] {
   const target = relPath.trim().length > 0 ? resolveExfatPath(session, relPath) : null;
+  if (relPath.trim().length > 0 && !target) {
+    throw new Error(`Directory not found: ${relPath}`);
+  }
   const cluster = target?.startCluster ?? session.rootCluster;
   let entries = session.directories.get(cluster);
   if (!entries) {

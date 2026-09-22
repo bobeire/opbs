@@ -66,6 +66,20 @@ function readNtfsUsedBlocks(
   if (clusterSize <= 0 || blockSize <= 0) {
     return null;
   }
+  // Prefer the boot-sector volume size when $Bitmap claims fewer clusters
+  // (truncated bitmap) so high clusters are scanned and the out-of-range
+  // bits below mark them allocated instead of silently dropping them.
+  let scanTo = totalClusters;
+  try {
+    const bpb = reader.read(0, 512);
+    const totalSectors = Number(bpb.readBigUInt64LE(0x28));
+    const spc = bpb.readUInt8(0x0d);
+    if (totalSectors > 0 && spc > 0) {
+      scanTo = Math.max(scanTo, Math.floor(totalSectors / spc));
+    }
+  } catch {
+    // keep $Bitmap-derived totalClusters
+  }
 
   const used = new Set<number>();
   const blockCount = Math.ceil(partitionSize / blockSize);
@@ -73,14 +87,16 @@ function readNtfsUsedBlocks(
     const start = b * blockSize;
     const end = Math.min((b + 1) * blockSize, partitionSize);
     const clusterStart = Math.floor(start / clusterSize);
-    const clusterEnd = Math.min(Math.ceil(end / clusterSize), totalClusters);
-    if (clusterStart >= totalClusters) {
+    const clusterEnd = Math.min(Math.ceil(end / clusterSize), scanTo);
+    if (clusterStart >= scanTo) {
       continue;
     }
     let touched = false;
     for (let c = clusterStart; c < clusterEnd; c++) {
       const byteIndex = c >> 3;
-      if (byteIndex < bitmapBytes.length && (bitmapBytes[byteIndex] & (1 << (c & 7))) !== 0) {
+      // Bits past a short/truncated $Bitmap are unknown — capture those
+      // blocks rather than silently dropping them (browse would 404 later).
+      if (byteIndex >= bitmapBytes.length || (bitmapBytes[byteIndex] & (1 << (c & 7))) !== 0) {
         touched = true;
         break;
       }

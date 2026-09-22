@@ -110,6 +110,21 @@ describe('image browse', () => {
     expect(() => reader.read(CLUSTER, 10)).toThrow(/out of bounds/i);
   });
 
+  it('explains a missing used-space block when browsing', () => {
+    // A used-blocks backup omits free-space blocks; reading one must not
+    // look like a generic corruption error.
+    writeImageFromBytes(imagePath, Buffer.alloc(CLUSTER), CLUSTER);
+    const { reader, partition } = partitionReaderForChain([imagePath], 0);
+    expect(partition.blockCount).toBe(1);
+    // Simulate an incomplete index by reading through a partition that
+    // claims more blocks than the image stores.
+    const incomplete = { ...partition, size: CLUSTER * 2, blockCount: 2 };
+    const info = readImageInfo(imagePath);
+    const chain = new ChainPartitionReader([{ imagePath, info }], incomplete);
+    expect(() => chain.read(CLUSTER, 10)).toThrow(/No block 1.*skipped free space|No block 1 for partition/i);
+    expect(reader.read(0, 4)).toHaveLength(4);
+  });
+
   it('does not misdetect a real NTFS boot sector as FAT32', () => {
     // Real NTFS boot sectors set a non-zero physical drive number at 0x24
     // (typically 0x80) and a 0x55/0xAA signature — bytes detectFatType()

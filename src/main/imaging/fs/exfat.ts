@@ -44,8 +44,11 @@ export function detectExfat(bpb: Buffer): boolean {
   if (bpb.length < 512) return false;
   if (bpb.toString('ascii', 3, 11) !== 'EXFAT   ') return false;
   if (bpb[510] !== 0x55 || bpb[511] !== 0xAA) return false;
-  const sectorShift = bpb.readUInt8(0x6C);
-  const clusterShift = bpb.readUInt8(0x6D);
+  // BytesPerSectorShift / SectorsPerClusterShift live at 0x6E / 0x6F
+  // (0x6C is VolumeFlags). Wrong offsets parsed clusterSize as megabytes
+  // and dropped free-space blocks past a short allocation bitmap.
+  const sectorShift = bpb.readUInt8(0x6e);
+  const clusterShift = bpb.readUInt8(0x6f);
   return sectorShift >= 9 && sectorShift <= 12 && clusterShift <= 25;
 }
 
@@ -57,8 +60,8 @@ export function parseExfatBootSector(reader: PartitionReader): ExfatLayout {
   if (!detectExfat(bpb)) {
     throw new Error('Not an exFAT volume');
   }
-  const sectorShift = bpb.readUInt8(0x6C);
-  const clusterShift = bpb.readUInt8(0x6D);
+  const sectorShift = bpb.readUInt8(0x6e);
+  const clusterShift = bpb.readUInt8(0x6f);
   const bytesPerSector = 1 << sectorShift;
   const sectorsPerCluster = 1 << clusterShift;
   const clusterSize = bytesPerSector * sectorsPerCluster;
@@ -303,7 +306,10 @@ export function readExfatUsedBlocks(
     for (let c = clusterStart; c < clusterEnd; c++) {
       const bitIndex = c - 2;
       const byteIndex = bitIndex >> 3;
-      if (byteIndex < bitmap.length && (bitmap[byteIndex] & (1 << (bitIndex & 7))) !== 0) {
+      // Bits past the end of a short/truncated bitmap mean "unknown" — treat
+      // as allocated so a deep directory whose clusters sit beyond the bitmap
+      // is still captured (browsing would otherwise hit "No block N").
+      if (byteIndex >= bitmap.length || (bitmap[byteIndex] & (1 << (bitIndex & 7))) !== 0) {
         touched = true;
         break;
       }
