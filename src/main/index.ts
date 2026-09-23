@@ -1363,7 +1363,11 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       if (mainWindow) {
         // Mount UUID must win: the helper progress payload includes a native
         // numeric handle id that would otherwise clobber it on spread.
-        mainWindow.webContents.send('mount-status', { ...p, id });
+        const payload = { ...p, id };
+        logger.info(`mount-status → renderer: state=${String(p?.state)} id=${id} mountPoint=${String((p as { mountPoint?: string })?.mountPoint ?? '')}`);
+        mainWindow.webContents.send('mount-status', payload);
+      } else {
+        logger.warn(`mount-status dropped (no window): state=${String(p?.state)} id=${id}`);
       }
     });
     launcher.promise

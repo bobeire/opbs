@@ -59,8 +59,9 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
   const [mounting, setMounting] = useState(false);
   const [mountError, setMountError] = useState('');
   // The mount-status listener is registered once ([]); it must read the current
-  // mount id through a ref or it closes over null and drops every event.
+  // mount id / image key through refs or it closes over null and drops every event.
   const mountIdRef = useRef<string | null>(null);
+  const mountKeyRef = useRef('');
 
   useEffect(() => {
     void window.electronAPI
@@ -76,7 +77,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
       if (!mountIdRef.current || status.id !== mountIdRef.current) return;
       if (status.state === 'mounted') {
         setMountPoint(status.mountPoint ?? '');
-        setMountedOf(`${imagePath}#${partitionIndex}`);
+        setMountedOf(mountKeyRef.current);
         setMounting(false);
         setMountError('');
       } else if (status.state === 'unmounted') {
@@ -84,15 +85,16 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
           setMountError(status.error ?? 'The mount was removed unexpectedly.');
         }
         mountIdRef.current = null;
+        mountKeyRef.current = '';
         setMountId(null);
         setMountPoint('');
+        setMountedOf('');
         setMounting(false);
       }
     });
     return () => {
       unsubscribe();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -260,7 +262,8 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         setMountError(result.error ?? 'Mount failed');
         setMounting(false);
       } else {
-        // Ref first so a fast mount-status event is not dropped by the listener.
+        // Refs first so a fast mount-status event is not dropped by the listener.
+        mountKeyRef.current = `${imagePath}#${partitionIndex}`;
         mountIdRef.current = result.id;
         setMountId(result.id);
       }
@@ -342,9 +345,9 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         )}
       </div>
 
-      {mountedOf === `${imagePath}#${partitionIndex}` ? (
+      {(mountPoint || (mountedOf && mountedOf === `${imagePath}#${partitionIndex}`)) ? (
         <div className="mount-bar mount-active">
-          <span className="mount-point">Mounted at {mountPoint}</span>
+          <span className="mount-point">Mounted at {mountPoint || mountedOf}</span>
           <button className="btn-secondary btn-small" onClick={() => void handleUnmount()}>
             Unmount
           </button>
