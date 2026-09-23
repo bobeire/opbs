@@ -22,7 +22,7 @@ function buildExfatVolume(opts?: { clusterCount?: number; bitmapLength?: number;
   const size = heapStart + (clusterCount + 2) * CLUSTER;
   const buf = Buffer.alloc(size);
 
-  // Boot sector — BytesPerSectorShift @ 0x6E, SectorsPerClusterShift @ 0x6F.
+  // Boot sector — BytesPerSectorShift @ 0x6C, SectorsPerClusterShift @ 0x6D.
   buf.write('EXFAT   ', 3, 'ascii');
   buf[0x40] = 0x01; // partitionOffset present marker (ignored by parser)
   buf.writeUInt32LE(8, 0x50); // fatOffset in sectors
@@ -31,9 +31,9 @@ function buildExfatVolume(opts?: { clusterCount?: number; bitmapLength?: number;
   buf.writeUInt32LE(2, 0x60); // rootDirCluster
   buf.writeUInt32LE(0, 0x64); // firstClusterOfBitmap not used by parser
   buf.writeUInt32LE(0, 0x68); // firstClusterOfChecksum
-  buf.writeUInt16LE(0, 0x6c); // VolumeFlags
-  buf.writeUInt8(SECTOR_SHIFT, 0x6e);
-  buf.writeUInt8(CLUSTER_SHIFT, 0x6f);
+  buf.writeUInt16LE(0, 0x6a); // VolumeFlags
+  buf.writeUInt8(SECTOR_SHIFT, 0x6c);
+  buf.writeUInt8(CLUSTER_SHIFT, 0x6d);
   buf[0x1fe] = 0x55;
   buf[0x1ff] = 0xaa;
 

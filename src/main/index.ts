@@ -1299,8 +1299,8 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       logger.error(`browse-list failed: ${imagePath}#${partitionIndex} path="${relPath}": ${msg}`, error);
-      if (msg.includes('Not an NTFS') || msg.includes('Not a FAT32')) {
-        throw new Error('This partition uses an unsupported filesystem. NTFS and FAT32 partitions can be browsed.');
+      if (msg.includes('Not an NTFS') || msg.includes('Not a FAT32') || msg.includes('Not an exFAT')) {
+        throw new Error('This partition uses an unsupported filesystem. NTFS, FAT32 and exFAT partitions can be browsed.');
       }
       throw error;
     }

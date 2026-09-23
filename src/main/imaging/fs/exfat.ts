@@ -44,11 +44,10 @@ export function detectExfat(bpb: Buffer): boolean {
   if (bpb.length < 512) return false;
   if (bpb.toString('ascii', 3, 11) !== 'EXFAT   ') return false;
   if (bpb[510] !== 0x55 || bpb[511] !== 0xAA) return false;
-  // BytesPerSectorShift / SectorsPerClusterShift live at 0x6E / 0x6F
-  // (0x6C is VolumeFlags). Wrong offsets parsed clusterSize as megabytes
-  // and dropped free-space blocks past a short allocation bitmap.
-  const sectorShift = bpb.readUInt8(0x6e);
-  const clusterShift = bpb.readUInt8(0x6f);
+  // BytesPerSectorShift / SectorsPerClusterShift are at 0x6C / 0x6D.
+  // (0x6A is VolumeFlags; 0x6E is NumberOfFats.)
+  const sectorShift = bpb.readUInt8(0x6c);
+  const clusterShift = bpb.readUInt8(0x6d);
   return sectorShift >= 9 && sectorShift <= 12 && clusterShift <= 25;
 }
 
@@ -60,8 +59,8 @@ export function parseExfatBootSector(reader: PartitionReader): ExfatLayout {
   if (!detectExfat(bpb)) {
     throw new Error('Not an exFAT volume');
   }
-  const sectorShift = bpb.readUInt8(0x6e);
-  const clusterShift = bpb.readUInt8(0x6f);
+  const sectorShift = bpb.readUInt8(0x6c);
+  const clusterShift = bpb.readUInt8(0x6d);
   const bytesPerSector = 1 << sectorShift;
   const sectorsPerCluster = 1 << clusterShift;
   const clusterSize = bytesPerSector * sectorsPerCluster;

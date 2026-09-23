@@ -136,7 +136,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         // Partitions exist but none are browsable — still show the list so the
         // user can see which filesystems are present.
         setPartitionIndex(loaded.partitions[0].partitionIndex);
-        setError('No browsable partitions in this image. Only NTFS and FAT32 partitions can be browsed.');
+        setError('No browsable partitions in this image. Only NTFS, FAT32 and exFAT partitions can be browsed.');
       } else {
         setError('This image has no partitions.');
       }
