@@ -99,6 +99,7 @@
       "repo": "opbs",
       "releaseType": "release",
       "vPrefixedTagName": false
-    }
+    },
+    "npmRebuild": false
   }
 }
