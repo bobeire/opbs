@@ -70,10 +70,13 @@ describe('runMountJob', () => {
     await job;
 
     const progress = pipe.sent.find((m) => m.type === 'progress');
-    expect(progress).toMatchObject({ state: 'mounted', mountPoint: 'Z:', id: 7 });
+    // nativeId (not `id`) so the parent can key by mount UUID without collision.
+    expect(progress).toMatchObject({ state: 'mounted', mountPoint: 'Z:', nativeId: 7 });
+    expect(progress).not.toHaveProperty('id');
     expect(JSON.parse(fs.readFileSync(progressPath, 'utf-8'))).toMatchObject({
       state: 'mounted',
-      mountPoint: 'Z:'
+      mountPoint: 'Z:',
+      nativeId: 7
     });
 
     const result = pipe.sent.find((m) => m.type === 'result');

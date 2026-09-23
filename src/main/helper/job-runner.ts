@@ -1648,7 +1648,8 @@ export async function runMountJob(
 
   const progress = {
     state: 'mounted',
-    id: handle.id,
+    // Not `id`: the parent keys mounts by UUID and spreads this payload.
+    nativeId: handle.id,
     mountPoint: handle.mountPoint,
     image: job.imagePath,
     partitionIndex: job.partitionIndex

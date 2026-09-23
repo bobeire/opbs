@@ -1361,7 +1361,9 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     const launcher = launchElevatedJob<typeof job, any, any>(job);
     launcher.onProgress((p) => {
       if (mainWindow) {
-        mainWindow.webContents.send('mount-status', { id, ...p });
+        // Mount UUID must win: the helper progress payload includes a native
+        // numeric handle id that would otherwise clobber it on spread.
+        mainWindow.webContents.send('mount-status', { ...p, id });
       }
     });
     launcher.promise
