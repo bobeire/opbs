@@ -1302,6 +1302,12 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       if (msg.includes('Not an NTFS') || msg.includes('Not a FAT32') || msg.includes('Not an exFAT')) {
         throw new Error('This partition uses an unsupported filesystem. NTFS, FAT32 and exFAT partitions can be browsed.');
       }
+      if (msg.includes('chain too long') || msg.includes('chain cycle') || msg.includes('chain spans')) {
+        throw new Error(
+          'This folder could not be read: the directory allocation chain on this volume is corrupt or unusually long. See the Logs page for details.',
+          { cause: error }
+        );
+      }
       throw error;
     }
   });

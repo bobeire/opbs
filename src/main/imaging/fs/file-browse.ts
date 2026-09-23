@@ -5,7 +5,7 @@ import { PartitionReader, partitionReaderForChain } from '../image-browse';
 import { baseVolumePath } from '../image-format';
 import { logger } from '../../utils/logger';
 import { parseBootSector, readFileRecords, buildTree, readFileData, readStreamData, readDirectoryIndex, NtfsFile, NtfsLayout, NtfsNode } from './ntfs';
-import { parseFat32BootSector, listFat32Directory, readFileData as readFat32FileData, Fat32Layout, Fat32Entry, clusterToOffset, readFatChain, readClusterChain, detectFatType } from './fat32';
+import { parseFat32BootSector, listFat32Directory, readFileData as readFat32FileData, Fat32Layout, Fat32Entry, detectFatType } from './fat32';
 import { parseExfatBootSector, listExfatDirectory, readExfatFileData, detectExfat, ExfatLayout, ExfatEntry } from './exfat';
 import { detectMacriumFormat, readMacriumImage, openMacriumPartitionReader, MacriumUnsupportedError } from '../mrimg';
 

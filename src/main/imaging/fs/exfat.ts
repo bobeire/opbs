@@ -222,21 +222,83 @@ export function readExfatFileData(
   size: number
 ): Buffer {
   if (startCluster < 2 || size === 0) return Buffer.alloc(0);
-  const chain = readExfatChain(reader, layout, startCluster);
-  const raw = readExfatChainData(reader, layout, chain);
+  // Only walk far enough to cover `size` — a corrupt chain that continues
+  // past the real file must not fail the read.
+  const maxClusters = Math.max(1, Math.ceil(size / layout.clusterSize));
+  const buffers: Buffer[] = [];
+  let bytes = 0;
+  let current = startCluster;
+  const seen = new Set<number>();
+  while (
+    bytes < size &&
+    current >= 2 &&
+    current < EXFAT_EOF_MIN &&
+    current <= layout.clusterCount + 1
+  ) {
+    if (seen.has(current)) {
+      throw new Error(`exFAT chain cycle detected at cluster ${current}`);
+    }
+    if (buffers.length >= maxClusters) break;
+    seen.add(current);
+    const chunk = reader.read(exfatClusterToOffset(layout, current), layout.clusterSize);
+    buffers.push(chunk);
+    bytes += chunk.length;
+    current = readExfatFatEntry(reader, layout, current);
+  }
+  const raw = Buffer.concat(buffers);
   return size < raw.length ? raw.subarray(0, size) : raw;
 }
 
-/** List a directory's entries (given its start cluster). */
+/**
+ * List a directory's entries (given its start cluster).
+ *
+ * Walks the FAT chain one cluster at a time and stops as soon as the
+ * end-of-directory marker (entry type 0x00 on a 32-byte boundary) appears,
+ * so a long or corrupt chain that continues after the real directory data
+ * does not fail the listing. Cluster sizes are always multiples of 32, so
+ * checking each chunk in place covers every new entry boundary.
+ */
 export function listExfatDirectory(
   reader: PartitionReader,
   layout: ExfatLayout,
   startCluster: number
 ): ExfatEntry[] {
-  // Directories are small; cap at 256 MB to avoid an unbounded allocation on
-  // a corrupt chain.
-  const chain = readExfatChain(reader, layout, startCluster, 65_536);
-  const data = readExfatChainData(reader, layout, chain, 256 << 20);
+  const maxBytes = 256 << 20;
+  // Align the chain cap with the byte cap: for 512-byte clusters the old
+  // 65_536-cluster limit was only 32 MB, rejecting valid large directories
+  // well before the 256 MB allocation limit.
+  const maxClusters = Math.max(65_536, Math.ceil(maxBytes / layout.clusterSize));
+  const buffers: Buffer[] = [];
+  let bytes = 0;
+  let current = startCluster;
+  const seen = new Set<number>();
+
+  while (current >= 2 && current < EXFAT_EOF_MIN && current <= layout.clusterCount + 1) {
+    if (seen.has(current)) {
+      throw new Error(`exFAT chain cycle detected at cluster ${current}`);
+    }
+    if (buffers.length >= maxClusters || bytes >= maxBytes) {
+      throw new Error(
+        `exFAT chain too long (>${maxClusters} clusters); the volume may be corrupt`
+      );
+    }
+    seen.add(current);
+    const chunk = reader.read(exfatClusterToOffset(layout, current), layout.clusterSize);
+
+    let ended = false;
+    for (let off = 0; off + 32 <= chunk.length; off += 32) {
+      if (chunk[off] === 0) {
+        ended = true;
+        break;
+      }
+    }
+    buffers.push(chunk);
+    bytes += chunk.length;
+    if (ended) break;
+    current = readExfatFatEntry(reader, layout, current);
+  }
+
+  const data = Buffer.concat(buffers);
   return parseExfatDirectory(data).filter((e) => e.name !== '.' && e.name !== '..');
 }
 

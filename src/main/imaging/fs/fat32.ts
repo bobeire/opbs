@@ -307,10 +307,43 @@ export function listFat32Directory(
   layout: Fat32Layout,
   startCluster: number
 ): Fat32Entry[] {
-  // Directories are small; a multi-hundred-MB "directory" means a corrupt
-  // chain. Cap at 256 MB to avoid an unbounded allocation.
-  const chain = readFatChain(reader, layout, startCluster, 65_536);
-  const data = readClusterChain(reader, layout, chain, 256 << 20);
+  const maxBytes = 256 << 20;
+  // Align the chain cap with the byte cap so small-cluster volumes are not
+  // rejected earlier than the allocation limit (65_536 * 512 = 32 MB).
+  const maxClusters = Math.max(65_536, Math.ceil(maxBytes / layout.clusterSize));
+  const buffers: Buffer[] = [];
+  let bytes = 0;
+  let current = startCluster;
+  const seen = new Set<number>();
+
+  // Stop at the end-of-directory marker (entry type 0x00) so a long or
+  // corrupt chain after the real directory data does not fail the listing.
+  while (current >= 2 && current < FAT32_EOF_MIN) {
+    if (seen.has(current)) {
+      throw new Error(`FAT chain cycle detected at cluster ${current}`);
+    }
+    if (buffers.length >= maxClusters || bytes >= maxBytes) {
+      throw new Error(
+        `FAT chain too long (>${maxClusters} clusters); the volume may be corrupt`
+      );
+    }
+    seen.add(current);
+    const chunk = reader.read(clusterToOffset(layout, current), layout.clusterSize);
+
+    let ended = false;
+    for (let off = 0; off + 32 <= chunk.length; off += 32) {
+      if (chunk[off] === 0) {
+        ended = true;
+        break;
+      }
+    }
+    buffers.push(chunk);
+    bytes += chunk.length;
+    if (ended) break;
+    current = readFatEntry(reader, layout, current);
+  }
+
+  const data = Buffer.concat(buffers);
   return parseDirectoryEntries(data).filter(
     (e) => e.name !== '.' && e.name !== '..' && !e.name.startsWith('\x00')
   );
