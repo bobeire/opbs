@@ -1,6 +1,6 @@
 {
   "name": "opbs",
-  "version": "0.6.8",
+  "version": "0.6.9",
   "description": "OPBS - Open Pickle Backup System: FOSS disk imaging backup for Windows",
   "author": "RHITCS",
   "main": "dist/index.js",

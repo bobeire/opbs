@@ -271,6 +271,50 @@ static std::wstring Utf16ToString(const std::u16string &In)
     return std::wstring(P, P + In.size());
 }
 
+// Mount Manager form (`\\.\X:`) creates a GLOBAL drive. Plain `X:` uses
+// DefineDosDevice, which is scoped to the caller's LUID — the elevated
+// helper's drive is invisible to non-elevated Explorer (WinFsp #194/#526).
+static std::wstring NormalizeDriveMountPoint(std::wstring Letter)
+{
+    // Accept "Z", "Z:", "\\.\Z:", "Z:\\" → "\\.\Z:"
+    while (!Letter.empty() && (Letter.back() == L'\\' || Letter.back() == L'/'))
+        Letter.pop_back();
+    if (Letter.rfind(L"\\\\.\\", 0) == 0)
+        Letter = Letter.substr(4);
+    while (!Letter.empty() && (Letter.back() == L'\\' || Letter.back() == L'/'))
+        Letter.pop_back();
+    if (Letter.size() == 1)
+        Letter += L':';
+    if (Letter.size() != 2 || Letter[1] != L':' ||
+        !((Letter[0] >= L'A' && Letter[0] <= L'Z') ||
+          (Letter[0] >= L'a' && Letter[0] <= L'z')))
+        return std::wstring();
+    if (Letter[0] >= L'a' && Letter[0] <= L'z')
+        Letter[0] = static_cast<wchar_t>(Letter[0] - L'a' + L'A');
+    return L"\\\\.\\" + Letter;
+}
+
+// First free drive letter counting down from Z: (same order WinFsp uses).
+// Always returns the Mount Manager form so the drive is globally visible.
+static std::wstring PickGlobalDriveMountPoint()
+{
+    DWORD Drives = GetLogicalDrives();
+    for (wchar_t Drive = L'Z'; Drive >= L'D'; --Drive)
+    {
+        if (0 == (Drives & (1u << (Drive - L'A'))))
+            return std::wstring(L"\\\\.\\") + Drive + L":";
+    }
+    return std::wstring(L"\\\\.\\Z:");
+}
+
+// Display form for the UI/logs: "\\.\Z:" → "Z:".
+static std::wstring DisplayMountPoint(const std::wstring &Raw)
+{
+    if (Raw.rfind(L"\\\\.\\", 0) == 0 && Raw.size() >= 6)
+        return Raw.substr(4);
+    return Raw;
+}
+
 // Read a UINT64 into a bridge field from a JS reply, allowing either a Number
 // (safe via double, < 2^53) or a decimal string (exact).
 static uint64_t ReadU64(const Napi::Object &Obj, const char *Key, uint64_t Fallback = 0)
@@ -1096,7 +1140,18 @@ Napi::Value WinFspMount(const Napi::CallbackInfo &Info)
     if (HasLetter)
     {
         std::string Letter = Config.Get("driveLetter").As<Napi::String>().Utf8Value();
-        MountPoint = Utf8ToWide(Letter);
+        MountPoint = NormalizeDriveMountPoint(Utf8ToWide(Letter));
+        if (MountPoint.empty())
+        {
+            Napi::Error::New(Env, "Invalid drive letter (expected e.g. \"Z:\")")
+                .ThrowAsJavaScriptException();
+            return Env.Null();
+        }
+    }
+    else
+    {
+        // No letter requested: still use Mount Manager form, not DefineDosDevice.
+        MountPoint = PickGlobalDriveMountPoint();
     }
 
     auto *St = new MountState();
@@ -1185,7 +1240,8 @@ Napi::Value WinFspMount(const Napi::CallbackInfo &Info)
     Napi::Object Result = Napi::Object::New(Env);
     Result.Set("id", Napi::Number::New(Env, St->Id));
     PWSTR Actual = St->Fs->MountPoint;
-    Result.Set("mountPoint", Napi::String::New(Env, WideToUtf8(Actual ? Actual : L"")));
+    std::wstring Shown = DisplayMountPoint(Actual ? Actual : L"");
+    Result.Set("mountPoint", Napi::String::New(Env, WideToUtf8(Shown)));
     return Result;
 }
 
