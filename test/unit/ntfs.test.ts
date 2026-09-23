@@ -213,7 +213,7 @@ describe('ntfs parser', () => {
   });
 
   it('reads directory children via an $INDEX_ALLOCATION buffer (large dir)', () => {
-    // Build one 4096-byte index buffer holding a real $FILE_NAME key entry.
+    // Build one 4096-byte INDX record holding a real $FILE_NAME key entry.
     const key = fileNameAttr(0, 'big.dat', 1);
     const entryLength = 0x10 + key.length;
     const entry = Buffer.alloc(entryLength);
@@ -224,12 +224,17 @@ describe('ntfs parser', () => {
     key.copy(entry, 0x10);
 
     const indexBuf = Buffer.alloc(4096);
-    // INDEX_HEADER at 0, then entries at 0x10.
-    indexBuf.writeUInt32LE(0x10, 0x00); // entries offset
-    indexBuf.writeUInt32LE(entryLength, 0x04); // total size
-    indexBuf.writeUInt32LE(entryLength, 0x08); // allocated size
-    indexBuf.writeUInt8(0, 0x0c); // flags (not large)
-    entry.copy(indexBuf, 0x10);
+    indexBuf.write('INDX', 0, 'ascii');
+    indexBuf.writeUInt16LE(0x28, 4); // USA offset
+    indexBuf.writeUInt16LE(1, 6); // USA count = 1 (USN only; no sector fixups)
+    indexBuf.writeUInt16LE(0xaaaa, 0x28); // USN — also the start of entries would collide; use count 1
+    // INDEX_HEADER at 0x18; entries at 0x28.
+    indexBuf.writeUInt32LE(0x10, 0x18); // entries offset (relative to INDEX_HEADER)
+    indexBuf.writeUInt32LE(0x10 + entryLength, 0x1c); // total size from header start
+    indexBuf.writeUInt32LE(0x10 + entryLength, 0x20); // allocated size
+    indexBuf.writeUInt8(0, 0x24); // flags (not large)
+    // Put USA just before the header area is taken; with count=1 applyFixup is a no-op copy.
+    entry.copy(indexBuf, 0x28);
 
     const volume = buildNtfsVolumeData();
     indexBuf.copy(volume, 40 * CLUSTER); // index data landed at LCN 40
@@ -240,8 +245,8 @@ describe('ntfs parser', () => {
     indexRoot.writeUInt32LE(4096, 0x08); // index buffer size
     indexRoot.writeUInt8(1, 0x0c); // clusters per buffer
     indexRoot.writeUInt32LE(0x10, 0x10); // entries offset (INDEX_HEADER)
-    indexRoot.writeUInt32LE(0, 0x14); // empty root node
-    indexRoot.writeUInt32LE(0, 0x18);
+    indexRoot.writeUInt32LE(0x10, 0x14); // empty root: total size = header only
+    indexRoot.writeUInt32LE(0x10, 0x18);
     indexRoot.writeUInt8(0x01, 0x1c); // LARGE_INDEX flag => allocation present
 
     const dir = buildFileRecord(5, {
@@ -275,6 +280,7 @@ describe('ntfs parser', () => {
     expect(entries.map((e) => e.name)).toEqual(['big.dat']);
     expect(entries[0].fileReference).toBe(13);
     expect(entries[0].lastEntry).toBe(true);
+    expect(entries[0].namespace).toBe(1);
   });
 
   it('reads an LZNT1-compressed file (compression unit)', () => {

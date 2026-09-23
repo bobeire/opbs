@@ -236,8 +236,9 @@ export function indexRootValue(entries: Array<{ fileReference: number; name: str
   value.writeUInt32LE(4096, 0x08); // index allocation size
   value.writeUInt8(1, 0x0c); // clusters per index buffer
   value.writeUInt32LE(0x10, 0x10); // INDEX_HEADER entries offset
-  value.writeUInt32LE(entriesBuf.length, 0x14); // total size
-  value.writeUInt32LE(entriesBuf.length, 0x18); // allocated size
+  // INDEX_HEADER.totalSize runs from the header start (0x10) through the entries.
+  value.writeUInt32LE(0x10 + entriesBuf.length, 0x14);
+  value.writeUInt32LE(0x10 + entriesBuf.length, 0x18); // allocated size
   value.writeUInt8(0, 0x1c); // flags
   entriesBuf.copy(value, 0x20);
   return value;

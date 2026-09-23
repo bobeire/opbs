@@ -233,8 +233,8 @@ function resolveNtfsPath(session: NtfsBrowseSession, relPath: string): NtfsFile 
   let parentRecord = session.rootId;
   for (let i = 0; i < segs.length; i++) {
     const seg = segs[i];
-    const kids = session.children.get(parentRecord) ?? [];
-    const match = kids.find((n) => n.name === seg || n.name.toLowerCase() === seg.toLowerCase());
+    const segLower = seg.toLowerCase();
+    const match = findNtfsChild(session, parentRecord, seg, segLower);
     if (!match) return null;
     if (i === segs.length - 1) {
       return session.records.get(match.recordNumber) ?? null;
@@ -243,6 +243,41 @@ function resolveNtfsPath(session: NtfsBrowseSession, relPath: string): NtfsFile 
     parentRecord = match.recordNumber;
   }
   return session.records.get(parentRecord) ?? null;
+}
+
+/**
+ * Find a child of `parentRecord` by name. Tries the parent/child tree first
+ * (Win32 names from $FILE_NAME), then the $I30 index (which may key the same
+ * file under a DOS 8.3 name such as DUMPST~1.TMP).
+ */
+function findNtfsChild(
+  session: NtfsBrowseSession,
+  parentRecord: number,
+  seg: string,
+  segLower: string
+): { recordNumber: number; isDirectory: boolean } | null {
+  const kids = session.children.get(parentRecord) ?? [];
+  const fromTree = kids.find((n) => n.name === seg || n.name.toLowerCase() === segLower);
+  if (fromTree) return fromTree;
+
+  const parent = session.records.get(parentRecord);
+  if (!parent) return null;
+  const indexEntries = readDirectoryIndex(session.reader, session.layout, parent);
+  for (const e of indexEntries) {
+    if (e.name !== seg && e.name.toLowerCase() !== segLower) continue;
+    const rec = session.records.get(e.fileReference);
+    if (rec && rec.inUse && rec.name) return { recordNumber: rec.recordNumber, isDirectory: rec.isDirectory };
+  }
+  // Also accept a Win32 name when the index only carried the DOS key (or vice versa).
+  for (const e of indexEntries) {
+    const rec = session.records.get(e.fileReference);
+    if (!rec?.inUse || !rec.name) continue;
+    const recName = rec.name.name;
+    if (recName === seg || recName.toLowerCase() === segLower || e.name === seg || e.name.toLowerCase() === segLower) {
+      return { recordNumber: rec.recordNumber, isDirectory: rec.isDirectory };
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -375,12 +410,20 @@ function listNtfs(session: NtfsBrowseSession, relPath: string): BrowseNode[] {
   const indexEntries = readDirectoryIndex(session.reader, session.layout, target);
   if (indexEntries.length > 0) {
     const nodes: BrowseNode[] = [];
+    const seen = new Set<number>();
     let missing = 0;
+    let dosOnly = 0;
     for (const e of indexEntries) {
       const rec = session.records.get(e.fileReference);
       if (rec && rec.inUse && rec.name) {
+        if (seen.has(rec.recordNumber)) continue;
+        seen.add(rec.recordNumber);
+        // Prefer the Win32 name from the MFT; fall back to the index key
+        // (which may be a DOS 8.3 name such as DUMPST~1.TMP).
+        const useIndexName = e.namespace === 2 && rec.name.namespace !== 2;
+        if (useIndexName) dosOnly++;
         nodes.push({
-          name: e.name,
+          name: useIndexName ? e.name : (rec.name.name || e.name),
           isDirectory: rec.isDirectory,
           size: rec.size,
           modified: rec.modified,
@@ -401,10 +444,10 @@ function listNtfs(session: NtfsBrowseSession, relPath: string): BrowseNode[] {
           `(${missing} missing from the MFT cache of ${session.records.size} records); falling back to the directory tree`
       );
     } else {
-      if (missing > 0) {
+      if (missing > 0 || dosOnly > 0) {
         logger.warn(
           `listNtfs: "${relPath || '/'}" resolved ${nodes.length}/${indexEntries.length} index entries ` +
-            `(${missing} missing from the MFT cache of ${session.records.size} records)`
+            `(${missing} missing from the MFT cache of ${session.records.size} records, ${dosOnly} DOS-name keys)`
         );
       }
       return nodes.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));

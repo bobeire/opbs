@@ -188,6 +188,8 @@ export interface IndexEntry {
   hasSubnode: boolean;
   lastEntry: boolean;
   subnodeVcn?: number;
+  /** $FILE_NAME namespace from the key: 1=Win32, 2=DOS, 3=Win32&DOS, 0=POSIX. */
+  namespace?: number;
 }
 
 const ATTR_STANDARD_INFORMATION = 0x10;
@@ -352,27 +354,51 @@ export function resolveAttributeLists(records: NtfsFile[]): NtfsFile[] {
       segments.push({ vcn: rec.dataVcn, runs: rec.dataRuns, size: rec.size });
       mergedSegmentsEncrypted ||= rec.isEncrypted ?? false;
     }
+    const indexSegs: Array<{ vcn: number; runs: DataRun[]; size: number }> = [];
+    if (rec.indexAllocation && rec.indexAllocation.dataRuns.length > 0) {
+      indexSegs.push({ vcn: 0, runs: rec.indexAllocation.dataRuns, size: rec.indexAllocation.size });
+    }
     for (const entry of rec.attributeList) {
-      if (entry.type !== ATTR_DATA) continue;
       const ref = byRec.get(entry.fileReference);
-      if (ref && ref.dataRuns.length > 0) {
+      if (entry.type === ATTR_DATA && ref && ref.dataRuns.length > 0) {
         segments.push({ vcn: ref.dataVcn, runs: ref.dataRuns, size: ref.size });
         mergedSegmentsEncrypted ||= ref.isEncrypted ?? false;
+      } else if (entry.type === ATTR_INDEX_ALLOCATION && ref?.indexAllocation?.dataRuns.length) {
+        indexSegs.push({
+          vcn: entry.lowestVcn,
+          runs: ref.indexAllocation.dataRuns,
+          size: ref.indexAllocation.size
+        });
+      } else if (entry.type === ATTR_INDEX_ROOT && ref?.indexRoot && !rec.indexRoot) {
+        rec.indexRoot = ref.indexRoot;
+      } else if (entry.type === ATTR_BITMAP && ref?.indexBitmap && !rec.indexBitmap) {
+        rec.indexBitmap = ref.indexBitmap;
       }
     }
-    if (segments.length === 0) continue;
-    segments.sort((a, b) => a.vcn - b.vcn);
-    const merged: DataRun[] = [];
-    let size = 0;
-    for (const seg of segments) {
-      merged.push(...seg.runs);
-      if (seg.size > size) size = seg.size;
+    if (indexSegs.length > 0) {
+      indexSegs.sort((a, b) => a.vcn - b.vcn);
+      const merged: DataRun[] = [];
+      let size = 0;
+      for (const seg of indexSegs) {
+        merged.push(...seg.runs);
+        if (seg.size > size) size = seg.size;
+      }
+      rec.indexAllocation = { dataRuns: merged, size };
     }
-    rec.dataRuns = merged;
-    rec.size = size;
-    rec.dataVcn = 0;
+    if (segments.length > 0) {
+      segments.sort((a, b) => a.vcn - b.vcn);
+      const merged: DataRun[] = [];
+      let size = 0;
+      for (const seg of segments) {
+        merged.push(...seg.runs);
+        if (seg.size > size) size = seg.size;
+      }
+      rec.dataRuns = merged;
+      rec.size = size;
+      rec.dataVcn = 0;
+      rec.isEncrypted = rec.isEncrypted || mergedSegmentsEncrypted;
+    }
     rec.attributeList = [];
-    rec.isEncrypted = rec.isEncrypted || mergedSegmentsEncrypted;
   }
   return records;
 }
@@ -834,25 +860,59 @@ function parseIndexEntries(buf: Buffer, entriesStart: number, end: number): Inde
     const hasSubnode = (flags & 0x01) !== 0;
     const lastEntry = (flags & 0x02) !== 0;
     // The key is a $FILE_NAME structure; skip entries without a parseable one.
+    const keyOffset = 0x10;
     let name = '';
     let validName = false;
+    let namespace: number | undefined;
     if (entryLength >= 0x10 + 0x42) {
-      const keyOffset = 0x10;
       const nameLength = buf.readUInt8(pos + keyOffset + 0x40);
       const nameStart = pos + keyOffset + 0x42;
       if (nameLength > 0 && nameStart + nameLength * 2 <= pos + entryLength) {
         name = buf.toString('utf16le', nameStart, nameStart + nameLength * 2);
+        namespace = buf.readUInt8(pos + keyOffset + 0x41);
         validName = true;
       }
     }
     if (validName) {
       const subnodeVcn = hasSubnode ? Number(buf.readBigUInt64LE(pos + entryLength - 8) & 0xffffffffffffn) : undefined;
-      entries.push({ fileReference, name, hasSubnode, lastEntry, subnodeVcn });
+      entries.push({ fileReference, name, hasSubnode, lastEntry, subnodeVcn, namespace });
     }
     if (lastEntry) break;
     pos += entryLength;
   }
   return entries;
+}
+
+/**
+ * Parse one INDEX_HEADER region (resident $INDEX_ROOT body, or the header
+ * inside an INDX allocation buffer). `headerOffset` is where the INDEX_HEADER
+ * sits; `entriesOffset`/`totalSize` are relative to that header, and
+ * `totalSize` runs from the header start through the last entry.
+ */
+function parseIndexHeader(buf: Buffer, headerOffset: number): IndexEntry[] {
+  if (headerOffset < 0 || headerOffset + 0x10 > buf.length) return [];
+  const entriesOffset = buf.readUInt32LE(headerOffset);
+  const totalSize = buf.readUInt32LE(headerOffset + 4);
+  const start = headerOffset + entriesOffset;
+  const end = Math.min(headerOffset + totalSize, buf.length);
+  if (start >= end) return [];
+  return parseIndexEntries(buf, start, end);
+}
+
+/**
+ * Parse an $INDEX_ALLOCATION buffer. Real on-disk buffers are INDX records
+ * (magic + update sequence + LSN + VCN, INDEX_HEADER at 0x18). Some fixtures
+ * place a bare INDEX_HEADER at offset 0 — accept that too.
+ */
+function parseIndexAllocationBuffer(raw: Buffer): IndexEntry[] {
+  if (raw.length >= 0x28 && raw.toString('ascii', 0, 4) === 'INDX') {
+    const buf = applyFixup(raw);
+    return parseIndexHeader(buf, 0x18);
+  }
+  if (raw.length >= 0x10) {
+    return parseIndexHeader(raw, 0);
+  }
+  return [];
 }
 
 /**
@@ -864,12 +924,8 @@ export function readDirectoryIndex(reader: PartitionReader, layout: NtfsLayout, 
   if (!file.indexRoot) return [];
   const entries: IndexEntry[] = [];
 
-  // $INDEX_ROOT: 0x10 index-root header, then a 0x10 INDEX_HEADER, then entries.
-  const rootEntriesOffset = file.indexRoot.readUInt32LE(0x10);
-  const rootTotal = file.indexRoot.readUInt32LE(0x14);
-  const rootStart = 0x10 + rootEntriesOffset;
-  const rootEnd = Math.min(rootStart + rootTotal, file.indexRoot.length);
-  entries.push(...parseIndexEntries(file.indexRoot, rootStart, rootEnd));
+  // $INDEX_ROOT: 0x10 INDEX_ROOT header, then INDEX_HEADER, then entries.
+  entries.push(...parseIndexHeader(file.indexRoot, 0x10));
 
   // $INDEX_ALLOCATION: a series of index buffers for large directories.
   if (file.indexAllocation && file.indexAllocation.dataRuns.length > 0) {
@@ -877,14 +933,19 @@ export function readDirectoryIndex(reader: PartitionReader, layout: NtfsLayout, 
     const bufferSize = Math.max(512, clustersPerBuffer * layout.clusterSize);
     const bitmap = file.indexBitmap;
     const bufferCount = Math.ceil(file.indexAllocation.size / bufferSize);
+    let buffersRead = 0;
     for (let i = 0; i < bufferCount; i++) {
-      if (bitmap && !(bitmap[i >> 3] & (1 << (i & 7)))) continue;
-      const buf = readRuns(reader, layout.clusterSize, file.indexAllocation.dataRuns, i * bufferSize, bufferSize);
-      const entriesOffset = buf.readUInt32LE(0x00);
-      const totalSize = buf.readUInt32LE(0x04);
-      const start = entriesOffset;
-      const end = Math.min(start + totalSize, buf.length);
-      entries.push(...parseIndexEntries(buf, start, end));
+      if (bitmap && i >> 3 < bitmap.length && !(bitmap[i >> 3] & (1 << (i & 7)))) continue;
+      const raw = readRuns(reader, layout.clusterSize, file.indexAllocation.dataRuns, i * bufferSize, bufferSize);
+      const parsed = parseIndexAllocationBuffer(raw);
+      if (parsed.length > 0) buffersRead++;
+      entries.push(...parsed);
+    }
+    if (entries.length === 0 && bufferCount > 0) {
+      logger.warn(
+        `readDirectoryIndex: record ${file.recordNumber} has ${bufferCount} index buffer(s) ` +
+          `(${buffersRead} with entries) but no children parsed`
+      );
     }
   }
 
