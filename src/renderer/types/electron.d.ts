@@ -301,7 +301,7 @@ declare global {
       getSmartAllDisks: () => Promise<any[]>;
       winfspStatus: () => Promise<{ available: boolean; note?: string }>;
       winfspInstall: () => Promise<{ ok: boolean; code?: number; available?: boolean; error?: string }>;
-      mountImage: (config: any) => Promise<{ ok: boolean; id?: string; error?: string }>;
+      mountImage: (config: any) => Promise<{ ok: boolean; id?: string; mountPoint?: string; error?: string }>;
       unmountImage: (id: string) => Promise<{ ok: boolean; error?: string }>;
       onMountStatus: (callback: (status: any) => void) => () => void;
       showAbout: () => Promise<void>;

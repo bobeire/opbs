@@ -74,6 +74,8 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
       })
       .catch(() => setWinfspOk(false));
     const unsubscribe = window.electronAPI.onMountStatus((status: MountStatus) => {
+      // Late/foreign events (previous mount, unmount after navigate) must not
+      // touch this view unless they belong to the active mount id.
       if (!mountIdRef.current || status.id !== mountIdRef.current) return;
       if (status.state === 'mounted') {
         setMountPoint(status.mountPoint ?? '');
@@ -248,7 +250,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
   };
 
   const handleMount = async (): Promise<void> => {
-    if (partitionIndex === null || mountIdRef.current) return;
+    if (partitionIndex === null || mountIdRef.current || mounting) return;
     setMounting(true);
     setMountError('');
     try {
@@ -258,16 +260,28 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         label: `OPBS ${imagePath.split(/[\\/]/).pop() ?? 'image'} (partition ${partitionIndex})`,
         passphrase: passphrase || undefined
       });
+      // Refs first so a concurrent mount-status event is not dropped.
+      const key = `${imagePath}#${partitionIndex}`;
+      mountKeyRef.current = key;
+      mountIdRef.current = result.id ?? null;
       if (!result.ok || !result.id) {
         setMountError(result.error ?? 'Mount failed');
+        setMountId(null);
         setMounting(false);
+        setMountPoint('');
+        setMountedOf('');
       } else {
-        // Refs first so a fast mount-status event is not dropped by the listener.
-        mountKeyRef.current = `${imagePath}#${partitionIndex}`;
-        mountIdRef.current = result.id;
         setMountId(result.id);
+        // The invoke resolves only after the helper reports mounted, so the
+        // bar can flip without depending on a separate progress event.
+        setMountPoint(result.mountPoint || '');
+        setMountedOf(key);
+        setMounting(false);
+        setMountError('');
       }
     } catch (e: any) {
+      mountIdRef.current = null;
+      mountKeyRef.current = '';
       setMountError(e?.message ?? 'Mount failed');
       setMounting(false);
     }

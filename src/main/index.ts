@@ -1359,48 +1359,82 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     };
     logger.info(`mount-image: launching helper for ${job.imagePath}#${job.partitionIndex} (${id})`);
     const launcher = launchElevatedJob<typeof job, any, any>(job);
-    launcher.onProgress((p) => {
-      if (mainWindow) {
-        // Mount UUID must win: the helper progress payload includes a native
-        // numeric handle id that would otherwise clobber it on spread.
-        const payload = { ...p, id };
-        logger.info(`mount-status → renderer: state=${String(p?.state)} id=${id} mountPoint=${String((p as { mountPoint?: string })?.mountPoint ?? '')}`);
-        mainWindow.webContents.send('mount-status', payload);
-      } else {
-        logger.warn(`mount-status dropped (no window): state=${String(p?.state)} id=${id}`);
-      }
-    });
-    launcher.promise
-      .then((result) => {
-        mountLaunchers.delete(id);
-        const ok = result?.ok !== false;
-        if (!ok) {
-          logger.warn(`mount-image failed: ${result?.error ?? 'unknown error'} (${id})`);
-        }
+    mountLaunchers.set(id, { cancel: launcher.cancel });
+
+    // Resolve only once the mount is live (or has failed). Returning early
+    // raced the progress event: the renderer set mountIdRef after the invoke
+    // settled, so a fast mount-status could be dropped and leave "Mounting…".
+    return await new Promise<{ ok: boolean; id: string; mountPoint?: string; error?: string }>((resolve) => {
+      let settled = false;
+      const finish = (value: { ok: boolean; id: string; mountPoint?: string; error?: string }): void => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      const timeout = setTimeout(() => {
+        logger.warn(`mount-image timed out waiting for mount status (${id})`);
+        launcher.cancel();
+        finish({ ok: false, id, error: 'Mount timed out before the helper reported a status.' });
+      }, 10 * 60 * 1000);
+
+      launcher.onProgress((p) => {
         if (mainWindow) {
-          mainWindow.webContents.send('mount-status', {
-            id,
-            state: 'unmounted',
-            ok,
-            error: ok ? undefined : result?.error
-          });
+          // Mount UUID must win: the helper progress payload includes a native
+          // numeric handle id that would otherwise clobber it on spread.
+          const payload = { ...p, id };
+          logger.info(`mount-status → renderer: state=${String(p?.state)} id=${id} mountPoint=${String((p as { mountPoint?: string })?.mountPoint ?? '')}`);
+          mainWindow.webContents.send('mount-status', payload);
+        } else {
+          logger.warn(`mount-status dropped (no window): state=${String(p?.state)} id=${id}`);
         }
-      })
-      .catch((error: unknown) => {
-        mountLaunchers.delete(id);
-        const message = error instanceof Error ? error.message : String(error);
-        logger.warn(`mount-image failed: ${message} (${id})`);
-        if (mainWindow) {
-          mainWindow.webContents.send('mount-status', {
+        if (p && (p as { state?: string }).state === 'mounted') {
+          clearTimeout(timeout);
+          finish({
+            ok: true,
             id,
-            state: 'unmounted',
-            ok: false,
-            error: message
+            mountPoint: String((p as { mountPoint?: string }).mountPoint ?? '')
           });
         }
       });
-    mountLaunchers.set(id, { cancel: launcher.cancel });
-    return { ok: true, id };
+
+      launcher.promise
+        .then((result) => {
+          mountLaunchers.delete(id);
+          clearTimeout(timeout);
+          const ok = result?.ok !== false;
+          if (!ok) {
+            logger.warn(`mount-image failed: ${result?.error ?? 'unknown error'} (${id})`);
+          }
+          if (mainWindow) {
+            mainWindow.webContents.send('mount-status', {
+              id,
+              state: 'unmounted',
+              ok,
+              error: ok ? undefined : result?.error
+            });
+          }
+          finish({
+            ok,
+            id,
+            error: ok ? undefined : (result as { error?: string } | null)?.error ?? 'Mount failed'
+          });
+        })
+        .catch((error: unknown) => {
+          mountLaunchers.delete(id);
+          clearTimeout(timeout);
+          const message = error instanceof Error ? error.message : String(error);
+          logger.warn(`mount-image failed: ${message} (${id})`);
+          if (mainWindow) {
+            mainWindow.webContents.send('mount-status', {
+              id,
+              state: 'unmounted',
+              ok: false,
+              error: message
+            });
+          }
+          finish({ ok: false, id, error: message });
+        });
+    });
   });
 
   ipcMain.handle('unmount-image', async (_, id: string) => {
