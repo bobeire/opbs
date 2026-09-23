@@ -71,7 +71,9 @@
                   "-lrpcrt4",
                   "-lsetupapi",
                   "-lvssapi",
-                  "-ldbghelp"
+                  "-ldbghelp",
+                  "-lshell32",
+                  "-luser32"
                 ]
               }
             ]

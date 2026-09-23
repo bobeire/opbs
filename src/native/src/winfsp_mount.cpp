@@ -25,6 +25,9 @@
 #include <condition_variable>
 #include <cwchar>
 #include <windows.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#include <dbt.h>
 #include <sddl.h>
 #include <strsafe.h>
 #include <dbghelp.h>
@@ -313,6 +316,36 @@ static std::wstring DisplayMountPoint(const std::wstring &Raw)
     if (Raw.rfind(L"\\\\.\\", 0) == 0 && Raw.size() >= 6)
         return Raw.substr(4);
     return Raw;
+}
+
+// Tell Explorer a drive letter appeared/disappeared. Mount Manager creates the
+// letter globally, but Explorer only repaints "This PC" on SHChangeNotify /
+// WM_DEVICECHANGE — without this the letter is invisible until F5.
+static void NotifyShellDriveChange(const std::wstring &RawMountPoint, bool Arrived)
+{
+    std::wstring Display = DisplayMountPoint(RawMountPoint);
+    if (Display.size() < 2 || Display[1] != L':')
+        return;
+    wchar_t Letter = Display[0];
+    if (Letter >= L'a' && Letter <= L'z')
+        Letter = static_cast<wchar_t>(Letter - L'a' + L'A');
+    if (Letter < L'A' || Letter > L'Z')
+        return;
+
+    wchar_t Path[4] = {Letter, L':', L'\\', L'\0'};
+    SHChangeNotify(Arrived ? SHCNE_DRIVEADD : SHCNE_DRIVEREMOVED,
+                   SHCNF_PATHW, Path, nullptr);
+
+    DEV_BROADCAST_VOLUME Volume;
+    memset(&Volume, 0, sizeof Volume);
+    Volume.dbcv_size = sizeof Volume;
+    Volume.dbcv_devicetype = DBT_DEVTYP_VOLUME;
+    Volume.dbcv_unitmask = 1u << (Letter - L'A');
+    DWORD_PTR Result = 0;
+    SendMessageTimeoutW(HWND_BROADCAST, WM_DEVICECHANGE,
+                        Arrived ? DBT_DEVICEARRIVAL : DBT_DEVICEREMOVECOMPLETE,
+                        reinterpret_cast<LPARAM>(&Volume),
+                        SMTO_ABORTIFHUNG, 2000, &Result);
 }
 
 // Read a UINT64 into a bridge field from a JS reply, allowing either a Number
@@ -1240,7 +1273,8 @@ Napi::Value WinFspMount(const Napi::CallbackInfo &Info)
     Napi::Object Result = Napi::Object::New(Env);
     Result.Set("id", Napi::Number::New(Env, St->Id));
     PWSTR Actual = St->Fs->MountPoint;
-    std::wstring Shown = DisplayMountPoint(Actual ? Actual : L"");
+    std::wstring Shown = DisplayMountPoint(Actual ? Actual : MountPoint);
+    NotifyShellDriveChange(Actual ? Actual : MountPoint, true);
     Result.Set("mountPoint", Napi::String::New(Env, WideToUtf8(Shown)));
     return Result;
 }
@@ -1268,6 +1302,8 @@ Napi::Value WinFspUnmount(const Napi::CallbackInfo &Info)
         g_mounts.erase(St->Fs);
     }
 
+    std::wstring MountBeforeRemove =
+        St->Fs->MountPoint ? St->Fs->MountPoint : std::wstring();
     g_api.FspFileSystemStopDispatcher(St->Fs);
     g_api.FspFileSystemRemoveMountPoint(St->Fs);
     g_api.FspFileSystemDelete(St->Fs);
@@ -1276,6 +1312,8 @@ Napi::Value WinFspUnmount(const Napi::CallbackInfo &Info)
     if (St->SecurityDescriptor)
         LocalFree(St->SecurityDescriptor);
     delete St;
+    if (!MountBeforeRemove.empty())
+        NotifyShellDriveChange(MountBeforeRemove, false);
 
     return Napi::Boolean::New(Env, true);
 }
