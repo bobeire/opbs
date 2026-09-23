@@ -240,9 +240,10 @@ export async function runBackupJob(
   // Multi-volume support: if maxVolumeSize > 0, split the image into multiple
   // files at the volume boundary. Each volume has its own header and partition
   // table; block offsets are volume-relative and the block index includes the
-  // volume index.
-  let maxVolumeSize = job.maxVolumeSize ?? 0;
-  const isMultiVolume = maxVolumeSize > 0;
+  // volume index. `isMultiVolume` may start false (single-file) and flip true
+  // mid-run when the destination returns ENOSPC (file-size or disk limit).
+  const maxVolumeSize = job.maxVolumeSize ?? 0;
+  let isMultiVolume = maxVolumeSize > 0;
   let currentVolume = 0;
   let currentFd = -1;
   const volumePaths: string[] = [];
@@ -259,9 +260,7 @@ export async function runBackupJob(
   }
 
   const fd = isMultiVolume ? openVolume(0) : fs.openSync(job.imagePath, isResume ? 'r+' : 'w+');
-  if (isMultiVolume) {
-    volumePaths[0] = job.imagePath;
-  }
+  volumePaths[0] = job.imagePath;
   currentFd = fd;
 
   try {
@@ -503,19 +502,67 @@ export async function runBackupJob(
           openNextVolume();
         }
 
-        const frameOffset = cursor;
+        let frameOffset = cursor;
         try {
-          fs.writeSync(currentFd, frame, 0, frame.length, cursor);
+          const written = fs.writeSync(currentFd, frame, 0, frame.length, cursor);
+          if (written !== frame.length) {
+            // Short write: treat like ENOSPC so we roll to the next volume
+            // instead of silently corrupting the frame stream.
+            const shortErr = new Error(`Short write (${written}/${frame.length})`) as NodeJS.ErrnoException;
+            shortErr.code = 'ENOSPC';
+            throw shortErr;
+          }
         } catch (writeErr) {
-          // ENOSPC on FAT32/exFAT: the volume hit its per-file size limit.
-          // Open the next volume and retry the write.
-          if (!isMultiVolume && (writeErr as NodeJS.ErrnoException).code === 'ENOSPC') {
-            logger.info('ENOSPC on write — switching to multi-volume mode');
-            maxVolumeSize = cursor; // use current file size as volume limit
-            header.maxVolumeSize = cursor;
-            header.flags |= FLAG_MULTI_VOLUME;
+          // ENOSPC on FAT32/exFAT (or a full disk): the write failed, possibly
+          // after a partial frame was left on this volume. Truncate back to the
+          // last complete frame, switch to multi-volume, and retry on the next
+          // volume. Without the truncate, verifyImage streams the partial frame
+          // and fails with "Decompressed size mismatch".
+          if ((writeErr as NodeJS.ErrnoException).code === 'ENOSPC') {
+            const wasSingle = !isMultiVolume;
+            logger.info(
+              wasSingle
+                ? 'ENOSPC on write — switching to multi-volume mode'
+                : `ENOSPC on write — rolling from volume ${currentVolume} to ${currentVolume + 1}`
+            );
+            try {
+              fs.ftruncateSync(currentFd, cursor);
+            } catch (truncErr) {
+              logger.warn(
+                `ENOSPC cleanup: truncate volume ${currentVolume} to ${cursor} failed: ${
+                  truncErr instanceof Error ? truncErr.message : String(truncErr)
+                }`
+              );
+            }
+            if (wasSingle) {
+              isMultiVolume = true;
+              // Do not derive maxVolumeSize from `cursor` — an early ENOSPC
+              // would cap later volumes to a few frames. Leave the cap at 0 so
+              // further rolls are driven only by ENOSPC (file-size or disk).
+              header.maxVolumeSize = maxVolumeSize;
+              header.flags |= FLAG_MULTI_VOLUME;
+            }
+            volumePaths[0] = job.imagePath;
             openNextVolume();
-            fs.writeSync(currentFd, frame, 0, frame.length, cursor);
+            frameOffset = cursor;
+            try {
+              const retried = fs.writeSync(currentFd, frame, 0, frame.length, cursor);
+              if (retried !== frame.length) {
+                throw writeErr;
+              }
+            } catch (retryErr) {
+              // Destination is genuinely out of space (not just a per-file cap).
+              if ((retryErr as NodeJS.ErrnoException).code === 'ENOSPC') {
+                const fullErr = new Error(
+                  `Destination is out of space while writing volume ${currentVolume} (${path.basename(
+                    volumePath(currentVolume)
+                  )}). Free space on the destination and retry.`
+                ) as NodeJS.ErrnoException;
+                fullErr.code = 'ENOSPC';
+                throw fullErr;
+              }
+              throw retryErr;
+            }
           } else {
             throw writeErr;
           }
