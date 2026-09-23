@@ -4,6 +4,7 @@ import { openAnyBrowse, BrowseSession } from './fs/file-browse';
 import { handleBridgeRequest, BridgeRequest, BridgeReply } from './fs/mount-fs';
 import { readImageInfo, deriveImageKey, CIPHER_NONE } from './image-format';
 import { detectMacriumFormat } from './mrimg';
+import { logger } from '../utils/logger';
 
 /**
  * Mounts a partition from a backup image as a read-only drive letter using the
@@ -34,6 +35,7 @@ export interface MountHandle {
 
 interface NativeWinFsp {
   winfspAvailable(): boolean;
+  winfspLoadNote?(): string;
   winfspMount(
     config: { label: string; totalSize: number; driveLetter?: string },
     handler: (req: BridgeRequest) => BridgeReply
@@ -46,7 +48,7 @@ interface ActiveMount {
   unmount: () => boolean;
 }
 
-let nativeCache: NativeWinFsp | null | null = null;
+let nativeCache: NativeWinFsp | null = null;
 
 function nativeApi(): NativeWinFsp {
   if (nativeCache === null) {
@@ -61,6 +63,16 @@ export function winfspAvailable(): boolean {
     return nativeApi().winfspAvailable();
   } catch {
     return false;
+  }
+}
+
+/** Human-readable note from the last WinFsp detection attempt (empty when unknown). */
+export function winfspLoadNote(): string {
+  try {
+    const note = nativeApi().winfspLoadNote?.();
+    return typeof note === 'string' ? note : '';
+  } catch {
+    return '';
   }
 }
 
@@ -79,10 +91,13 @@ const mounts = new Map<number, ActiveMount>();
 export function mountImage(config: MountConfig): MountHandle {
   const native = nativeApi();
   if (!native.winfspAvailable()) {
+    const note = winfspLoadNote();
+    const detail = note && note !== 'not attempted' ? ` (${note})` : '';
     throw new Error(
-      'WinFsp is not installed. Install the WinFsp runtime (https://winfsp.dev) and try again.'
+      `WinFsp is not installed. Install the WinFsp runtime (https://winfsp.dev) and try again.${detail}`
     );
   }
+  logger.info(`mountImage: opening ${config.imagePath}#${config.partitionIndex}`);
   const session = openAnyBrowse(config.imagePath, config.partitionIndex, keyFor(config));
   const handler = (req: BridgeRequest): BridgeReply => handleBridgeRequest(session, req);
   const label = config.label ?? `OPBS ${path.basename(config.imagePath)}`;
@@ -90,6 +105,7 @@ export function mountImage(config: MountConfig): MountHandle {
     { label, totalSize: session.reader.size, driveLetter: config.driveLetter },
     handler
   );
+  logger.info(`mountImage: mounted ${res.mountPoint} (id ${res.id}, fs=${session.filesystem})`);
   mounts.set(res.id, { session, unmount: () => native.winfspUnmount(res.id) });
   return { id: res.id, mountPoint: res.mountPoint, unmount: () => unmountImage(res.id) };
 }
@@ -99,9 +115,11 @@ export function unmountImage(id: number): boolean {
   const active = mounts.get(id);
   if (!active) return false;
   mounts.delete(id);
+  logger.info(`unmountImage: id ${id}`);
   try {
     return active.unmount();
-  } catch {
+  } catch (error) {
+    logger.warn(`unmountImage: id ${id} failed: ${error instanceof Error ? error.message : error}`);
     return false;
   }
 }

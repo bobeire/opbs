@@ -1057,6 +1057,13 @@ static void BuildInterface()
 // N-API exports.
 // ---------------------------------------------------------------------------
 
+static std::string NtStatusHex(NTSTATUS Status)
+{
+    char Buf[16];
+    snprintf(Buf, sizeof Buf, "0x%08X", static_cast<unsigned>(Status));
+    return Buf;
+}
+
 Napi::Value WinFspAvailable(const Napi::CallbackInfo &Info)
 {
     EnsureWinFsp();
@@ -1128,7 +1135,7 @@ Napi::Value WinFspMount(const Napi::CallbackInfo &Info)
     if (!NT_SUCCESS(Status))
     {
         delete St;
-        Napi::Error::New(Env, "FspFileSystemCreate failed: 0x" + std::to_string(Status))
+        Napi::Error::New(Env, "FspFileSystemCreate failed: " + NtStatusHex(Status))
             .ThrowAsJavaScriptException();
         return Env.Null();
     }
@@ -1145,7 +1152,7 @@ Napi::Value WinFspMount(const Napi::CallbackInfo &Info)
     Status = g_api.FspFileSystemSetMountPoint(St->Fs, Mount);
     if (!NT_SUCCESS(Status))
     {
-        Napi::Error::New(Env, "FspFileSystemSetMountPoint failed: 0x" + std::to_string(Status))
+        Napi::Error::New(Env, "FspFileSystemSetMountPoint failed: " + NtStatusHex(Status))
             .ThrowAsJavaScriptException();
         St->Tsf.Release();
         {
@@ -1161,7 +1168,7 @@ Napi::Value WinFspMount(const Napi::CallbackInfo &Info)
     Status = g_api.FspFileSystemStartDispatcher(St->Fs, 0);
     if (!NT_SUCCESS(Status))
     {
-        Napi::Error::New(Env, "FspFileSystemStartDispatcher failed: 0x" + std::to_string(Status))
+        Napi::Error::New(Env, "FspFileSystemStartDispatcher failed: " + NtStatusHex(Status))
             .ThrowAsJavaScriptException();
         g_api.FspFileSystemRemoveMountPoint(St->Fs);
         St->Tsf.Release();

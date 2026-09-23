@@ -299,7 +299,7 @@ declare global {
       getTrimStatus: () => Promise<any>;
       retrimVolume: (volume: string) => Promise<any>;
       getSmartAllDisks: () => Promise<any[]>;
-      winfspStatus: () => Promise<{ available: boolean }>;
+      winfspStatus: () => Promise<{ available: boolean; note?: string }>;
       winfspInstall: () => Promise<{ ok: boolean; code?: number; available?: boolean; error?: string }>;
       mountImage: (config: any) => Promise<{ ok: boolean; id?: string; error?: string }>;
       unmountImage: (id: string) => Promise<{ ok: boolean; error?: string }>;

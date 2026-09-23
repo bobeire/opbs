@@ -1612,7 +1612,8 @@ export async function runMountJob(
   jobPath: string,
   resultPath: string,
   progressPath: string,
-  cancelPath: string
+  cancelPath: string,
+  pipeClient?: PipeClient
 ): Promise<void> {
   const job = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as {
     imagePath: string;
@@ -1622,52 +1623,67 @@ export async function runMountJob(
     passphrase?: string;
   };
 
+  const writeResult = (result: Record<string, unknown>): void => {
+    emitResult(resultPath, result, pipeClient);
+  };
+
   if (!winfspAvailable()) {
-    fs.writeFileSync(
-      resultPath,
-      JSON.stringify({
-        ok: false,
-        error: 'WinFsp is not installed. Install the WinFsp runtime (https://winfsp.dev) and try again.'
-      })
-    );
+    const error = 'WinFsp is not installed. Install the WinFsp runtime (https://winfsp.dev) and try again.';
+    logger.warn(`Mount job failed: ${error}`);
+    writeResult({ ok: false, error });
     return;
   }
 
   let handle: { id: number; mountPoint: string; unmount(): boolean };
   try {
+    logger.info(`Mount job: opening ${job.imagePath}#${job.partitionIndex}`);
     handle = mountImage(job);
+    logger.info(`Mount job: live at ${handle.mountPoint} (id ${handle.id})`);
   } catch (error) {
-    fs.writeFileSync(
-      resultPath,
-      JSON.stringify({ ok: false, error: errorMessage(error) })
-    );
+    const message = errorMessage(error);
+    logger.error(`Mount job failed: ${message}`, { error });
+    writeResult({ ok: false, error: message });
     return;
   }
 
-  fs.writeFileSync(
-    progressPath,
-    JSON.stringify({
-      state: 'mounted',
-      id: handle.id,
-      mountPoint: handle.mountPoint,
-      image: job.imagePath,
-      partitionIndex: job.partitionIndex
-    })
-  );
+  const progress = {
+    state: 'mounted',
+    id: handle.id,
+    mountPoint: handle.mountPoint,
+    image: job.imagePath,
+    partitionIndex: job.partitionIndex
+  };
+  // Pipe first so the parent settles/updates without waiting on file polling.
+  pipeClient?.send({ type: 'progress', ...progress });
+  try {
+    fs.writeFileSync(progressPath, JSON.stringify(progress));
+  } catch {
+    /* progress reporting is best-effort */
+  }
 
-  // Stay alive until the launcher asks us to unmount.
+  // Stay alive until the launcher asks us to unmount. Refresh progress.json
+  // periodically so a file-IPC parent can tell this helper is still alive.
+  let heartbeatAt = Date.now();
   while (!fs.existsSync(cancelPath)) {
     await new Promise((resolve) => setTimeout(resolve, 500));
+    if (Date.now() - heartbeatAt >= 5000) {
+      heartbeatAt = Date.now();
+      try {
+        fs.writeFileSync(progressPath, JSON.stringify({ ...progress, heartbeat: heartbeatAt }));
+      } catch {
+        /* best-effort */
+      }
+    }
   }
 
   try {
     handle.unmount();
-    fs.writeFileSync(resultPath, JSON.stringify({ ok: true }));
+    logger.info(`Mount job: unmounted ${handle.mountPoint}`);
+    writeResult({ ok: true });
   } catch (error) {
-    fs.writeFileSync(
-      resultPath,
-      JSON.stringify({ ok: false, error: errorMessage(error) })
-    );
+    const message = errorMessage(error);
+    logger.error(`Mount job unmount failed: ${message}`, { error });
+    writeResult({ ok: false, error: message });
   }
 }
 
@@ -1685,7 +1701,7 @@ export async function dispatchHelperJob(
 ): Promise<void> {
   const raw = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as { type?: string };
   if (raw.type === 'mount') {
-    await runMountJob(jobPath, resultPath, progressPath, cancelPath);
+    await runMountJob(jobPath, resultPath, progressPath, cancelPath, pipeClient);
     return;
   }
   if (raw.type === 'restore') {

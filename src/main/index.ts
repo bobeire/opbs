@@ -18,7 +18,7 @@ import { dispatchHelperJob } from './helper/job-runner';
 import { launchElevatedJob } from './helper/launcher';
 import { loadNative } from './utils/native-loader';
 import type { VssJob, VssJobResult } from './utils/vss';
-import { winfspAvailable } from './imaging/mount-manager';
+import { winfspAvailable, winfspLoadNote } from './imaging/mount-manager';
 import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains, writeManifest } from './backup/retention';
 import { checkDiskHealth } from './utils/disk-health';
 import { runCli } from './cli';
@@ -1336,15 +1336,17 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
 
   // Read-only WinFsp mounts of image partitions (elevated helper)
   ipcMain.handle('winfsp-status', async () => {
-    return { available: winfspAvailable() };
+    const available = winfspAvailable();
+    return { available, note: available ? '' : winfspLoadNote() };
   });
 
   ipcMain.handle('mount-image', async (_, config) => {
     if (!winfspAvailable()) {
-      return {
-        ok: false,
-        error: 'WinFsp is not installed. Install the WinFsp runtime (https://winfsp.dev) and try again.'
-      };
+      const note = winfspLoadNote();
+      const detail = note && note !== 'not attempted' ? ` (${note})` : '';
+      const error = `WinFsp is not installed. Install the WinFsp runtime (https://winfsp.dev) and try again.${detail}`;
+      logger.warn(`mount-image rejected: ${error}`);
+      return { ok: false, error };
     }
     const id = `mount-${crypto.randomUUID()}`;
     const job = {
@@ -1355,6 +1357,7 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       label: config.label,
       passphrase: config.passphrase
     };
+    logger.info(`mount-image: launching helper for ${job.imagePath}#${job.partitionIndex} (${id})`);
     const launcher = launchElevatedJob<typeof job, any, any>(job);
     launcher.onProgress((p) => {
       if (mainWindow) {
@@ -1364,14 +1367,30 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     launcher.promise
       .then((result) => {
         mountLaunchers.delete(id);
+        const ok = result?.ok !== false;
+        if (!ok) {
+          logger.warn(`mount-image failed: ${result?.error ?? 'unknown error'} (${id})`);
+        }
         if (mainWindow) {
-          mainWindow.webContents.send('mount-status', { id, state: 'unmounted', ok: result?.ok !== false });
+          mainWindow.webContents.send('mount-status', {
+            id,
+            state: 'unmounted',
+            ok,
+            error: ok ? undefined : result?.error
+          });
         }
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         mountLaunchers.delete(id);
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warn(`mount-image failed: ${message} (${id})`);
         if (mainWindow) {
-          mainWindow.webContents.send('mount-status', { id, state: 'unmounted', ok: false });
+          mainWindow.webContents.send('mount-status', {
+            id,
+            state: 'unmounted',
+            ok: false,
+            error: message
+          });
         }
       });
     mountLaunchers.set(id, { cancel: launcher.cancel });

@@ -69,6 +69,8 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
   let settled = false;
   let pipeConnected = false;
   let pipeResult: unknown = null;
+  let lastFileProgress = '';
+  let lastProgressAt = 0;
 
   const pipe = new PipeServer(pipeName);
 
@@ -104,14 +106,18 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
   pipe.onMessage((msg: PipeMessage) => {
     switch (msg.type) {
       case 'started':
+        pipeConnected = true;
+        helperStarted = true;
         // Keep startupTimer running: it doubles as the result.json watchdog
         // if the pipe later drops before the result message arrives.
-        helperStarted = true;
         break;
       case 'progress':
+        pipeConnected = true;
+        lastProgressAt = Date.now();
         emitter.emit('progress', msg);
         break;
       case 'result':
+        pipeConnected = true;
         pipeResult = msg;
         settle();
         break;
@@ -171,12 +177,27 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
   const startedAt = Date.now();
   let helperStarted = false;
   const startupTimer = setInterval(() => {
-    if (!pipeConnected && !helperStarted) {
-      if (fs.existsSync(progressPath) || fs.existsSync(resultPath)) {
+    // File-based IPC: detect that the helper is alive and surface progress.json
+    // changes (the pipe never delivered them). Do NOT clear the timer here —
+    // we still need to poll for result.json so the promise can settle.
+    if (!pipeConnected) {
+      if (!helperStarted && (fs.existsSync(progressPath) || fs.existsSync(resultPath))) {
         helperStarted = true;
-        clearInterval(startupTimer);
+      }
+      if (helperStarted && fs.existsSync(progressPath)) {
+        try {
+          const raw = fs.readFileSync(progressPath, 'utf-8');
+          if (raw !== lastFileProgress) {
+            lastFileProgress = raw;
+            lastProgressAt = Date.now();
+            emitter.emit('progress', JSON.parse(raw) as P);
+          }
+        } catch {
+          /* partial write — try again next tick */
+        }
       }
     }
+
     if (fs.existsSync(resultPath)) {
       settle();
       return;
@@ -184,10 +205,21 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
     if (!helperStarted && Date.now() - startedAt > STARTED_TIMEOUT_MS) {
       clearInterval(startupTimer);
       fail(new Error('Elevation was not confirmed. The job did not start.'));
+      return;
     }
     // Helper started but never produced a result and the pipe never settled
     // us: catch a silently-dead helper so the UI gets an error, not a hang.
-    if (helperStarted && !pipe.connected && Date.now() - startedAt > STARTED_TIMEOUT_MS * 4) {
+    // Recent progress (pipe or file) means the helper is still working.
+    if (
+      helperStarted &&
+      !pipe.connected &&
+      !settled &&
+      Date.now() - startedAt > STARTED_TIMEOUT_MS * 4
+    ) {
+      const recentActivity = lastProgressAt > 0 && Date.now() - lastProgressAt < STARTED_TIMEOUT_MS * 4;
+      if (recentActivity) {
+        return;
+      }
       clearInterval(startupTimer);
       fail(new Error('The backup helper exited without reporting a result.'));
     }

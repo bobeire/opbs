@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 interface BrowseNode {
   /** MFT record number (NTFS) or start cluster (FAT/exFAT), as sent by main. */
@@ -58,14 +58,22 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
   const currentBrowsable = currentPartition ? currentPartition.browsable !== false : false;
   const [mounting, setMounting] = useState(false);
   const [mountError, setMountError] = useState('');
+  // The mount-status listener is registered once ([]); it must read the current
+  // mount id through a ref or it closes over null and drops every event.
+  const mountIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     void window.electronAPI
       .winfspStatus()
-      .then((status: { available: boolean }) => setWinfspOk(status.available))
+      .then((status: { available: boolean; note?: string }) => {
+        setWinfspOk(status.available);
+        if (!status.available && status.note && status.note !== 'not attempted') {
+          setMountError(`WinFsp not available: ${status.note}`);
+        }
+      })
       .catch(() => setWinfspOk(false));
     const unsubscribe = window.electronAPI.onMountStatus((status: MountStatus) => {
-      if (status.id !== mountId) return;
+      if (!mountIdRef.current || status.id !== mountIdRef.current) return;
       if (status.state === 'mounted') {
         setMountPoint(status.mountPoint ?? '');
         setMountedOf(`${imagePath}#${partitionIndex}`);
@@ -75,6 +83,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         if (status.ok === false) {
           setMountError(status.error ?? 'The mount was removed unexpectedly.');
         }
+        mountIdRef.current = null;
         setMountId(null);
         setMountPoint('');
         setMounting(false);
@@ -237,7 +246,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
   };
 
   const handleMount = async (): Promise<void> => {
-    if (partitionIndex === null || mountId) return;
+    if (partitionIndex === null || mountIdRef.current) return;
     setMounting(true);
     setMountError('');
     try {
@@ -247,10 +256,12 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         label: `OPBS ${imagePath.split(/[\\/]/).pop() ?? 'image'} (partition ${partitionIndex})`,
         passphrase: passphrase || undefined
       });
-      if (!result.ok) {
+      if (!result.ok || !result.id) {
         setMountError(result.error ?? 'Mount failed');
         setMounting(false);
       } else {
+        // Ref first so a fast mount-status event is not dropped by the listener.
+        mountIdRef.current = result.id;
         setMountId(result.id);
       }
     } catch (e: any) {
@@ -260,8 +271,9 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
   };
 
   const handleUnmount = async (): Promise<void> => {
-    if (!mountId) return;
-    await window.electronAPI.unmountImage(mountId);
+    const id = mountIdRef.current;
+    if (!id) return;
+    await window.electronAPI.unmountImage(id);
   };
 
   const formatSize = (bytes: number): string => {
