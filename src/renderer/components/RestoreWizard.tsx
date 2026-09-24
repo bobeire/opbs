@@ -36,9 +36,18 @@ interface PreflightResult {
   sameDisk?: boolean;
   encrypted?: boolean;
   passphraseRequired?: boolean;
+  targetIsSystemDisk?: boolean;
 }
 
-type WizardStep = 'select_image' | 'select_target' | 'options' | 'progress' | 'complete';
+interface RestoreResultSummary {
+  targetsRestored?: number;
+  bytesWritten?: number;
+  durationMs?: number;
+  warnings?: string[];
+  drill?: { ok: boolean; failures?: string[] };
+}
+
+type WizardStep = 'select_image' | 'select_target' | 'options' | 'progress' | 'complete' | 'error';
 
 function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: RestoreWizardProps) {
   const isClone = mode === 'clone';
@@ -55,6 +64,8 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [acknowledge, setAcknowledge] = useState(false);
   const [progress, setProgress] = useState<any>(null);
+  const [restoreResult, setRestoreResult] = useState<RestoreResultSummary | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
 
   useEffect(() => {
     const cleanup = window.electronAPI.onRestoreProgress((p) => {
@@ -140,20 +151,24 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
 
   const handleStartRestore = async () => {
     setCurrentStep('progress');
-    
+    setRestoreResult(null);
+    setRestoreError(null);
+
     try {
-      await window.electronAPI.startRestore({
+      const result = (await window.electronAPI.startRestore({
         imagePath,
         targetDiskIndex: targetDiskIndex!,
         targetPartitions,
         verifyBeforeWrite: true,
         applyDeltas,
         ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {})
-      });
+      })) as RestoreResultSummary | undefined;
+      setRestoreResult(result ?? null);
       setCurrentStep('complete');
     } catch (error) {
       console.error('Restore failed:', error);
-      setCurrentStep('select_image');
+      setRestoreError(error instanceof Error ? error.message : String(error));
+      setCurrentStep('error');
     }
   };
 
@@ -466,23 +481,88 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
           </div>
         );
         
-      case 'complete':
+      case 'complete': {
+        const needsReboot = !!preflight?.targetIsSystemDisk;
+        const warnings = restoreResult?.warnings ?? [];
+        const drillFailures = restoreResult?.drill?.ok === false ? (restoreResult.drill.failures ?? []) : [];
         return (
           <div className="wizard-step">
             <h2>{isClone ? 'Clone Complete' : 'Restore Complete'}</h2>
-            
+
             <div className="success-message">
               <p>
                 {isClone
                   ? 'The disk has been cloned successfully from the backup image.'
-                  : 'Your system has been restored successfully!'}
+                  : needsReboot
+                    ? 'Your system has been restored successfully!'
+                    : 'Restore completed successfully!'}
               </p>
-              <p>Please restart your computer to complete the process.</p>
+              {needsReboot ? (
+                <p>Please restart your computer to complete the process.</p>
+              ) : (
+                <p>
+                  No restart is required for this drive. The restored volumes are ready — open them
+                  in File Explorer or Disk Management.
+                </p>
+              )}
+              {typeof restoreResult?.bytesWritten === 'number' && restoreResult.bytesWritten > 0 && (
+                <p>
+                  Wrote {formatSize(restoreResult.bytesWritten)}
+                  {typeof restoreResult.targetsRestored === 'number'
+                    ? ` to ${restoreResult.targetsRestored} partition(s)`
+                    : ''}
+                  {typeof restoreResult.durationMs === 'number'
+                    ? ` in ${Math.max(1, Math.round(restoreResult.durationMs / 1000))}s`
+                    : ''}
+                  .
+                </p>
+              )}
             </div>
-            
+
+            {warnings.length > 0 && (
+              <div className="warning-box">
+                <h3>Warnings</h3>
+                <ul>
+                  {warnings.map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {drillFailures.length > 0 && (
+              <div className="error-message">
+                <h3>Restore drill reported failures</h3>
+                <ul>
+                  {drillFailures.map((f, i) => (
+                    <li key={i}>{f}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             <div className="wizard-actions">
               <button className="btn-primary" onClick={onComplete}>
                 Done
+              </button>
+            </div>
+          </div>
+        );
+      }
+
+      case 'error':
+        return (
+          <div className="wizard-step">
+            <h2>Restore Failed</h2>
+            <div className="error-message">
+              <p>{restoreError ?? 'The restore did not complete.'}</p>
+            </div>
+            <div className="wizard-actions">
+              <button className="btn-secondary" onClick={() => setCurrentStep('select_target')}>
+                Back
+              </button>
+              <button className="btn-primary" onClick={onComplete}>
+                Close
               </button>
             </div>
           </div>

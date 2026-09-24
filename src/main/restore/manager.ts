@@ -2,7 +2,8 @@ import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import { RestoreCoordinator, RestoreJobConfig, mapRestoreJobProgress, summarizeImage, ImageSummary } from '../imaging/restore-engine';
 import { RestoreJobProgress, RestoreJobResult } from '../imaging/imaging-job';
-import { DiskEnumerator } from '../utils/disk-enumerator';
+import { DiskEnumerator, querySystemDiskIndex } from '../utils/disk-enumerator';
+import { logger } from '../utils/logger';
 
 export type RestoreConfig = RestoreJobConfig;
 
@@ -24,6 +25,9 @@ export interface RestorePreflightResult {
   sameDisk?: boolean;
   encrypted?: boolean;
   passphraseRequired?: boolean;
+  /** True when the target disk holds Windows (system/boot) — a reboot is
+   *  required after restore; secondary disks do not need one. */
+  targetIsSystemDisk?: boolean;
 }
 
 export interface RestoreProgress {
@@ -86,6 +90,14 @@ export class RestoreManager extends EventEmitter {
 
       if (!result.ok) {
         throw new Error(result.error ?? 'Restore failed');
+      }
+
+      logger.info(
+        `Restore completed: ${result.targetsRestored} target(s), ${result.bytesWritten} bytes in ${result.durationMs}ms` +
+          (result.warnings.length > 0 ? ` (${result.warnings.length} warning(s))` : '')
+      );
+      if (result.warnings.length > 0) {
+        logger.warn(`Restore warnings: ${result.warnings.join('; ')}`);
       }
 
       this.emitProgress({
@@ -153,6 +165,18 @@ export class RestoreManager extends EventEmitter {
 
       const disks = await this.diskEnumerator.getDisks();
       const targetDisk = disks.find((d) => d.index === config.targetDiskIndex);
+      const systemDrive = (process.env.SystemDrive || 'C:').replace(':', '').toUpperCase();
+      let targetIsSystemDisk =
+        (targetDisk?.partitions ?? []).some(
+          (p) =>
+            p.isSystem === true ||
+            p.isBoot === true ||
+            (p.driveLetter || '').replace(':', '').toUpperCase() === systemDrive
+        ) ?? false;
+      if (!targetIsSystemDisk) {
+        const sysDisk = querySystemDiskIndex();
+        targetIsSystemDisk = sysDisk !== null && sysDisk === config.targetDiskIndex;
+      }
 
       const warnings = [...(job.warnings ?? [])];
       const encrypted = summary.encrypted;
@@ -172,7 +196,8 @@ export class RestoreManager extends EventEmitter {
         warnings,
         sameDisk: (job.warnings ?? []).some((w) => w.includes('same disk the image')),
         encrypted,
-        passphraseRequired
+        passphraseRequired,
+        targetIsSystemDisk
       };
     } catch (error) {
       return {

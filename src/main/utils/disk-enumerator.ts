@@ -11,9 +11,11 @@ interface VolumeInfo {
   fsType: string;
   label: string;
   usedSpace: number;
+  isSystem?: boolean;
+  isBoot?: boolean;
 }
 
-/** Query drive letter / filesystem / label / used space per partition via PowerShell. */
+/** Query drive letter / filesystem / label / used space / system-boot flags per partition via PowerShell. */
 function queryVolumes(diskIndex: number): Map<number, VolumeInfo> {
   const result = new Map<number, VolumeInfo>();
   try {
@@ -22,7 +24,8 @@ function queryVolumes(diskIndex: number): Map<number, VolumeInfo> {
       `$p=$_; $v = if ($p.DriveLetter) { Get-Volume -DriveLetter $p.DriveLetter -ErrorAction SilentlyContinue } else { $null }; ` +
       `[pscustomobject]@{ PartitionNumber=$p.PartitionNumber; DriveLetter=[string]$p.DriveLetter; ` +
       `FileSystem=if($v){[string]$v.FileSystem}else{''}; Label=if($v){[string]$v.FileSystemLabel}else{''}; ` +
-      `Used=if($v -and $v.Size){[int64]($v.Size - $v.SizeRemaining)}else{0} } } | ConvertTo-Json -Compress`;
+      `Used=if($v -and $v.Size){[int64]($v.Size - $v.SizeRemaining)}else{0}; ` +
+      `IsSystem=[bool]$p.IsSystem; IsBoot=[bool]$p.IsBoot } } | ConvertTo-Json -Compress`;
     const out = execFileSync(powershellExe, ['-NoProfile', '-NonInteractive', '-Command', script], {
       encoding: 'utf-8',
       timeout: 15_000,
@@ -38,13 +41,35 @@ function queryVolumes(diskIndex: number): Map<number, VolumeInfo> {
         driveLetter: item.DriveLetter || null,
         fsType: item.FileSystem || 'Unknown',
         label: item.Label || '',
-        usedSpace: Number(item.Used) || 0
+        usedSpace: Number(item.Used) || 0,
+        isSystem: !!item.IsSystem,
+        isBoot: !!item.IsBoot
       });
     }
   } catch {
     // PowerShell unavailable — skip enrichment.
   }
   return result;
+}
+
+/** Disk number holding %SystemDrive% (usually C:), or null if unknown. */
+export function querySystemDiskIndex(): number | null {
+  try {
+    const letter = (process.env.SystemDrive || 'C:').replace(':', '');
+    const out = execFileSync(
+      powershellExe,
+      ['-NoProfile', '-NonInteractive', '-Command', `(Get-Partition -DriveLetter '${letter}' -ErrorAction Stop).DiskNumber | Out-String`],
+      {
+        encoding: 'utf-8',
+        timeout: 10_000,
+        windowsHide: true
+      }
+    ).trim();
+    const n = Number(out);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface NativePartition {
@@ -153,8 +178,8 @@ export class DiskEnumerator {
           label: vol?.label || `Partition ${partition.partitionIndex}`,
           fsType: vol?.fsType || 'Unknown',
           usedSpace: vol?.usedSpace ?? 0,
-          isSystem: false,
-          isBoot: false
+          isSystem: vol?.isSystem ?? false,
+          isBoot: vol?.isBoot ?? false
         };
       });
     } catch (error) {

@@ -121,6 +121,7 @@ describe('RestoreManager.preflight (dry-run)', () => {
       expect(result.targetDiskPartitionCount).toBe(0);
       expect(result.writeTableScheme).toBeNull();
       expect(result.passphraseRequired).toBe(false);
+      expect(result.targetIsSystemDisk).toBe(false);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -169,6 +170,81 @@ describe('RestoreManager.preflight (dry-run)', () => {
 
       expect(result.ok).toBe(false);
       expect(result.error).toMatch(/Target disk 9 not found/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('flags a system disk (isSystem partition) so the UI can require a reboot', async () => {
+    const dir = tempDir();
+    try {
+      const imagePath = path.join(dir, 'system.opbs');
+      writeImage(imagePath);
+
+      const stubDisks = {
+        getDisks: async () => [
+          {
+            index: 0,
+            size: 40 * 1024 * 1024 * 1024,
+            model: 'SystemSSD',
+            serial: 'SYS1',
+            partitions: [{ partitionIndex: 0, driveLetter: 'D:', isSystem: true, isBoot: false }]
+          },
+          {
+            index: 1,
+            size: 40 * 1024 * 1024 * 1024,
+            model: 'DataHDD',
+            serial: 'DAT1',
+            partitions: [{ partitionIndex: 0, driveLetter: 'E:', isSystem: false, isBoot: false }]
+          }
+        ]
+      };
+      const manager = new RestoreManager(new RestoreEngine(stubDisks as never), stubDisks as never);
+
+      const sys = await manager.preflight({ imagePath, targetDiskIndex: 0, targetPartitions: [0] });
+      const data = await manager.preflight({ imagePath, targetDiskIndex: 1, targetPartitions: [0] });
+
+      expect(sys.ok).toBe(true);
+      expect(sys.targetIsSystemDisk).toBe(true);
+      expect(data.ok).toBe(true);
+      expect(data.targetIsSystemDisk).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('treats the SystemDrive letter as the system disk even without isSystem flags', async () => {
+    const dir = tempDir();
+    try {
+      const imagePath = path.join(dir, 'system.opbs');
+      writeImage(imagePath);
+
+      const systemLetter = `${(process.env.SystemDrive || 'C:').replace(':', '')}:`;
+      const stubDisks = {
+        getDisks: async () => [
+          {
+            index: 0,
+            size: 40 * 1024 * 1024 * 1024,
+            model: 'SystemSSD',
+            serial: 'SYS1',
+            partitions: [{ partitionIndex: 0, driveLetter: systemLetter, isSystem: false, isBoot: false }]
+          },
+          {
+            index: 1,
+            size: 40 * 1024 * 1024 * 1024,
+            model: 'DataHDD',
+            serial: 'DAT1',
+            partitions: [{ partitionIndex: 0, driveLetter: 'E:', isSystem: false, isBoot: false }]
+          }
+        ]
+      };
+      const manager = new RestoreManager(new RestoreEngine(stubDisks as never), stubDisks as never);
+
+      const sys = await manager.preflight({ imagePath, targetDiskIndex: 0, targetPartitions: [0] });
+      const data = await manager.preflight({ imagePath, targetDiskIndex: 1, targetPartitions: [0] });
+
+      expect(sys.targetIsSystemDisk).toBe(true);
+      expect(data.targetIsSystemDisk).toBe(false);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
