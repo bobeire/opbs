@@ -1048,12 +1048,20 @@ export async function runRestoreJob(
           : 0;
     progress.createdAt = Date.now();
     lastProgressWrite = Date.now();
+    // Send through pipe (primary) — real-time, no polling. Without this the
+    // launcher's file fallback never runs (pipe IS connected) and the UI
+    // never leaves "preparing 0%".
+    pipeClient?.send({ type: 'progress', ...progress });
     try {
       fs.writeFileSync(progressPath, JSON.stringify(progress));
     } catch {
       /* best-effort */
     }
   };
+
+  // Leave "preparing" immediately — the first real phase may be seconds away
+  // (image reads) and the UI would otherwise sit at 0% with no signal.
+  writeProgress(progress.phase);
 
   const isCancelled = (): boolean => fs.existsSync(cancelPath);
 
@@ -1079,16 +1087,23 @@ export async function runRestoreJob(
     // Integrity gate: verify every source that lacks the VERIFIED flag before
     // opening any target for writing.
     if (job.verifyBeforeWrite) {
-      const unverified = infos.filter((info) => !(info.header.flags & FLAG_VERIFIED));
+      const unverified = infos
+        .map((info, index) => ((info.header.flags & FLAG_VERIFIED) ? -1 : index))
+        .filter((index) => index >= 0);
       if (unverified.length > 0) {
         progress.currentPartition = 'Verifying image';
         writeProgress('verifying');
-        for (let i = 0; i < unverified.length; i++) {
-          const source = sources[i];
-          const verified = await verifyImage(source, key);
+        for (let n = 0; n < unverified.length; n++) {
+          // Index into sources/infos with the ORIGINAL position — not the
+          // filtered list — or a partially pre-verified chain verifies the
+          // wrong file.
+          const sourceIndex = unverified[n];
+          progress.currentPartition = `Verifying image (${n + 1}/${unverified.length})`;
+          writeProgress('verifying');
+          const verified = await verifyImage(sources[sourceIndex], key);
           if (!verified.ok) {
             throw new Error(
-              `Image verification failed before restore (${path.basename(source)}): ${verified.error ?? 'unknown error'}`
+              `Image verification failed before restore (${path.basename(sources[sourceIndex])}): ${verified.error ?? 'unknown error'}`
             );
           }
         }
@@ -1231,6 +1246,8 @@ export async function runRestoreJob(
       // space and incremental gaps) so a file created after the backup cannot
       // survive on the restored volume.
       if (clearFreeSpace) {
+        progress.currentPartition = `${target.label} — clearing free space`;
+        writeProgress('writing');
         const present = presentByPartition.get(target.partitionIndex) ?? new Set<number>();
         const totalBlocks = Math.ceil(rangeSize / blockSize);
         let runStart = -1;
@@ -1263,6 +1280,8 @@ export async function runRestoreJob(
             remaining -= n;
             offset += BigInt(n);
             progress.bytesDone += n;
+            const elapsedSec = (Date.now() - start) / 1000;
+            progress.speed = elapsedSec > 0 ? progress.bytesDone / elapsedSec : 0;
             if (Date.now() - lastProgressWrite > 100) {
               writeProgress('writing');
             }
@@ -1286,6 +1305,7 @@ export async function runRestoreJob(
         }
         const elapsedSec = (Date.now() - start) / 1000;
         progress.speed = elapsedSec > 0 ? progress.bytesDone / elapsedSec : 0;
+        progress.currentPartition = target.label;
       }
 
       // Filesystem grow-on-restore: when the target is explicitly larger than
@@ -1545,12 +1565,18 @@ export async function runCloneJob(
           : 0;
     progress.createdAt = Date.now();
     lastProgressWrite = Date.now();
+    // Send through pipe (primary) — real-time, no polling (same fix as
+    // restore; the file fallback only runs when the pipe is NOT connected).
+    pipeClient?.send({ type: 'progress', ...progress });
     try {
       fs.writeFileSync(progressPath, JSON.stringify(progress));
     } catch {
       /* progress reporting is best-effort */
     }
   };
+
+  // Leave "preparing" immediately (see restore).
+  writeProgress(progress.phase);
 
   const isCancelled = (): boolean => fs.existsSync(cancelPath);
 

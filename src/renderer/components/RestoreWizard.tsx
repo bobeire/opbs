@@ -50,6 +50,36 @@ interface RestoreResultSummary {
 
 type WizardStep = 'select_image' | 'select_target' | 'options' | 'progress' | 'complete' | 'error';
 
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.round((seconds % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
+function formatSpeed(bytesPerSec: number): string {
+  if (bytesPerSec >= 1073741824) return `${(bytesPerSec / 1073741824).toFixed(1)} GB/s`;
+  if (bytesPerSec >= 1048576) return `${(bytesPerSec / 1048576).toFixed(1)} MB/s`;
+  if (bytesPerSec >= 1024) return `${(bytesPerSec / 1024).toFixed(0)} KB/s`;
+  return `${Math.round(bytesPerSec)} B/s`;
+}
+
+function phaseLabel(phase?: string): string {
+  switch (phase) {
+    case 'reading_image':
+      return 'Reading image';
+    case 'restoring':
+      return 'Writing to target';
+    case 'completed':
+      return 'Completed';
+    case 'error':
+      return 'Failed';
+    default:
+      return 'Preparing';
+  }
+}
+
 function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: RestoreWizardProps) {
   const isClone = mode === 'clone';
   const [currentStep, setCurrentStep] = useState<WizardStep>('select_image');
@@ -469,8 +499,24 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
               </div>
               
               <div className="progress-info">
-                <p>Phase: {progress?.phase || 'Preparing...'}</p>
+                <p>Phase: {phaseLabel(progress?.phase)}</p>
                 <p>Progress: {Math.round((progress?.percentComplete || 0) * 10) / 10}%</p>
+                {progress?.currentPartition && <p>Current: {progress.currentPartition}</p>}
+                {(progress?.bytesProcessed ?? 0) > 0 && progress?.totalBytes > 0 && (
+                  <p>
+                    {formatSize(progress.bytesProcessed)} of {formatSize(progress.totalBytes)}
+                  </p>
+                )}
+                {progress?.speed > 0 && <p>Speed: {formatSpeed(progress.speed)}</p>}
+                {progress?.estimatedTimeRemaining > 0 && progress?.estimatedTimeRemaining < Infinity && (
+                  <p>ETA: {formatDuration(progress.estimatedTimeRemaining)}</p>
+                )}
+                {(progress?.phase === 'restoring' || progress?.phase === 'reading_image') && (
+                  <p className="progress-resume-note">
+                    The target volume is locked and temporarily hidden from Explorer while the write
+                    runs — it reappears when the restore finishes. This is normal.
+                  </p>
+                )}
               </div>
             </div>
             

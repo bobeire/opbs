@@ -1057,6 +1057,46 @@ describe('runRestoreJob', () => {
       expect((native.writeBlocks as any).mock.calls[i][1]).toBe(BigInt(targetOffset + i * BLOCK));
     }
   });
+
+  it('streams progress over the pipe so the UI never sits at preparing 0%', async () => {
+    await writeAndBackup(createMockNative());
+
+    fs.writeFileSync(
+      jobPath,
+      JSON.stringify({
+        type: 'restore',
+        imagePath,
+        verifyBeforeWrite: false,
+        targets: [{ partitionIndex: 2, diskIndex: 3, offset: 4096, label: 'Partition 2' }]
+      } as RestoreJob)
+    );
+
+    const send = vi.fn();
+    const pipeClient = { send } as unknown as Parameters<typeof runRestoreJob>[5];
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, createMockNative(), pipeClient);
+
+    const progressMessages = send.mock.calls
+      .map((call) => call[0] as { type?: string; phase?: string; percent?: number; totalBytes?: number })
+      .filter((msg) => msg?.type === 'progress');
+    expect(progressMessages.length).toBeGreaterThan(1);
+
+    // The first message must already carry a real job phase — without the
+    // pipe send the launcher never falls back to progress.json polling
+    // (pipeConnected is true) and the wizard stays on "preparing 0%".
+    expect(['verifying', 'reading-image', 'writing', 'completed']).toContain(progressMessages[0].phase);
+    expect(progressMessages[0]).toHaveProperty('percent');
+    expect(progressMessages[0]).toHaveProperty('totalBytes');
+    expect(progressMessages[0]).toHaveProperty('bytesDone');
+
+    const last = progressMessages[progressMessages.length - 1];
+    expect(last.phase).toBe('completed');
+    expect(last.percent).toBe(100);
+
+    // The file fallback still gets the same final state.
+    const onDisk = JSON.parse(fs.readFileSync(progressPath, 'utf-8')) as { phase: string; percent: number };
+    expect(onDisk.phase).toBe('completed');
+    expect(onDisk.percent).toBe(100);
+  });
 });
 
 describe('incremental and encrypted jobs', () => {
@@ -1196,6 +1236,43 @@ describe('incremental and encrypted jobs', () => {
     expect(restoreNative.writeBlocks).toHaveBeenNthCalledWith(4, '\\\\.\\PhysicalDrive1', BigInt(4096 + BLOCK), expect.any(Buffer));
     const lastData = ((restoreNative.writeBlocks as any).mock.calls[3][2] as Buffer);
     expect(lastData).toEqual(blockPattern(9, BLOCK));
+  });
+
+  it('verify-before-write checks the source that is actually unverified', async () => {
+    const native = createIncrementalMock();
+
+    writeJob(singlePartitionJob(fullPath));
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    native.changeBlock1();
+    writeJob({ ...singlePartitionJob(deltaPath), baseImagePath: fullPath });
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    // The full was verified during backup; only the delta is unverified.
+    // Clear its VERIFIED flag and corrupt its frame payload: verifying the
+    // delta must fail, while verifying the (already verified) full would pass.
+    const deltaInfo = readImageInfo(deltaPath);
+    const fd = fs.openSync(deltaPath, 'r+');
+    fs.writeSync(fd, Buffer.from([deltaInfo.header.flags & ~FLAG_VERIFIED]), 0, 1, FLAGS_OFFSET);
+    fs.writeSync(fd, Buffer.from([0xff]), 0, 1, deltaInfo.blocks[0].fileOffset + 16);
+    fs.closeSync(fd);
+
+    const restoreNative = createIncrementalMock();
+    writeJob({
+      type: 'restore',
+      imagePath: fullPath,
+      verifyBeforeWrite: true,
+      applyDeltas: [deltaPath],
+      targets: [{ partitionIndex: 2, diskIndex: 1, offset: 4096, label: 'Partition 2' }]
+    } as RestoreJob);
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, restoreNative);
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as RestoreJobResult;
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('Image verification failed before restore');
+    expect(result.error).toContain(path.basename(deltaPath));
+    // The integrity gate runs before any target write.
+    expect(restoreNative.writeBlocks).not.toHaveBeenCalled();
   });
 
   it('encrypted backup refuses to verify without the key and passes with it', async () => {
