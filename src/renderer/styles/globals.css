@@ -519,6 +519,13 @@ body {
   cursor: pointer;
 }
 
+.option-note {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin: 4px 0 0 28px;
+  line-height: 1.45;
+}
+
 /* Summary */
 .summary {
   background-color: var(--bg-color);

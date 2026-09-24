@@ -90,6 +90,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   const [targetDiskIndex, setTargetDiskIndex] = useState<number | null>(null);
   const [targetPartitions, setTargetPartitions] = useState<number[]>([]);
   const [applyDeltas, setApplyDeltas] = useState(true);
+  const [clearFreeSpace, setClearFreeSpace] = useState(true);
   const [passphrase, setPassphrase] = useState('');
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
@@ -192,6 +193,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
         targetPartitions,
         verifyBeforeWrite: true,
         applyDeltas,
+        clearFreeSpace,
         ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {})
       })) as RestoreResultSummary | undefined;
       setRestoreResult(result ?? null);
@@ -441,6 +443,23 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
               )}
 
               <div className="option-group">
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={clearFreeSpace}
+                    onChange={(e) => setClearFreeSpace(e.target.checked)}
+                  />
+                  Clear free space after restore
+                </label>
+                <p className="option-note">
+                  Zeroes every block not in the image so files created after the backup cannot
+                  survive (even with recovery tools). This writes the target's whole free space and
+                  can take hours on slow drives — uncheck for a much faster restore that skips the
+                  cleaning.
+                </p>
+              </div>
+
+              <div className="option-group">
                 <label>Encryption Passphrase:</label>
                 <input
                   type="password"
@@ -471,6 +490,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                 <li>Target Disk: {preflight?.targetDiskModel ?? `Disk ${targetDiskIndex}`} ({formatSize(preflight?.targetDiskBytes ?? 0)})</li>
                 <li>Partitions to Restore: {targetPartitions.length}</li>
                 <li>Required Space: {formatSize(preflight?.requiredBytes ?? 0)}</li>
+                <li>Clear free space: {clearFreeSpace ? 'Yes (slower, thorough)' : 'No (fast)'}</li>
               </ul>
             </div>
             
