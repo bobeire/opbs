@@ -44,6 +44,7 @@ interface RestoreResultSummary {
   bytesWritten?: number;
   durationMs?: number;
   warnings?: string[];
+  freeBlocksCleared?: number;
   drill?: { ok: boolean; failures?: string[] };
 }
 
@@ -515,6 +516,18 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                     ? ` in ${Math.max(1, Math.round(restoreResult.durationMs / 1000))}s`
                     : ''}
                   .
+                </p>
+              )}
+              {typeof restoreResult?.freeBlocksCleared === 'number' && restoreResult.freeBlocksCleared > 0 && (
+                <p>
+                  Cleared {restoreResult.freeBlocksCleared} free-space block(s) that were not in the image, so
+                  files created after the backup are gone.
+                </p>
+              )}
+              {!needsReboot && (
+                <p className="warning-text">
+                  If a file still appears in Explorer, eject the drive and plug it back in (or reboot) so
+                  Windows drops its cache.
                 </p>
               )}
             </div>

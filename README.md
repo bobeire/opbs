@@ -231,9 +231,11 @@ A backup (or clone) can drop free space: `usedBlocksOnly` reads the NTFS
 **$Bitmap** from the snapshot/volume and stores only blocks that contain at
 least one allocated cluster (non-NTFS partitions fall back to a full capture).
 Skipped blocks are simply absent from the image (the same gap mechanism
-incrementals already use), so the `.opbs` format is unchanged and restores
-leave spare space untouched. CLI: `backup --used-blocks-only` /
-`clone --used-blocks-only`.
+incrementals already use), so the `.opbs` format is unchanged. On restore,
+blocks that are **not** in the image chain are zero-filled on the target by
+default (`clearFreeSpace`, opt-out with `false` / skip only if you need the
+faster older behaviour), so a file created on the drive after the backup cannot
+survive. CLI: `backup --used-blocks-only` / `clone --used-blocks-only`.
 
 ### Resumable imaging (`resume`)
 
@@ -278,6 +280,13 @@ CLI: `clone <config.json> [--elevated] [--used-blocks-only] [--layout P:OFF[:SIZ
 - Each unverified image in the chain is verified (with the provided passphrase
   key) before any data is written.
 - Blocks are written to the target disk at `target.offset + blockIndex * blockSize`.
+- After the image chain is applied, every block **not** present in the image
+  (used-blocks free space and incremental gaps) is zero-filled on the target
+  (`clearFreeSpace`, default true) so a file created after the backup cannot
+  survive. Set `clearFreeSpace: false` only if you want the faster older
+  behaviour that leaves spare space untouched. Volumes are lock+dismounted
+  while writing when the native addon supports it, and write failures fail the
+  restore instead of continuing with a warning.
 - Decompression is multithreaded for compressed images (defaults to a few
   worker threads; `compressionThreads: 0` or `--threads 0` forces the
   synchronous path). Blocks are decompressed out of order but written in

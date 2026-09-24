@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as zlib from 'zlib';
 import { runBackupJob, runRestoreJob } from '../../src/main/helper/job-runner';
-import { verifyImage, readImageInfo, encodeHeader, encodeBlockFrame, encodePartitionEntry, encodeBlockIndexEntry, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, FLAG_VERIFIED, FLAGS_OFFSET, FLAG_INCREMENTAL, FLAG_RESUMED, COMPRESSION_DEFLATE, COMPRESSION_ZSTD, crc32, newImageCipher, metadataFromCipher, scanPartialImage, compressBlock } from '../../src/main/imaging/image-format';
+import { verifyImage, readImageInfo, encodeHeader, encodeBlockFrame, encodePartitionEntry, encodeBlockIndexEntry, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, FLAG_VERIFIED, FLAGS_OFFSET, FLAG_INCREMENTAL, FLAG_RESUMED, COMPRESSION_DEFLATE, COMPRESSION_ZSTD, crc32, newImageCipher, metadataFromCipher, scanPartialImage, compressBlock, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
 import { ImagingJob, RestoreJob, NativeImagingApi, JobResult, RestoreJobResult } from '../../src/main/imaging/imaging-job';
 import { buildNtfsVolumeData, CLUSTER as NTFS_CLUSTER } from '../helpers/ntfs-fixture';
 import { buildCanonicalNtfsVolumeData, GR_CLUSTER, GR_SPC } from '../helpers/ntfs-resize-fixture';
@@ -551,6 +551,190 @@ describe('runRestoreJob', () => {
     // The written bytes must match what was backed up.
     const firstWrite = ((native.writeBlocks as any).mock.calls[0][2] as Buffer);
     expect(firstWrite).toEqual(blockPattern(3, BLOCK));
+  });
+
+  it('zero-fills target blocks absent from a used-blocks image so free space cannot survive', async () => {
+    // Sparse image: only block 0 of a 3-block partition is present.
+    const partSize = BLOCK * 3;
+    const partition: PartitionEntryMeta = {
+      partitionIndex: 2,
+      size: partSize,
+      offsetOnDisk: 122683392,
+      firstBlockFileOffset: 0,
+      blockCount: 1
+    };
+    const header: ImageHeader = {
+      version: IMAGE_VERSION,
+      timestamp: Date.now(),
+      totalBytes: BLOCK,
+      blockSize: BLOCK,
+      compressionId: 0,
+      partitionCount: 1,
+      flags: FLAG_HAS_BLOCK_INDEX | FLAG_VERIFIED,
+      blockIndexOffset: 0,
+      cipherId: 0,
+      kdfIterations: 0,
+      salt: Buffer.alloc(16),
+      baseImagePath: ''
+    };
+    const fd = fs.openSync(imagePath, 'w+');
+    fs.writeSync(fd, encodeHeader(header), 0, HEADER_SIZE, 0);
+    fs.writeSync(fd, Buffer.alloc(PARTITION_TABLE_ENTRY_SIZE), 0, PARTITION_TABLE_ENTRY_SIZE, HEADER_SIZE);
+    let cursor = HEADER_SIZE + PARTITION_TABLE_ENTRY_SIZE;
+    partition.firstBlockFileOffset = cursor;
+    const raw = blockPattern(7, BLOCK);
+    const frame = encodeBlockFrame(raw, raw);
+    fs.writeSync(fd, frame, 0, frame.length, cursor);
+    const blocks: BlockRecord[] = [
+      { partitionIndex: 2, blockIndex: 0, fileOffset: cursor, rawSize: BLOCK, compSize: frame.length, rawCrc32: crc32(raw) }
+    ];
+    cursor += frame.length;
+    const bi = cursor;
+    const countBuf = Buffer.alloc(8);
+    countBuf.writeBigUInt64LE(BigInt(blocks.length));
+    fs.writeSync(fd, countBuf, 0, 8, cursor);
+    cursor += 8;
+    fs.writeSync(fd, encodeBlockIndexEntry(blocks[0]), 0, BLOCK_INDEX_ENTRY_SIZE, cursor);
+    fs.writeSync(fd, encodePartitionEntry(partition), 0, PARTITION_TABLE_ENTRY_SIZE, HEADER_SIZE);
+    const patched = Buffer.alloc(HEADER_SIZE);
+    fs.readSync(fd, patched, 0, HEADER_SIZE, 0);
+    patched.writeBigUInt64LE(BigInt(bi), 40);
+    fs.writeSync(fd, patched, 0, HEADER_SIZE, 0);
+    fs.closeSync(fd);
+
+    const targetOffset = 4096;
+    fs.writeFileSync(
+      jobPath,
+      JSON.stringify({
+        type: 'restore',
+        imagePath,
+        verifyBeforeWrite: false,
+        targets: [{ partitionIndex: 2, diskIndex: 3, offset: targetOffset, label: 'Partition 2' }]
+      } as RestoreJob)
+    );
+
+    const native = createMockNative();
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as RestoreJobResult;
+    expect(result.ok).toBe(true);
+    expect(result.blocksWritten).toBe(1);
+    expect(result.freeBlocksCleared).toBe(2);
+    expect(result.warnings.some((w) => w.includes('Cleared 2 free-space block'))).toBe(true);
+    // totalBytes includes image bytes + gap zeros.
+    expect(result.totalBytes).toBe(BLOCK + BLOCK * 2);
+    expect(result.bytesWritten).toBe(BLOCK * 3);
+
+    const calls = (native.writeBlocks as any).mock.calls as Array<[string, bigint, Buffer]>;
+    expect(calls).toHaveLength(2);
+    expect(calls[0][1]).toBe(BigInt(targetOffset + 0));
+    expect(calls[0][2]).toEqual(raw);
+    // Contiguous gap run (blocks 1–2) written as zeros in one call.
+    expect(calls[1][1]).toBe(BigInt(targetOffset + BLOCK));
+    expect(calls[1][2].length).toBe(BLOCK * 2);
+    expect(calls[1][2].every((b: number) => b === 0)).toBe(true);
+  });
+
+  it('skips free-space zero-fill when clearFreeSpace is false', async () => {
+    const partSize = BLOCK * 3;
+    const partition: PartitionEntryMeta = {
+      partitionIndex: 2,
+      size: partSize,
+      offsetOnDisk: 122683392,
+      firstBlockFileOffset: 0,
+      blockCount: 1
+    };
+    const header: ImageHeader = {
+      version: IMAGE_VERSION,
+      timestamp: Date.now(),
+      totalBytes: BLOCK,
+      blockSize: BLOCK,
+      compressionId: 0,
+      partitionCount: 1,
+      flags: FLAG_HAS_BLOCK_INDEX | FLAG_VERIFIED,
+      blockIndexOffset: 0,
+      cipherId: 0,
+      kdfIterations: 0,
+      salt: Buffer.alloc(16),
+      baseImagePath: ''
+    };
+    const fd = fs.openSync(imagePath, 'w+');
+    fs.writeSync(fd, encodeHeader(header), 0, HEADER_SIZE, 0);
+    fs.writeSync(fd, Buffer.alloc(PARTITION_TABLE_ENTRY_SIZE), 0, PARTITION_TABLE_ENTRY_SIZE, HEADER_SIZE);
+    let cursor = HEADER_SIZE + PARTITION_TABLE_ENTRY_SIZE;
+    partition.firstBlockFileOffset = cursor;
+    const raw = blockPattern(9, BLOCK);
+    const frame = encodeBlockFrame(raw, raw);
+    fs.writeSync(fd, frame, 0, frame.length, cursor);
+    const record: BlockRecord = {
+      partitionIndex: 2,
+      blockIndex: 0,
+      fileOffset: cursor,
+      rawSize: BLOCK,
+      compSize: frame.length,
+      rawCrc32: crc32(raw)
+    };
+    cursor += frame.length;
+    const bi = cursor;
+    const countBuf = Buffer.alloc(8);
+    countBuf.writeBigUInt64LE(1n);
+    fs.writeSync(fd, countBuf, 0, 8, cursor);
+    cursor += 8;
+    fs.writeSync(fd, encodeBlockIndexEntry(record), 0, BLOCK_INDEX_ENTRY_SIZE, cursor);
+    fs.writeSync(fd, encodePartitionEntry(partition), 0, PARTITION_TABLE_ENTRY_SIZE, HEADER_SIZE);
+    const patched = Buffer.alloc(HEADER_SIZE);
+    fs.readSync(fd, patched, 0, HEADER_SIZE, 0);
+    patched.writeBigUInt64LE(BigInt(bi), 40);
+    fs.writeSync(fd, patched, 0, HEADER_SIZE, 0);
+    fs.closeSync(fd);
+
+    fs.writeFileSync(
+      jobPath,
+      JSON.stringify({
+        type: 'restore',
+        imagePath,
+        verifyBeforeWrite: false,
+        clearFreeSpace: false,
+        targets: [{ partitionIndex: 2, diskIndex: 3, offset: 4096, label: 'Partition 2' }]
+      } as RestoreJob)
+    );
+
+    const native = createMockNative();
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as RestoreJobResult;
+    expect(result.ok).toBe(true);
+    expect(result.freeBlocksCleared).toBeUndefined();
+    expect(result.blocksWritten).toBe(1);
+    expect(native.writeBlocks).toHaveBeenCalledTimes(1);
+    expect(result.totalBytes).toBe(BLOCK);
+  });
+
+  it('fails the restore when a target write fails instead of only warning', async () => {
+    await writeAndBackup(createMockNative());
+
+    fs.writeFileSync(
+      jobPath,
+      JSON.stringify({
+        type: 'restore',
+        imagePath,
+        verifyBeforeWrite: false,
+        clearFreeSpace: false,
+        targets: [{ partitionIndex: 2, diskIndex: 3, offset: 4096, label: 'Partition 2' }]
+      } as RestoreJob)
+    );
+
+    const native = createMockNative();
+    native.writeBlocks = vi.fn(() => {
+      throw new Error('ERROR_ACCESS_DENIED');
+    });
+
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as RestoreJobResult;
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/Write failed for Partition 2 block 0/);
+    expect(result.targetsRestored).toBe(0);
   });
 
   it('surfaces build-time warnings alongside runtime warnings on the result', async () => {

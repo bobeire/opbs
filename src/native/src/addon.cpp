@@ -77,6 +77,34 @@ Napi::Value GetVolumePath(const Napi::CallbackInfo& info) {
     return Napi::String::New(env, path);
 }
 
+// Lock + dismount a mounted volume so raw restore writes are not racing FS cache.
+Napi::Value LockAndDismountVolume(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (info.Length() < 1 || !info[0].IsString()) {
+        Napi::TypeError::New(env, "lockAndDismountVolume expects a volume path").ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    std::string volumePath = info[0].As<Napi::String>().Utf8Value();
+    return Napi::Boolean::New(env, DiskReader::LockAndDismountVolume(volumePath));
+}
+
+// Unlock/close volumes held by lockAndDismountVolume.
+Napi::Value ReleaseLockedVolumes(const Napi::CallbackInfo& info) {
+    DiskReader::ReleaseLockedVolumes();
+    return info.Env().Undefined();
+}
+
+// Ask Windows to re-read the partition table after a raw restore.
+Napi::Value UpdateDiskProperties(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (info.Length() < 1 || !info[0].IsString()) {
+        Napi::TypeError::New(env, "updateDiskProperties expects a device path").ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    std::string devicePath = info[0].As<Napi::String>().Utf8Value();
+    return Napi::Boolean::New(env, DiskReader::UpdateDiskProperties(devicePath));
+}
+
 // Compute a CRC-32 of a buffer (matches the JS implementation).
 Napi::Value Crc32(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
@@ -352,6 +380,9 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set("getPartitions", Napi::Function::New(env, GetPartitions));
     exports.Set("getPhysicalDrivePath", Napi::Function::New(env, GetPhysicalDrivePath));
     exports.Set("getVolumePath", Napi::Function::New(env, GetVolumePath));
+    exports.Set("lockAndDismountVolume", Napi::Function::New(env, LockAndDismountVolume));
+    exports.Set("releaseLockedVolumes", Napi::Function::New(env, ReleaseLockedVolumes));
+    exports.Set("updateDiskProperties", Napi::Function::New(env, UpdateDiskProperties));
     exports.Set("queryUsnJournal", Napi::Function::New(env, QueryUsnJournal));
     exports.Set("getUsnJournalInfo", Napi::Function::New(env, GetUsnJournalInfo));
     exports.Set("crc32", Napi::Function::New(env, Crc32));

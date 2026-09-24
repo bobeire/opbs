@@ -49,6 +49,14 @@ public:
     static UsnJournalInfo GetUsnJournalInfo(const std::string& volumePath);
     static uint32_t Crc32(const uint8_t* data, size_t length, uint32_t seed = 0);
 
+    // Lock + dismount a mounted volume and hold the lock handle so raw
+    // physical-drive writes are not racing the filesystem cache.
+    static bool LockAndDismountVolume(const std::string& volumePath);
+    // Unlock/close every volume held by LockAndDismountVolume.
+    static void ReleaseLockedVolumes();
+    // Ask Windows to re-read the partition table after a raw restore.
+    static bool UpdateDiskProperties(const std::string& devicePath);
+
     // Close all cached device handles. Call before process exit.
     static void CloseAllHandles();
 
@@ -60,5 +68,6 @@ private:
     // CreateFileW/CloseHandle per 1MB block during backup/restore.
     static HANDLE GetCachedHandle(const std::string& devicePath, DWORD access);
     static std::unordered_map<std::string, HANDLE> s_handleCache;
+    static std::vector<HANDLE> s_lockedVolumes;
 #endif
 };

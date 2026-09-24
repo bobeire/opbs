@@ -23,6 +23,9 @@ declare module 'opbs-native' {
   export function getPartitions(diskIndex: number): PartitionInfo[];
   export function getPhysicalDrivePath(diskIndex: number): string;
   export function getVolumePath(diskIndex: number, partitionOffset: number): string;
+  export function lockAndDismountVolume(volumePath: string): boolean;
+  export function releaseLockedVolumes(): void;
+  export function updateDiskProperties(devicePath: string): boolean;
   export function createSnapshot(volumePath: string): SnapshotInfo;
   export function deleteSnapshot(snapshotId: string): boolean;
   export function readBlocks(devicePath: string, offset: bigint, length: bigint): Buffer;

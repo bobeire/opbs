@@ -28,6 +28,98 @@ static std::string FormatWinError(DWORD code) {
 
 // Static handle cache — avoids repeated CreateFileW/CloseHandle per 1MB block.
 std::unordered_map<std::string, HANDLE> DiskReader::s_handleCache;
+// Volumes locked for restore; held open until ReleaseLockedVolumes.
+std::vector<HANDLE> DiskReader::s_lockedVolumes;
+
+bool DiskReader::LockAndDismountVolume(const std::string& volumePath) {
+    if (volumePath.empty()) {
+        return false;
+    }
+    std::wstring wide(volumePath.begin(), volumePath.end());
+    // Strip trailing backslash for CreateFile on volume GUID paths.
+    if (!wide.empty() && wide.back() == L'\\') {
+        wide.pop_back();
+    }
+    HANDLE hVolume = CreateFileW(
+        wide.c_str(),
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        nullptr
+    );
+    if (hVolume == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    DWORD bytesReturned = 0;
+    bool locked = false;
+    for (int attempt = 0; attempt < 8; attempt++) {
+        if (DeviceIoControl(hVolume, FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &bytesReturned, nullptr)) {
+            locked = true;
+            break;
+        }
+        Sleep(150);
+    }
+    if (!locked) {
+        CloseHandle(hVolume);
+        return false;
+    }
+
+    if (!DeviceIoControl(hVolume, FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &bytesReturned, nullptr)) {
+        DeviceIoControl(hVolume, FSCTL_UNLOCK_VOLUME, nullptr, 0, nullptr, 0, &bytesReturned, nullptr);
+        CloseHandle(hVolume);
+        return false;
+    }
+
+    // Hold the lock for the duration of the raw writes so the volume stays
+    // dismounted and ntfs.sys cannot flush pre-restore cache over our data.
+    s_lockedVolumes.push_back(hVolume);
+    return true;
+}
+
+void DiskReader::ReleaseLockedVolumes() {
+    DWORD bytesReturned = 0;
+    for (HANDLE h : s_lockedVolumes) {
+        if (h != INVALID_HANDLE_VALUE) {
+            DeviceIoControl(h, FSCTL_UNLOCK_VOLUME, nullptr, 0, nullptr, 0, &bytesReturned, nullptr);
+            CloseHandle(h);
+        }
+    }
+    s_lockedVolumes.clear();
+}
+
+bool DiskReader::UpdateDiskProperties(const std::string& devicePath) {
+    if (devicePath.empty()) {
+        return false;
+    }
+    HANDLE hDevice = CreateFileW(
+        std::wstring(devicePath.begin(), devicePath.end()).c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        0,
+        nullptr
+    );
+    if (hDevice == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    DWORD bytesReturned = 0;
+    const BOOL ok = DeviceIoControl(
+        hDevice,
+        IOCTL_DISK_UPDATE_PROPERTIES,
+        nullptr,
+        0,
+        nullptr,
+        0,
+        &bytesReturned,
+        nullptr
+    );
+    CloseHandle(hDevice);
+    return ok == TRUE;
+}
 
 HANDLE DiskReader::GetCachedHandle(const std::string& devicePath, DWORD access) {
     // Return cached handle if it exists and has compatible access.
@@ -57,6 +149,7 @@ HANDLE DiskReader::GetCachedHandle(const std::string& devicePath, DWORD access) 
 }
 
 void DiskReader::CloseAllHandles() {
+    ReleaseLockedVolumes();
     for (auto& [path, handle] : s_handleCache) {
         if (handle != INVALID_HANDLE_VALUE) {
             CloseHandle(handle);

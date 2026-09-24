@@ -106,6 +106,18 @@ describe('RestoreEngine dissimilar layout', () => {
     const engine = new RestoreEngine(createFakeEnumerator());
     const job = await engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] });
     expect(job.targets[0].offset).toBe(1048576);
+    expect(job.clearFreeSpace).toBe(true);
+  });
+
+  it('forwards clearFreeSpace:false onto the job (skip free-space zero-fill)', async () => {
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const job = await engine.buildJob({
+      imagePath,
+      targetDiskIndex: 1,
+      targetPartitions: [0],
+      clearFreeSpace: false
+    });
+    expect(job.clearFreeSpace).toBe(false);
   });
 
   it('honors a custom targetLayout offset (dissimilar-hardware re-order/move)', async () => {

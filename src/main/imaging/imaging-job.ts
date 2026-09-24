@@ -8,10 +8,17 @@ export interface NativeImagingApi {
   readBlocksAsync?(devicePath: string, offset: bigint, length: bigint): Promise<Buffer>;
   writeBlocksAsync?(devicePath: string, offset: bigint, data: Buffer): Promise<number>;
   getPhysicalDrivePath(diskIndex: number): string;
+  getVolumePath?(diskIndex: number, partitionOffset: number): string;
   queryUsnJournal?(volumePath: string, startUsn?: number): Array<{ usn: bigint; fileReference: bigint; reason: number; fileName: string }>;
   getUsnJournalInfo?(volumePath: string): { firstUsn: bigint; nextUsn: bigint; lowestValidUsn: bigint };
   crc32?(data: Uint8Array, seed?: number): number;
   closeAllHandles?(): void;
+  /** Lock + dismount a mounted volume so raw writes are not racing the FS cache. */
+  lockAndDismountVolume?(volumePath: string): boolean;
+  /** Unlock/close volumes held by lockAndDismountVolume. */
+  releaseLockedVolumes?(): void;
+  /** Ask Windows to re-read the partition table after a raw restore. */
+  updateDiskProperties?(devicePath: string): boolean;
   /**
    * Build a GPT or MBR partition table. Returns the regions (byte offset + data)
    * the elevated helper writes via writeBlocks before restoring partitions.
@@ -144,6 +151,13 @@ export interface RestoreJob {
    *  against the image's stored CRC. Catches silent disk write failures. */
   verifyAfterRestore?: boolean;
   /**
+   * Zero every block in the target range that the image chain does not contain
+   * (used-blocks / incremental gaps). Default true so free space left by a
+   * post-backup file cannot survive a restore. Set false to skip gap wipe
+   * (faster; leaves spare space untouched like older releases).
+   */
+  clearFreeSpace?: boolean;
+  /**
    * Build-time warnings/hints (e.g. the target disk looks identical to the
    * source) that the helper appends to the restore result's warnings.
    */
@@ -207,6 +221,8 @@ export interface RestoreJobResult {
   targetsRestored: number;
   verifiedBeforeWrite: boolean;
   warnings: string[];
+  /** Free-space blocks zeroed because they were absent from the image chain. */
+  freeBlocksCleared?: number;
   /** Per-partition filesystem checks populated when validateAfterWrite is set. */
   fsValidation?: Array<{
     partitionIndex: number;

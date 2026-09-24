@@ -48,6 +48,11 @@ export interface RestoreJobConfig {
   /** Post-restore CRC verify: read back every restored block and compare
    *  against the image's stored CRC. Catches silent disk write failures. */
   verifyAfterRestore?: boolean;
+  /**
+   * Zero target blocks absent from the image chain (used-blocks / delta gaps)
+   * so free space cannot retain post-backup data. Defaults to true.
+   */
+  clearFreeSpace?: boolean;
 }
 
 export interface RestoreCoordinator {
@@ -297,6 +302,7 @@ export class RestoreEngine implements RestoreCoordinator {
       writeTable,
       validateAfterWrite: config.validateAfterWrite,
       verifyAfterRestore: config.verifyAfterRestore,
+      clearFreeSpace: config.clearFreeSpace !== false,
       warnings: warnings.length > 0 ? warnings : undefined
     };
   }

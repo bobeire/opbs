@@ -955,6 +955,39 @@ export async function runRestoreJob(
 
   const selectedPartitions = new Set(job.targets.map((t) => t.partitionIndex));
   const usableBlocks = infos.flatMap((info) => info.blocks.filter((b) => selectedPartitions.has(b.partitionIndex)));
+  const blockSize = infos[0].header.blockSize;
+  const clearFreeSpace = job.clearFreeSpace !== false;
+
+  // Blocks present anywhere in the chain, per partition — the complement of
+  // this set is free space / incremental gaps that must be zeroed so data
+  // written after the backup cannot survive the restore.
+  const presentByPartition = new Map<number, Set<number>>();
+  for (const info of infos) {
+    for (const b of info.blocks) {
+      let set = presentByPartition.get(b.partitionIndex);
+      if (!set) {
+        set = new Set();
+        presentByPartition.set(b.partitionIndex, set);
+      }
+      set.add(b.blockIndex);
+    }
+  }
+
+  let gapBytes = 0;
+  if (clearFreeSpace) {
+    for (const target of job.targets) {
+      const partition = infos[0].partitions.find((p) => p.partitionIndex === target.partitionIndex);
+      if (!partition) continue;
+      const rangeSize = target.size ?? partition.size;
+      const totalBlocks = Math.ceil(rangeSize / blockSize);
+      const present = presentByPartition.get(target.partitionIndex) ?? new Set<number>();
+      for (let i = 0; i < totalBlocks; i++) {
+        if (!present.has(i)) {
+          gapBytes += Math.min(blockSize, rangeSize - i * blockSize);
+        }
+      }
+    }
+  }
 
   // Multithreaded decompression pool. Only used when every source shares the
   // same compressed codec and the job asks for more than one thread; otherwise
@@ -987,10 +1020,12 @@ export async function runRestoreJob(
         warnings
       })
     );
+    decompPool?.stop();
     return;
   }
 
-  const totalBytes = usableBlocks.reduce((sum, b) => sum + b.rawSize, 0);
+  const imageBytes = usableBlocks.reduce((sum, b) => sum + b.rawSize, 0);
+  const totalBytes = imageBytes + gapBytes;
   const progress: RestoreJobProgress = {
     phase: job.verifyBeforeWrite ? 'verifying' : 'reading-image',
     percent: 0,
@@ -1024,8 +1059,21 @@ export async function runRestoreJob(
 
   let bytesWritten = 0;
   let blocksWritten = 0;
+  let freeBlocksCleared = 0;
   let targetsRestored = 0;
   let verifiedBeforeWrite = false;
+
+  const writeRaw = async (devicePath: string, offset: bigint, data: Buffer, what: string): Promise<void> => {
+    try {
+      if (native.writeBlocksAsync) {
+        await native.writeBlocksAsync(devicePath, offset, data);
+      } else {
+        native.writeBlocks(devicePath, offset, data);
+      }
+    } catch (error) {
+      throw new Error(`${what}: ${errorMessage(error)}`, { cause: error });
+    }
+  };
 
   try {
     // Integrity gate: verify every source that lacks the VERIFIED flag before
@@ -1045,6 +1093,23 @@ export async function runRestoreJob(
           }
         }
         verifiedBeforeWrite = true;
+      }
+    }
+
+    // Dismount target volumes so ntfs.sys is not serving (or flushing back)
+    // pre-restore metadata while we overwrite the physical disk.
+    if (native.closeAllHandles) {
+      native.closeAllHandles();
+    }
+    if (native.lockAndDismountVolume && native.getVolumePath) {
+      for (const target of job.targets) {
+        const volumePath = native.getVolumePath(target.diskIndex, target.offset);
+        if (!volumePath) continue;
+        if (!native.lockAndDismountVolume(volumePath)) {
+          warnings.push(
+            `Could not dismount ${target.label} before restore; eject and reinsert the drive (or reboot) if Explorer still shows stale files.`
+          );
+        }
       }
     }
 
@@ -1070,7 +1135,12 @@ export async function runRestoreJob(
         if (isCancelled()) {
           throw new CancelledError();
         }
-        native.writeBlocks(tableDevicePath, BigInt(region.offset), Buffer.from(region.data));
+        await writeRaw(
+          tableDevicePath,
+          BigInt(region.offset),
+          Buffer.from(region.data),
+          `Partition table write at ${region.offset}`
+        );
       }
     }
 
@@ -1105,18 +1175,7 @@ export async function runRestoreJob(
             throw new Error(`Raw data CRC mismatch for ${target.label} block ${block.blockIndex}`);
           }
           const writeOffset = BigInt(target.offset) + BigInt(block.blockIndex * info.header.blockSize);
-          try {
-            if (native.writeBlocksAsync) {
-              await native.writeBlocksAsync(devicePath, writeOffset, raw);
-            } else {
-              native.writeBlocks(devicePath, writeOffset, raw);
-            }
-          } catch (error) {
-            warnings.push(
-              `Write failed for ${target.label} block ${block.blockIndex} at ${writeOffset}: ${errorMessage(error)}`
-            );
-            return;
-          }
+          await writeRaw(devicePath, writeOffset, raw, `Write failed for ${target.label} block ${block.blockIndex} at ${writeOffset}`);
 
           blocksWritten++;
           bytesWritten += raw.length;
@@ -1165,11 +1224,74 @@ export async function runRestoreJob(
         inFlight.length = 0;
       }
 
+      const capturedPartition = infos[0].partitions.find((p) => p.partitionIndex === target.partitionIndex)!;
+      const rangeSize = target.size ?? capturedPartition.size;
+
+      // Zero every block the image chain does not contain (used-blocks free
+      // space and incremental gaps) so a file created after the backup cannot
+      // survive on the restored volume.
+      if (clearFreeSpace) {
+        const present = presentByPartition.get(target.partitionIndex) ?? new Set<number>();
+        const totalBlocks = Math.ceil(rangeSize / blockSize);
+        let runStart = -1;
+
+        const flushZeroRun = async (endExclusive: number): Promise<void> => {
+          if (runStart < 0) return;
+          const startBlock = runStart;
+          runStart = -1;
+          const startOffset = BigInt(target.offset) + BigInt(startBlock * blockSize);
+          const byteLen = Math.min(rangeSize, endExclusive * blockSize) - startBlock * blockSize;
+          if (byteLen <= 0) return;
+
+          const chunkSize = Math.min(byteLen, 4 * 1024 * 1024);
+          const zeroChunk = Buffer.alloc(chunkSize);
+          let remaining = byteLen;
+          let offset = startOffset;
+          while (remaining > 0) {
+            if (isCancelled()) {
+              throw new CancelledError();
+            }
+            const n = Math.min(remaining, chunkSize);
+            const buf = n === chunkSize ? zeroChunk : Buffer.alloc(n);
+            await writeRaw(
+              devicePath,
+              offset,
+              buf,
+              `Free-space clear failed for ${target.label} at ${offset}`
+            );
+            bytesWritten += n;
+            remaining -= n;
+            offset += BigInt(n);
+            progress.bytesDone += n;
+            if (Date.now() - lastProgressWrite > 100) {
+              writeProgress('writing');
+            }
+          }
+          freeBlocksCleared += endExclusive - startBlock;
+        };
+
+        for (let i = 0; i <= totalBlocks; i++) {
+          if (isCancelled()) {
+            throw new CancelledError();
+          }
+          const presentHere = i < totalBlocks && present.has(i);
+          if (!presentHere) {
+            if (runStart < 0) runStart = i;
+          } else if (runStart >= 0) {
+            await flushZeroRun(i);
+          }
+        }
+        if (runStart >= 0) {
+          await flushZeroRun(totalBlocks);
+        }
+        const elapsedSec = (Date.now() - start) / 1000;
+        progress.speed = elapsedSec > 0 ? progress.bytesDone / elapsedSec : 0;
+      }
+
       // Filesystem grow-on-restore: when the target is explicitly larger than
       // the captured partition, extend the NTFS volume to the new size after
       // the partition data has been written. Unsupported layouts/filesystems
       // are reported as warnings and never fail the restore.
-      const capturedPartition = infos[0].partitions.find((p) => p.partitionIndex === target.partitionIndex)!;
       if (target.size !== undefined && target.size > capturedPartition.size) {
         if (isCancelled()) {
           throw new CancelledError();
@@ -1181,11 +1303,12 @@ export async function runRestoreJob(
             if (isCancelled()) {
               throw new CancelledError();
             }
-            if (native.writeBlocksAsync) {
-              await native.writeBlocksAsync(devicePath, BigInt(target.offset + region.relativeOffset), region.data);
-            } else {
-              native.writeBlocks(devicePath, BigInt(target.offset + region.relativeOffset), region.data);
-            }
+            await writeRaw(
+              devicePath,
+              BigInt(target.offset + region.relativeOffset),
+              region.data,
+              `Filesystem grow write failed on ${target.label}`
+            );
           }
           warnings.push(
             `Grew filesystem on ${target.label} from ${capturedPartition.size} to ${target.size} bytes ` +
@@ -1270,6 +1393,12 @@ export async function runRestoreJob(
       }
     }
 
+    if (freeBlocksCleared > 0) {
+      warnings.push(
+        `Cleared ${freeBlocksCleared} free-space block(s) not present in the image so post-backup data cannot remain`
+      );
+    }
+
     writeProgress('completed');
 
     const result: RestoreJobResult = {
@@ -1282,6 +1411,7 @@ export async function runRestoreJob(
       targetsRestored,
       verifiedBeforeWrite,
       warnings,
+      freeBlocksCleared: freeBlocksCleared > 0 ? freeBlocksCleared : undefined,
       fsValidation: fsValidation.length > 0 ? fsValidation : undefined,
       drill:
         job.validateAfterWrite && fsValidation.length > 0
@@ -1306,10 +1436,29 @@ export async function runRestoreJob(
       targetsRestored,
       verifiedBeforeWrite,
       warnings,
+      freeBlocksCleared: freeBlocksCleared > 0 ? freeBlocksCleared : undefined,
       fsValidation: fsValidation.length > 0 ? fsValidation : undefined
     };
     fs.writeFileSync(resultPath, JSON.stringify(result));
   } finally {
+    try {
+      native.releaseLockedVolumes?.();
+    } catch {
+      /* best-effort unlock */
+    }
+    try {
+      if (native.updateDiskProperties && job.targets.length > 0) {
+        const devicePath = native.getPhysicalDrivePath(job.targets[0].diskIndex);
+        native.updateDiskProperties(devicePath);
+      }
+    } catch {
+      /* best-effort re-read of the partition table */
+    }
+    try {
+      native.closeAllHandles?.();
+    } catch {
+      /* best-effort handle cleanup */
+    }
     try {
       decompPool?.stop();
     } catch {
