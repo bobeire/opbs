@@ -71,7 +71,9 @@
       "src/native/build/Release/opbs_native.node"
     ],
     "asarUnpack": [
-      "src/native/build/Release/opbs_native.node"
+      "src/native/build/Release/opbs_native.node",
+      "node_modules/fzstd/**",
+      "node_modules/zstdify/**"
     ],
     "win": {
       "target": [
