@@ -78,7 +78,10 @@ function run(args: string[], timeoutMs = 30000): string {
  * process runs windowless with no captured stdio, the snippet's output is
  * written to a result file by the wrapper script and read back here.
  */
-async function runElevated(ps: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+export async function runElevated(
+  ps: string,
+  env?: Record<string, string>
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-disk-'));
   const scriptPath = path.join(tmpDir, 'tool.ps1');
   const resultPath = path.join(tmpDir, 'result.json');
@@ -95,7 +98,7 @@ async function runElevated(ps: string): Promise<{ exitCode: number; stdout: stri
   ].join('\r\n');
   fs.writeFileSync(scriptPath, wrapper, 'utf-8');
   try {
-    const exitCode = await runElevatedPowerShell(scriptPath);
+    const exitCode = await runElevatedPowerShell(scriptPath, env);
     if (!fs.existsSync(resultPath)) {
       return {
         exitCode: exitCode ?? 5,

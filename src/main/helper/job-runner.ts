@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from '../utils/logger';
+import { collectAndWriteSidecar } from '../utils/bitlocker-capture';
 import { loadNative } from '../utils/native-loader';
 import type { PipeClient } from '../utils/pipe-ipc';
 import {
@@ -359,6 +360,26 @@ export async function runBackupJob(
     } catch (error) {
       deleteSnapshots();
       throw new Error(`Failed to create VSS snapshot: ${errorMessage(error)}`, { cause: error });
+    }
+
+    // BitLocker recovery-key custody (encrypted backups only). Runs now while
+    // every source volume is unlocked and the image key is in memory; failures
+    // are warnings, never fatal. Plaintext backups skip this silently — the
+    // wizard advises enabling encryption before the run.
+    if (job.encryption?.keyHex) {
+      collectAndWriteSidecar(
+        {
+          imagePath: job.imagePath,
+          encryptionKeyHex: job.encryption.keyHex,
+          partitions: job.partitions.map((p) => ({
+            label: p.label,
+            offset: p.offset,
+            size: p.size,
+            driveLetter: p.driveLetter
+          }))
+        },
+        warnings
+      );
     }
 
     for (let pi = 0; pi < job.partitions.length; pi++) {
@@ -872,6 +893,7 @@ export async function runBackupJob(
       }
       try { fs.unlinkSync(job.imagePath); } catch { /* best-effort */ }
       try { fs.unlinkSync(`${job.imagePath}.volumes.json`); } catch { /* best-effort */ }
+      try { fs.unlinkSync(`${job.imagePath}.bitlocker.json`); } catch { /* best-effort */ }
       try { fs.unlinkSync(`${job.imagePath}.usn`); } catch { /* best-effort */ }
     }
     emitResult(resultPath, result, pipeClient);

@@ -36,6 +36,8 @@ interface PreflightResult {
   sameDisk?: boolean;
   encrypted?: boolean;
   passphraseRequired?: boolean;
+  unlockRequired?: boolean;
+  lockedLetter?: string;
   targetIsSystemDisk?: boolean;
 }
 
@@ -95,6 +97,13 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [acknowledge, setAcknowledge] = useState(false);
+  // BitLocker unlock box (shown when preflight reports the image's volume is
+  // locked). Bumping the nonce re-runs the preflight after a successful unlock.
+  const [unlockPassword, setUnlockPassword] = useState('');
+  const [unlockBusy, setUnlockBusy] = useState(false);
+  const [unlockError, setUnlockError] = useState<string | null>(null);
+  const [unlockNotice, setUnlockNotice] = useState<string | null>(null);
+  const [preflightNonce, setPreflightNonce] = useState(0);
   const [progress, setProgress] = useState<any>(null);
   const [restoreResult, setRestoreResult] = useState<RestoreResultSummary | null>(null);
   const [restoreError, setRestoreError] = useState<string | null>(null);
@@ -140,6 +149,8 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
       if (imagePath && targetDiskIndex !== null && targetPartitions.length > 0) {
         setPreflightLoading(true);
         setAcknowledge(false);
+        setUnlockNotice(null);
+        setUnlockError(null);
         window.electronAPI
           .restorePreflight({
             imagePath,
@@ -166,7 +177,30 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     return () => {
       alive = false;
     };
-  }, [imagePath, targetDiskIndex, targetPartitions.join(','), applyDeltas]);
+  }, [imagePath, targetDiskIndex, targetPartitions.join(','), applyDeltas, preflightNonce]);
+
+  // Unlock the image's BitLocker-locked volume with a recovery password, then
+  // re-run the preflight inside the same step (one UAC prompt on Windows).
+  const handleUnlockVolume = async () => {
+    const letter = preflight?.lockedLetter;
+    if (!letter || !unlockPassword.trim()) return;
+    setUnlockBusy(true);
+    setUnlockError(null);
+    try {
+      const result = await window.electronAPI.bitlockerUnlock(letter, unlockPassword.trim());
+      if (result.ok) {
+        setUnlockPassword('');
+        setUnlockNotice(`Volume ${letter}: unlocked. Re-checking the restore…`);
+        setPreflightNonce((n) => n + 1);
+      } else {
+        setUnlockError(result.error);
+      }
+    } catch (e) {
+      setUnlockError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setUnlockBusy(false);
+    }
+  };
 
   const handleSelectImage = async () => {
     const path = await window.electronAPI.selectFile({
@@ -352,6 +386,45 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                 <div className="preflight-panel">
                   {preflightLoading ? (
                     <p className="field-hint">Checking target disk…</p>
+                  ) : preflight && !preflight.ok && preflight.unlockRequired ? (
+                    <div className="bitlocker-unlock-box">
+                      <div className="error-message">
+                        <p>{preflight.error}</p>
+                      </div>
+                      {unlockNotice && (
+                        <div className="warning-box">
+                          <p>{unlockNotice}</p>
+                        </div>
+                      )}
+                      <div className="bitlocker-unlock-row">
+                        <input
+                          type="password"
+                          value={unlockPassword}
+                          placeholder={`Recovery password for ${preflight.lockedLetter ?? ''}: (48 digits)`}
+                          disabled={unlockBusy}
+                          onChange={(e) => setUnlockPassword(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') void handleUnlockVolume();
+                          }}
+                        />
+                        <button
+                          className="btn-primary"
+                          onClick={() => void handleUnlockVolume()}
+                          disabled={unlockBusy || !unlockPassword.trim()}
+                        >
+                          {unlockBusy ? 'Unlocking…' : 'Unlock'}
+                        </button>
+                      </div>
+                      {unlockError && (
+                        <div className="error-message">
+                          <p>{unlockError}</p>
+                        </div>
+                      )}
+                      <p className="field-hint">
+                        Unlocking costs one UAC confirmation on Windows. The password is passed to
+                        the elevated helper in its environment only — never written to disk.
+                      </p>
+                    </div>
                   ) : preflight && !preflight.ok ? (
                     <div className="error-message">
                       <p>Cannot restore: {preflight.error}</p>

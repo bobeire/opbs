@@ -19,6 +19,21 @@ interface PartitionInfo {
   isBoot: boolean;
 }
 
+interface BitlockerVolume {
+  letter: string;
+  volumeType: string;
+  locked: boolean;
+  protectionOn: boolean;
+  conversion: string;
+  protectors: Array<{ type: string }>;
+}
+
+/** Recovery-password protectors are the only kind Phase 1 can store/unlock. */
+function isRecoveryType(type: string): boolean {
+  const normalized = type.toLowerCase().replace(/[\s_-]/g, '');
+  return normalized === 'numericalpassword' || normalized === 'recoverypassword';
+}
+
 interface BackupConfig {
   sourceDiskIndex: number;
   sourcePartitions: number[];
@@ -122,9 +137,14 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   const [selectedProfileId, setSelectedProfileId] = useState<string>('');
   const [profileName, setProfileName] = useState('');
   const [profileMsg, setProfileMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const [blVolumes, setBlVolumes] = useState<BitlockerVolume[] | null>(null);
+  const [blChecking, setBlChecking] = useState(false);
+  const [blNeedsElevation, setBlNeedsElevation] = useState(false);
+  const [blError, setBlError] = useState<string | null>(null);
 
   useEffect(() => {
     loadDisks();
+    void checkBitlocker('silent');
     window.electronAPI
       .getSettings()
       .then((s) => setProfiles(s?.backupProfiles ?? []))
@@ -153,6 +173,55 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       setIsLoading(false);
     }
   };
+
+  /**
+   * Silent on mount (cached or non-elevated probe — no UAC). 'elevate' costs
+   * one administrator prompt; 'refresh' bypasses the session cache.
+   */
+  const checkBitlocker = async (mode: 'silent' | 'elevate' | 'refresh') => {
+    setBlChecking(true);
+    setBlError(null);
+    try {
+      const opts =
+        mode === 'elevate' ? { elevate: true, refresh: true } : mode === 'refresh' ? { refresh: true } : {};
+      const res = await window.electronAPI.bitlockerStatus(opts);
+      if (res.ok) {
+        setBlVolumes(res.volumes);
+        setBlNeedsElevation(false);
+      } else {
+        setBlVolumes(null);
+        setBlNeedsElevation(res.needsElevation === true);
+        setBlError(res.error ?? 'BitLocker status check failed.');
+      }
+    } catch (error) {
+      setBlNeedsElevation(false);
+      setBlError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBlChecking(false);
+    }
+  };
+
+  const blWarnings: string[] = [];
+  if (blVolumes) {
+    for (const v of blVolumes) {
+      if (v.locked) {
+        blWarnings.push(`${v.letter}: is BitLocker-locked — unlock it (Disk Tools) before imaging it.`);
+        continue;
+      }
+      const encrypted = !!v.conversion && v.conversion !== 'FullyDecrypted';
+      if (encrypted) {
+        blWarnings.push(
+          `${v.letter}: is encrypted (${v.conversion}) — turn on backup encryption (passphrase) ` +
+            `on the options step so recovery keys are stored with the backup.`
+        );
+        if (!v.protectors.some((p) => isRecoveryType(p.type))) {
+          blWarnings.push(
+            `${v.letter}: has no recovery-password protector, so OPBS cannot store a recovery key for it.`
+          );
+        }
+      }
+    }
+  }
 
   const formatSize = (bytes: number): string => {
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -325,6 +394,46 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
         return (
           <div className="wizard-step">
             <h2>Select Source Disk</h2>
+
+            <div className="setting-item bitlocker-status-row">
+              <span>BitLocker:</span>
+              {blChecking ? (
+                <span className="field-hint">Checking status…</span>
+              ) : blVolumes ? (
+                <span className="field-hint">
+                  {blVolumes.length === 0
+                    ? 'No BitLocker volumes found.'
+                    : `${blVolumes.length} volume${blVolumes.length === 1 ? '' : 's'} checked — see notes below.`}
+                </span>
+              ) : blNeedsElevation ? (
+                <>
+                  <span className="field-hint">Administrator rights required to read status.</span>
+                  <button
+                    className="btn-secondary btn-small"
+                    onClick={() => void checkBitlocker('elevate')}
+                  >
+                    Check (one UAC prompt)
+                  </button>
+                </>
+              ) : blError ? (
+                <>
+                  <span className="field-hint">{blError}</span>
+                  <button
+                    className="btn-secondary btn-small"
+                    onClick={() => void checkBitlocker('refresh')}
+                  >
+                    Retry
+                  </button>
+                </>
+              ) : (
+                <span className="field-hint">Not checked</span>
+              )}
+            </div>
+            {blWarnings.map((w, i) => (
+              <div key={i} className="warning-box">
+                <p>{w}</p>
+              </div>
+            ))}
 
             {isLoading ? (
               <div className="loading">Loading disks...</div>

@@ -716,6 +716,50 @@ body {
   font-weight: 500;
 }
 
+/* BitLocker status row in the backup wizard: label + status text + action button */
+.bitlocker-status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.bitlocker-status-row > span:first-child {
+  font-weight: 500;
+}
+
+/* Restore wizard: unlock box shown when the image's volume is BitLocker-locked */
+.bitlocker-unlock-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bitlocker-unlock-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.bitlocker-unlock-row input[type="password"] {
+  flex: 1;
+  min-width: 240px;
+  padding: 8px 10px;
+  background-color: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-color);
+  font-size: 0.9rem;
+}
+
+/* Key viewer table: keep 48-digit recovery passwords on one line */
+.bitlocker-key-cell {
+  font-family: Consolas, 'Courier New', monospace;
+  white-space: nowrap;
+  letter-spacing: 0.5px;
+}
+
 .setting-item select,
 .setting-item input[type="number"] {
   width: 200px;

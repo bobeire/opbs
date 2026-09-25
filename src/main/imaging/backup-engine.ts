@@ -113,7 +113,8 @@ export class ImagingEngine implements BackupCoordinator {
         offset: part.offset,
         label: part.label ?? `Partition ${part.partitionIndex}`,
         readSource: volumeDevicePath ? 'volume' : 'physical',
-        volumeDevicePath: volumeDevicePath ?? undefined
+        volumeDevicePath: volumeDevicePath ?? undefined,
+        driveLetter: part.driveLetter || undefined
       });
     }
 
@@ -352,10 +353,33 @@ export class ImagingEngine implements BackupCoordinator {
     const key = path.basename(imagePath);
     logger.info(`Uploading ${imagePath} to s3://${config.bucket}/${config.prefix ? config.prefix + '/' : ''}${key}`);
     await store.put(key, fs.readFileSync(imagePath));
+    await this.uploadBitlockerSidecar(imagePath, (localPath, remoteKey) =>
+      store.put(remoteKey, fs.readFileSync(localPath))
+    );
     try {
       fs.rmSync(path.dirname(imagePath), { recursive: true, force: true });
     } catch {
       /* best-effort temp cleanup */
+    }
+  }
+
+  /**
+   * Upload `<image>.bitlocker.json` next to the image when the helper wrote
+   * one (encrypted backups). Runs after the image itself is safe: a sidecar
+   * failure is logged loudly but never fails the completed backup.
+   */
+  private async uploadBitlockerSidecar(
+    imagePath: string,
+    put: (localPath: string, remoteKey: string) => Promise<void>
+  ): Promise<void> {
+    const sidecarPath = `${imagePath}.bitlocker.json`;
+    if (!fs.existsSync(sidecarPath)) return;
+    try {
+      await put(sidecarPath, `${path.basename(imagePath)}.bitlocker.json`);
+      logger.info(`Uploaded BitLocker key sidecar for ${path.basename(imagePath)}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`BitLocker key sidecar upload failed for ${path.basename(imagePath)}: ${message}`);
     }
   }
 
@@ -379,6 +403,7 @@ export class ImagingEngine implements BackupCoordinator {
     const key = path.basename(imagePath);
     logger.info(`Uploading ${imagePath} to sftp://${config.host}${config.remotePath ? '/' + config.remotePath : ''}/${key}`);
     await store.uploadFile(imagePath, key);
+    await this.uploadBitlockerSidecar(imagePath, (localPath, remoteKey) => store.uploadFile(localPath, remoteKey));
     try {
       fs.rmSync(path.dirname(imagePath), { recursive: true, force: true });
     } catch {
@@ -406,6 +431,7 @@ export class ImagingEngine implements BackupCoordinator {
     const key = path.basename(imagePath);
     logger.info(`Uploading ${imagePath} to ftp://${config.host}${config.remotePath ? '/' + config.remotePath : ''}/${key} (${config.secure})`);
     await store.uploadFile(imagePath, key);
+    await this.uploadBitlockerSidecar(imagePath, (localPath, remoteKey) => store.uploadFile(localPath, remoteKey));
     try {
       fs.rmSync(path.dirname(imagePath), { recursive: true, force: true });
     } catch {

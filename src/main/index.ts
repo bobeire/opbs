@@ -1468,6 +1468,7 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       makeWinPEMedia: adk?.makeWinPEMedia ?? null,
       dism: adk?.dism ?? null,
       oscdimg: adk?.oscdimg ?? null,
+      winpeBitlocker: !!adk?.winpeSecureStartupCab,
       node,
       ready: !!adk && !!adk.dism && !!node
     };
@@ -1481,6 +1482,34 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
   ipcMain.handle('media-drives', async () => {
     const { listMediaDrives } = await import('./utils/media-drives');
     return listMediaDrives();
+  });
+
+  // BitLocker volume status. elevate:true costs one UAC prompt; the renderer
+  // only asks for it from an explicit "Check" action, never automatically.
+  ipcMain.handle('bitlocker-status', async (_, options?: { elevate?: boolean; refresh?: boolean }) => {
+    const { listBitlockerStatus } = await import('./utils/bitlocker');
+    return listBitlockerStatus(options ?? {});
+  });
+
+  // Unlock a locked volume with a recovery password. Costs one UAC prompt on
+  // Windows (the password travels in the elevated child's environment, never
+  // in the script or on a command line); WinPE runs manage-bde directly.
+  ipcMain.handle('bitlocker-unlock', async (_, options: { letter: string; recoveryPassword: string }) => {
+    const { unlockVolume } = await import('./utils/bitlocker-unlock');
+    if (!options || typeof options.letter !== 'string' || typeof options.recoveryPassword !== 'string') {
+      return { ok: false, letter: '', source: 'windows', error: 'Missing letter or recovery password.' };
+    }
+    return unlockVolume(options.letter, options.recoveryPassword);
+  });
+
+  // Decrypt a sidecar's recovery keys for the viewer. The passphrase is
+  // handled in memory only — never logged, never stored.
+  ipcMain.handle('bitlocker-keys-read', async (_, options: { imagePath: string; passphrase: string }) => {
+    const { readRecoveryKeys } = await import('./utils/bitlocker-capture');
+    if (!options || typeof options.imagePath !== 'string' || typeof options.passphrase !== 'string') {
+      return { ok: false, error: 'Missing image path or passphrase.' };
+    }
+    return readRecoveryKeys(options.imagePath, options.passphrase);
   });
 
   // Silent Windows ADK install (bootstraps downloaded, installed via one UAC prompt)

@@ -8,6 +8,7 @@ interface MediaCheckReport {
   makeWinPEMedia: string | null;
   dism: string | null;
   oscdimg: string | null;
+  winpeBitlocker: boolean;
   node: string | null;
   ready: boolean;
 }
@@ -247,6 +248,14 @@ function MediaView({ onComplete }: MediaViewProps) {
               <option value="arm64">arm64</option>
             </select>
           </div>
+          {report?.adkRoot && (
+            <div className="setting-item">
+              <label>WinPE BitLocker support:</label>
+              <span className="mono-value">
+                {report.winpeBitlocker ? 'Included (WinPE-SecureStartup)' : 'Not available (ADK component missing)'}
+              </span>
+            </div>
+          )}
         </div>
       )}
 

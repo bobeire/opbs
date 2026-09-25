@@ -108,6 +108,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   adkInstall: (options: any) => ipcRenderer.invoke('adk-install', options),
   nodeInstall: () => ipcRenderer.invoke('node-install'),
 
+  // BitLocker status (elevates only when explicitly asked)
+  bitlockerStatus: (options?: { elevate?: boolean; refresh?: boolean }) => ipcRenderer.invoke('bitlocker-status', options),
+  bitlockerUnlock: (letter: string, recoveryPassword: string) =>
+    ipcRenderer.invoke('bitlocker-unlock', { letter, recoveryPassword }),
+  bitlockerKeysRead: (imagePath: string, passphrase: string) =>
+    ipcRenderer.invoke('bitlocker-keys-read', { imagePath, passphrase }),
+
   // Cloud S3
   verifyS3: () => ipcRenderer.invoke('verify-s3'),
 

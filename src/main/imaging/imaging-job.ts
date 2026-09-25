@@ -39,6 +39,9 @@ export interface ImagingPartition {
   label: string;
   readSource: ReadSource;
   volumeDevicePath?: string;
+  /** Source drive letter when the partition has one (BitLocker key capture
+   *  matches encrypted volumes to job partitions by letter). */
+  driveLetter?: string;
 }
 
 /**

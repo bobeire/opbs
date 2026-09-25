@@ -394,6 +394,7 @@ export function buildElevatedScript(options: {
   adkDandISetEnv: string;
   adkDism: string;
   adkMakeWinPEMedia: string;
+  adkSecureStartupCab?: string;
   payloadCopies: PayloadItem[];
   payloadTextFiles: PayloadTextFile[];
   startnetCmd: string;
@@ -451,6 +452,10 @@ export function buildElevatedScript(options: {
     lines.push(`if (-not (Test-Path -LiteralPath ${psQuote(driver)})) { Write-Result @{ok=$false;error="Driver directory not found: ${psQuote(driver)}"}; exit 0 }`);
     lines.push(`& ${psQuote(options.adkDism)} /Image:${psQuote(mountDir)} /Add-Driver /Driver:${psQuote(driver)} /Recurse`);
     lines.push(`if ($LASTEXITCODE -ne 0) { Write-Result @{ok=$false;error="DISM /Add-Driver failed (${psQuote(driver)}) with exit code $LASTEXITCODE"}; exit 0 }`);
+  }
+  if (options.adkSecureStartupCab) {
+    lines.push(`& ${psQuote(options.adkDism)} /Image:${psQuote(mountDir)} /Add-Package /PackagePath:${psQuote(options.adkSecureStartupCab)}`);
+    lines.push(`if ($LASTEXITCODE -ne 0) { Write-Result @{ok=$false;error="adding WinPE-SecureStartup (BitLocker support) failed with exit code $LASTEXITCODE"}; exit 0 }`);
   }
   lines.push(`& ${psQuote(options.adkDism)} /Unmount-Wim /MountDir:${psQuote(mountDir)} /Commit`);
   lines.push(`if ($LASTEXITCODE -ne 0) { Write-Result @{ok=$false;error="DISM unmount failed with exit code $LASTEXITCODE"}; exit 0 }`);
@@ -580,6 +585,7 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
       adkDandISetEnv: adk.dandiSetEnv,
       adkDism: adk.dism,
       adkMakeWinPEMedia: adk.makeWinPEMedia,
+      adkSecureStartupCab: adk.winpeSecureStartupCab,
       payloadCopies: stagedCopies,
       payloadTextFiles: payloadTextFiles(),
       startnetCmd: buildStartnetCmd(),

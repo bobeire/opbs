@@ -175,6 +175,31 @@ describe('RestoreManager.preflight (dry-run)', () => {
     }
   });
 
+  it('warns when a BitLocker recovery-key sidecar sits next to the image, and not otherwise', async () => {
+    const dir = tempDir();
+    try {
+      const imagePath = path.join(dir, 'system.opbs');
+      writeImage(imagePath);
+
+      const stubDisks = {
+        getDisks: async () => [{ index: 1, size: 40 * 1024 * 1024 * 1024, model: 'TestDrive', serial: 'TEST123', partitions: [] }]
+      };
+      const manager = new RestoreManager(new RestoreEngine(stubDisks as never), stubDisks as never);
+      const config = { imagePath, targetDiskIndex: 1, targetPartitions: [0] };
+
+      const without = await manager.preflight(config);
+      expect(without.ok).toBe(true);
+      expect((without.warnings ?? []).some((w) => w.includes('recovery-key sidecar'))).toBe(false);
+
+      fs.writeFileSync(`${imagePath}.bitlocker.json`, JSON.stringify({ version: 1 }), 'utf-8');
+      const withSidecar = await manager.preflight(config);
+      expect(withSidecar.ok).toBe(true);
+      expect((withSidecar.warnings ?? []).some((w) => w.includes('recovery-key sidecar'))).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('flags a system disk (isSystem partition) so the UI can require a reboot', async () => {
     const dir = tempDir();
     try {

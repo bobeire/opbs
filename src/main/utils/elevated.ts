@@ -50,13 +50,22 @@ export function buildElevatedWrapper(powershell: string, scriptPath: string): st
   );
 }
 
-export function runElevatedPowerShell(scriptPath: string): Promise<number> {
+/**
+ * Run an elevated script and report its exit code.
+ *
+ * `env` is merged into this process' environment before spawning: the UAC
+ * child inherits the requester's environment, so secrets can travel to the
+ * elevated script in an environment variable — never in the script file and
+ * never on a command line (used by the BitLocker unlock flow).
+ */
+export function runElevatedPowerShell(scriptPath: string, env?: Record<string, string>): Promise<number> {
   const powershell = resolvePowershell();
   return new Promise((resolve, reject) => {
     const wrapper = buildElevatedWrapper(powershell, scriptPath);
     const child = spawn(powershell, ['-NoProfile', '-NonInteractive', '-Command', wrapper], {
       windowsHide: true,
-      stdio: 'ignore'
+      stdio: 'ignore',
+      env: env ? { ...process.env, ...env } : undefined
     });
     child.on('error', reject);
     child.on('close', (code) => resolve(code ?? -1));

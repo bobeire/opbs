@@ -29,6 +29,8 @@ declare global {
         sameDisk?: boolean;
         encrypted?: boolean;
         passphraseRequired?: boolean;
+        unlockRequired?: boolean;
+        lockedLetter?: string;
         targetIsSystemDisk?: boolean;
       }>;
       getImageInfo: (imagePath: string) => Promise<any>;
@@ -284,6 +286,43 @@ declare global {
       mediaDrives: () => Promise<{ primary: any[]; others: any[]; error?: string }>;
       adkInstall: (options: any) => Promise<{ ok: boolean; adkRoot: string | null; steps: Array<{ name: string; exitCode: number }>; error?: string }>;
       nodeInstall: () => Promise<{ ok: boolean; nodeExe: string | null; version?: string; error?: string }>;
+      bitlockerStatus: (options?: { elevate?: boolean; refresh?: boolean }) => Promise<{
+        ok: boolean;
+        source: string;
+        volumes: Array<{
+          letter: string;
+          volumeType: string;
+          locked: boolean;
+          protectionOn: boolean;
+          conversion: string;
+          protectors: Array<{ type: string }>;
+        }>;
+        error?: string;
+        needsElevation?: boolean;
+      }>;
+      bitlockerUnlock: (letter: string, recoveryPassword: string) => Promise<
+        | {
+            ok: true;
+            letter: string;
+            source: 'windows' | 'winpe';
+            volumes: Array<{
+              letter: string;
+              volumeType: string;
+              locked: boolean;
+              protectionOn: boolean;
+              conversion: string;
+              protectors: Array<{ type: string }>;
+            }> | null;
+          }
+        | { ok: false; letter: string; source: string; error: string }
+      >;
+      bitlockerKeysRead: (
+        imagePath: string,
+        passphrase: string
+      ) => Promise<
+        | { ok: true; keys: Array<{ letter: string; label: string; recoveryPassword: string }> }
+        | { ok: false; error: string }
+      >;
       verifyS3: () => Promise<any>;
       verifySftp: () => Promise<any>;
       verifyFtp: () => Promise<any>;

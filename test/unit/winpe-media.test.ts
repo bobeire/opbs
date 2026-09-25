@@ -322,6 +322,18 @@ describe('winpe-media', () => {
       // Without drivers, no Add-Driver step is emitted.
       expect(buildElevatedScript(base)).not.toContain('/Add-Driver');
     });
+
+    it('adds WinPE-SecureStartup into the mounted WIM before committing', () => {
+      const cab = 'C:/adk/WinPE_OCs/WinPE-SecureStartup.cab';
+      const s = buildElevatedScript({ ...base, adkSecureStartupCab: cab });
+      const addPackageIdx = s.indexOf('/Add-Package');
+      const unmountIdx = s.indexOf('/Unmount-Wim');
+      expect(addPackageIdx).toBeGreaterThan(-1);
+      expect(s).toContain(`PackagePath:'${cab}'`);
+      expect(s).toContain('WinPE-SecureStartup (BitLocker support) failed');
+      expect(unmountIdx).toBeGreaterThan(addPackageIdx);
+      expect(buildElevatedScript(base)).not.toContain('/Add-Package');
+    });
   });
 
   describe('smokeMediaPayload', () => {

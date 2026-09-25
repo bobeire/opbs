@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-type Tab = 'mbr' | 'check' | 'trim' | 'smart';
+type Tab = 'mbr' | 'check' | 'trim' | 'smart' | 'bitlocker';
 
 function DiskTools({ onComplete }: { onComplete: () => void }) {
   const [tab, setTab] = useState<Tab>('mbr');
@@ -32,6 +32,21 @@ function DiskTools({ onComplete }: { onComplete: () => void }) {
   // SMART state
   const [smart, setSmart] = useState<any[]>([]);
   const [smartLoading, setSmartLoading] = useState(false);
+
+  // BitLocker state (unlock tool + recovery-key viewer)
+  const [blLetter, setBlLetter] = useState('');
+  const [blPassword, setBlPassword] = useState('');
+  const [blBusy, setBlBusy] = useState(false);
+  const [blResult, setBlResult] = useState<
+    { ok: true; letter: string; source?: string } | { ok: false; letter?: string; error: string } | null
+  >(null);
+  const [keysImage, setKeysImage] = useState('');
+  const [keysPassphrase, setKeysPassphrase] = useState('');
+  const [keysBusy, setKeysBusy] = useState(false);
+  const [keysResult, setKeysResult] = useState<
+    { ok: true; keys: Array<{ letter: string; label: string; recoveryPassword: string }> } | { ok: false; error: string } | null
+  >(null);
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
 
   useEffect(() => {
     void window.electronAPI.getDisks().then((list) => {
@@ -135,13 +150,60 @@ function DiskTools({ onComplete }: { onComplete: () => void }) {
     setTrimBusy(false);
   };
 
+  const runUnlock = async () => {
+    const letter = blLetter.trim().replace(/:$/, '');
+    if (!letter || !blPassword.trim()) return;
+    setBlBusy(true);
+    setBlResult(null);
+    try {
+      setBlResult(await window.electronAPI.bitlockerUnlock(letter, blPassword.trim()));
+    } catch (e) {
+      setBlResult({ ok: false, letter, error: e instanceof Error ? e.message : String(e) });
+    }
+    setBlBusy(false);
+  };
+
+  const pickKeysImage = async () => {
+    const picked = await window.electronAPI.selectFile({
+      filters: [
+        { name: 'OPBS Images', extensions: ['opbs'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+    if (picked) {
+      setKeysImage(picked);
+      setKeysResult(null);
+    }
+  };
+
+  const runKeysRead = async () => {
+    if (!keysImage) return;
+    setKeysBusy(true);
+    setKeysResult(null);
+    try {
+      setKeysResult(await window.electronAPI.bitlockerKeysRead(keysImage, keysPassphrase));
+    } catch (e) {
+      setKeysResult({ ok: false, error: e instanceof Error ? e.message : 'Could not read keys' });
+    }
+    setKeysBusy(false);
+  };
+
+  const copyKey = async (text: string, index: number) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedIndex(index);
+      setTimeout(() => setCopiedIndex((i) => (i === index ? null : i)), 1500);
+    } catch { /* clipboard unavailable */ }
+  };
+
   if (loading) return <div className="dashboard"><h1>Disk Tools</h1><p>Loading disks…</p></div>;
 
   const tabs: { key: Tab; label: string }[] = [
     { key: 'mbr', label: 'MBR & Boot Repair' },
     { key: 'check', label: 'Disk Error Check' },
     { key: 'trim', label: 'SSD TRIM' },
-    { key: 'smart', label: 'SMART Health' }
+    { key: 'smart', label: 'SMART Health' },
+    { key: 'bitlocker', label: 'BitLocker' }
   ];
 
   return (
@@ -398,6 +460,122 @@ function DiskTools({ onComplete }: { onComplete: () => void }) {
           {smart.length === 0 && !smartLoading && (
             <p className="disk-tools-note">No disks found or unable to query health data.</p>
           )}
+        </div>
+      )}
+
+      {tab === 'bitlocker' && (
+        <div className="disk-tools-panel">
+          <h2>BitLocker</h2>
+          <p className="disk-tools-note">
+            Unlock a locked volume with its 48-digit recovery password, or view the recovery keys
+            stored inside a backup's sidecar file.
+          </p>
+
+          <div className="disk-tools-section">
+            <h3>Unlock BitLocker Volume</h3>
+            <p className="disk-tools-note">
+              Unlocking costs one UAC confirmation on Windows. The password is passed to the
+              elevated helper in its environment only — it is never written to disk or logged.
+            </p>
+            <div className="disk-tools-row">
+              <label>Volume:</label>
+              <input className="disk-tools-input" value={blLetter} onChange={(e) => setBlLetter(e.target.value.toUpperCase())} placeholder="D:" />
+              <input
+                type="password"
+                className="disk-tools-input"
+                style={{ flex: 1, minWidth: 220 }}
+                value={blPassword}
+                onChange={(e) => setBlPassword(e.target.value)}
+                placeholder="48-digit recovery password"
+                disabled={blBusy}
+                onKeyDown={(e) => { if (e.key === 'Enter') void runUnlock(); }}
+              />
+              <button
+                className="btn-primary btn-small"
+                disabled={blBusy || !blLetter.trim() || !blPassword.trim()}
+                onClick={() => void runUnlock()}
+              >
+                {blBusy ? 'Unlocking…' : 'Unlock'}
+              </button>
+            </div>
+            {blResult && (
+              <div className={`disk-tools-output ${blResult.ok ? 'ok' : 'err'}`}>
+                <p className="disk-tools-output-head">
+                  UNLOCK {blResult.ok ? `— Volume ${blResult.letter}: unlocked ✓` : `— ${blResult.letter || blLetter} Failed`}
+                </p>
+                {!blResult.ok && <p>{blResult.error}</p>}
+                {blResult.ok && blResult.source && <p>Source: {blResult.source === 'winpe' ? 'manage-bde (WinPE)' : 'Unlock-BitLocker (Windows)'}</p>}
+              </div>
+            )}
+          </div>
+
+          <div className="disk-tools-section">
+            <h3>View Stored BitLocker Keys</h3>
+            <p className="disk-tools-note">
+              Shows the recovery passwords a backup stored in its <code>.bitlocker.json</code> sidecar.
+              Enter the backup's passphrase to decrypt them. Keep the sidecar with the backup image.
+            </p>
+            <div className="disk-tools-row">
+              <div className="path-input" style={{ flex: 1, minWidth: 260 }}>
+                <input type="text" readOnly value={keysImage} placeholder="Select a backup image…" />
+                <button onClick={() => void pickKeysImage()}>Browse</button>
+              </div>
+            </div>
+            <div className="disk-tools-row">
+              <label>Passphrase:</label>
+              <input
+                type="password"
+                className="disk-tools-input"
+                style={{ flex: 1, minWidth: 220 }}
+                value={keysPassphrase}
+                onChange={(e) => setKeysPassphrase(e.target.value)}
+                placeholder="Backup passphrase"
+                disabled={keysBusy}
+                onKeyDown={(e) => { if (e.key === 'Enter') void runKeysRead(); }}
+              />
+              <button
+                className="btn-primary btn-small"
+                disabled={keysBusy || !keysImage}
+                onClick={() => void runKeysRead()}
+              >
+                {keysBusy ? 'Decrypting…' : 'View Keys'}
+              </button>
+            </div>
+            {keysResult && !keysResult.ok && (
+              <div className="disk-tools-output err">
+                <p className="disk-tools-output-head">VIEW KEYS — Failed</p>
+                <p>{keysResult.error}</p>
+              </div>
+            )}
+            {keysResult?.ok && (
+              <div className="mbr-table-wrap">
+                <table className="mbr-table">
+                  <thead>
+                    <tr>
+                      <th>Volume</th>
+                      <th>Label</th>
+                      <th>Recovery Password</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {keysResult.keys.map((k, i) => (
+                      <tr key={i}>
+                        <td>{k.letter}:</td>
+                        <td>{k.label || '—'}</td>
+                        <td className="bitlocker-key-cell">{k.recoveryPassword}</td>
+                        <td>
+                          <button className="btn-secondary btn-small" onClick={() => void copyKey(k.recoveryPassword, i)}>
+                            {copiedIndex === i ? 'Copied ✓' : 'Copy'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

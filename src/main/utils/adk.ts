@@ -25,6 +25,8 @@ export interface AdkTools {
   dism: string;
   /** oscdimg used by MakeWinPEMedia for ISO output (may be null). */
   oscdimg?: string;
+  /** WinPE-SecureStartup.cab (BitLocker support for the rescue media), if installed. */
+  winpeSecureStartupCab?: string;
   arch: PeArch;
 }
 
@@ -62,6 +64,7 @@ export function locateAdk(arch: PeArch = peArchForProcess(), rootOverride?: stri
     const peDir = path.join(resolved, 'Windows Preinstallation Environment');
     const dism = dismCandidates(resolved, arch).find((d) => fs.existsSync(d));
     const oscdimg = path.join(resolved, 'Deployment Tools', arch, 'Oscdimg', 'oscdimg.exe');
+    const secureStartupCab = path.join(peDir, arch, 'WinPE_OCs', 'WinPE-SecureStartup.cab');
     return {
       root: resolved,
       copype: path.join(peDir, 'copype.cmd'),
@@ -69,6 +72,7 @@ export function locateAdk(arch: PeArch = peArchForProcess(), rootOverride?: stri
       dandiSetEnv: path.join(resolved, 'Deployment Tools', 'DandISetEnv.bat'),
       dism: dism ?? '',
       oscdimg: fs.existsSync(oscdimg) ? oscdimg : undefined,
+      winpeSecureStartupCab: fs.existsSync(secureStartupCab) ? secureStartupCab : undefined,
       arch
     };
   }
