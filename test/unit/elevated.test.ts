@@ -1,7 +1,29 @@
 import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
-import { resolvePowershell } from '../../src/main/utils/elevated';
+import { resolvePowershell, buildElevatedWrapper, psQuote } from '../../src/main/utils/elevated';
+
+describe('buildElevatedWrapper', () => {
+  it('elevates the script and reports its exit code', () => {
+    const script = 'C:\\Users\\rober\\AppData\\Local\\Temp\\opbs-winpe-AbC123\\build.ps1';
+    const wrapper = buildElevatedWrapper('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', script);
+    expect(wrapper).toContain('-Verb RunAs');
+    expect(wrapper).toContain(`'-File', ${psQuote(script)}`);
+    expect(wrapper).toContain('-WindowStyle Hidden');
+    expect(wrapper).toContain('-Wait');
+    // Elevation failure sentinel.
+    expect(wrapper).toContain('if ($null -eq $p) { exit 5 }');
+    expect(wrapper).toContain('exit $p.ExitCode');
+  });
+
+  it('never combines -Verb RunAs with -RedirectStandard* (AmbiguousParameterSet breaks elevation)', () => {
+    const wrapper = buildElevatedWrapper('powershell.exe', 'C:\\work\\build.ps1');
+    expect(wrapper).toContain('-Verb RunAs');
+    expect(wrapper).not.toContain('-RedirectStandardOutput');
+    expect(wrapper).not.toContain('-RedirectStandardError');
+    expect(wrapper).not.toContain('-RedirectStandardInput');
+  });
+});
 
 describe('resolvePowershell', () => {
   it('resolves to a real powershell.exe path that exists', () => {

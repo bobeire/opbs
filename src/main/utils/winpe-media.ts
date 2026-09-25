@@ -5,6 +5,8 @@ import * as path from 'path';
 import { psQuote, runElevatedPowerShell as runPowershell } from './elevated';
 import { locateAdk, peArchForProcess, PeArch } from './adk';
 import { nodeRuntimeDir } from './node-install';
+import { usbTargetGuard, protectedDriveLetters } from './media-drives';
+import { logger } from './logger';
 
 /**
  * WinPE recovery media builder.
@@ -65,6 +67,62 @@ export interface PayloadItem {
   from: string;
   /** Relative destination under <stage>/media/OPBS. */
   to: string;
+}
+
+/**
+ * Copy payload sources into `payloadDir` as real files BEFORE the elevated
+ * script is written. The packaged app resolves payload paths inside
+ * `app.asar`, which Electron's fs can read but the elevated PowerShell (.NET)
+ * cannot — a script referencing `app.asar\...` crashes on its first Copy-Item
+ * and never writes its result.json. Staging first keeps every source real.
+ */
+export function stagePayloadFiles(payloadCopies: PayloadItem[], payloadDir: string): PayloadItem[] {
+  fs.mkdirSync(payloadDir, { recursive: true });
+  return payloadCopies.map((item, index) => {
+    const stagedFrom = path.join(payloadDir, `${index}-${path.basename(item.from)}`);
+    fs.cpSync(item.from, stagedFrom, { recursive: true });
+    return { from: stagedFrom, to: item.to };
+  });
+}
+
+/** Last `maxBytes` of a log file (for error messages), or null if unreadable. */
+export function readLogTail(file: string, maxBytes = 2000): string | null {
+  try {
+    if (!fs.existsSync(file)) return null;
+    const size = fs.statSync(file).size;
+    if (size === 0) return null;
+    const length = Math.min(maxBytes, size);
+    const buffer = Buffer.alloc(length);
+    const fd = fs.openSync(file, 'r');
+    try {
+      fs.readSync(fd, buffer, 0, length, size - length);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const text = buffer.toString('utf8').trim();
+    return text.length > 0 ? text : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Explain a completed elevation that produced no result.json: exit code 5 is
+ * the wrapper's own "elevation failed" sentinel, anything else means the
+ * elevated script crashed (include its captured output when available).
+ */
+export function elevatedNoResultError(exitCode: number, work: string, script: string, logTail: string | null): string {
+  const cause =
+    exitCode === 5
+      ? 'the UAC prompt was declined or never appeared'
+      : 'the elevated script failed before writing result.json';
+  // Keep the message readable: only the last bit of output, where the error is.
+  const trimmed = logTail && logTail.length > 600 ? `…${logTail.slice(-600)}` : logTail;
+  const tail = trimmed ? ` — script output: ${trimmed}` : '';
+  return (
+    `Elevated ADK step did not produce a result (exit code ${exitCode}: ${cause})${tail}. ` +
+    `Work kept at ${work} (run ${script} from an elevated PowerShell to retry).`
+  );
 }
 
 /**
@@ -346,6 +404,11 @@ export function buildElevatedScript(options: {
   const outputArg = format === 'usb' ? `${output.replace(/:$/, '')}:` : output;
   const lines: string[] = [];
   lines.push('$ErrorActionPreference = "Stop"');
+  // Record everything this elevated session does (including terminating errors)
+  // into a file next to the script: the outer wrapper cannot combine
+  // Start-Process -Verb RunAs with -RedirectStandard* (AmbiguousParameterSet),
+  // so the script captures its own output for post-mortem reading.
+  lines.push(`Start-Transcript -Path (Join-Path $PSScriptRoot 'elevated.log') -Append -ErrorAction SilentlyContinue | Out-Null`);
   // Ensure System32 is on PATH so `reg` (needed by DandISetEnv) and `dism`
   // resolve even when this process was spawned from an environment with a
   // restricted PATH (e.g. a dev shell).
@@ -399,6 +462,7 @@ export function buildElevatedScript(options: {
   lines.push(cmdCall(`call "${options.adkMakeWinPEMedia}" /${format === 'iso' ? 'ISO' : 'USB'} "${stage}" "${outputArg}"`));
   lines.push(`if ($LASTEXITCODE -ne 0) { Write-Result @{ok=$false;error="MakeWinPEMedia failed with exit code $LASTEXITCODE"}; exit 0 }`);
   lines.push('Write-Result @{ok=$true;output=' + psQuote(outputArg) + '}');
+  lines.push('Stop-Transcript -ErrorAction SilentlyContinue | Out-Null');
   lines.push('exit 0');
   return lines.join('\r\n');
 }
@@ -406,6 +470,14 @@ export function buildElevatedScript(options: {
 /** Create the recovery media. Requires a UAC confirmation for the ADK steps. */
 export async function createRecoveryMedia(options: MediaCreateOptions): Promise<MediaCreateResult> {
   const arch = options.arch ?? PE_ARCH_DEFAULT;
+  // Never allow USB creation to target the drive Windows or OPBS runs from,
+  // no matter what the UI sent.
+  if (options.format === 'usb') {
+    const guardError = usbTargetGuard(options.output, protectedDriveLetters());
+    if (guardError) {
+      return { ok: false, format: options.format, output: options.output, arch, error: guardError };
+    }
+  }
   const adk = locateAdk(arch, options.adkRoot);
   if (!adk || !adk.copype || !adk.dism || !adk.makeWinPEMedia) {
     return {
@@ -493,6 +565,9 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
     ...planPayloadCopies({ nodeExe, distDir, nativeNode, nodeModules: moduleRoots }),
     ...(restoreConfigCopy ? [restoreConfigCopy] : [])
   ];
+  // Real-file staging: the elevated PowerShell cannot read inside app.asar.
+  const stagedCopies = stagePayloadFiles(payloadCopies, path.join(work, 'payload'));
+  logger.info(`Building recovery media: ${options.format} → ${options.output} (arch ${arch}, work at ${work})`);
   const script = path.join(work, 'build.ps1');
   fs.writeFileSync(
     script,
@@ -505,7 +580,7 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
       adkDandISetEnv: adk.dandiSetEnv,
       adkDism: adk.dism,
       adkMakeWinPEMedia: adk.makeWinPEMedia,
-      payloadCopies,
+      payloadCopies: stagedCopies,
       payloadTextFiles: payloadTextFiles(),
       startnetCmd: buildStartnetCmd(),
       yesForUsb: options.yesForUsb ?? false,
@@ -528,28 +603,32 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
 
   try {
     const elevated = await runPowershell(script);
+    logger.info(`Elevated ADK step finished with exit code ${elevated}`);
     const resultPath = path.join(stage, 'result.json');
     if (!fs.existsSync(resultPath)) {
+      const logTail = readLogTail(path.join(work, 'elevated.log'));
+      const error = elevatedNoResultError(elevated, work, script, logTail);
+      logger.error(`Recovery media build failed: ${error}`);
       return {
         ok: false,
         format: options.format,
         output: options.output,
         arch,
-        error:
-          `Elevated ADK step did not produce a result (UAC exit code ${elevated}; declined or the window ` +
-          `closed early). Work kept at ${work} (run ${script} from an elevated PowerShell to retry).`
+        error
       };
     }
     const parsed = JSON.parse(
       fs.readFileSync(resultPath, 'utf-8').replace(/^\uFEFF/, '')
     ) as { ok?: boolean; error?: string; output?: string };
     if (!parsed.ok) {
+      const error = `${parsed.error ?? 'Media build failed'} (work kept at ${work} for inspection)`;
+      logger.error(`Recovery media build failed: ${error}`);
       return {
         ok: false,
         format: options.format,
         output: options.output,
         arch,
-        error: `${parsed.error ?? 'Media build failed'} (work kept at ${work} for inspection)`
+        error
       };
     }
     let sizeBytes: number | undefined;
@@ -557,6 +636,7 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
       const iso = path.resolve(options.output);
       sizeBytes = fs.existsSync(iso) ? fs.statSync(iso).size : undefined;
     }
+    logger.info(`Recovery media created: ${options.output}${sizeBytes ? ` (${sizeBytes} bytes)` : ''}`);
     return { ok: true, format: options.format, output: options.output, arch, sizeBytes };
   } finally {
     // Keep the staging directory when the build failed (so the elevated script

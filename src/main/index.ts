@@ -1477,6 +1477,12 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     return createRecoveryMedia(options);
   });
 
+  // Drives offered by the USB target picker (label/size/bus, system drives excluded)
+  ipcMain.handle('media-drives', async () => {
+    const { listMediaDrives } = await import('./utils/media-drives');
+    return listMediaDrives();
+  });
+
   // Silent Windows ADK install (bootstraps downloaded, installed via one UAC prompt)
   ipcMain.handle('adk-install', async (_, options?: { adkSetup?: string; adkWinPe?: string; installPath?: string }) => {
     return installAdkExe(options ?? {});

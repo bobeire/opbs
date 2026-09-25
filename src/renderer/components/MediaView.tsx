@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 
 interface MediaCheckReport {
   ok: boolean;
@@ -21,6 +21,20 @@ interface MediaCreateResult {
   error?: string;
 }
 
+interface MediaDriveOption {
+  letter: string;
+  volumeLabel: string;
+  sizeBytes: number;
+  busType: string;
+  text: string;
+}
+
+interface MediaDriveGroups {
+  primary: MediaDriveOption[];
+  others: MediaDriveOption[];
+  error?: string;
+}
+
 interface MediaViewProps {
   onComplete?: () => void;
 }
@@ -39,6 +53,31 @@ function MediaView({ onComplete }: MediaViewProps) {
   const [error, setError] = useState('');
   const [installing, setInstalling] = useState<'adk' | 'node' | null>(null);
   const [installError, setInstallError] = useState('');
+  const [drives, setDrives] = useState<MediaDriveGroups | null>(null);
+  const [drivesLoading, setDrivesLoading] = useState(false);
+  const [drivesError, setDrivesError] = useState('');
+
+  const loadDrives = useCallback(async () => {
+    setDrivesLoading(true);
+    setDrivesError('');
+    try {
+      const g = await window.electronAPI.mediaDrives();
+      setDrives(g);
+      setDrivesError(g?.error ?? '');
+    } catch (e) {
+      setDrivesError(e instanceof Error ? e.message : 'Failed to list drives');
+    } finally {
+      setDrivesLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (format !== 'usb') return;
+    // Deferred so loadDrives' initial setState doesn't run synchronously
+    // inside the effect (react-hooks/set-state-in-effect).
+    const timer = setTimeout(() => void loadDrives(), 0);
+    return () => clearTimeout(timer);
+  }, [format, loadDrives]);
 
   useEffect(() => {
     void (async () => {
@@ -119,10 +158,13 @@ function MediaView({ onComplete }: MediaViewProps) {
     }
   };
 
+  const allDrives = drives ? [...drives.primary, ...drives.others] : [];
+  const selectedDrive = allDrives.find((d) => d.letter === usbDrive);
+
   const canCreate =
     !building &&
     report?.ready &&
-    (format === 'iso' ? !!isoPath : !!usbDrive && usbConfirmed);
+    (format === 'iso' ? !!isoPath : !!selectedDrive && usbConfirmed);
 
   return (
     <div className="media-view">
@@ -245,25 +287,61 @@ function MediaView({ onComplete }: MediaViewProps) {
         {format === 'usb' && (
           <>
             <div className="setting-item">
-              <label>Drive letter:</label>
-              <input
-                type="text"
-                value={usbDrive}
-                onChange={(e) => setUsbDrive(e.target.value.toUpperCase().replace(/[^A-Z]/g, ''))}
-                placeholder="E"
-                maxLength={1}
-              />
+              <label>USB drive:</label>
+              <div className="path-input">
+                <select
+                  value={selectedDrive ? usbDrive : ''}
+                  onChange={(e) => {
+                    setUsbDrive(e.target.value);
+                    setUsbConfirmed(false);
+                  }}
+                >
+                  <option value="" disabled>
+                    {drivesLoading && !drives ? 'Listing drives…' : 'Select a drive…'}
+                  </option>
+                  {drives && drives.primary.length > 0 && (
+                    <optgroup label="USB / removable drives">
+                      {drives.primary.map((d) => (
+                        <option key={d.letter} value={d.letter}>
+                          {d.text}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {drives && drives.others.length > 0 && (
+                    <optgroup label="Other drives — double-check before selecting">
+                      {drives.others.map((d) => (
+                        <option key={d.letter} value={d.letter}>
+                          {d.text}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+                <button onClick={() => void loadDrives()} disabled={drivesLoading}>
+                  {drivesLoading ? 'Listing…' : 'Refresh'}
+                </button>
+              </div>
+              {drivesError && <p className="field-hint">{drivesError}</p>}
+              {!drivesLoading && !drivesError && drives && allDrives.length === 0 && (
+                <p className="field-hint">No drives found — plug in the USB stick, then click Refresh.</p>
+              )}
+              <p className="field-hint">
+                Pick the USB stick to turn into recovery media — it will be completely erased.
+              </p>
             </div>
-            <div className="setting-item">
-              <label className="checkbox-label">
-                <input
-                  type="checkbox"
-                  checked={usbConfirmed}
-                  onChange={(e) => setUsbConfirmed(e.target.checked)}
-                />
-                I confirm this will erase the contents of drive {usbDrive || '…'}
-              </label>
-            </div>
+            {selectedDrive && (
+              <div className="setting-item">
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={usbConfirmed}
+                    onChange={(e) => setUsbConfirmed(e.target.checked)}
+                  />
+                  I understand: erase everything on {selectedDrive.text}
+                </label>
+              </div>
+            )}
           </>
         )}
 

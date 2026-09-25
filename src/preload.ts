@@ -104,6 +104,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // WinPE recovery media
   mediaCheck: () => ipcRenderer.invoke('media-check'),
   mediaCreate: (options: any) => ipcRenderer.invoke('media-create', options),
+  mediaDrives: () => ipcRenderer.invoke('media-drives'),
   adkInstall: (options: any) => ipcRenderer.invoke('adk-install', options),
   nodeInstall: () => ipcRenderer.invoke('node-install'),
 

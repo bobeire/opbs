@@ -25,21 +25,35 @@ export function resolvePowershell(): string {
   return fs.existsSync(full) ? full : 'powershell.exe';
 }
 
+/**
+ * Build the outer wrapper command: elevate the script with one UAC prompt and
+ * report the script's exit code.
+ *
+ * Do NOT add -RedirectStandardOutput/-RedirectStandardError here: in Windows
+ * PowerShell those belong to a different parameter set than -Verb, so binding
+ * fails with `AmbiguousParameterSet`, Start-Process returns $null, and
+ * elevation never even prompts (observed as "exit 5, no UAC"). Elevated
+ * scripts capture their own output instead (Start-Transcript at the top of
+ * each script).
+ *
+ * Exit codes: 5 = the elevation itself failed (prompt declined or never
+ * appeared); anything else = the inner script's own exit code.
+ */
+export function buildElevatedWrapper(powershell: string, scriptPath: string): string {
+  const innerArgs = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath]
+    .map(psQuote)
+    .join(', ');
+  return (
+    `$p = Start-Process -FilePath ${psQuote(powershell)} -ArgumentList @(${innerArgs})` +
+    ` -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ErrorAction SilentlyContinue; ` +
+    `if ($null -eq $p) { exit 5 }; exit $p.ExitCode`
+  );
+}
+
 export function runElevatedPowerShell(scriptPath: string): Promise<number> {
   const powershell = resolvePowershell();
   return new Promise((resolve, reject) => {
-    const wrapper =
-      `$p = Start-Process -FilePath ${psQuote(powershell)} -ArgumentList @(${[
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        scriptPath
-      ]
-        .map(psQuote)
-        .join(', ')}) -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ErrorAction SilentlyContinue; ` +
-      `if ($null -eq $p) { exit 5 }; exit $p.ExitCode`;
+    const wrapper = buildElevatedWrapper(powershell, scriptPath);
     const child = spawn(powershell, ['-NoProfile', '-NonInteractive', '-Command', wrapper], {
       windowsHide: true,
       stdio: 'ignore'

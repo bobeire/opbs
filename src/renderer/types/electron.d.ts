@@ -281,6 +281,7 @@ declare global {
       browseClose: () => Promise<void>;
       mediaCheck: () => Promise<any>;
       mediaCreate: (options: any) => Promise<any>;
+      mediaDrives: () => Promise<{ primary: any[]; others: any[]; error?: string }>;
       adkInstall: (options: any) => Promise<{ ok: boolean; adkRoot: string | null; steps: Array<{ name: string; exitCode: number }>; error?: string }>;
       nodeInstall: () => Promise<{ ok: boolean; nodeExe: string | null; version?: string; error?: string }>;
       verifyS3: () => Promise<any>;

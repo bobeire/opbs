@@ -13,8 +13,12 @@ import {
   planRestoreConfigCopy,
   buildElevatedScript,
   smokeMediaPayload,
+  stagePayloadFiles,
+  readLogTail,
+  elevatedNoResultError,
   PE_ARCH_DEFAULT
 } from '../../src/main/utils/winpe-media';
+import * as os from 'os';
 
 describe('winpe-media', () => {
   const ARCH = PE_ARCH_DEFAULT;
@@ -27,6 +31,119 @@ describe('winpe-media', () => {
       const found = resolveNodeExe();
       expect(found).toBeTruthy();
       expect(path.basename(found!)).toBe('node.exe');
+    });
+  });
+
+  describe('stagePayloadFiles', () => {
+    it('copies payload sources to real flat files the elevated script can read', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-stage-'));
+      try {
+        const srcDir = path.join(tmp, 'fake-asar', 'node_modules', 'fzstd');
+        fs.mkdirSync(srcDir, { recursive: true });
+        fs.writeFileSync(path.join(srcDir, 'index.js'), 'codec');
+        const srcFile = path.join(tmp, 'fake-asar', 'node.exe');
+        fs.writeFileSync(srcFile, 'exe');
+
+        const payloadDir = path.join(tmp, 'payload');
+        const staged = stagePayloadFiles(
+          [
+            { from: srcDir, to: 'node_modules/fzstd' },
+            { from: srcFile, to: 'node.exe' }
+          ],
+          payloadDir
+        );
+
+        expect(staged).toHaveLength(2);
+        for (const item of staged) {
+          expect(item.from.startsWith(payloadDir)).toBe(true);
+          expect(path.basename(item.from).startsWith('0-') || path.basename(item.from).startsWith('1-')).toBe(true);
+          expect(fs.existsSync(item.from)).toBe(true);
+        }
+        // Destinations are preserved for the script; content survives the copy.
+        expect(staged[0].to).toBe('node_modules/fzstd');
+        expect(fs.readFileSync(path.join(staged[0].from, 'index.js'), 'utf8')).toBe('codec');
+        expect(fs.readFileSync(staged[1].from, 'utf8')).toBe('exe');
+        // The originals are untouched.
+        expect(fs.existsSync(srcDir)).toBe(true);
+        expect(fs.existsSync(srcFile)).toBe(true);
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps sources distinct when basenames collide', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-stage-'));
+      try {
+        const a = path.join(tmp, 'a', 'dist');
+        const b = path.join(tmp, 'b', 'dist');
+        fs.mkdirSync(a, { recursive: true });
+        fs.mkdirSync(b, { recursive: true });
+        fs.writeFileSync(path.join(a, 'x'), 'a');
+        fs.writeFileSync(path.join(b, 'x'), 'b');
+
+        const staged = stagePayloadFiles(
+          [
+            { from: a, to: 'dist' },
+            { from: b, to: 'dist2' }
+          ],
+          path.join(tmp, 'payload')
+        );
+        expect(staged[0].from).not.toBe(staged[1].from);
+        expect(fs.readFileSync(path.join(staged[0].from, 'x'), 'utf8')).toBe('a');
+        expect(fs.readFileSync(path.join(staged[1].from, 'x'), 'utf8')).toBe('b');
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('readLogTail', () => {
+    it('returns the last bytes of a file', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-log-'));
+      try {
+        const file = path.join(tmp, 'x.log');
+        fs.writeFileSync(file, 'line1\nline2\nline3\n');
+        const tail = readLogTail(file, 7);
+        expect(tail).toBe('line3'); // trailing whitespace is trimmed for messages
+        expect(readLogTail(path.join(tmp, 'missing.log'))).toBeNull();
+        const empty = path.join(tmp, 'empty.log');
+        fs.writeFileSync(empty, '');
+        expect(readLogTail(empty)).toBeNull();
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('elevatedNoResultError', () => {
+    it('attributes exit code 5 to the UAC prompt itself', () => {
+      const msg = elevatedNoResultError(5, 'C:/work', 'C:/work/build.ps1', null);
+      expect(msg).toContain('exit code 5');
+      expect(msg).toContain('declined or never appeared');
+      expect(msg).toContain('C:/work');
+      expect(msg).toContain('C:/work/build.ps1');
+      expect(msg).not.toContain('script output');
+    });
+
+    it('attributes other exits to the script and embeds captured output', () => {
+      const msg = elevatedNoResultError(1, 'C:/work', 'C:/work/build.ps1', 'ItemNotFoundException: bad path');
+      expect(msg).toContain('exit code 1');
+      expect(msg).toContain('failed before writing result.json');
+      expect(msg).toContain('ItemNotFoundException: bad path');
+    });
+
+    it('omits the output section when no log was captured', () => {
+      const msg = elevatedNoResultError(1, 'C:/work', 'C:/work/build.ps1', null);
+      expect(msg).not.toContain('script output');
+      expect(msg).toContain('Work kept at C:/work');
+    });
+
+    it('trims long output to its final 600 chars so the error stays readable', () => {
+      const long = 'a'.repeat(1000) + 'TAIL-MARKER';
+      const msg = elevatedNoResultError(1, 'C:/work', 'C:/work/build.ps1', long);
+      expect(msg).toContain('TAIL-MARKER');
+      expect(msg).toContain('…');
+      expect(msg).not.toContain('a'.repeat(601));
     });
   });
 
@@ -164,6 +281,18 @@ describe('winpe-media', () => {
       const s = buildElevatedScript(base);
       expect(s).toContain('media\\OPBS\\restore.cmd');
       expect(s).toContain('[Convert]::FromBase64String');
+    });
+
+    it('transcripts its output into elevated.log next to the script', () => {
+      const s = buildElevatedScript(base);
+      // The wrapper cannot use -RedirectStandard* with -Verb RunAs
+      // (AmbiguousParameterSet), so the script must capture its own output.
+      expect(s).toContain(`Start-Transcript -Path (Join-Path $PSScriptRoot 'elevated.log')`);
+      expect(s).toContain('-ErrorAction SilentlyContinue | Out-Null');
+      // Transcript starts before the first operation that can fail.
+      expect(s.indexOf('Start-Transcript')).toBeLessThan(s.indexOf('copype.cmd'));
+      // And is stopped on the success path just before the final exit.
+      expect(s).toContain('Stop-Transcript -ErrorAction SilentlyContinue | Out-Null\r\nexit 0');
     });
 
     it('uses /USB and guards without confirmation', () => {

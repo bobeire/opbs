@@ -1565,6 +1565,17 @@ body {
   font: inherit;
 }
 
+.path-input select {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  background-color: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-color);
+  font-size: 0.9rem;
+}
+
 /* ---------- Dashboard WinFsp banner ---------- */
 .dashboard-banner {
   display: flex;
