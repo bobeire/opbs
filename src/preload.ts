@@ -135,6 +135,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Auto-update
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
   installUpdate: () => ipcRenderer.invoke('install-update'),
+  getVersion: () => ipcRenderer.invoke('get-version'),
 
   // Network destination discovery
   networkDiscover: () => ipcRenderer.invoke('network-discover'),

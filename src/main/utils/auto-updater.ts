@@ -15,7 +15,9 @@ function send(status: string, payload?: unknown): void {
 function enabled(): boolean {
   // app.getName() returns the package.json `name` ("opbs"), not the
   // electron-builder productName, so compare case-insensitively.
-  return app.isPackaged && app.getName().toLowerCase() === 'opbs';
+  // Works in dev too (packaged builds and dev both need to be able
+  // to check for updates — only the auto-install is deferred).
+  return app.getName().toLowerCase() === 'opbs';
 }
 
 export function initAutoUpdater(window: BrowserWindow): void {

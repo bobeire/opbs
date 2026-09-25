@@ -353,6 +353,7 @@ declare global {
       importSettings: () => Promise<{ ok: boolean; canceled?: boolean; settings?: any; error?: string }>;
       checkForUpdates: () => Promise<{ ok: boolean }>;
       installUpdate: () => Promise<{ ok: boolean }>;
+      getVersion: () => Promise<string>;
       networkDiscover: () => Promise<{ machines: { name: string; addresses: string[]; services: string[] }[] }>;
       networkShares: (host: string) => Promise<{ shares: { unc: string; name: string; kind: string; reachable: boolean; writable: boolean; remark?: string }[] }>;
       networkTest: (uncPath: string, create?: boolean) => Promise<{ path: string; ok: boolean; writable?: boolean; reachable?: boolean; created?: boolean; error?: string }>;

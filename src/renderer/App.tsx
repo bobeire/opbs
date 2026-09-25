@@ -45,8 +45,10 @@ function App() {
   const [browseIntent, setBrowseIntent] = useState<BrowseIntent | null>(null);
   const [backupRunning, setBackupRunning] = useState(false);
   const [lastBackupProgress, setLastBackupProgress] = useState<any>(null);
+  const [appVersion, setAppVersion] = useState<string>('');
 
   useEffect(() => {
+    void window.electronAPI.getVersion().then((v) => setAppVersion(v));
     void window.electronAPI.checkForUpdates();
   }, []);
 
@@ -263,7 +265,7 @@ function App() {
         
         <div className="sidebar-footer">
           <button className="version-btn" onClick={() => window.electronAPI.showAbout()}>
-            v0.2.0
+            v{appVersion}
           </button>
           <button className="version-btn" onClick={() => void window.electronAPI.checkForUpdates()}>
             Check for updates

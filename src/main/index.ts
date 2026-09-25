@@ -828,6 +828,10 @@ function setupIpcHandlers(): void {
     return { ok: true };
   });
 
+  ipcMain.handle('get-version', async () => {
+    return app.getVersion();
+  });
+
   // Network destination discovery
   ipcMain.handle('network-discover', async () => {
     const machines = await discoverNetworkMachines();
