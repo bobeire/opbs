@@ -183,7 +183,7 @@ export function resolveBundleNodeModules(packages: string[]): Array<{ name: stri
         const pkgJson = path.join(dir, 'package.json');
         try {
           if (JSON.parse(fs.readFileSync(pkgJson, 'utf-8')).name === pkg) {
-            return { name: pkgName, dir };
+            return { name: pkgName, dir: realDir(dir) };
           }
         } catch {
           /* keep climbing */
@@ -195,6 +195,17 @@ export function resolveBundleNodeModules(packages: string[]): Array<{ name: stri
       return { name: pkgName, dir: '' };
     }
   });
+}
+
+/**
+ * require.resolve() returns paths inside app.asar when the app is
+ * packaged, but those are not real directories (opendir/readdir fail).
+ * Strip the asar mount so the caller gets the sibling directory that
+ * asarUnpack populated.
+ */
+function realDir(dir: string): string {
+  const stripped = dir.replace('app.asar', '');
+  return fs.existsSync(stripped) ? stripped : dir;
 }
 
 export function planPayloadCopies(options: {
