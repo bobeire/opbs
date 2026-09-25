@@ -204,7 +204,10 @@ export function resolveBundleNodeModules(packages: string[]): Array<{ name: stri
  * the sibling directory that asarUnpack populated.
  */
 function realDir(dir: string): string {
-  const stripped = path.normalize(dir.replace('app.asar', ''));
+  // Strip "app.asar\": require.resolve returns the asar-internal path,
+  // but the caller needs the sibling directory that asarUnpack populated.
+  // Preserve the "\\?\" extended-length prefix and keep separators clean.
+  const stripped = dir.replace('app.asar' + path.sep, '');
   return fs.existsSync(stripped) ? stripped : dir;
 }
 
