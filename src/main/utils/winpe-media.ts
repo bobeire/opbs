@@ -200,15 +200,12 @@ export function resolveBundleNodeModules(packages: string[]): Array<{ name: stri
 /**
  * require.resolve() returns paths inside app.asar when the app is
  * packaged, but those are not real directories (opendir/readdir fail).
- * Strip the asar mount and normalize the separators so the caller gets
- * the sibling directory that asarUnpack populated.
+ * asarUnpack populates the sibling app.asar.unpacked directory, so map
+ * the asar path to the corresponding unpacked path.
  */
 function realDir(dir: string): string {
-  // Strip "app.asar\": require.resolve returns the asar-internal path,
-  // but the caller needs the sibling directory that asarUnpack populated.
-  // Preserve the "\\?\" extended-length prefix and keep separators clean.
-  const stripped = dir.replace('app.asar' + path.sep, '');
-  return fs.existsSync(stripped) ? stripped : dir;
+  const unpacked = dir.replace('app.asar', 'app.asar.unpacked');
+  return fs.existsSync(unpacked) ? unpacked : dir;
 }
 
 export function planPayloadCopies(options: {
