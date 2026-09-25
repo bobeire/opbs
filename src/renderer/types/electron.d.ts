@@ -282,6 +282,7 @@ declare global {
       mediaCheck: () => Promise<any>;
       mediaCreate: (options: any) => Promise<any>;
       adkInstall: (options: any) => Promise<{ ok: boolean; adkRoot: string | null; steps: Array<{ name: string; exitCode: number }>; error?: string }>;
+      nodeInstall: () => Promise<{ ok: boolean; nodeExe: string | null; version?: string; error?: string }>;
       verifyS3: () => Promise<any>;
       verifySftp: () => Promise<any>;
       verifyFtp: () => Promise<any>;

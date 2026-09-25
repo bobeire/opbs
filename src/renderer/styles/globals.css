@@ -1070,6 +1070,14 @@ body {
   color: #c0392b;
 }
 
+.media-missing .error-message button {
+  margin-top: 10px;
+}
+
+.media-missing .error-message .field-hint {
+  margin-top: 6px;
+}
+
 .mono-value {
   font-family: monospace;
   font-size: 13px;

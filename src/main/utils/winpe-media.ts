@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { psQuote, runElevatedPowerShell as runPowershell } from './elevated';
 import { locateAdk, peArchForProcess, PeArch } from './adk';
+import { nodeRuntimeDir } from './node-install';
 
 /**
  * WinPE recovery media builder.
@@ -66,8 +67,14 @@ export interface PayloadItem {
   to: string;
 }
 
-/** Resolve a stock Node.exe to bundle. Never returns a path inside the app. */
-export function resolveNodeExe(explicit?: string): string | null {
+/**
+ * Resolve a stock Node.exe to bundle. Preference order: the portable runtime
+ * installed by `installNodeRuntime()` (version-pinned, per-user, silent),
+ * then PATH/env candidates. Never returns a path inside the app.
+ *
+ * `runtimeDir` is injectable so tests can point at a fake node.exe.
+ */
+export function resolveNodeExe(explicit?: string, runtimeDir: string | null = nodeRuntimeDir()): string | null {
   const seen = (candidate: string): boolean => {
     if (!candidate) return false;
     return /node(\.exe)?$/i.test(path.basename(candidate)) && fs.existsSync(candidate);
@@ -89,6 +96,9 @@ export function resolveNodeExe(explicit?: string): string | null {
   } catch {
     /* fall through */
   }
+
+  // Portable OPBS-managed runtime wins over system installs (version-pinned).
+  if (runtimeDir) candidates.unshift(path.join(runtimeDir, 'node.exe'));
 
   for (const pf of [process.env.ProgramFiles, process.env['ProgramFiles(x86)']]) {
     if (pf) candidates.push(path.join(pf, 'nodejs', 'node.exe'));

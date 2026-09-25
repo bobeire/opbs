@@ -595,9 +595,13 @@ OPBS.exe --cli media smoke [--node <node.exe>] [--dist <dir>] [--native <addon>]
 
 If the ADK is missing, the GUI detects it at startup and offers to download and
 silently install the Deployment Tools + WinPE add-on automatically (one UAC
-confirmation for the whole install). Mounting backup partitions as read-only
-drives needs the WinFsp runtime; when it's missing the Dashboard shows a
-non-blocking banner that installs the latest WinFsp MSI the same way.
+confirmation for the whole install). The Recovery Media screen's Tools Check
+names each gap separately: a missing ADK offers a silent **Install ADK**
+button, and a missing Node.js runtime offers **Install Node.js**, which
+downloads the official portable LTS runtime (~38 MB) into the app's data
+folder — per-user, no admin rights or UAC prompt. Mounting backup partitions
+as read-only drives needs the WinFsp runtime; when it's missing the Dashboard
+shows a non-blocking banner that installs the latest WinFsp MSI the same way.
 
 The generated script: `copype` a WinPE working dir, layer OPBS under
 `media\OPBS\` (dist + codecs + `opbs_native.node` + `node.exe`), optionally

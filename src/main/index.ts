@@ -28,6 +28,7 @@ import { detectMacriumFormat, readMacriumImage, closeImageFds, clearMacriumInfoC
 import { locateAdk, peArchForProcess } from './utils/adk';
 import { createRecoveryMedia, resolveNodeExe, MediaCreateOptions } from './utils/winpe-media';
 import { installAdkExe } from './utils/adk-install';
+import { installNodeRuntime } from './utils/node-install';
 import { installWinfsp } from './utils/winfsp-install';
 import { S3Store, resolveS3Config } from './utils/s3';
 import { SftpStore, resolveSftpConfig } from './utils/sftp';
@@ -1479,6 +1480,11 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
   // Silent Windows ADK install (bootstraps downloaded, installed via one UAC prompt)
   ipcMain.handle('adk-install', async (_, options?: { adkSetup?: string; adkWinPe?: string; installPath?: string }) => {
     return installAdkExe(options ?? {});
+  });
+
+  // Silent per-user Node.js runtime install (portable zip, no UAC, no admin)
+  ipcMain.handle('node-install', async () => {
+    return installNodeRuntime();
   });
 
   // Silent WinFsp runtime install, then re-check availability

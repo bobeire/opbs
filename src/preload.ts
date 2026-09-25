@@ -105,6 +105,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   mediaCheck: () => ipcRenderer.invoke('media-check'),
   mediaCreate: (options: any) => ipcRenderer.invoke('media-create', options),
   adkInstall: (options: any) => ipcRenderer.invoke('adk-install', options),
+  nodeInstall: () => ipcRenderer.invoke('node-install'),
 
   // Cloud S3
   verifyS3: () => ipcRenderer.invoke('verify-s3'),

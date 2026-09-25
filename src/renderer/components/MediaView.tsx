@@ -37,6 +37,8 @@ function MediaView({ onComplete }: MediaViewProps) {
   const [building, setBuilding] = useState(false);
   const [result, setResult] = useState<MediaCreateResult | null>(null);
   const [error, setError] = useState('');
+  const [installing, setInstalling] = useState<'adk' | 'node' | null>(null);
+  const [installError, setInstallError] = useState('');
 
   useEffect(() => {
     void (async () => {
@@ -92,6 +94,31 @@ function MediaView({ onComplete }: MediaViewProps) {
     }
   };
 
+  const refreshReport = async () => {
+    try {
+      const r = await window.electronAPI.mediaCheck();
+      setReport(r);
+    } catch (e) {
+      setInstallError(e instanceof Error ? e.message : 'Failed to re-check media tools');
+    }
+  };
+
+  const handleInstall = async (kind: 'adk' | 'node') => {
+    setInstallError('');
+    setInstalling(kind);
+    try {
+      const r = kind === 'adk' ? await window.electronAPI.adkInstall({}) : await window.electronAPI.nodeInstall();
+      if (!r?.ok) {
+        setInstallError(r?.error ?? (kind === 'adk' ? 'ADK install failed.' : 'Node.js install failed.'));
+      }
+      await refreshReport();
+    } catch (e) {
+      setInstallError(e instanceof Error ? e.message : 'Install failed');
+    } finally {
+      setInstalling(null);
+    }
+  };
+
   const canCreate =
     !building &&
     report?.ready &&
@@ -117,11 +144,50 @@ function MediaView({ onComplete }: MediaViewProps) {
               <p>Ready — Windows ADK (WinPE) and a bundled Node runtime were found.</p>
             </div>
           ) : (
-            <div className="error-message">
-              <p>
-                WinPE ADK tools are not available. Install the Windows ADK with the Windows
-                Preinstallation Environment component, then retry.
-              </p>
+            <div className="media-missing">
+              {(!report?.adkRoot || !report?.dism) && (
+                <div className="error-message">
+                  <p>
+                    <strong>Windows ADK not found.</strong> Building recovery media needs the
+                    Windows ADK with the Windows Preinstallation Environment (WinPE) add-on.
+                  </p>
+                  <button
+                    className="btn-secondary"
+                    disabled={!!installing}
+                    onClick={() => void handleInstall('adk')}
+                  >
+                    {installing === 'adk' ? 'Installing ADK…' : 'Install ADK (silent)'}
+                  </button>
+                  {installing === 'adk' && (
+                    <p className="field-hint">
+                      Downloading (~1 GB) and installing — one administrator confirmation, a few minutes.
+                    </p>
+                  )}
+                </div>
+              )}
+              {!report?.node && (
+                <div className="error-message">
+                  <p>
+                    <strong>Node.js runtime not found.</strong> The recovery media boots and runs
+                    node.exe — install the portable runtime (per-user, no admin rights needed).
+                  </p>
+                  <button
+                    className="btn-secondary"
+                    disabled={!!installing}
+                    onClick={() => void handleInstall('node')}
+                  >
+                    {installing === 'node' ? 'Installing Node.js…' : 'Install Node.js (silent)'}
+                  </button>
+                  {installing === 'node' && (
+                      <p className="field-hint">Downloading (~38 MB) — no confirmation needed.</p>
+                  )}
+                </div>
+              )}
+              {installError && (
+                <div className="error-message">
+                  <p>{installError}</p>
+                </div>
+              )}
             </div>
           )}
           <div className="setting-item">
