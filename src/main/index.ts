@@ -272,12 +272,22 @@ function createWindow(): void {
     minHeight: 600,
     title: 'OPBS — Open Pickle Backup System',
     icon: path.join(__dirname, '../resources/icon.ico'),
+    show: false,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js')
     }
   });
+
+  // Show the window only once the first frame (the startup splash) is painted,
+  // so no blank window flashes before the UI is ready. Hard fallback so a
+  // renderer that never paints can't leave an invisible window behind.
+  const showMainWindow = () => {
+    if (mainWindow && !mainWindow.isVisible()) mainWindow.show();
+  };
+  mainWindow.on('ready-to-show', showMainWindow);
+  setTimeout(showMainWindow, 10000);
 
   if (process.env.NODE_ENV === 'development') {
     mainWindow.loadURL('http://localhost:5173');

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Dashboard from './components/Dashboard';
 import BackupWizard from './components/BackupWizard';
 import RestoreWizard from './components/RestoreWizard';
@@ -13,6 +13,7 @@ import PartitionCopy from './components/PartitionCopy';
 import DiskTools from './components/DiskTools';
 import ToastHost from './components/ToastHost';
 import AdkPrompt from './components/AdkPrompt';
+import SplashScreen from './components/SplashScreen';
 
 type Page =
   | 'dashboard'
@@ -46,6 +47,26 @@ function App() {
   const [backupRunning, setBackupRunning] = useState(false);
   const [lastBackupProgress, setLastBackupProgress] = useState<any>(null);
   const [appVersion, setAppVersion] = useState<string>('');
+  const [initialDataReady, setInitialDataReady] = useState(false);
+  const [splashMinElapsed, setSplashMinElapsed] = useState(false);
+
+  // Splash stays up briefly (avoids a flash) and never blocks forever even if
+  // the dashboard's drive/backup queries hang.
+  useEffect(() => {
+    const minTimer = setTimeout(() => setSplashMinElapsed(true), 700);
+    const hardCap = setTimeout(() => setInitialDataReady(true), 8000);
+    return () => {
+      clearTimeout(minTimer);
+      clearTimeout(hardCap);
+    };
+  }, []);
+
+  const handleDashboardLoaded = useCallback(() => setInitialDataReady(true), []);
+
+  // Hidden until the dashboard's drive/backup data is loaded (and a minimum
+  // display time has passed). A file-association open landing on another page
+  // hides it immediately — that data isn't what it's waiting for.
+  const splashVisible = currentPage === 'dashboard' && !(initialDataReady && splashMinElapsed);
 
   useEffect(() => {
     void window.electronAPI.getVersion().then((v) => setAppVersion(v));
@@ -129,6 +150,7 @@ function App() {
       default:
         return (
           <Dashboard
+            onLoaded={handleDashboardLoaded}
             onNavigate={(page, intent) => {
               if (page === 'restore' || page === 'clone') {
                 setRestoreIntent({ imagePath: intent?.imagePath, mode: page });
@@ -281,6 +303,8 @@ function App() {
 
       <ToastHost />
       <AdkPrompt />
+
+      {splashVisible && <SplashScreen />}
     </div>
   );
 }

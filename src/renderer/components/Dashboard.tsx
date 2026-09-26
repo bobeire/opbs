@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 interface RecentBackup {
   id: string;
@@ -16,9 +16,11 @@ interface RecentBackup {
 
 interface DashboardProps {
   onNavigate: (page: 'backup' | 'restore' | 'clone' | 'copy' | 'disks' | 'browse', intent?: { imagePath?: string }) => void;
+  /** Fires once the initial backup-list and drive queries have settled (drives the startup splash). */
+  onLoaded?: () => void;
 }
 
-function Dashboard({ onNavigate }: DashboardProps) {
+function Dashboard({ onNavigate, onLoaded }: DashboardProps) {
   const [backups, setBackups] = useState<RecentBackup[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
@@ -43,6 +45,14 @@ function Dashboard({ onNavigate }: DashboardProps) {
   const [helperTaskRegistered, setHelperTaskRegistered] = useState(true); // assume registered until checked
   const [helperTaskLoading, setHelperTaskLoading] = useState(false);
   const [now, setNow] = useState(0);
+
+  const initial = useRef({ load: false, disks: false });
+  const notifiedInitial = useRef(false);
+  const notifyInitialLoaded = useCallback(() => {
+    if (notifiedInitial.current || !initial.current.load || !initial.current.disks) return;
+    notifiedInitial.current = true;
+    onLoaded?.();
+  }, [onLoaded]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -76,8 +86,10 @@ function Dashboard({ onNavigate }: DashboardProps) {
       setHealth([]);
     } finally {
       setLoading(false);
+      initial.current.load = true;
+      notifyInitialLoaded();
     }
-  }, []);
+  }, [notifyInitialLoaded]);
 
   const runScrub = useCallback(async () => {
     setBusy('scrub');
@@ -142,6 +154,10 @@ function Dashboard({ onNavigate }: DashboardProps) {
       })
       .catch(() => {
         // ignore
+      })
+      .finally(() => {
+        initial.current.disks = true;
+        notifyInitialLoaded();
       });
     window.electronAPI
       .winfspStatus()
@@ -163,7 +179,7 @@ function Dashboard({ onNavigate }: DashboardProps) {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [load]);
+  }, [load, notifyInitialLoaded]);
 
   const installWinfsp = useCallback(async () => {
     setWinfspPhase('installing');

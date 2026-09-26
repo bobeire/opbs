@@ -2158,3 +2158,53 @@ body {
   padding-top: 16px;
   border-top: 1px solid var(--border-color, #374151);
 }
+
+/* ---------- Startup splash ---------- */
+.splash-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--sidebar-bg, #111827);
+}
+
+.splash-card {
+  text-align: center;
+}
+
+.splash-logo {
+  font-size: 44px;
+  font-weight: 700;
+  letter-spacing: 8px;
+  color: var(--text-color, #f9fafb);
+}
+
+.splash-subtitle {
+  margin: 6px 0 0;
+  color: var(--text-muted, #9ca3af);
+  font-size: 14px;
+  letter-spacing: 1px;
+}
+
+.splash-spinner {
+  width: 34px;
+  height: 34px;
+  margin: 28px auto 14px;
+  border: 3px solid var(--border-color, #4b5563);
+  border-top-color: var(--primary-color, #2563eb);
+  border-radius: 50%;
+  animation: splash-spin 0.8s linear infinite;
+}
+
+@keyframes splash-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.splash-status {
+  color: var(--text-muted, #9ca3af);
+  font-size: 13px;
+}
