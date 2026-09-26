@@ -286,6 +286,11 @@ export function buildStartnetCmd(): string {
     '@echo off',
     'title OPBS Recovery',
     'mode con cols=100 lines=40',
+    // node.js (OpenSSL 3) fatals at startup when OPENSSL_CONF points at an
+    // unreadable path — before any of our code runs. An EMPTY value is the
+    // documented "skip config loading" switch, so neutralize it for every
+    // node.exe spawned from this console (restore.cmd, manual Shift+F10 use).
+    'set "OPENSSL_CONF="',
     'echo.',
     'echo  Starting OPBS Recovery Media, please wait...',
     'call wpeinit',
@@ -322,6 +327,10 @@ export function buildRestoreCmd(): string {
     'setlocal EnableDelayedExpansion',
     'title OPBS Restore',
     'mode con cols=100 lines=40',
+    // See buildStartnetCmd: a bad OPENSSL_CONF makes node.exe exit fatally
+    // before running winpe-entry.js (this also covers double-click runs on a
+    // normal Windows where some installer left a stale OPENSSL_CONF behind).
+    'set "OPENSSL_CONF="',
     'cd /d "%~dp0"',
     'echo ============================================================',
     'echo   OPBS - Open Pickle Backup System - Recovery Media',
@@ -958,7 +967,10 @@ export function smokeMediaPayload(options: PayloadSmokeOptions = {}): PayloadSmo
         cwd: payloadRoot,
         encoding: 'utf-8',
         windowsHide: true,
-        timeout: 30000
+        timeout: 30000,
+        // Empty OPENSSL_CONF skips config loading — a stale system var would
+        // otherwise make node.exe exit fatally before winpe-entry.js runs.
+        env: { ...process.env, OPENSSL_CONF: '' }
       }).trim();
     } catch (error) {
       const err = error as { status?: number | null; stdout?: string; stderr?: string; message?: string };

@@ -161,7 +161,13 @@ export async function installNodeRuntime(options: NodeInstallOptions = {}): Prom
 
     let version: string | undefined;
     if (options.verify !== false) {
-      const out = execFileSync(nodeExe, ['-v'], { encoding: 'utf8', windowsHide: true }).trim();
+      // Empty OPENSSL_CONF = "skip config loading" — a stale system var from
+      // some installer would otherwise make node.exe exit fatally before -v.
+      const out = execFileSync(nodeExe, ['-v'], {
+        encoding: 'utf8',
+        windowsHide: true,
+        env: { ...process.env, OPENSSL_CONF: '' }
+      }).trim();
       if (!/^v\d+\./.test(out)) {
         return { ok: false, nodeExe: null, error: `Extracted node.exe did not report a version (got "${out}").` };
       }

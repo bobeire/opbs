@@ -244,6 +244,18 @@ describe('winpe-media', () => {
       expect(s).not.toMatch(/^\s*start\s+"/m);
     });
 
+    it('both scripts neutralize OPENSSL_CONF before node.exe starts', () => {
+      // A stale OPENSSL_CONF (installer leftover) makes node exit fatally at
+      // startup with "openssl configuration error ... BIO_new_file" before any
+      // of our code runs. Empty value = documented "skip config loading".
+      const startnet = buildStartnetCmd();
+      expect(startnet).toContain('set "OPENSSL_CONF="');
+      expect(startnet.indexOf('set "OPENSSL_CONF="')).toBeLessThan(startnet.indexOf('wpeinit'));
+      const restore = buildRestoreCmd();
+      expect(restore).toContain('set "OPENSSL_CONF="');
+      expect(restore.indexOf('set "OPENSSL_CONF="')).toBeLessThan(restore.indexOf('winpe-entry.js'));
+    });
+
     it('restore.cmd invokes the embedded CLI on a config', () => {
       const s = buildRestoreCmd();
       expect(s).toContain('winpe-entry.js');
