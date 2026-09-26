@@ -302,7 +302,10 @@ export function buildStartnetCmd(): string {
     'if not defined OPBS_ROOT goto :notfound',
     ':found',
     'cd /d "%OPBS_ROOT%"',
-    'start "%OPBS_ROOT%\\restore.cmd"',
+    // `call` keeps the flow in THIS console. `start "%OPBS_ROOT%\restore.cmd"`
+    // would parse the quoted path as the window TITLE (classic cmd gotcha)
+    // and open a bare second prompt — restore.cmd never ran, so no wizard.
+    'call "%OPBS_ROOT%\\restore.cmd"',
     'exit /b 0',
     ':notfound',
     'echo.',

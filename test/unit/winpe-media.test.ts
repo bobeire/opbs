@@ -236,6 +236,14 @@ describe('winpe-media', () => {
       expect(s.replace(/\r\n/g, '')).not.toMatch(/[\r\n]/); // strictly CRLF
     });
 
+    it('startnet.cmd runs restore.cmd inline, not via start (title gotcha)', () => {
+      const s = buildStartnetCmd();
+      expect(s).toContain('call "%OPBS_ROOT%\\restore.cmd"');
+      // `start "path"` consumes the first quoted token as the WINDOW TITLE
+      // and opens an empty second prompt — restore.cmd never runs.
+      expect(s).not.toMatch(/^\s*start\s+"/m);
+    });
+
     it('restore.cmd invokes the embedded CLI on a config', () => {
       const s = buildRestoreCmd();
       expect(s).toContain('winpe-entry.js');
