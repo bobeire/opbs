@@ -60,6 +60,8 @@ interface BackupProgress {
   resuming?: boolean;
   verifyDone?: number;
   verifyTotal?: number;
+  /** Set on the 'completed' event — the image just written. */
+  imagePath?: string;
 }
 
 interface BackupWizardProps {
@@ -68,6 +70,8 @@ interface BackupWizardProps {
   initialAllDisks?: boolean;
   activeProgress?: BackupProgress | null;
   backupRunning?: boolean;
+  /** Open the just-created image in the file browser (BrowseView). */
+  onViewImage?: (imagePath: string) => void;
 }
 
 type WizardStep = 'select_source' | 'select_destination' | 'options' | 'progress' | 'complete';
@@ -108,7 +112,7 @@ function phaseLabel(phase?: string): string {
   }
 }
 
-function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeProgress, backupRunning }: BackupWizardProps) {
+function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeProgress, backupRunning, onViewImage }: BackupWizardProps) {
   const [currentStep, setCurrentStep] = useState<WizardStep>(
     backupRunning && activeProgress ? 'progress' : 'select_source'
   );
@@ -869,7 +873,13 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
         }
         return (
           <div className="wizard-step">
-            <h2>Backup in Progress</h2>
+            <h2>
+              {progress?.phase === 'completed'
+                ? 'Backup Complete'
+                : progress?.phase === 'error'
+                  ? 'Backup Failed'
+                  : 'Backup in Progress'}
+            </h2>
             
             <div className="progress-container">
               {diskLabel && <p className="progress-disk-label">{diskLabel}</p>}
@@ -909,9 +919,21 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
             </div>
             
             <div className="wizard-actions">
-              <button className="btn-danger" onClick={() => window.electronAPI.cancelBackup()}>
-                Cancel Backup
-              </button>
+              {progress?.phase === 'completed' ? (
+                progress.imagePath && onViewImage ? (
+                  <button className="btn-primary" onClick={() => onViewImage(progress.imagePath!)}>
+                    View image
+                  </button>
+                ) : (
+                  <button className="btn-primary" onClick={() => setCurrentStep('complete')}>
+                    Continue
+                  </button>
+                )
+              ) : (
+                <button className="btn-danger" onClick={() => window.electronAPI.cancelBackup()}>
+                  Cancel Backup
+                </button>
+              )}
             </div>
           </div>
         );
@@ -926,6 +948,14 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
             </div>
             
             <div className="wizard-actions">
+              {progress?.imagePath && onViewImage && (
+                <button
+                  className="btn-secondary"
+                  onClick={() => onViewImage(progress.imagePath!)}
+                >
+                  View image
+                </button>
+              )}
               <button className="btn-primary" onClick={onComplete}>
                 Done
               </button>

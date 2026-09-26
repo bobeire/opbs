@@ -332,9 +332,9 @@ export function buildRestoreCmd(): string {
     // normal Windows where some installer left a stale OPENSSL_CONF behind).
     'set "OPENSSL_CONF="',
     'cd /d "%~dp0"',
-    'echo ============================================================',
-    'echo   OPBS - Open Pickle Backup System - Recovery Media',
-    'echo ============================================================',
+    'echo =============================================================',
+    'echo  OPBS - Open Pickle Backup System by RHITCS - Recovery Media',
+    'echo =============================================================',
     'echo.',
     'set "CFG="',
     'if exist "%~dp0OPBS-restore.json" set CFG=%~dp0OPBS-restore.json',

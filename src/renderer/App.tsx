@@ -92,7 +92,7 @@ function App() {
   const renderPage = () => {
     switch (currentPage) {
       case 'backup':
-        return <BackupWizard onComplete={() => setCurrentPage('dashboard')} initialDestination={backupIntent?.destinationPath} initialAllDisks={backupIntent?.allDisks} activeProgress={lastBackupProgress} backupRunning={backupRunning} />;
+        return <BackupWizard onComplete={() => setCurrentPage('dashboard')} initialDestination={backupIntent?.destinationPath} initialAllDisks={backupIntent?.allDisks} activeProgress={lastBackupProgress} backupRunning={backupRunning} onViewImage={(imagePath) => { setBrowseIntent({ imagePath }); setCurrentPage('browse'); }} />;
       case 'restore':
         return (
           <RestoreWizard

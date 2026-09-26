@@ -27,6 +27,8 @@ export interface BackupProgress {
   error?: string;
   /** True while a backup is continuing a previously interrupted image. */
   resuming?: boolean;
+  /** Set on the 'completed' event: the image the wizard can then open/browse. */
+  imagePath?: string;
 }
 
 export class BackupManager extends EventEmitter {
@@ -134,6 +136,7 @@ export class BackupManager extends EventEmitter {
         speed: 0,
         estimatedTimeRemaining: 0,
         currentPartition: '',
+        imagePath: result.imagePath,
         error: result.warnings.length > 0 ? result.warnings.join('; ') : undefined
       });
 
