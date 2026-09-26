@@ -419,10 +419,6 @@ function MediaView({ onComplete }: MediaViewProps) {
             {progress || 'Waiting for the elevated build step to start…'}
           </p>
         )}
-
-        <p className="field-hint">
-          Building requires a single administrator confirmation for the ADK tooling (copype/DISM).
-        </p>
       </div>
     </div>
   );

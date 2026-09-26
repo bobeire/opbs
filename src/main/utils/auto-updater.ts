@@ -7,6 +7,10 @@ const GITHUB_REPO = 'opbs';
 
 let updaterWindow: BrowserWindow | null = null;
 let checking = false;
+// True only while an explicit check (button/menu) is in flight, so the UI can
+// distinguish user-initiated feedback ("You're up to date") from silent
+// startup checks.
+let manualRequested = false;
 
 function send(status: string, payload?: unknown): void {
   updaterWindow?.webContents.send('update-status', { status, ...(payload ?? {}) });
@@ -38,7 +42,7 @@ export function initAutoUpdater(window: BrowserWindow): void {
 
   autoUpdater.on('checking-for-update', () => {
     logger.info('Checking for updates…');
-    send('checking');
+    send('checking', { manual: manualRequested });
   });
   autoUpdater.on('update-available', (info) => {
     logger.info('Update available', info.version);
@@ -50,7 +54,7 @@ export function initAutoUpdater(window: BrowserWindow): void {
   });
   autoUpdater.on('update-not-available', (info) => {
     logger.info('No update available', info?.version);
-    send('not-available');
+    send('not-available', { version: info?.version, manual: manualRequested });
   });
   autoUpdater.on('update-downloaded', (info) => {
     logger.info('Update downloaded', info.version);
@@ -58,7 +62,11 @@ export function initAutoUpdater(window: BrowserWindow): void {
   });
   autoUpdater.on('error', (err) => {
     logger.error('Auto-update error', err);
-    send('error', { message: err instanceof Error ? err.message : String(err) });
+    // In dev the check always fails (no app-update.yml) — keep that silent so
+    // the toast isn't on every launch; packaged builds surface it.
+    if (app.isPackaged) {
+      send('error', { message: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   void autoUpdater.checkForUpdates().catch((err) => {
@@ -70,7 +78,11 @@ export async function checkForUpdates(): Promise<boolean> {
   if (checking) return false;
   if (!enabled()) return false;
   checking = true;
+  manualRequested = true;
   try {
+    // electron-updater emits checking/available/not-available/error before the
+    // awaited promise settles, so events raised during this call still see the
+    // manual flag.
     await autoUpdater.checkForUpdates();
     return true;
   } catch (err) {
@@ -78,6 +90,7 @@ export async function checkForUpdates(): Promise<boolean> {
     return false;
   } finally {
     checking = false;
+    manualRequested = false;
   }
 }
 

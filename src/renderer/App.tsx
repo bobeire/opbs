@@ -49,7 +49,9 @@ function App() {
 
   useEffect(() => {
     void window.electronAPI.getVersion().then((v) => setAppVersion(v));
-    void window.electronAPI.checkForUpdates();
+    // Update check happens in main at startup (initAutoUpdater); calling it
+    // here too would make background checks indistinguishable from the
+    // manual "Check for updates" button.
   }, []);
 
   // Track backup state globally so it persists across navigation

@@ -11,6 +11,7 @@ interface UpdateStatus {
   status: string;
   version?: string;
   message?: string;
+  manual?: boolean;
 }
 
 let nextId = 1;
@@ -32,10 +33,12 @@ function ToastHost() {
     (toast: Omit<Toast, 'id'>) => {
       const id = nextId++;
       setToasts((prev) => [...prev.slice(-3), { ...toast, id }]);
-      timers.current.set(
-        id,
-        setTimeout(() => dismiss(id), toast.kind === 'update' ? 0 : 6000)
-      );
+      // 'update' toasts must stay until the user acts on them — an earlier
+      // setTimeout(..., 0) dismissed them instantly, making the updater look
+      // dead even when an update had been downloaded.
+      if (toast.kind !== 'update') {
+        timers.current.set(id, setTimeout(() => dismiss(id), 6000));
+      }
     },
     [dismiss]
   );
@@ -49,15 +52,46 @@ function ToastHost() {
       });
     });
     const offUpdate = window.electronAPI.onUpdateStatus((status: UpdateStatus) => {
-      if (status.status === 'downloaded') {
-        show({
-          kind: 'update',
-          title: 'Update ready to install',
-          body:
-            'OPBS v' +
-            (status.version ?? '') +
-            ' has been downloaded. Restart to apply, or click here to install now.'
-        });
+      switch (status.status) {
+        case 'checking':
+          // Only for explicit "Check for updates" clicks, not startup checks.
+          if (status.manual) {
+            show({ kind: 'info', title: 'Checking for updates…', body: 'Contacting GitHub releases.' });
+          }
+          break;
+        case 'available':
+          show({
+            kind: 'info',
+            title: 'Update v' + (status.version ?? '') + ' available',
+            body: 'Downloading in the background — you can keep working.'
+          });
+          break;
+        case 'not-available':
+          if (status.manual) {
+            show({
+              kind: 'info',
+              title: "You're up to date",
+              body: 'OPBS v' + (status.version ?? '') + ' is the latest version.'
+            });
+          }
+          break;
+        case 'downloaded':
+          show({
+            kind: 'update',
+            title: 'Update ready to install',
+            body:
+              'OPBS v' +
+              (status.version ?? '') +
+              ' has been downloaded. Restart to apply, or click here to install now.'
+          });
+          break;
+        case 'error':
+          show({
+            kind: 'error',
+            title: 'Update check failed',
+            body: status.message || 'Unknown error'
+          });
+          break;
       }
     });
     return () => {
