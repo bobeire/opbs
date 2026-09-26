@@ -244,6 +244,23 @@ describe('winpe-media', () => {
       expect(s).toContain('OPBS-restore.json');
     });
 
+    it('restore.cmd starts the interactive wizard when no config is staged', () => {
+      const s = buildRestoreCmd();
+      expect(s).toContain('winpe-entry.js" wizard');
+      // The old bare "Config path:" prompt is gone.
+      expect(s).not.toContain('set /p CFG=');
+      // A staged config still runs headless, before the wizard fallback.
+      expect(s.indexOf('restore "%CFG%" --elevated')).toBeGreaterThan(s.indexOf('if defined CFG goto :run'));
+      expect(s.indexOf('winpe-entry.js" wizard')).toBeGreaterThan(s.indexOf('if defined CFG goto :run'));
+    });
+
+    it('README documents the wizard as the primary recovery flow', () => {
+      const readme = buildReadme();
+      expect(readme).toContain('interactive recovery wizard');
+      expect(readme).toContain('node.exe winpe-entry.js wizard');
+      expect(readme).toContain('asks you to type');
+    });
+
     it('example restore config uses canonical CLI keys', () => {
       const cfg = buildExampleRestoreConfig();
       expect(cfg).toContain('imagePath');

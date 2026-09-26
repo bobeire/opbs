@@ -6,6 +6,7 @@ import { ImagingEngine } from '../imaging/backup-engine';
 import { RestoreEngine } from '../imaging/restore-engine';
 import { CloneEngine } from '../imaging/clone-engine';
 import { summarizeImage } from '../imaging/restore-engine';
+import type { RestoreJobConfig } from '../imaging/restore-engine';
 import { verifyImage, readImageInfo, deriveImageKey, scanPartialImage, DEFAULT_BLOCK_SIZE } from '../imaging/image-format';
 import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains, writeManifest, selectImagesForVerify, RetentionPlan } from '../backup/retention';
 import { checkDiskHealth } from '../utils/disk-health';
@@ -14,6 +15,7 @@ import { dispatchHelperJob } from '../helper/job-runner';
 import { launchElevatedJob } from '../helper/launcher';
 import { winfspAvailable } from '../imaging/mount-manager';
 import { JobResult } from '../imaging/imaging-job';
+import type { RestoreJobProgress } from '../imaging/imaging-job';
 import { locateAdk, peArchForProcess } from '../utils/adk';
 import { createRecoveryMedia, resolveNodeExe, smokeMediaPayload } from '../utils/winpe-media';
 import { openAnyBrowse, listDirectory, extractPath, formatTimestamp, resolvePath } from '../imaging/fs/file-browse';
@@ -72,6 +74,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdBackup(ctx);
       case 'restore':
         return await cmdRestore(ctx);
+      case 'wizard':
+        return await cmdWizard(ctx);
       case 'drill':
         return await cmdDrill(ctx);
       case 'analytics':
@@ -147,6 +151,11 @@ Commands:
   backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume]
                            Run a backup job (config as JSON file).
   restore <config.json> [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk] Run a restore job (config as JSON file).
+  wizard                             Interactive restore wizard: scans the drives for .opbs
+                                     images, picks a target disk and partitions, preflights,
+                                     asks for confirmation, then restores with live progress.
+                                     The recovery media runs this automatically when no
+                                     restore config is staged (run as administrator).
   drill <config.json> [--elevated] [--json-out FILE]  Restore the newest image in a directory
   drill --dir <dir> --disk <targetDiskIndex> [--verify] [--elevated] [--json-out FILE]
                            Restore drill: writes an image to a scratch disk, reads it
@@ -655,6 +664,97 @@ async function cmdRestore(ctx: CommandContext): Promise<number> {
     console.log(JSON.stringify(result, null, 2));
   }
   return result.ok ? 0 : 1;
+}
+
+/**
+ * Run a validated restore job through the same in-process helper dispatch the
+ * recovery media's `restore --elevated` path uses (buildJob -> job.json ->
+ * dispatchHelperJob), while tailing progress.json so the wizard can render a
+ * live progress line — the bare --elevated path prints nothing until done.
+ */
+async function executeWizardRestore(
+  config: RestoreJobConfig,
+  onProgress: (progress: RestoreJobProgress) => void
+): Promise<{ ok: boolean; bytesWritten?: number; error?: string }> {
+  const job = await restoreEngine.buildJob(config);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-wizard-'));
+  const jobPath = path.join(dir, 'job.json');
+  const resultPath = path.join(dir, 'result.json');
+  const progressPath = path.join(dir, 'progress.json');
+  const cancelPath = path.join(dir, 'cancel');
+  fs.writeFileSync(jobPath, JSON.stringify(job));
+  const timer = setInterval(() => {
+    try {
+      onProgress(JSON.parse(fs.readFileSync(progressPath, 'utf-8')) as RestoreJobProgress);
+    } catch {
+      /* no progress file yet */
+    }
+  }, 400);
+  try {
+    await dispatchHelperJob(jobPath, resultPath, progressPath, cancelPath);
+    return JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as { ok: boolean; bytesWritten?: number; error?: string };
+  } finally {
+    clearInterval(timer);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Interactive restore wizard (`wizard`). All heavy dependencies are wired
+ * here so restore-wizard.ts stays a pure, unit-testable flow: it never
+ * imports the restore engine, disk enumerator or readline itself beyond the
+ * IO factory.
+ */
+async function cmdWizard(ctx: CommandContext): Promise<number> {
+  if (ctx.opts.json) {
+    console.error('The wizard is interactive; --json is not supported.');
+    return 1;
+  }
+  const { runRestoreWizard, createConsoleIO, scanDrivesForImages } = await import('./restore-wizard');
+  const io = createConsoleIO();
+  try {
+    return await runRestoreWizard(io, {
+      scanDrives: async () => scanDrivesForImages(),
+      scanDir: async (dir) =>
+        scanBackupDirectory(dir).map((entry) => ({
+          path: entry.path,
+          name: entry.name,
+          size: entry.size,
+          timestamp: entry.timestamp,
+          incremental: entry.incremental,
+          encrypted: entry.encrypted
+        })),
+      describeImage: async (imagePath) => {
+        const summary = summarizeImage(imagePath);
+        return {
+          encrypted: summary.encrypted,
+          incremental: summary.incremental,
+          totalSize: summary.totalSize,
+          partitions: summary.partitions.map((p) => ({ index: p.index, size: p.size, fsType: p.fsType })),
+          sourceDisk: summary.sourceDisk
+        };
+      },
+      getDisks: async () =>
+        (await diskEnumerator.getDisks()).map((disk) => ({
+          index: disk.index,
+          size: disk.size,
+          model: disk.model ?? '',
+          serial: disk.serial ?? ''
+        })),
+      getPartitions: async (diskIndex) =>
+        (await diskEnumerator.getPartitions(diskIndex)).map((part) => ({
+          partitionIndex: part.partitionIndex,
+          size: part.size,
+          fsType: part.fsType ?? '',
+          label: part.label ?? ''
+        })),
+      preflight: (config) => restoreEngine.buildJob(config),
+      renderPlan: (plan) => renderRestorePlan(plan),
+      execute: (config, onProgress) => executeWizardRestore(config, onProgress)
+    });
+  } finally {
+    io.close();
+  }
 }
 
 interface DrillOutput {
