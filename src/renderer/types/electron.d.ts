@@ -329,6 +329,7 @@ declare global {
       onBackupProgress: (callback: (progress: any) => void) => () => void;
       onRestoreProgress: (callback: (progress: any) => void) => () => void;
       onCloneProgress: (callback: (progress: any) => void) => () => void;
+      onMediaProgress: (callback: (progress: { message: string }) => void) => () => void;
 
       // Disk tools
       getMbrInfo: (diskIndex: number) => Promise<any>;
