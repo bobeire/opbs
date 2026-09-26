@@ -202,6 +202,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   };
 
   const blWarnings: string[] = [];
+  const blOkNotes: string[] = [];
   if (blVolumes) {
     for (const v of blVolumes) {
       if (v.locked) {
@@ -219,6 +220,14 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
             `${v.letter}: has no recovery-password protector, so OPBS cannot store a recovery key for it.`
           );
         }
+      } else {
+        // No warning for this volume — say what was checked instead of
+        // pointing at notes that don't exist.
+        blOkNotes.push(
+          v.conversion === 'FullyDecrypted'
+            ? `${v.letter}: unlocked and not encrypted — no action needed.`
+            : `${v.letter}: unlocked — no action needed.`
+        );
       }
     }
   }
@@ -403,7 +412,9 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                 <span className="field-hint">
                   {blVolumes.length === 0
                     ? 'No BitLocker volumes found.'
-                    : `${blVolumes.length} volume${blVolumes.length === 1 ? '' : 's'} checked — see notes below.`}
+                    : blWarnings.length > 0
+                      ? `${blVolumes.length} volume${blVolumes.length === 1 ? '' : 's'} checked — see notes below.`
+                      : `${blVolumes.length} volume${blVolumes.length === 1 ? '' : 's'} checked — no issues found.`}
                 </span>
               ) : blNeedsElevation ? (
                 <>
@@ -434,6 +445,12 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                 <p>{w}</p>
               </div>
             ))}
+            {blWarnings.length === 0 &&
+              blOkNotes.map((n, i) => (
+                <div key={i} className="bl-ok-note">
+                  <p>{n}</p>
+                </div>
+              ))}
 
             {isLoading ? (
               <div className="loading">Loading disks...</div>

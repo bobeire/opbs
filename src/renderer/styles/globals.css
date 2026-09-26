@@ -1055,6 +1055,17 @@ body {
   color: var(--text-color);
 }
 
+/* BitLocker status in the backup wizard: per-volume "all clear" note shown
+   when the check found nothing to warn about */
+.bl-ok-note {
+  border-left: 4px solid var(--success-color);
+  background-color: var(--card-bg);
+  padding: 10px 12px;
+  border-radius: 4px;
+  margin-top: 8px;
+  color: var(--text-color);
+}
+
 .acknowledge-box {
   border: 1px solid var(--danger-color);
   background-color: rgba(220, 38, 38, 0.08);
