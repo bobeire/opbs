@@ -564,7 +564,11 @@ export function buildElevatedScript(options: {
     lines.push('Write-Result @{ok=$false;error="USB output requires explicit confirmation (--yes)"}; exit 0');
   }
   lines.push(`Write-Step 'Writing the recovery media (this can take several minutes)...'`);
-  lines.push(cmdCall(`call "${options.adkMakeWinPEMedia}" /${format === 'iso' ? 'ISO' : 'USB'} "${stage}" "${outputArg}"`));
+  // /UFD (NOT /USB — other switches print usage and exit 1) and /f: the
+  // script runs -NonInteractive with a hidden console, so MakeWinPEMedia's
+  // format/overwrite prompt would abort the build. Confirmation is already
+  // enforced upstream (yesForUsb gate above; ISO mode is implicitly confirmed).
+  lines.push(cmdCall(`call "${options.adkMakeWinPEMedia}" /${format === 'iso' ? 'ISO' : 'UFD'} /f "${stage}" "${outputArg}"`));
   lines.push(`if ($LASTEXITCODE -ne 0) { Write-Result @{ok=$false;error="MakeWinPEMedia failed with exit code $LASTEXITCODE"}; exit 0 }`);
   lines.push(`Write-Step 'Done.'`);
   lines.push('Write-Result @{ok=$true;output=' + psQuote(outputArg) + '}');

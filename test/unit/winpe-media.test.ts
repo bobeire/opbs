@@ -329,9 +329,13 @@ describe('winpe-media', () => {
       expect(s).toContain('Stop-Transcript -ErrorAction SilentlyContinue | Out-Null\r\nexit 0');
     });
 
-    it('uses /USB and guards without confirmation', () => {
+    it('uses MakeWinPEMedia /UFD /f and guards without confirmation', () => {
       const s = buildElevatedScript({ ...base, format: 'usb', output: 'E:', yesForUsb: false });
-      expect(s).toContain('/USB');
+      // MakeWinPEMedia only accepts /UFD — /USB prints usage and exits 1.
+      expect(s).toContain('/UFD');
+      expect(s).not.toContain('/USB');
+      // /f: -NonInteractive build must not hit the format/overwrite prompt.
+      expect(s).toMatch(/MakeWinPEMedia\.cmd" \/UFD \/f /);
       expect(s).toContain('explicit confirmation');
     });
 
