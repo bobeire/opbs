@@ -172,13 +172,17 @@ export async function runBackupJob(
 
   const writeProgress = (phase: JobProgress['phase']): void => {
     let percent = progress.totalBytes > 0 ? Math.min(99, (progress.bytesDone / progress.totalBytes) * 100) : 0;
-    if (phase === 'writing-index') percent = Math.max(percent, 99);
+    if (phase === 'writing-index') {
+      percent = Math.max(percent, 99);
+      progress.currentPartition = 'Writing image index…';
+    }
     if (phase === 'verifying') {
       // Verification re-reads the whole image; show 99→100 so the bar keeps moving.
       percent =
         progress.verifyTotal && progress.verifyTotal > 0
           ? 99 + Math.min(1, (progress.verifyDone ?? 0) / progress.verifyTotal)
           : 99.5;
+      progress.currentPartition = 'Verifying image…';
     }
     if (phase === 'completed') percent = 100;
     progress.phase = phase;

@@ -370,7 +370,7 @@ describe('mapJobProgress', () => {
 
   it('maps each helper phase', () => {
     expect(mapJobProgress({ ...base, phase: 'snapshotting' }).phase).toBe('snapshotting');
-    expect(mapJobProgress({ ...base, phase: 'writing-index' }).phase).toBe('backing_up');
+    expect(mapJobProgress({ ...base, phase: 'writing-index' }).phase).toBe('finalizing');
     expect(mapJobProgress({ ...base, phase: 'verifying' }).phase).toBe('verifying');
     expect(mapJobProgress({ ...base, phase: 'completed' }).phase).toBe('completed');
   });

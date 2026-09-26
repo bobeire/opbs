@@ -96,7 +96,9 @@ function phaseLabel(phase?: string): string {
     case 'verifying':
       return 'Verifying image';
     case 'finalizing':
-      return 'Finalizing (building parity recovery data)';
+      // The sub-line (currentPartition) carries the detail: "Writing image
+      // index…" during the job tail, "Building parity recovery data…" after.
+      return 'Finalizing';
     case 'completed':
       return 'Completed';
     case 'error':

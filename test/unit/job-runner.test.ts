@@ -181,7 +181,10 @@ describe('runBackupJob', () => {
     const progress = JSON.parse(fs.readFileSync(progressPath, 'utf-8'));
     expect(progress.percent).toBe(100);
     expect(progress.bytesDone).toBe(BLOCK * 2);
-    expect(progress.currentPartition).toBe('Partition 2');
+    // The index-writing tail is reported as its own stage, not silently as
+    // the last partition's imaging (verification was off in this job).
+    expect(progress.phase).toBe('completed');
+    expect(progress.currentPartition).toBe('Writing image index…');
   });
 
   it('aborts and removes the partial image when cancelled', async () => {

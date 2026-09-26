@@ -447,7 +447,7 @@ export class ImagingEngine implements BackupCoordinator {
 }
 
 export function mapJobProgress(jobProgress: JobProgress): {
-  phase: 'preparing' | 'snapshotting' | 'backing_up' | 'verifying' | 'completed' | 'error';
+  phase: 'preparing' | 'snapshotting' | 'backing_up' | 'verifying' | 'finalizing' | 'completed' | 'error';
   percentComplete: number;
   bytesProcessed: number;
   totalBytes: number;
@@ -458,14 +458,18 @@ export function mapJobProgress(jobProgress: JobProgress): {
   verifyDone?: number;
   verifyTotal?: number;
 } {
-  let phase: 'preparing' | 'snapshotting' | 'backing_up' | 'verifying' | 'completed' | 'error';
+  let phase: 'preparing' | 'snapshotting' | 'backing_up' | 'verifying' | 'finalizing' | 'completed' | 'error';
   switch (jobProgress.phase) {
     case 'snapshotting':
       phase = 'snapshotting';
       break;
     case 'reading':
-    case 'writing-index':
       phase = 'backing_up';
+      break;
+    case 'writing-index':
+      // Imaging bytes are done; the tail (block index, header patch) must not
+      // masquerade as "Backing up" at a pinned 99%.
+      phase = 'finalizing';
       break;
     case 'verifying':
       phase = 'verifying';
