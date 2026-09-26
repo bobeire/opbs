@@ -37,4 +37,20 @@ describe('locateAdk (WinPE-SecureStartup resolution)', () => {
     expect(adk).not.toBeNull();
     expect(adk?.winpeSecureStartupCab).toBeUndefined();
   });
+
+  it('resolves winpeWmiCab (the parent package SecureStartup requires)', () => {
+    const cab = path.join(root, 'Windows Preinstallation Environment', 'amd64', 'WinPE_OCs', 'WinPE-WMI.cab');
+    fs.writeFileSync(cab, '');
+    const adk = locateAdk('amd64', root);
+    expect(adk).not.toBeNull();
+    expect(adk?.winpeWmiCab).toBe(cab);
+  });
+
+  it('leaves winpeWmiCab undefined when the OC cab is absent', () => {
+    const cab = path.join(root, 'Windows Preinstallation Environment', 'amd64', 'WinPE_OCs', 'WinPE-WMI.cab');
+    fs.rmSync(cab, { force: true });
+    const adk = locateAdk('amd64', root);
+    expect(adk).not.toBeNull();
+    expect(adk?.winpeWmiCab).toBeUndefined();
+  });
 });

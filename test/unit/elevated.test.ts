@@ -10,10 +10,14 @@ describe('buildElevatedWrapper', () => {
     expect(wrapper).toContain('-Verb RunAs');
     expect(wrapper).toContain(`'-File', ${psQuote(script)}`);
     expect(wrapper).toContain('-WindowStyle Hidden');
-    expect(wrapper).toContain('-Wait');
     // Elevation failure sentinel.
     expect(wrapper).toContain('if ($null -eq $p) { exit 5 }');
-    expect(wrapper).toContain('exit $p.ExitCode');
+    // Child exit must be observed via the process table, NOT -Wait: with
+    // -Verb RunAs, Start-Process -Wait sat forever after the child exited
+    // (result.json written, caller awaiting close indefinitely).
+    expect(wrapper).not.toContain('-Wait');
+    expect(wrapper).toContain('Get-Process -Id $opbsChild');
+    expect(wrapper).toContain('exit $opbsCode');
   });
 
   it('never combines -Verb RunAs with -RedirectStandard* (AmbiguousParameterSet breaks elevation)', () => {

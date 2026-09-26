@@ -197,6 +197,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener('clone-progress', handler);
     };
   },
+  onMediaProgress: (callback: (progress: { message: string }) => void) => {
+    const handler = (_event: unknown, progress: { message: string }) => callback(progress);
+    ipcRenderer.on('media-progress', handler);
+    return () => {
+      ipcRenderer.removeListener('media-progress', handler);
+    };
+  },
 
   // Disk tools
   getMbrInfo: (diskIndex: number) => ipcRenderer.invoke('get-mbr-info', diskIndex),

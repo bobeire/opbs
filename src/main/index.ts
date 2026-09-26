@@ -1478,8 +1478,17 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     };
   });
 
-  ipcMain.handle('media-create', async (_, options: MediaCreateOptions) => {
-    return createRecoveryMedia(options);
+  ipcMain.handle('media-create', async (event, options: MediaCreateOptions) => {
+    return createRecoveryMedia({
+      ...options,
+      onProgress: (message: string) => {
+        try {
+          event.sender.send('media-progress', { message });
+        } catch {
+          /* renderer navigated away */
+        }
+      }
+    });
   });
 
   // Drives offered by the USB target picker (label/size/bus, system drives excluded)

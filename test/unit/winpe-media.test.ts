@@ -289,7 +289,9 @@ describe('winpe-media', () => {
       const copypeIdx = s.indexOf('copype.cmd');
       const mountIdx = s.indexOf('/Mount-Wim');
       const writeIdx = s.indexOf('startnet.cmd');
-      const unmountIdx = s.indexOf('/Unmount-Wim');
+      // lastIndexOf: the FIRST /Unmount-Wim is Fail-Media's discard helper,
+      // the commit unmount is the one that must follow the customization.
+      const unmountIdx = s.lastIndexOf('/Unmount-Wim');
       const isoIdx = s.indexOf('/ISO');
       expect(copypeIdx).toBeGreaterThan(-1);
       expect(mountIdx).toBeGreaterThan(copypeIdx);
@@ -344,7 +346,7 @@ describe('winpe-media', () => {
       const s = buildElevatedScript({ ...base, drivers: ['C:/drivers/net', 'C:/drivers/storage'] });
       const startnetIdx = s.indexOf('startnet.cmd');
       const addDriverIdx = s.indexOf('/Add-Driver');
-      const unmountIdx = s.indexOf('/Unmount-Wim');
+      const unmountIdx = s.lastIndexOf('/Unmount-Wim');
       expect(addDriverIdx).toBeGreaterThan(startnetIdx);
       expect(unmountIdx).toBeGreaterThan(addDriverIdx);
       expect(s.indexOf("C:/drivers/net")).toBeGreaterThan(-1);
@@ -359,12 +361,51 @@ describe('winpe-media', () => {
       const cab = 'C:/adk/WinPE_OCs/WinPE-SecureStartup.cab';
       const s = buildElevatedScript({ ...base, adkSecureStartupCab: cab });
       const addPackageIdx = s.indexOf('/Add-Package');
-      const unmountIdx = s.indexOf('/Unmount-Wim');
+      const unmountIdx = s.lastIndexOf('/Unmount-Wim');
       expect(addPackageIdx).toBeGreaterThan(-1);
       expect(s).toContain(`PackagePath:'${cab}'`);
       expect(s).toContain('WinPE-SecureStartup (BitLocker support) failed');
       expect(unmountIdx).toBeGreaterThan(addPackageIdx);
       expect(buildElevatedScript(base)).not.toContain('/Add-Package');
+    });
+
+    it('stages WinPE-WMI BEFORE WinPE-SecureStartup (declared parent package)', () => {
+      const wmi = 'C:/adk/WinPE_OCs/WinPE-WMI.cab';
+      const ss = 'C:/adk/WinPE_OCs/WinPE-SecureStartup.cab';
+      const s = buildElevatedScript({ ...base, adkWmiCab: wmi, adkSecureStartupCab: ss });
+      const wmiIdx = s.indexOf(`PackagePath:'${wmi}'`);
+      const ssIdx = s.indexOf(`PackagePath:'${ss}'`);
+      expect(wmiIdx).toBeGreaterThan(-1);
+      expect(ssIdx).toBeGreaterThan(wmiIdx);
+      expect(s).toContain('adding WinPE-WMI (parent package) failed');
+      // Without WinPE-WMI, SecureStartup is rejected with 0x800f081e.
+      expect(s.indexOf('WinPE-WMI (parent package)')).toBeLessThan(
+        s.indexOf('WinPE-SecureStartup (BitLocker support)')
+      );
+    });
+
+    it('discards the mount on failure paths instead of leaking a wimserv mount', () => {
+      const s = buildElevatedScript({ ...base, adkSecureStartupCab: 'C:/adk/WinPE_OCs/WinPE-SecureStartup.cab' });
+      expect(s).toContain('function Fail-Media($msg)');
+      expect(s).toContain('/Discard /Quiet');
+      expect(s).toContain('$script:mounted = $true');
+      // Post-mount failures (drivers/packages) and unexpected terminating
+      // errors all route through Fail-Media (discard + result + exit).
+      expect(s).toContain('Fail-Media "adding WinPE-SecureStartup (BitLocker support) failed');
+      expect(s).toContain('Fail-Media ("build step failed: " + $_.Exception.Message)');
+      // The commit unmount clears the flag so Fail-Media stops trying to discard.
+      expect(s).toContain('$script:mounted = $false');
+    });
+
+    it('emits progress steps the main process streams to the UI', () => {
+      const s = buildElevatedScript({ ...base, drivers: ['C:/drivers/net'] });
+      expect(s).toContain(`function Write-Step($msg) { Add-Content -Path (Join-Path $PSScriptRoot 'progress.txt')`);
+      expect(s).toContain(`Write-Step 'Creating the Windows PE working directory (copype)...'`);
+      expect(s).toContain(`Write-Step 'Staging the OPBS recovery payload...'`);
+      expect(s).toContain(`Write-Step 'Mounting the WinPE boot image...'`);
+      expect(s).toContain(`Write-Step 'Injecting storage/network drivers...'`);
+      expect(s).toContain(`Write-Step 'Writing the recovery media (this can take several minutes)...'`);
+      expect(s).toContain(`Write-Step 'Done.'`);
     });
   });
 

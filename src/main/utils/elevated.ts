@@ -36,8 +36,16 @@ export function resolvePowershell(): string {
  * scripts capture their own output instead (Start-Transcript at the top of
  * each script).
  *
+ * Do NOT use `Start-Process -Wait` here: with `-Verb RunAs` it can wait on a
+ * handle that never signals (observed live: the elevated child exits and
+ * writes its result.json, but the wrapper sits in -Wait forever, leaving the
+ * caller awaiting `close` indefinitely — the UI showed no progress while the
+ * build had actually finished). Polling the child's PID against the process
+ * table is immune to bad handles.
+ *
  * Exit codes: 5 = the elevation itself failed (prompt declined or never
- * appeared); anything else = the inner script's own exit code.
+ * appeared); 3 = the child exited without producing a result; anything else =
+ * the inner script's own exit code when it can still be read.
  */
 export function buildElevatedWrapper(powershell: string, scriptPath: string): string {
   const innerArgs = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath]
@@ -45,8 +53,12 @@ export function buildElevatedWrapper(powershell: string, scriptPath: string): st
     .join(', ');
   return (
     `$p = Start-Process -FilePath ${psQuote(powershell)} -ArgumentList @(${innerArgs})` +
-    ` -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ErrorAction SilentlyContinue; ` +
-    `if ($null -eq $p) { exit 5 }; exit $p.ExitCode`
+    ` -Verb RunAs -WindowStyle Hidden -PassThru -ErrorAction SilentlyContinue; ` +
+    `if ($null -eq $p) { exit 5 }; ` +
+    `$opbsChild = $p.Id; ` +
+    `while (Get-Process -Id $opbsChild -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 400 }; ` +
+    `$opbsCode = 3; try { if ($p.HasExited) { $opbsCode = $p.ExitCode } } catch { $opbsCode = 3 }; ` +
+    `exit $opbsCode`
   );
 }
 

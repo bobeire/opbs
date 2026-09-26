@@ -49,6 +49,9 @@ export interface MediaCreateOptions {
    *  step. Useful in CI or shells that cannot raise UAC: run the returned
    *  `scriptPath` from an already-elevated PowerShell. */
   scriptOnly?: boolean;
+  /** Receives human-readable build steps as the elevated script progresses
+   *  (streamed from <work>/progress.txt by the main process). */
+  onProgress?: (message: string) => void;
 }
 
 export interface MediaCreateResult {
@@ -439,6 +442,10 @@ export function buildElevatedScript(options: {
   adkDism: string;
   adkMakeWinPEMedia: string;
   adkSecureStartupCab?: string;
+  /** WinPE-WMI.cab — must be staged into the image BEFORE WinPE-SecureStartup
+   *  (it is that package's declared parent; without it DISM reports 0x800f081e
+   *  "not applicable"). */
+  adkWmiCab?: string;
   payloadCopies: PayloadItem[];
   payloadTextFiles: PayloadTextFile[];
   startnetCmd: string;
@@ -467,10 +474,35 @@ export function buildElevatedScript(options: {
   // refuses an existing destination.
   const cmdCall = (inner: string): string =>
     `& $env:ComSpec /d /s /c 'call "${options.adkDandISetEnv}" >NUL && ${inner}'`;
+  const mountDir = path.join(stage, 'mount');
+  // Progress markers: the main process tails this file and streams each new
+  // line to the UI, so a multi-minute build is never a silent spinner.
+  lines.push(
+    `function Write-Step($msg) { Add-Content -Path (Join-Path $PSScriptRoot 'progress.txt') -Value $msg -Encoding UTF8 }`
+  );
+  // Failure helper: once the WIM is mounted, EVERY failure path must unmount
+  // (discard) first — otherwise wimserv keeps the mount alive, the work dir
+  // stays locked and the next run inherits a dirty mount.
+  lines.push('$script:mounted = $false');
+  lines.push('function Fail-Media($msg) {');
+  lines.push('  if ($script:mounted) {');
+  lines.push('    $script:mounted = $false');
+  lines.push('    $eapSave = $ErrorActionPreference');
+  lines.push('    $ErrorActionPreference = "Continue"');
+  lines.push(
+    `    try { & ${psQuote(options.adkDism)} /Unmount-Wim /MountDir:${psQuote(mountDir)} /Discard /Quiet | Out-Null } catch { }`
+  );
+  lines.push('    $ErrorActionPreference = $eapSave');
+  lines.push('  }');
+  lines.push('  Write-Result @{ok=$false;error=$msg}');
+  lines.push('  exit 0');
+  lines.push('}');
+  lines.push(`Write-Step 'Creating the Windows PE working directory (copype)...'`);
   lines.push(cmdCall(`call "${options.adkCopype}" ${arch} "${stage}"`));
   lines.push(`if ($LASTEXITCODE -ne 0) { Write-Result @{ok=$false;error="copype failed with exit code $LASTEXITCODE"}; exit 0 }`);
   lines.push('');
   // Payload + embedded files into <stage>/media/OPBS
+  lines.push(`Write-Step 'Staging the OPBS recovery payload...'`);
   lines.push(`New-Item -ItemType Directory -Force -Path ${psQuote(path.join(stage, 'media', 'OPBS'))} | Out-Null`);
   for (const item of payloadCopies) {
     const dest = path.resolve(stage, 'media', 'OPBS', item.to);
@@ -485,31 +517,56 @@ export function buildElevatedScript(options: {
   }
   lines.push('');
   // Inject startnet.cmd into the boot.wim
-  const mountDir = path.join(stage, 'mount');
   lines.push(`New-Item -ItemType Directory -Force -Path ${psQuote(mountDir)} | Out-Null`);
+  lines.push(`Write-Step 'Mounting the WinPE boot image...'`);
   lines.push(`& ${psQuote(options.adkDism)} /Mount-Wim /WimFile:${psQuote(path.join(stage, 'media', 'sources', 'boot.wim'))} /index:1 /MountDir:${psQuote(mountDir)}`);
   lines.push(`if ($LASTEXITCODE -ne 0) { Write-Result @{ok=$false;error="DISM mount failed with exit code $LASTEXITCODE"}; exit 0 }`);
+  lines.push(`$script:mounted = $true`);
+  // Everything below runs with the WIM mounted: any error (terminating or a
+  // failed native command) must go through Fail-Media so the mount is
+  // discarded instead of leaking a wimserv-held mount dir.
+  lines.push('try {');
   lines.push(
     `[IO.File]::WriteAllText(${psQuote(path.join(mountDir, 'Windows', 'System32', 'startnet.cmd'))}, [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(${psQuote(base64(startnetCmd))})))`
   );
+  if ((options.drivers ?? []).length > 0) {
+    lines.push(`Write-Step 'Injecting storage/network drivers...'`);
+  }
   for (const driver of options.drivers ?? []) {
-    lines.push(`if (-not (Test-Path -LiteralPath ${psQuote(driver)})) { Write-Result @{ok=$false;error="Driver directory not found: ${psQuote(driver)}"}; exit 0 }`);
+    lines.push(`if (-not (Test-Path -LiteralPath ${psQuote(driver)})) { Fail-Media "Driver directory not found: ${psQuote(driver)}" }`);
     lines.push(`& ${psQuote(options.adkDism)} /Image:${psQuote(mountDir)} /Add-Driver /Driver:${psQuote(driver)} /Recurse`);
-    lines.push(`if ($LASTEXITCODE -ne 0) { Write-Result @{ok=$false;error="DISM /Add-Driver failed (${psQuote(driver)}) with exit code $LASTEXITCODE"}; exit 0 }`);
+    lines.push(`if ($LASTEXITCODE -ne 0) { Fail-Media "DISM /Add-Driver failed (${psQuote(driver)}) with exit code $LASTEXITCODE" }`);
+  }
+  if (options.adkWmiCab || options.adkSecureStartupCab) {
+    lines.push(`Write-Step 'Adding BitLocker support packages (WMI + SecureStartup)...'`);
+  }
+  // WinPE-SecureStartup declares WinPE-WMI-Package as its <parent>: without
+  // WinPE-WMI installed in the image first, DISM rejects SecureStartup with
+  // 0x800f081e "the specified package is not applicable to this image".
+  if (options.adkWmiCab) {
+    lines.push(`& ${psQuote(options.adkDism)} /Image:${psQuote(mountDir)} /Add-Package /PackagePath:${psQuote(options.adkWmiCab)}`);
+    lines.push(`if ($LASTEXITCODE -ne 0) { Fail-Media "adding WinPE-WMI (parent package) failed with exit code $LASTEXITCODE" }`);
   }
   if (options.adkSecureStartupCab) {
     lines.push(`& ${psQuote(options.adkDism)} /Image:${psQuote(mountDir)} /Add-Package /PackagePath:${psQuote(options.adkSecureStartupCab)}`);
-    lines.push(`if ($LASTEXITCODE -ne 0) { Write-Result @{ok=$false;error="adding WinPE-SecureStartup (BitLocker support) failed with exit code $LASTEXITCODE"}; exit 0 }`);
+    lines.push(`if ($LASTEXITCODE -ne 0) { Fail-Media "adding WinPE-SecureStartup (BitLocker support) failed with exit code $LASTEXITCODE" }`);
   }
+  lines.push(`Write-Step 'Finalizing the WinPE boot image...'`);
   lines.push(`& ${psQuote(options.adkDism)} /Unmount-Wim /MountDir:${psQuote(mountDir)} /Commit`);
-  lines.push(`if ($LASTEXITCODE -ne 0) { Write-Result @{ok=$false;error="DISM unmount failed with exit code $LASTEXITCODE"}; exit 0 }`);
+  lines.push(`if ($LASTEXITCODE -ne 0) { Fail-Media "DISM unmount failed with exit code $LASTEXITCODE" }`);
+  lines.push(`$script:mounted = $false`);
+  lines.push('} catch {');
+  lines.push('  Fail-Media ("build step failed: " + $_.Exception.Message)');
+  lines.push('}');
   lines.push('');
   // Produce the media
   if (format === 'usb' && !options.yesForUsb) {
     lines.push('Write-Result @{ok=$false;error="USB output requires explicit confirmation (--yes)"}; exit 0');
   }
+  lines.push(`Write-Step 'Writing the recovery media (this can take several minutes)...'`);
   lines.push(cmdCall(`call "${options.adkMakeWinPEMedia}" /${format === 'iso' ? 'ISO' : 'USB'} "${stage}" "${outputArg}"`));
   lines.push(`if ($LASTEXITCODE -ne 0) { Write-Result @{ok=$false;error="MakeWinPEMedia failed with exit code $LASTEXITCODE"}; exit 0 }`);
+  lines.push(`Write-Step 'Done.'`);
   lines.push('Write-Result @{ok=$true;output=' + psQuote(outputArg) + '}');
   lines.push('Stop-Transcript -ErrorAction SilentlyContinue | Out-Null');
   lines.push('exit 0');
@@ -630,6 +687,7 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
       adkDism: adk.dism,
       adkMakeWinPEMedia: adk.makeWinPEMedia,
       adkSecureStartupCab: adk.winpeSecureStartupCab,
+      adkWmiCab: adk.winpeWmiCab,
       payloadCopies: stagedCopies,
       payloadTextFiles: payloadTextFiles(),
       startnetCmd: buildStartnetCmd(),
@@ -651,13 +709,98 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
     };
   }
 
+  const resultPath = path.join(stage, 'result.json');
+  const progressFile = path.join(work, 'progress.txt');
+  let seenProgressLines = 0;
+  const progressTimer = setInterval(() => {
+    try {
+      if (!fs.existsSync(progressFile)) return;
+      const all = fs
+        .readFileSync(progressFile, 'utf-8')
+        .split(/\r?\n/)
+        .filter((line) => line.trim().length > 0);
+      if (all.length > seenProgressLines) {
+        seenProgressLines = all.length;
+        try {
+          options.onProgress?.(all[all.length - 1]);
+        } catch {
+          /* renderer may be gone by now */
+        }
+      }
+    } catch {
+      /* partial or locked write */
+    }
+  }, 700);
+  // The authoritative completion signal is result.json (the script writes it
+  // on every path). Poll for it instead of awaiting the wrapper's `close`
+  // blindly: an elevated wrapper that fails to observe child exit (observed
+  // live with Start-Process -Verb RunAs -Wait, which sat forever while the
+  // build had actually finished) would otherwise leave this promise pending
+  // and the UI stuck on a silent spinner.
+  options.onProgress?.('Starting the elevated ADK build (copype/DISM)...');
+  const startedAt = Date.now();
+  const CLOSE_GRACE_MS = 15_000;
+  const BUILD_TIMEOUT_MS = 60 * 60 * 1000;
+  let exitCode: number | undefined;
+  let closeError: unknown;
+  let closeAtMs = 0;
+  const closing = runPowershell(script)
+    .then((code) => {
+      exitCode = code;
+      closeAtMs = Date.now();
+    })
+    .catch((err: unknown) => {
+      closeError = err;
+      closeAtMs = Date.now();
+    });
+  let timedOut = false;
+  for (;;) {
+    if (fs.existsSync(resultPath)) {
+      try {
+        JSON.parse(fs.readFileSync(resultPath, 'utf-8').replace(/^\uFEFF/, ''));
+        break;
+      } catch {
+        /* still being written */
+      }
+    }
+    if (closeError) break;
+    if (exitCode === 5) break; // elevation refused — no script ever ran
+    if (exitCode !== undefined && Date.now() - closeAtMs > CLOSE_GRACE_MS) break;
+    if (Date.now() - startedAt > BUILD_TIMEOUT_MS) {
+      timedOut = true;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  clearInterval(progressTimer);
+  // Never leave a rejection unobserved when we stop waiting on the wrapper.
+  void closing.catch(() => undefined);
+
+  let succeeded = false;
   try {
-    const elevated = await runPowershell(script);
-    logger.info(`Elevated ADK step finished with exit code ${elevated}`);
-    const resultPath = path.join(stage, 'result.json');
+    logger.info(
+      timedOut
+        ? 'Elevated ADK step timed out'
+        : `Elevated ADK step settled (wrapper exit ${exitCode ?? 'n/a'})`
+    );
+    if (closeError) throw closeError;
+    if (timedOut) {
+      const logTail = readLogTail(path.join(work, 'elevated.log'));
+      const error =
+        `Media build timed out after 60 minutes (work kept at ${work} for inspection)` +
+        (logTail ? `\n\nLast elevated output:\n${logTail}` : '');
+      logger.error(`Recovery media build failed: ${error}`);
+      return {
+        ok: false,
+        format: options.format,
+        output: options.output,
+        arch,
+        error
+      };
+    }
     if (!fs.existsSync(resultPath)) {
       const logTail = readLogTail(path.join(work, 'elevated.log'));
-      const error = elevatedNoResultError(elevated, work, script, logTail);
+      const error = elevatedNoResultError(exitCode ?? -1, work, script, logTail);
       logger.error(`Recovery media build failed: ${error}`);
       return {
         ok: false,
@@ -687,11 +830,13 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
       sizeBytes = fs.existsSync(iso) ? fs.statSync(iso).size : undefined;
     }
     logger.info(`Recovery media created: ${options.output}${sizeBytes ? ` (${sizeBytes} bytes)` : ''}`);
+    succeeded = true;
     return { ok: true, format: options.format, output: options.output, arch, sizeBytes };
   } finally {
+    clearInterval(progressTimer);
     // Keep the staging directory when the build failed (so the elevated script
     // can be re-run manually); clean it up on success.
-    if (fs.existsSync(path.join(stage, 'result.json'))) {
+    if (succeeded) {
       try {
         fs.rmSync(work, { recursive: true, force: true });
       } catch {

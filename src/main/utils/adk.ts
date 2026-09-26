@@ -27,6 +27,11 @@ export interface AdkTools {
   oscdimg?: string;
   /** WinPE-SecureStartup.cab (BitLocker support for the rescue media), if installed. */
   winpeSecureStartupCab?: string;
+  /** WinPE-WMI.cab — the declared parent package of WinPE-SecureStartup
+   *  (`<parent>WinPE-WMI-Package</parent>` in its update.mum). DISM rejects
+   *  SecureStartup with 0x800f081e ("not applicable") unless WinPE-WMI is
+   *  installed in the mounted image first. */
+  winpeWmiCab?: string;
   arch: PeArch;
 }
 
@@ -65,6 +70,7 @@ export function locateAdk(arch: PeArch = peArchForProcess(), rootOverride?: stri
     const dism = dismCandidates(resolved, arch).find((d) => fs.existsSync(d));
     const oscdimg = path.join(resolved, 'Deployment Tools', arch, 'Oscdimg', 'oscdimg.exe');
     const secureStartupCab = path.join(peDir, arch, 'WinPE_OCs', 'WinPE-SecureStartup.cab');
+    const wmiCab = path.join(peDir, arch, 'WinPE_OCs', 'WinPE-WMI.cab');
     return {
       root: resolved,
       copype: path.join(peDir, 'copype.cmd'),
@@ -73,6 +79,7 @@ export function locateAdk(arch: PeArch = peArchForProcess(), rootOverride?: stri
       dism: dism ?? '',
       oscdimg: fs.existsSync(oscdimg) ? oscdimg : undefined,
       winpeSecureStartupCab: fs.existsSync(secureStartupCab) ? secureStartupCab : undefined,
+      winpeWmiCab: fs.existsSync(wmiCab) ? wmiCab : undefined,
       arch
     };
   }

@@ -50,6 +50,7 @@ function MediaView({ onComplete }: MediaViewProps) {
   const [arch, setArch] = useState('amd64');
   const [restoreConfig, setRestoreConfig] = useState('');
   const [building, setBuilding] = useState(false);
+  const [progress, setProgress] = useState('');
   const [result, setResult] = useState<MediaCreateResult | null>(null);
   const [error, setError] = useState('');
   const [installing, setInstalling] = useState<'adk' | 'node' | null>(null);
@@ -114,6 +115,7 @@ function MediaView({ onComplete }: MediaViewProps) {
   const handleCreate = async () => {
     setError('');
     setResult(null);
+    setProgress('');
     setBuilding(true);
     try {
       const options: any = {
@@ -133,6 +135,16 @@ function MediaView({ onComplete }: MediaViewProps) {
       setBuilding(false);
     }
   };
+
+  // Live build steps streamed from the elevated script (progress.txt), so the
+  // multi-minute media build never looks frozen. Progress is cleared in
+  // handleCreate (event context), not here — setState in an effect body is
+  // a cascading-render hazard.
+  useEffect(() => {
+    if (!building) return;
+    const off = window.electronAPI.onMediaProgress?.((p) => setProgress(p?.message ?? ''));
+    return () => off?.();
+  }, [building]);
 
   const refreshReport = async () => {
     try {
@@ -401,6 +413,12 @@ function MediaView({ onComplete }: MediaViewProps) {
             {building ? 'Building…' : format === 'iso' ? 'Create ISO' : 'Create USB Drive'}
           </button>
         </div>
+
+        {building && (
+          <p className="field-hint media-progress">
+            {progress || 'Waiting for the elevated build step to start…'}
+          </p>
+        )}
 
         <p className="field-hint">
           Building requires a single administrator confirmation for the ADK tooling (copype/DISM).
