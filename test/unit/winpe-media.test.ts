@@ -14,6 +14,7 @@ import {
   buildElevatedScript,
   smokeMediaPayload,
   stagePayloadFiles,
+  copyPath,
   readLogTail,
   elevatedNoResultError,
   PE_ARCH_DEFAULT
@@ -91,6 +92,37 @@ describe('winpe-media', () => {
         expect(staged[0].from).not.toBe(staged[1].from);
         expect(fs.readFileSync(path.join(staged[0].from, 'x'), 'utf8')).toBe('a');
         expect(fs.readFileSync(path.join(staged[1].from, 'x'), 'utf8')).toBe('b');
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('copyPath', () => {
+    it('copies a nested directory tree', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-copypath-'));
+      try {
+        const src = path.join(tmp, 'src', 'dist');
+        fs.mkdirSync(path.join(src, 'cli'), { recursive: true });
+        fs.writeFileSync(path.join(src, 'cli', 'index.js'), 'cli');
+        fs.writeFileSync(path.join(src, 'root.js'), 'root');
+        const dest = path.join(tmp, 'dest');
+        copyPath(src, dest);
+        expect(fs.readFileSync(path.join(dest, 'cli', 'index.js'), 'utf8')).toBe('cli');
+        expect(fs.readFileSync(path.join(dest, 'root.js'), 'utf8')).toBe('root');
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it('copies a single file, creating the destination directory', () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-copypath-'));
+      try {
+        const src = path.join(tmp, 'opbs_native.node');
+        fs.writeFileSync(src, 'binary');
+        const dest = path.join(tmp, 'out', 'deep', 'opbs_native.node');
+        copyPath(src, dest);
+        expect(fs.readFileSync(dest, 'utf8')).toBe('binary');
       } finally {
         fs.rmSync(tmp, { recursive: true, force: true });
       }

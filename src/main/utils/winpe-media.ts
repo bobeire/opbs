@@ -76,11 +76,44 @@ export interface PayloadItem {
  * cannot — a script referencing `app.asar\...` crashes on its first Copy-Item
  * and never writes its result.json. Staging first keeps every source real.
  */
+/**
+ * Copy a file or directory tree from either the real filesystem or inside
+ * `app.asar`. Node's `fs.cpSync`/`fs.copyFileSync` are NOT patched for
+ * archive paths: `cpSync` walks the source with `opendir`, which Electron
+ * does not implement inside an asar, so it throws ENOENT. Electron's
+ * `readdirSync`/`statSync`/`readFileSync` ARE patched and read straight
+ * through the archive, so archive sources are walked manually with those.
+ */
+export function copyPath(src: string, dest: string): void {
+  const inAsar = src.includes('app.asar' + path.sep);
+  if (!inAsar) {
+    const stat = fs.statSync(src);
+    if (stat.isDirectory()) {
+      fs.cpSync(src, dest, { recursive: true });
+    } else {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(src, dest);
+    }
+    return;
+  }
+  const stat = fs.statSync(src);
+  if (stat.isDirectory()) {
+    fs.mkdirSync(dest, { recursive: true });
+    for (const entry of fs.readdirSync(src)) {
+      const child = src.endsWith(path.sep) ? src + entry : src + path.sep + entry;
+      copyPath(child, path.join(dest, entry));
+    }
+    return;
+  }
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.writeFileSync(dest, fs.readFileSync(src));
+}
+
 export function stagePayloadFiles(payloadCopies: PayloadItem[], payloadDir: string): PayloadItem[] {
   fs.mkdirSync(payloadDir, { recursive: true });
   return payloadCopies.map((item, index) => {
     const stagedFrom = path.join(payloadDir, `${index}-${path.basename(item.from)}`);
-    fs.cpSync(item.from, stagedFrom, { recursive: true });
+    copyPath(item.from, stagedFrom);
     return { from: stagedFrom, to: item.to };
   });
 }
@@ -746,13 +779,7 @@ export function smokeMediaPayload(options: PayloadSmokeOptions = {}): PayloadSmo
     ];
     for (const item of copies) {
       const dest = path.resolve(payloadRoot, item.to);
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      const stat = fs.statSync(item.from);
-      if (stat.isDirectory()) {
-        fs.cpSync(item.from, dest, { recursive: true });
-      } else {
-        fs.copyFileSync(item.from, dest);
-      }
+      copyPath(item.from, dest);
     }
     for (const file of payloadTextFiles()) {
       fs.writeFileSync(path.join(payloadRoot, file.name), file.content, 'utf-8');
