@@ -31,6 +31,8 @@ export interface TableEntry {
   typeGuid?: string;
   name?: string;
   bootable?: boolean;
+  /** MBR-only: the partition type byte (e.g. 0x07 NTFS, 0x0C FAT32-LBA, 0xEF ESP). */
+  mbrType?: number;
 }
 
 /**
@@ -57,7 +59,9 @@ export interface RestoreTableOptions {
   diskGuid?: string;
   /** Per-partition GPT type GUIDs keyed by image partition index. */
   typeGuids?: Record<number, string>;
-  /** Mark this image partition bootable (MBR only). */
+  /** Per-partition MBR type bytes keyed by image partition index (MBR only). */
+  mbrTypes?: Record<number, number>;
+  /** Mark this image partition bootable (MBR only). Defaults to the first partition. */
   bootPartition?: number;
 }
 
@@ -71,6 +75,9 @@ export function mbrProblem(entries: TableEntry[], diskSize: number): string | nu
   for (const e of entries) {
     const startLba = e.offset / SECTOR_SIZE;
     const sizeLba = e.size / SECTOR_SIZE;
+    if (e.mbrType !== undefined && (!Number.isInteger(e.mbrType) || e.mbrType < 0 || e.mbrType > 255)) {
+      return `Invalid MBR partition type ${e.mbrType} (must be an integer 0-255)`;
+    }
     if (e.offset % SECTOR_SIZE !== 0 || e.size % SECTOR_SIZE !== 0) {
       return `Partition at offset ${e.offset} is not sector-aligned (512 bytes)`;
     }
@@ -161,19 +168,26 @@ export function buildRestoreTablePlan(
     opts.scheme ?? 'auto'
   );
 
+  const firstIndex = raw[0]?.partitionIndex;
   const entries: TableEntry[] = raw.map((p) => {
     const typeGuid =
-      opts.typeGuids && opts.typeGuids[p.partitionIndex] !== undefined
-        ? opts.typeGuids[p.partitionIndex]
-        : scheme === 'gpt'
-          ? GPT_BASIC_DATA_GUID
-          : undefined;
+      scheme !== 'gpt'
+        ? undefined
+        : opts.typeGuids && opts.typeGuids[p.partitionIndex] !== undefined
+          ? opts.typeGuids[p.partitionIndex]
+          : GPT_BASIC_DATA_GUID;
+    const mbrType =
+      scheme === 'mbr' && opts.mbrTypes && opts.mbrTypes[p.partitionIndex] !== undefined
+        ? opts.mbrTypes[p.partitionIndex]
+        : undefined;
+    const bootTarget = opts.bootPartition ?? firstIndex;
     return {
       offset: p.offset,
       size: p.size,
       typeGuid,
       name: `Partition ${p.partitionIndex}`,
-      bootable: scheme === 'mbr' && opts.bootPartition === p.partitionIndex
+      bootable: scheme === 'mbr' && p.partitionIndex === bootTarget,
+      mbrType
     };
   });
 

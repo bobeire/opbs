@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { RestoreEngine, summarizeImage } from '../../src/main/imaging/restore-engine';
 import { GPT_BASIC_DATA_GUID, GPT_EFI_SYSTEM_GUID } from '../../src/main/imaging/partition-table';
-import { inferTableTypeGuids } from '../../src/main/imaging/fs/file-browse';
+import { inferMbrTypes, inferTableTypeGuids } from '../../src/main/imaging/fs/file-browse';
 import { DiskEnumerator } from '../../src/main/utils/disk-enumerator';
 import { launchElevatedJob } from '../../src/main/helper/launcher';
 import { encodeHeader, encodePartitionEntry, encodeBlockIndexEntry, encodeBlockFrame, compressBlock, crc32, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
@@ -125,9 +125,26 @@ function createFakeEnumerator(): DiskEnumerator {
   return {
     getDisks: vi.fn(async () => [{ index: 1, model: 'TEST', size: 1_000_000_000, serial: 'TEST' }]),
     getPartitions: vi.fn(async () => []),
+    isDiskBlank: vi.fn(() => false),
     getPhysicalDrivePath: vi.fn((i: number) => `\\\\.\\PhysicalDrive${i}`),
     getVolumePath: vi.fn(async () => null)
   } as unknown as DiskEnumerator;
+}
+
+/** Simulates a brand-new disk: no partition table at all. */
+function createBlankEnumerator(): DiskEnumerator {
+  const enumerator = createFakeEnumerator();
+  (enumerator as unknown as { isDiskBlank: ReturnType<typeof vi.fn> }).isDiskBlank = vi.fn(() => true);
+  return enumerator;
+}
+
+/** Simulates an unreadable partition layout — must be treated as "not blank". */
+function createFailingEnumerator(): DiskEnumerator {
+  const enumerator = createFakeEnumerator();
+  (enumerator as unknown as { isDiskBlank: ReturnType<typeof vi.fn> }).isDiskBlank = vi.fn(() => {
+    throw new Error('ioctl failed');
+  });
+  return enumerator;
 }
 
 function createTargetEnumerator(disk: { index?: number; model?: string; serial?: string; size?: number }): DiskEnumerator {
@@ -140,6 +157,7 @@ function createTargetEnumerator(disk: { index?: number; model?: string; serial?:
   return {
     getDisks: vi.fn(async () => disks),
     getPartitions: vi.fn(async () => []),
+    isDiskBlank: vi.fn(() => false),
     getPhysicalDrivePath: vi.fn((i: number) => `\\\\.\\PhysicalDrive${i}`),
     getVolumePath: vi.fn(async () => null)
   } as unknown as DiskEnumerator;
@@ -548,5 +566,145 @@ describe('inferTableTypeGuids', () => {
 
   it('returns an empty map when nothing qualifies', () => {
     expect(inferTableTypeGuids('image.opbs', [0, 1], undefined, () => false)).toEqual({});
+  });
+});
+
+describe('RestoreEngine blank physical targets', () => {
+  let dir: string;
+  let imagePath: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-restore-blank-'));
+    imagePath = path.join(dir, 'image.opbs');
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('lays down a fresh GPT table on a blank physical target when the image has an ESP', async () => {
+    writeImage(imagePath, undefined, { partitionPayload: fat32Payload(true) });
+    const engine = new RestoreEngine(createBlankEnumerator());
+    const job = await engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] });
+    expect(job.writeTable).toBeDefined();
+    expect(job.writeTable!.scheme).toBe('gpt');
+    expect(job.writeTable!.entries[0].typeGuid).toBe(GPT_EFI_SYSTEM_GUID);
+    expect(job.warnings!.join(' ')).toMatch(/has no partition table/);
+  });
+
+  it('falls back to MBR with a FAT32 type byte and active flag for a blank non-ESP image', async () => {
+    writeImage(imagePath, undefined, { partitionPayload: fat32Payload(false) });
+    const engine = new RestoreEngine(createBlankEnumerator());
+    const job = await engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] });
+    expect(job.writeTable!.scheme).toBe('mbr');
+    expect(job.writeTable!.entries[0].mbrType).toBe(0x0c);
+    expect(job.writeTable!.entries[0].bootable).toBe(true);
+    expect(job.warnings!.join(' ')).toMatch(/has no partition table/);
+  });
+
+  it('does not write a table on a target that already has partitions', async () => {
+    writeImage(imagePath, undefined, { partitionPayload: fat32Payload(true) });
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const job = await engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] });
+    expect(job.writeTable).toBeUndefined();
+    expect(job.warnings).toBeUndefined();
+  });
+
+  it('treats an unreadable partition layout as not blank (never overwrites blindly)', async () => {
+    writeImage(imagePath, undefined, { partitionPayload: fat32Payload(true) });
+    const engine = new RestoreEngine(createFailingEnumerator());
+    const job = await engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] });
+    expect(job.writeTable).toBeUndefined();
+  });
+
+  it('respects writePartitionTable:false on a blank target', async () => {
+    writeImage(imagePath, undefined, { partitionPayload: fat32Payload(true) });
+    const engine = new RestoreEngine(createBlankEnumerator());
+    const job = await engine.buildJob({
+      imagePath,
+      targetDiskIndex: 1,
+      targetPartitions: [0],
+      writePartitionTable: false
+    });
+    expect(job.writeTable).toBeUndefined();
+  });
+
+  it('honors an explicit MBR scheme even when the image has an ESP (0xEF type byte)', async () => {
+    writeImage(imagePath, undefined, { partitionPayload: fat32Payload(true) });
+    const engine = new RestoreEngine(createBlankEnumerator());
+    const job = await engine.buildJob({
+      imagePath,
+      targetDiskIndex: 1,
+      targetPartitions: [0],
+      tableScheme: 'mbr'
+    });
+    expect(job.writeTable!.scheme).toBe('mbr');
+    expect(job.writeTable!.entries[0].mbrType).toBe(0xef);
+    expect(job.writeTable!.entries[0].bootable).toBe(true);
+    expect(job.writeTable!.entries[0].typeGuid).toBeUndefined();
+  });
+});
+
+describe('RestoreEngine fresh-table scheme preference', () => {
+  let dir: string;
+  let imagePath: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-restore-scheme-'));
+    imagePath = path.join(dir, 'image.opbs');
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('prefers GPT over MBR for a dissimilar restore whose image contains an ESP', async () => {
+    writeImage(imagePath, undefined, { partitionPayload: fat32Payload(true) });
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const job = await engine.buildJob({
+      imagePath,
+      targetDiskIndex: 1,
+      targetPartitions: [0],
+      targetLayout: [{ partitionIndex: 0, offset: 4194304 }],
+      acknowledgeLayout: true
+    });
+    expect(job.writeTable!.scheme).toBe('gpt');
+    expect(job.writeTable!.entries[0].typeGuid).toBe(GPT_EFI_SYSTEM_GUID);
+  });
+
+  it('keeps auto→MBR for a dissimilar restore without an ESP and types the partition from its filesystem', async () => {
+    writeImage(imagePath, undefined, { partitionPayload: fat32Payload(false) });
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const job = await engine.buildJob({
+      imagePath,
+      targetDiskIndex: 1,
+      targetPartitions: [0],
+      targetLayout: [{ partitionIndex: 0, offset: 4194304 }],
+      acknowledgeLayout: true
+    });
+    expect(job.writeTable!.scheme).toBe('mbr');
+    expect(job.writeTable!.entries[0].mbrType).toBe(0x0c);
+    expect(job.writeTable!.entries[0].bootable).toBe(true);
+  });
+});
+
+describe('inferMbrTypes', () => {
+  let dir: string;
+  let imagePath: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-infer-mbr-'));
+    imagePath = path.join(dir, 'image.opbs');
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('maps FAT32 to 0x0C and unrecognized payloads to 0x07', () => {
+    writeImage(imagePath, undefined, { partitionPayload: fat32Payload(false) });
+    expect(inferMbrTypes(imagePath, [0])).toEqual({ 0: 0x0c });
+    writeImage(imagePath, undefined);
+    expect(inferMbrTypes(imagePath, [0])).toEqual({ 0: 0x07 });
   });
 });

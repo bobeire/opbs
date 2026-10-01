@@ -12,9 +12,9 @@ import {
   COMPRESSION_NONE,
   CIPHER_NONE
 } from './image-format';
-import { detectPartitionFilesystem, inferTableTypeGuids } from './fs/file-browse';
+import { detectPartitionFilesystem, inferMbrTypes, inferTableTypeGuids } from './fs/file-browse';
 import { RestoreJob, RestoreJobProgress, RestoreJobResult, RestoreTarget, JobEncryption } from './imaging-job';
-import { buildRestoreTablePlan, RestoreTableOptions } from './partition-table';
+import { buildRestoreTablePlan, RestoreTableOptions, RestoreTablePlan } from './partition-table';
 import { launchElevatedJob } from '../helper/launcher';
 import { logger } from '../utils/logger';
 import { VirtualDiskTarget, resolveVirtualDiskSize } from '../utils/virtual-disk';
@@ -265,24 +265,79 @@ export class RestoreEngine implements RestoreCoordinator {
       );
     }
 
-    // GPT type-GUID inference: probe the image contents for EFI System
+    // A blank target (no partition table at all) must get a fresh table or
+    // the restored volumes are invisible in Explorer — same rule as a blank
+    // virtual disk. Probe through the native call directly so enumeration
+    // errors (thrown) are treated as "not blank" and we never overwrite a
+    // table that could not be inspected. Skipped when a deviating custom
+    // layout or a virtual disk target already decides the table.
+    let blankTarget = false;
+    if (
+      config.writePartitionTable !== false &&
+      vhd == null &&
+      config.targetDiskIndex != null &&
+      !(config.targetLayout != null && deviatesFromCaptured)
+    ) {
+      try {
+        blankTarget = this.diskEnumerator.isDiskBlank(config.targetDiskIndex);
+      } catch {
+        blankTarget = false;
+      }
+    }
+
+    const detectKey =
+      config.passphrase && info.header.cipherId !== CIPHER_NONE
+        ? deriveImageKey(config.passphrase, info.header.salt, info.header.kdfIterations)
+        : undefined;
+
+    // Table-type inference: probe the image contents for EFI System
     // Partitions (FAT32 with the spec-required \EFI directory) so a freshly
-    // laid table is bootable in a VM. Explicit tableTypeGuids always win.
+    // laid table is bootable in a VM — GPT type GUID 0xEF as ESP, MBR type
+    // byte 0xEF, plus fs-based MBR type bytes. Explicit config values win.
     const willWriteTable =
       config.writePartitionTable !== false &&
-      ((config.targetLayout != null && deviatesFromCaptured) || vhd != null);
-    const tableTypeGuids = willWriteTable
-      ? {
-          ...inferTableTypeGuids(
-            config.imagePath,
-            targets.map((t) => t.partitionIndex),
-            config.passphrase && info.header.cipherId !== CIPHER_NONE
-              ? deriveImageKey(config.passphrase, info.header.salt, info.header.kdfIterations)
-              : undefined
-          ),
-          ...config.tableTypeGuids
+      ((config.targetLayout != null && deviatesFromCaptured) || vhd != null || blankTarget);
+    const inferredTypeGuids = willWriteTable
+      ? inferTableTypeGuids(config.imagePath, targets.map((t) => t.partitionIndex), detectKey)
+      : {};
+    const tableTypeGuids = { ...inferredTypeGuids, ...config.tableTypeGuids };
+    const mbrTypes = willWriteTable
+      ? inferMbrTypes(config.imagePath, targets.map((t) => t.partitionIndex), detectKey)
+      : {};
+    for (const idx of Object.keys(inferredTypeGuids)) {
+      mbrTypes[Number(idx)] = 0xef;
+    }
+    const espDetected = Object.keys(inferredTypeGuids).length > 0;
+
+    // Build a fresh partition-table plan for the restored placements. In
+    // auto mode prefer GPT for blank virtual disks and images that contain
+    // an ESP — a UEFI-sourced restore must not silently become MBR. Fall
+    // back to plain auto (MBR when representable) only when GPT cannot fit.
+    const buildFreshTablePlan = (): RestoreTablePlan => {
+      const placements = targets.map((t) => {
+        const partition = info.partitions.find((p) => p.partitionIndex === t.partitionIndex)!;
+        return { partitionIndex: t.partitionIndex, offset: t.offset, size: t.size ?? partition.size };
+      });
+      const requested = config.tableScheme || 'auto';
+      const tableOptions: RestoreTableOptions = {
+        scheme: requested,
+        diskGuid: config.tableDiskGuid,
+        typeGuids: tableTypeGuids,
+        mbrTypes,
+        bootPartition: config.tableBootPartition
+      };
+      if (requested !== 'auto') {
+        return buildRestoreTablePlan(placements, targetDiskSize, tableOptions);
+      }
+      if (vhd != null || espDetected) {
+        try {
+          return buildRestoreTablePlan(placements, targetDiskSize, { ...tableOptions, scheme: 'gpt' });
+        } catch {
+          // GPT unrepresentable — plain auto below picks a fitting scheme.
         }
-      : config.tableTypeGuids;
+      }
+      return buildRestoreTablePlan(placements, targetDiskSize, tableOptions);
+    };
 
     let writeTable: RestoreJob['writeTable'] = undefined;
     if (config.targetLayout && deviatesFromCaptured) {
@@ -294,56 +349,26 @@ export class RestoreEngine implements RestoreCoordinator {
         );
       }
       if (config.writePartitionTable !== false) {
-        const tableOptions: RestoreTableOptions = {
-          scheme: config.tableScheme ?? 'auto',
-          diskGuid: config.tableDiskGuid,
-          typeGuids: tableTypeGuids,
-          bootPartition: config.tableBootPartition
-        };
-        const plan = buildRestoreTablePlan(
-          targets.map((t) => {
-            const partition = info.partitions.find((p) => p.partitionIndex === t.partitionIndex)!;
-            return { partitionIndex: t.partitionIndex, offset: t.offset, size: t.size ?? partition.size };
-          }),
-          targetDiskSize,
-          tableOptions
-        );
+        const plan = buildFreshTablePlan();
         writeTable = { scheme: plan.scheme, diskSize: plan.diskSize, entries: plan.entries, diskGuid: plan.diskGuid };
       }
-    } else if (vhd && config.writePartitionTable !== false) {
-      // A virtual disk starts blank: without a partition table the restored
-      // volumes would be invisible in Explorer. Always lay one down (the
-      // captured layout is not "destroyed" — there is nothing to destroy, so
-      // no acknowledgement gate is needed). Prefer GPT for auto mode; fall
-      // back to MBR when the layout cannot be represented as GPT.
-      const tableOptions: RestoreTableOptions = {
-        scheme: config.tableScheme ?? 'auto',
-        diskGuid: config.tableDiskGuid,
-        typeGuids: tableTypeGuids,
-        bootPartition: config.tableBootPartition
-      };
-      const placements = targets.map((t) => {
-        const partition = info.partitions.find((p) => p.partitionIndex === t.partitionIndex)!;
-        return { partitionIndex: t.partitionIndex, offset: t.offset, size: t.size ?? partition.size };
-      });
-      let plan;
-      try {
-        plan = buildRestoreTablePlan(placements, targetDiskSize, {
-          ...tableOptions,
-          scheme: tableOptions.scheme === 'auto' ? 'gpt' : tableOptions.scheme
-        });
-      } catch (error) {
-        if (tableOptions.scheme !== 'auto') {
-          throw error;
-        }
-        plan = buildRestoreTablePlan(placements, targetDiskSize, tableOptions);
-      }
+    } else if ((vhd != null || blankTarget) && config.writePartitionTable !== false) {
+      // A blank target starts without a partition table: without one the
+      // restored volumes would be invisible in Explorer. Always lay it down
+      // (nothing to destroy, so no acknowledgement gate is needed).
+      const plan = buildFreshTablePlan();
       writeTable = { scheme: plan.scheme, diskSize: plan.diskSize, entries: plan.entries, diskGuid: plan.diskGuid };
-      warnings.push(
-        `A fresh ${plan.scheme.toUpperCase()} partition table will be written — the virtual disk is a blank target.`
-      );
-      if (config.targetDiskIndex == null) {
-        warnings.push('Disk identity and same-disk checks run again after the virtual disk is attached.');
+      if (vhd != null) {
+        warnings.push(
+          `A fresh ${plan.scheme.toUpperCase()} partition table will be written — the virtual disk is a blank target.`
+        );
+        if (config.targetDiskIndex == null) {
+          warnings.push('Disk identity and same-disk checks run again after the virtual disk is attached.');
+        }
+      } else {
+        warnings.push(
+          `Target disk ${config.targetDiskIndex} has no partition table — a fresh ${plan.scheme.toUpperCase()} partition table will be written.`
+        );
       }
     }
     if (warnings.length > 0) {

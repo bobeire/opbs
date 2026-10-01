@@ -263,6 +263,34 @@ export function inferTableTypeGuids(
   return typeGuids;
 }
 
+/**
+ * Infer MBR partition type bytes for the partitions a restore will lay down,
+ * keyed by image partition index: FAT32→0x0C (FAT32 LBA), FAT16→0x06,
+ * FAT12→0x01, everything else (NTFS/exFAT/unknown)→0x07 (Generic). Callers
+ * layer ESP→0xEF over the result when a partition is an EFI System
+ * Partition, and merge explicit config values over both.
+ */
+export function inferMbrTypes(
+  imagePath: string,
+  partitionIndexes: number[],
+  key?: Buffer
+): Record<number, number> {
+  const mbrTypes: Record<number, number> = {};
+  for (const idx of partitionIndexes) {
+    const { fsType } = detectPartitionFilesystem(imagePath, idx, key);
+    if (fsType === 'FAT32') {
+      mbrTypes[idx] = 0x0c;
+    } else if (fsType === 'FAT16') {
+      mbrTypes[idx] = 0x06;
+    } else if (fsType === 'FAT12') {
+      mbrTypes[idx] = 0x01;
+    } else {
+      mbrTypes[idx] = 0x07;
+    }
+  }
+  return mbrTypes;
+}
+
 function splitPath(relPath: string): string[] {
   return relPath.replace(/^[\\/]+/, '').split(/[\\/]/).filter(Boolean);
 }

@@ -8,7 +8,7 @@ interface PartitionTableNative {
   buildPartitionTable(
     scheme: 'gpt' | 'mbr',
     lbaCount: bigint | number,
-    entries: Array<{ offset: number; size: number; typeGuid?: string; name?: string; bootable?: boolean }>,
+    entries: Array<{ offset: number; size: number; typeGuid?: string; name?: string; bootable?: boolean; mbrType?: number }>,
     opts?: { diskGuid?: string }
   ): { firstUsableLBA: number; lastUsableLBA: number; regions: Array<{ offset: number; data: Buffer }> };
 }
@@ -219,6 +219,23 @@ describe('native MBR partition table builder', () => {
       expect(() => nativeMbr!.buildPartitionTable('mbr', LBA_COUNT, five)).toThrow(/at most 4/);
       const big = [{ offset: 1048576, size: 0x100000000 * 512 }];
       expect(() => nativeMbr!.buildPartitionTable('mbr', 0x200000000, big)).toThrow(/32-bit LBA limit/);
+    });
+
+    it('honors per-entry MBR type bytes and defaults to 0x07', () => {
+      const typed = [
+        { offset: 1048576, size: 1048576, mbrType: 0x0c },
+        { offset: 2097152, size: 1048576, mbrType: 0xef },
+        { offset: 3145728, size: 1048576, mbrType: 0x83 },
+        { offset: 4194304, size: 1048576 }
+      ];
+      const mbr = nativeMbr!.buildPartitionTable('mbr', LBA_COUNT, typed).regions[0].data;
+      expect(mbr[0x1be + 4]).toBe(0x0c);
+      expect(mbr[0x1ce + 4]).toBe(0xef);
+      expect(mbr[0x1de + 4]).toBe(0x83);
+      expect(mbr[0x1ee + 4]).toBe(0x07);
+      expect(() =>
+        nativeMbr!.buildPartitionTable('mbr', LBA_COUNT, [{ offset: 1048576, size: 1048576, mbrType: 300 }])
+      ).toThrow(/0-255/);
     });
   });
 });

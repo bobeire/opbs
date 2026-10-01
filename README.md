@@ -312,16 +312,35 @@ the target disk **before** any partition contents:
   header + entry CRCs, and the mirrored backup header/entries at the end of the
   disk. MBR output supports ≤4 partitions with the classic `0x55AA` signature.
 - Scheme defaults to `auto`: MBR when every placement fits (≤4 partitions,
-  ≤2 TiB disk, ≥LBA63 start, 32-bit LBAs), otherwise GPT. Override with
+  ≤2 TiB disk, ≥LBA63 start, 32-bit LBAs), otherwise GPT. When the image
+  contains an EFI System Partition, `auto` prefers GPT so a UEFI-sourced
+  restore cannot silently become an unbootable MBR disk. Override with
   `tableScheme` / `--table-scheme gpt|mbr`.
 - Optional knobs: `tableDiskGuid` (deterministic GPT disk GUID),
   `tableTypeGuids` (per-partition GPT type GUIDs; defaults: automatic EFI
   System detection — a FAT32 volume whose root contains the `\EFI` directory
   gets the EFI System type `C12A7328-...` so a restored disk boots in a VM —
-  everything else is basic-data), and
-  `tableBootPartition` (MBR boot flag).
+  everything else is basic-data), `tableBootPartition` (MBR active partition;
+  defaults to the first restored partition), and MBR partition type bytes
+  inferred from each filesystem (ESP→`0xEF`, FAT32→`0x0C`, FAT16→`0x06`,
+  FAT12→`0x01`, NTFS/exFAT/unknown→`0x07`) so legacy-BIOS restores keep the
+  right types instead of everything becoming `0x07`.
 - `writePartitionTable:false`/`--no-write-table` restores raw blocks only
   (still moves data, but leaves whatever table the target already has).
+
+### Blank-target restores
+
+A target disk with **no partition table at all** (brand-new, uninitialized,
+RAW) would hide the restored volumes from Windows, so OPBS lays down a fresh
+partition table automatically — no acknowledgement needed, because there is no
+existing layout to destroy:
+
+- An unreadable partition layout is treated as *not* blank: a fresh table is
+  never written when the current one could not be inspected.
+- The GPT preference, ESP typing, MBR type bytes, and active-flag default
+  described above all apply; `writePartitionTable:false` opts out.
+- A target that *does* have a partition table keeps it untouched unless a
+  differing `targetLayout` is acknowledged.
 
 Backups record the source disk's **model + serial** in the image header. A
 dissimilar restore is refused when the target is the *same physical disk the
@@ -384,12 +403,13 @@ OPBS.exe --cli restore job-restore.json
   physical-disk safety gate (capacity fit, identity, same-disk) still
   applies, re-checked after the disk appears. The disk is detached again
   afterwards when this restore is the one that attached it.
-- A fresh target gets a **new partition table** (GPT preferred, MBR fallback;
-  override with `tableScheme`) so the restored volumes show up in Windows.
-  A restored EFI System Partition (FAT32 with a root `\EFI` directory) is
-  automatically typed as the EFI System partition, so the disk is VM-bootable
-  without extra configuration; `tableTypeGuids` overrides any partition's
-  type. Use `writePartitionTable:false` to write raw blocks only.
+- A fresh target gets a **new partition table** (the blank-target rule above:
+  GPT preferred, MBR fallback; override with `tableScheme`) so the restored
+  volumes show up in Windows. A restored EFI System Partition (FAT32 with a
+  root `\EFI` directory) is automatically typed as the EFI System partition,
+  so the disk is VM-bootable without extra configuration; `tableTypeGuids`
+  overrides any partition's type. Use `writePartitionTable:false` to write
+  raw blocks only.
 - In the GUI, choose **Virtual disk (VHD / VHDX)** on the restore wizard's
   target step (path, size, dynamic/fixed) or in the Config Builder's Restore
   tab; the preflight flags an existing file (`targetFileExists`) before you

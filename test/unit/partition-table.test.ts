@@ -104,4 +104,43 @@ describe('partition-table TS planning', () => {
       })
     ).not.toThrow();
   });
+
+  it('applies MBR type bytes and defaults the active flag to the first partition', () => {
+    const plan = buildRestoreTablePlan(
+      [
+        { partitionIndex: 0, offset: 1048576, size: 67108864 },
+        { partitionIndex: 1, offset: 68294451200, size: 67108864 }
+      ],
+      200_000_000_000,
+      { scheme: 'mbr', mbrTypes: { 0: 0x0c, 1: 0x07 } }
+    );
+    expect(plan.entries[0]).toMatchObject({ mbrType: 0x0c, bootable: true });
+    expect(plan.entries[1]).toMatchObject({ mbrType: 0x07, bootable: false });
+
+    const explicit = buildRestoreTablePlan(
+      [
+        { partitionIndex: 0, offset: 1048576, size: 67108864 },
+        { partitionIndex: 1, offset: 68294451200, size: 67108864 }
+      ],
+      200_000_000_000,
+      { scheme: 'mbr', bootPartition: 1 }
+    );
+    expect(explicit.entries[0].bootable).toBe(false);
+    expect(explicit.entries[1].bootable).toBe(true);
+  });
+
+  it('omits MBR-only fields from GPT plans and rejects out-of-range type bytes', () => {
+    const gpt = buildRestoreTablePlan([{ partitionIndex: 0, offset: 1048576, size: 67108864 }], 200_000_000_000, {
+      scheme: 'gpt',
+      mbrTypes: { 0: 0x0c }
+    });
+    expect(gpt.entries[0].mbrType).toBeUndefined();
+    expect(gpt.entries[0].bootable).toBe(false);
+    expect(() =>
+      buildRestoreTablePlan([{ partitionIndex: 0, offset: 1048576, size: 67108864 }], 200_000_000_000, {
+        scheme: 'mbr',
+        mbrTypes: { 0: 300 }
+      })
+    ).toThrow(/Invalid MBR partition type/);
+  });
 });

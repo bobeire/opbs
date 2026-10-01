@@ -26,7 +26,7 @@ export interface NativeImagingApi {
   buildPartitionTable?(
     scheme: 'gpt' | 'mbr',
     lbaCount: bigint | number,
-    entries: Array<{ offset: number; size: number; typeGuid?: string; name?: string; bootable?: boolean }>,
+    entries: Array<{ offset: number; size: number; typeGuid?: string; name?: string; bootable?: boolean; mbrType?: number }>,
     opts?: { diskGuid?: string }
   ): { firstUsableLBA: number; lastUsableLBA: number; regions: Array<{ offset: number; data: Buffer }> };
 }
@@ -145,7 +145,7 @@ export interface RestoreJob {
     scheme: 'gpt' | 'mbr';
     diskSize: number;
     diskGuid?: string;
-    entries: Array<{ offset: number; size: number; typeGuid?: string; name?: string; bootable?: boolean }>;
+    entries: Array<{ offset: number; size: number; typeGuid?: string; name?: string; bootable?: boolean; mbrType?: number }>;
   };
   /** Read back the written filesystem after every target and validate the
    *  boot sector / MFT. The CLI `drill` subcommand sets this flag. */

@@ -189,6 +189,17 @@ export class DiskEnumerator {
   }
 
   /**
+   * True when a disk has no partition table at all (RAW/uninitialized).
+   * Uses the native call directly so enumeration errors propagate — callers
+   * treat a thrown error as "not blank" and never overwrite a table that
+   * could not be inspected. The wrapped getPartitions() swallows errors into
+   * an empty array, which would be indistinguishable from a blank disk.
+   */
+  isDiskBlank(diskIndex: number): boolean {
+    return this.native.getPartitions(diskIndex).length === 0;
+  }
+
+  /**
    * Get the physical drive device path, e.g. "\\\\.\\PhysicalDrive0"
    */
   getPhysicalDrivePath(diskIndex: number): string {

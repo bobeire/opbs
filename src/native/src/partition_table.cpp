@@ -27,6 +27,7 @@ struct TableEntry {
     uint8_t typeGuid[16];
     std::u16string name;
     bool bootable;
+    uint8_t mbrType = 0x07;  // MBR partition type byte (NTFS/generic default)
 };
 
 uint32_t Crc32Table[256];
@@ -271,7 +272,7 @@ void BuildMbr(const std::vector<TableEntry>& entries, uint64_t lbaCount, std::ve
         entry[1] = 0xFE;
         entry[2] = 0xFF;
         entry[3] = 0xFF;
-        entry[4] = 0x07;  // NTFS / basic data
+        entry[4] = e.mbrType;
         entry[5] = 0xFE;
         entry[6] = 0xFF;
         entry[7] = 0xFF;
@@ -327,6 +328,13 @@ std::vector<TableEntry> ParseEntries(const Napi::Array& arr) {
             }
         }
         e.bootable = obj.Has("bootable") ? obj.Get("bootable").As<Napi::Boolean>().Value() : false;
+        if (obj.Has("mbrType") && obj.Get("mbrType").IsNumber()) {
+            int t = obj.Get("mbrType").As<Napi::Number>().Int32Value();
+            if (t < 0 || t > 255) {
+                throw std::runtime_error("MBR partition type must be 0-255");
+            }
+            e.mbrType = static_cast<uint8_t>(t);
+        }
         entries.push_back(std::move(e));
     }
     return entries;
