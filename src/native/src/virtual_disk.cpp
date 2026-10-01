@@ -103,15 +103,21 @@ void CreateVirtualDiskImpl(const std::wstring& path, ULONGLONG sizeBytes, bool f
 
 // --- open helpers ---------------------------------------------------------
 
+// Handles used for attach / detach / GetVirtualDiskPhysicalPath must carry
+// real rights: opening with VIRTUAL_DISK_ACCESS_NONE succeeds but the later
+// AttachVirtualDisk then fails with ERROR_ACCESS_DENIED (verified empirically
+// on Win11 26100 — NONE handles attach/physical-path both return code 5).
+// ALL covers every operation we need; NONE stays as a fallback for providers
+// that reject the legacy mask.
 HANDLE OpenForModify(const std::wstring& path, DWORD* errOut) {
     VIRTUAL_STORAGE_TYPE storage = DeviceTypeFor(path);
     HANDLE handle = INVALID_HANDLE_VALUE;
     DWORD err = OpenVirtualDisk(
-        &storage, path.c_str(), VIRTUAL_DISK_ACCESS_NONE,
+        &storage, path.c_str(), VIRTUAL_DISK_ACCESS_ALL,
         OPEN_VIRTUAL_DISK_FLAG_NONE, nullptr, &handle);
-    if (err != ERROR_SUCCESS && (err == ERROR_INVALID_PARAMETER || err == ERROR_ACCESS_DENIED)) {
+    if (err != ERROR_SUCCESS) {
         err = OpenVirtualDisk(
-            &storage, path.c_str(), VIRTUAL_DISK_ACCESS_ALL,
+            &storage, path.c_str(), VIRTUAL_DISK_ACCESS_NONE,
             OPEN_VIRTUAL_DISK_FLAG_NONE, nullptr, &handle);
     }
     *errOut = err;
@@ -245,13 +251,15 @@ Napi::Value AttachVirtualDiskJs(const Napi::CallbackInfo& info) {
     params.Version = ATTACH_VIRTUAL_DISK_VERSION_1;
     params.Version1.Reserved = 0;
 
+    // PERMANENT_LIFETIME is required: this handle is closed right after the
+    // call and without the flag Windows detaches the disk again on the last
+    // handle close (verified: probe after close returns err 55). A retry with
+    // plain NO_DRIVE_LETTER would attach-then-instantly-detach, so any failure
+    // surfaces as-is instead of being masked.
     err = AttachVirtualDisk(
         handle, nullptr,
         ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER | ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME,
         0, &params, nullptr);
-    if (err != ERROR_SUCCESS && (err == ERROR_INVALID_PARAMETER || err == ERROR_ACCESS_DENIED)) {
-        err = AttachVirtualDisk(handle, nullptr, ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER, 0, &params, nullptr);
-    }
     CloseHandle(handle);
 
     if (err != ERROR_SUCCESS) {
