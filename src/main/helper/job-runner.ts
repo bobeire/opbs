@@ -1957,6 +1957,11 @@ export async function dispatchHelperJob(
     await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, nativeApi, pipeClient);
     return;
   }
+  if (raw.type === 'restore-vhd') {
+    const { runRestoreVhdJob } = await import('./restore-vhd-job');
+    await runRestoreVhdJob(jobPath, resultPath, progressPath, cancelPath, nativeApi, pipeClient);
+    return;
+  }
   if (raw.type === 'clone') {
     await runCloneJob(jobPath, resultPath, progressPath, cancelPath, nativeApi, pipeClient);
     return;

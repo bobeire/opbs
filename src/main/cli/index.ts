@@ -582,6 +582,10 @@ async function cmdRestore(ctx: CommandContext): Promise<number> {
   if (config.targetDiskIndex === undefined && config.destinationDiskIndex !== undefined) {
     config.targetDiskIndex = config.destinationDiskIndex;
   }
+  if (config.targetVirtualDisk && config.targetDiskIndex !== undefined) {
+    console.error('Restore config: set either targetDiskIndex or targetVirtualDisk, not both.');
+    return 1;
+  }
 
   const threadsFlag = flagValue(ctx.argv, '--threads');
   if (threadsFlag !== undefined) {
@@ -643,7 +647,10 @@ async function cmdRestore(ctx: CommandContext): Promise<number> {
   }
 
   if (ctx.argv.includes('--elevated')) {
-    return await runJobInProcess(function () {
+    return await runJobInProcess(async function () {
+      if (config.targetVirtualDisk) {
+        return { type: 'restore-vhd', config };
+      }
       return restoreEngine.buildJob(config);
     }, ctx);
   }
@@ -2320,6 +2327,18 @@ function cmdNewConfig(ctx: CommandContext): Promise<number> {
   };
   fs.writeFileSync(path.join(path.dirname(output), 'restore-example.json'), JSON.stringify(restoreExample, null, 2));
   console.log(`Restore example written to ${path.join(path.dirname(output), 'restore-example.json')}`);
+
+  console.log('\nVirtual-disk restore example (restore into a new .vhdx file):');
+  const vhdExample = {
+    kind: 'restore',
+    imagePath: 'D:\\OPBS\\img_0_1746300000000.opbs',
+    targetVirtualDisk: { path: 'D:\\VMs\\restored.vhdx', virtualSize: 128 * 1024 ** 3, type: 'dynamic' },
+    targetPartitions: [2],
+    verifyBeforeWrite: true,
+    applyDeltas: true
+  };
+  fs.writeFileSync(path.join(path.dirname(output), 'restore-vhd-example.json'), JSON.stringify(vhdExample, null, 2));
+  console.log(`Restore example written to ${path.join(path.dirname(output), 'restore-vhd-example.json')}`);
 
   console.log('\nDrill example (restore to a scratch disk and validate):');
   const drillExample = {

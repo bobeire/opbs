@@ -5,6 +5,13 @@ import { RestoreJobProgress, RestoreJobResult } from '../imaging/imaging-job';
 import { DiskEnumerator, querySystemDiskIndex } from '../utils/disk-enumerator';
 import { listBitlockerStatus } from '../utils/bitlocker';
 import { sidecarPathFor } from '../utils/bitlocker-capture';
+import {
+  isVirtualDiskPath,
+  readVirtualDiskInfo,
+  roundToSector,
+  validateVirtualSize,
+  virtualDiskFormatFromPath
+} from '../utils/virtual-disk';
 import { logger } from '../utils/logger';
 
 export type RestoreConfig = RestoreJobConfig;
@@ -35,6 +42,9 @@ export interface RestorePreflightResult {
   /** True when the target disk holds Windows (system/boot) — a reboot is
    *  required after restore; secondary disks do not need one. */
   targetIsSystemDisk?: boolean;
+  /** VHD/VHDX target: an existing file at the target path will be
+   *  overwritten — the UI must ask for an explicit acknowledgement. */
+  targetFileExists?: boolean;
 }
 
 export interface RestoreProgress {
@@ -202,6 +212,49 @@ export class RestoreManager extends EventEmitter {
         return { partitionIndex: t.partitionIndex, offset: t.offset, size };
       });
 
+      const warnings = [...(job.warnings ?? [])];
+      const encrypted = summary.encrypted;
+      const passphraseRequired = encrypted && !(config.passphrase?.trim());
+      if (passphraseRequired) {
+        warnings.push('This image is encrypted; the passphrase is required to restore it.');
+      }
+      if (fs.existsSync(sidecarPathFor(config.imagePath))) {
+        warnings.push(
+          'A BitLocker recovery-key sidecar (.bitlocker.json) is stored next to this image. Keep it with the backup; restore does not read it.'
+        );
+      }
+
+      // VHD/VHDX target: no physical disk exists yet — report the virtual
+      // capacity and whether an existing file will be overwritten.
+      if (config.targetVirtualDisk) {
+        const vhd = config.targetVirtualDisk;
+        const targetFileExists = fs.existsSync(vhd.path);
+        let targetDiskBytes = typeof vhd.virtualSize === 'number' ? vhd.virtualSize : 0;
+        if (targetFileExists) {
+          warnings.push(`A file already exists at ${vhd.path} — restoring overwrites its contents.`);
+          try {
+            targetDiskBytes = readVirtualDiskInfo(vhd.path).virtualSize;
+          } catch {
+            /* keep the configured size as the reported capacity */
+          }
+        }
+        return {
+          ok: true,
+          requiredBytes,
+          targetDiskBytes,
+          targetDiskModel: `Virtual disk (${virtualDiskFormatFromPath(vhd.path).toUpperCase()})`,
+          targetDiskPartitionCount: 0,
+          targetFileExists,
+          targets,
+          writeTableScheme: job.writeTable?.scheme ?? null,
+          warnings,
+          sameDisk: false,
+          encrypted,
+          passphraseRequired,
+          targetIsSystemDisk: false
+        };
+      }
+
       const disks = await this.diskEnumerator.getDisks();
       const targetDisk = disks.find((d) => d.index === config.targetDiskIndex);
       const systemDrive = (process.env.SystemDrive || 'C:').replace(':', '').toUpperCase();
@@ -215,18 +268,6 @@ export class RestoreManager extends EventEmitter {
       if (!targetIsSystemDisk) {
         const sysDisk = querySystemDiskIndex();
         targetIsSystemDisk = sysDisk !== null && sysDisk === config.targetDiskIndex;
-      }
-
-      const warnings = [...(job.warnings ?? [])];
-      const encrypted = summary.encrypted;
-      const passphraseRequired = encrypted && !(config.passphrase?.trim());
-      if (passphraseRequired) {
-        warnings.push('This image is encrypted; the passphrase is required to restore it.');
-      }
-      if (fs.existsSync(sidecarPathFor(config.imagePath))) {
-        warnings.push(
-          'A BitLocker recovery-key sidecar (.bitlocker.json) is stored next to this image. Keep it with the backup; restore does not read it.'
-        );
       }
 
       return {
@@ -299,6 +340,34 @@ export class RestoreManager extends EventEmitter {
 
     if (!config.targetPartitions || config.targetPartitions.length === 0) {
       throw new Error('No target partitions selected');
+    }
+
+    if (config.targetVirtualDisk) {
+      if (config.targetDiskIndex != null) {
+        throw new Error('Set either a target disk or a virtual disk target, not both');
+      }
+      const vhd = config.targetVirtualDisk;
+      const vpath = (vhd.path ?? '').trim();
+      if (!vpath) {
+        throw new Error('Virtual disk path is empty');
+      }
+      if (!isVirtualDiskPath(vpath)) {
+        throw new Error('Virtual disk target must be a .vhd or .vhdx file');
+      }
+      config.targetVirtualDisk = { ...vhd, path: vpath };
+      if (!fs.existsSync(vpath)) {
+        if (typeof vhd.virtualSize !== 'number' || !Number.isFinite(vhd.virtualSize)) {
+          throw new Error(`The virtual disk ${vpath} does not exist yet — set its size to create it`);
+        }
+        const problem = validateVirtualSize(
+          virtualDiskFormatFromPath(vpath),
+          roundToSector(Math.floor(vhd.virtualSize))
+        );
+        if (problem) {
+          throw new Error(problem);
+        }
+      }
+      return;
     }
 
     if (typeof config.targetDiskIndex !== 'number' || config.targetDiskIndex < 0) {

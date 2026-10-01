@@ -1,4 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+
+/** VHD/VHDX target state shared by the target step, preflight and start. */
+function virtualDiskFormatFromPath(p: string): 'vhd' | 'vhdx' {
+  return /\.vhdx$/i.test(p) ? 'vhdx' : 'vhd';
+}
 
 interface RestoreWizardProps {
   onComplete: () => void;
@@ -39,6 +44,7 @@ interface PreflightResult {
   unlockRequired?: boolean;
   lockedLetter?: string;
   targetIsSystemDisk?: boolean;
+  targetFileExists?: boolean;
 }
 
 interface RestoreResultSummary {
@@ -90,6 +96,11 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   const [disks, setDisks] = useState<DiskInfo[]>([]);
   const [disksLoading, setDisksLoading] = useState(true);
   const [targetDiskIndex, setTargetDiskIndex] = useState<number | null>(null);
+  const [targetKind, setTargetKind] = useState<'disk' | 'vhd'>('disk');
+  const [vhdPath, setVhdPath] = useState('');
+  const [vhdSizeGb, setVhdSizeGb] = useState(16);
+  const [vhdType, setVhdType] = useState<'dynamic' | 'fixed'>('dynamic');
+  const vhdSizeEdited = useRef(false);
   const [targetPartitions, setTargetPartitions] = useState<number[]>([]);
   const [applyDeltas, setApplyDeltas] = useState(true);
   const [clearFreeSpace, setClearFreeSpace] = useState(true);
@@ -137,7 +148,19 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     if (!imagePath) return;
     window.electronAPI
       .getImageInfo(imagePath)
-      .then((info) => setImageInfo(info))
+      .then((info) => {
+        setImageInfo(info);
+        // Offer a virtual disk big enough for the whole image until the user
+        // types their own size.
+        if (!vhdSizeEdited.current && Array.isArray(info?.partitions)) {
+          let end = 0;
+          for (const p of info.partitions) {
+            end = Math.max(end, (p.offsetOnDisk ?? 0) + p.size);
+          }
+          const bytes = Math.ceil((end + 1048576) / 1048576) * 1048576;
+          setVhdSizeGb(Math.max(1, Math.ceil(bytes / 1073741824)));
+        }
+      })
       .catch(() => setImageInfo(null));
   }, [imagePath]);
 
@@ -146,7 +169,8 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   useEffect(() => {
     let alive = true;
     const run = () => {
-      if (imagePath && targetDiskIndex !== null && targetPartitions.length > 0) {
+      const ready = targetKind === 'disk' ? targetDiskIndex !== null : vhdPath.trim() !== '';
+      if (imagePath && ready && targetPartitions.length > 0) {
         setPreflightLoading(true);
         setAcknowledge(false);
         setUnlockNotice(null);
@@ -154,9 +178,18 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
         window.electronAPI
           .restorePreflight({
             imagePath,
-            targetDiskIndex,
             targetPartitions,
-            applyDeltas
+            applyDeltas,
+            ...(targetKind === 'vhd'
+              ? {
+                  targetVirtualDisk: {
+                    path: vhdPath.trim(),
+                    virtualSize: Math.round(vhdSizeGb * 1024 ** 3),
+                    format: virtualDiskFormatFromPath(vhdPath.trim()),
+                    type: vhdType
+                  }
+                }
+              : { targetDiskIndex })
           })
           .then((res) => {
             if (alive) setPreflight(res);
@@ -177,7 +210,17 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     return () => {
       alive = false;
     };
-  }, [imagePath, targetDiskIndex, targetPartitions.join(','), applyDeltas, preflightNonce]);
+  }, [
+    imagePath,
+    targetDiskIndex,
+    targetPartitions.join(','),
+    applyDeltas,
+    preflightNonce,
+    targetKind,
+    vhdPath,
+    vhdSizeGb,
+    vhdType
+  ]);
 
   // Unlock the image's BitLocker-locked volume with a recovery password, then
   // re-run the preflight inside the same step (one UAC prompt on Windows).
@@ -215,6 +258,16 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     }
   };
 
+  const handleSelectVhd = async () => {
+    const p = await window.electronAPI.selectSaveFile({
+      name: vhdPath || 'restore-target.vhdx',
+      filters: [{ name: 'Virtual disks', extensions: ['vhdx', 'vhd'] }]
+    });
+    if (p) setVhdPath(p);
+  };
+
+  const targetReady = targetKind === 'disk' ? targetDiskIndex !== null : vhdPath.trim() !== '';
+
   const handleStartRestore = async () => {
     setCurrentStep('progress');
     setRestoreResult(null);
@@ -223,11 +276,20 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     try {
       const result = (await window.electronAPI.startRestore({
         imagePath,
-        targetDiskIndex: targetDiskIndex!,
         targetPartitions,
         verifyBeforeWrite: true,
         applyDeltas,
         clearFreeSpace,
+        ...(targetKind === 'vhd'
+          ? {
+              targetVirtualDisk: {
+                path: vhdPath.trim(),
+                virtualSize: Math.round(vhdSizeGb * 1024 ** 3),
+                format: virtualDiskFormatFromPath(vhdPath.trim()),
+                type: vhdType
+              }
+            }
+          : { targetDiskIndex: targetDiskIndex! }),
         ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {})
       })) as RestoreResultSummary | undefined;
       setRestoreResult(result ?? null);
@@ -255,12 +317,13 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   const destructiveAckNeeded =
     !!preflight && preflight.ok &&
     (!!preflight.writeTableScheme || !!preflight.sameDisk ||
+      !!preflight.targetFileExists ||
       (preflight.targetDiskPartitionCount ?? 0) > 0);
 
   const canStart =
     !!preflight &&
     preflight.ok &&
-    !!targetDiskIndex &&
+    targetReady &&
     !(imageInfo?.encrypted && !passphrase.trim()) &&
     (!destructiveAckNeeded || acknowledge);
 
@@ -320,36 +383,107 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
       case 'select_target':
         return (
           <div className="wizard-step">
-            <h2>Select Target Disk</h2>
-            
+            <h2>{targetKind === 'vhd' ? 'Select Target Virtual Disk' : 'Select Target Disk'}</h2>
+
             <div className="target-disk-selector">
-              <p className="warning-text">
-                Warning: This will overwrite all data on the target disk!
-              </p>
-              
-              {disksLoading ? (
-                <div className="loading">Loading disks...</div>
-              ) : (
-                <div className="disk-list">
-                  {disks.map((disk) => (
-                    <div
-                      key={disk.index}
-                      className={`disk-card ${targetDiskIndex === disk.index ? 'selected' : ''}`}
-                      onClick={() => {
-                        setTargetDiskIndex(disk.index);
-                        setTargetPartitions([]);
-                        setAcknowledge(false);
-                      }}
-                    >
-                      <h3>{disk.model}</h3>
-                      <p>Size: {formatSize(disk.size)}</p>
-                      <p>Partitions: {disk.partitions.length}</p>
-                    </div>
-                  ))}
+              {!isClone && (
+                <div className="target-kind-toggle">
+                  <label className={`target-kind-option ${targetKind === 'disk' ? 'selected' : ''}`}>
+                    <input
+                      type="radio"
+                      name="target-kind"
+                      checked={targetKind === 'disk'}
+                      onChange={() => setTargetKind('disk')}
+                    />
+                    Physical disk
+                  </label>
+                  <label className={`target-kind-option ${targetKind === 'vhd' ? 'selected' : ''}`}>
+                    <input
+                      type="radio"
+                      name="target-kind"
+                      checked={targetKind === 'vhd'}
+                      onChange={() => setTargetKind('vhd')}
+                    />
+                    Virtual disk (VHD / VHDX)
+                  </label>
                 </div>
               )}
-              
-              {targetDiskIndex !== null && (
+              <p className="warning-text">
+                {targetKind === 'vhd'
+                  ? 'Warning: The restore writes into the virtual disk file, overwriting its contents!'
+                  : 'Warning: This will overwrite all data on the target disk!'}
+              </p>
+
+              {targetKind === 'disk' &&
+                (disksLoading ? (
+                  <div className="loading">Loading disks...</div>
+                ) : (
+                  <div className="disk-list">
+                    {disks.map((disk) => (
+                      <div
+                        key={disk.index}
+                        className={`disk-card ${targetDiskIndex === disk.index ? 'selected' : ''}`}
+                        onClick={() => {
+                          setTargetDiskIndex(disk.index);
+                          setTargetPartitions([]);
+                          setAcknowledge(false);
+                        }}
+                      >
+                        <h3>{disk.model}</h3>
+                        <p>Size: {formatSize(disk.size)}</p>
+                        <p>Partitions: {disk.partitions.length}</p>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+
+              {targetKind === 'vhd' && (
+                <div className="vhd-target">
+                  <div className="current-path">
+                    <label>Virtual Disk File (.vhd / .vhdx):</label>
+                    <div className="path-input">
+                      <input
+                        type="text"
+                        value={vhdPath}
+                        placeholder="D:\VMs\restore-target.vhdx"
+                        onChange={(e) => setVhdPath(e.target.value)}
+                      />
+                      <button onClick={() => void handleSelectVhd()}>Browse</button>
+                    </div>
+                  </div>
+                  <div className="vhd-options">
+                    <div className="option-group">
+                      <label>Size (GB):</label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={vhdSizeGb}
+                        onChange={(e) => {
+                          vhdSizeEdited.current = true;
+                          setVhdSizeGb(Math.max(1, Number(e.target.value) || 1));
+                        }}
+                      />
+                    </div>
+                    <div className="option-group">
+                      <label>Type:</label>
+                      <select
+                        value={vhdType}
+                        onChange={(e) => setVhdType(e.target.value as 'dynamic' | 'fixed')}
+                      >
+                        <option value="dynamic">Dynamic (grows as data is written)</option>
+                        <option value="fixed">Fixed (pre-allocates the full size)</option>
+                      </select>
+                    </div>
+                  </div>
+                  <p className="field-hint">
+                    The size is only used when the file has to be created — an existing file's
+                    capacity is used as-is. A fresh file gets a new partition table so the restored
+                    volumes show up in Windows.
+                  </p>
+                </div>
+              )}
+
+              {targetReady && (
                 <div className="partition-selection">
                   <h3>Select Partitions to Restore</h3>
                   <div className="partition-list">
@@ -382,7 +516,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                 </div>
               )}
 
-              {targetDiskIndex !== null && targetPartitions.length > 0 && (
+              {targetReady && targetPartitions.length > 0 && (
                 <div className="preflight-panel">
                   {preflightLoading ? (
                     <p className="field-hint">Checking target disk…</p>
@@ -442,7 +576,11 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                         </div>
                         <div>
                           <span>Target</span>
-                          <strong>{preflight.targetDiskModel ?? `Disk ${targetDiskIndex}`}</strong>
+                          <strong>
+                            {targetKind === 'vhd'
+                              ? preflight.targetDiskModel ?? 'Virtual disk'
+                              : preflight.targetDiskModel ?? `Disk ${targetDiskIndex}`}
+                          </strong>
                         </div>
                       </div>
                       {(preflight.targetDiskPartitionCount ?? 0) > 0 && (
@@ -458,6 +596,11 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                           <p>This restore writes a fresh {preflight.writeTableScheme.toUpperCase()} partition table, erasing the target disk's current layout.</p>
                         </div>
                       )}
+                      {preflight.targetFileExists && (
+                        <div className="error-message">
+                          <p>A virtual disk file already exists at this path — restoring overwrites its contents.</p>
+                        </div>
+                      )}
                       {preflight.sameDisk && (
                         <div className="error-message">
                           <p>Target disk matches the disk the image was captured from. Restoring overwrites the source.</p>
@@ -468,8 +611,8 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                           <p>This image is encrypted. Enter the passphrase to restore it.</p>
                         </div>
                       )}
-                      {preflight.warnings.map((w, i) => (
-                        w.includes('matches the source disk') ? (
+                      {(preflight.warnings ?? []).map((w, i) => (
+                        w.includes('matches the source disk') || w.includes('virtual disk') ? (
                           <div key={i} className="warning-box">
                             <p>{w}</p>
                           </div>
@@ -487,7 +630,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
               </button>
               <button
                 className="btn-primary"
-                disabled={targetDiskIndex === null || targetPartitions.length === 0 || (!!preflight && !preflight.ok) || preflightLoading}
+                disabled={!targetReady || targetPartitions.length === 0 || (!!preflight && !preflight.ok) || preflightLoading}
                 onClick={() => setCurrentStep('options')}
               >
                 Next
@@ -551,7 +694,10 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                     checked={acknowledge}
                     onChange={(e) => setAcknowledge(e.target.checked)}
                   />
-                  Yes, I understand the target disk will be permanently overwritten and existing data will be lost.
+                  Yes, I understand{' '}
+                  {targetKind === 'vhd'
+                    ? 'the virtual disk file will be overwritten and existing data in it will be lost.'
+                    : 'the target disk will be permanently overwritten and existing data will be lost.'}
                 </label>
               </div>
             )}
@@ -560,7 +706,13 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
               <h3>{isClone ? 'Clone Summary' : 'Restore Summary'}</h3>
               <ul>
                 <li>Source Image: {imagePath}</li>
-                <li>Target Disk: {preflight?.targetDiskModel ?? `Disk ${targetDiskIndex}`} ({formatSize(preflight?.targetDiskBytes ?? 0)})</li>
+                <li>
+                  {targetKind === 'vhd' ? 'Target Virtual Disk' : 'Target Disk'}:{' '}
+                  {targetKind === 'vhd'
+                    ? vhdPath
+                    : preflight?.targetDiskModel ?? `Disk ${targetDiskIndex}`}{' '}
+                  ({formatSize(preflight?.targetDiskBytes ?? 0)})
+                </li>
                 <li>Partitions to Restore: {targetPartitions.length}</li>
                 <li>Required Space: {formatSize(preflight?.requiredBytes ?? 0)}</li>
                 <li>Clear free space: {clearFreeSpace ? 'Yes (slower, thorough)' : 'No (fast)'}</li>

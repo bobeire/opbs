@@ -6,6 +6,7 @@
 #include "partition_table.h"
 
 void RegisterWinFspMount(Napi::Env env, Napi::Object exports);
+void RegisterVirtualDisk(Napi::Env env, Napi::Object exports);
 
 // Disk enumeration wrapper
 Napi::Value GetDisks(const Napi::CallbackInfo& info) {
@@ -376,6 +377,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
     RegisterZstd(env, exports);
     RegisterPartitionTable(env, exports);
     RegisterWinFspMount(env, exports);
+    RegisterVirtualDisk(env, exports);
     exports.Set("getDisks", Napi::Function::New(env, GetDisks));
     exports.Set("getPartitions", Napi::Function::New(env, GetPartitions));
     exports.Set("getPhysicalDrivePath", Napi::Function::New(env, GetPhysicalDrivePath));

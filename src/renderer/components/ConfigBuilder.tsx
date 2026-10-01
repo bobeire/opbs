@@ -38,7 +38,11 @@ interface BackupForm {
 
 interface RestoreForm {
   imagePath: string;
+  targetKind: 'disk' | 'vhd';
   targetDiskIndex: number | null;
+  vhdPath: string;
+  vhdSizeGb: number;
+  vhdType: 'dynamic' | 'fixed';
   targetPartitions: number[];
   verifyBeforeWrite: boolean;
   applyDeltas: boolean;
@@ -118,7 +122,11 @@ const DEFAULT_BACKUP: BackupForm = {
 
 const DEFAULT_RESTORE: RestoreForm = {
   imagePath: '',
+  targetKind: 'disk',
   targetDiskIndex: null,
+  vhdPath: '',
+  vhdSizeGb: 64,
+  vhdType: 'dynamic',
   targetPartitions: [],
   verifyBeforeWrite: true,
   applyDeltas: true,
@@ -175,6 +183,9 @@ function ConfigBuilder() {
   const [disksLoading, setDisksLoading] = useState(true);
   const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [extras, setExtras] = useState<Partial<Record<Tab, Record<string, unknown>>>>({});
+  const [imageInfo, setImageInfo] = useState<{
+    partitions?: Array<{ index: number; size: number; fsType?: string }>;
+  } | null>(null);
 
   const [backup, setBackup] = useState<BackupForm>(DEFAULT_BACKUP);
   const [restore, setRestore] = useState<RestoreForm>(DEFAULT_RESTORE);
@@ -199,6 +210,31 @@ function ConfigBuilder() {
       alive = false;
     };
   }, []);
+
+  // Read the image's partition list for the restore tab — a VHD target has no
+  // disk to read partitions from, so the image is the only source.
+  useEffect(() => {
+    let alive = true;
+    const p = restore.imagePath.trim();
+    Promise.resolve().then(() => {
+      if (!alive) return;
+      if (!p) {
+        setImageInfo(null);
+        return;
+      }
+      window.electronAPI
+        .getImageInfo(p)
+        .then((info) => {
+          if (alive) setImageInfo(info);
+        })
+        .catch(() => {
+          if (alive) setImageInfo(null);
+        });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [restore.imagePath]);
 
   const formatSize = (bytes: number): string => {
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -242,6 +278,16 @@ function ConfigBuilder() {
     { name: 'OPBS images', extensions: ['opbs'] },
     { name: 'All files', extensions: ['*'] }
   ];
+  const VHD_FILTERS = [{ name: 'Virtual disks', extensions: ['vhdx', 'vhd'] }];
+
+  const pickSaveFile = async (
+    setPath: (p: string) => void,
+    name: string,
+    filters: Array<{ name: string; extensions: string[] }>
+  ): Promise<void> => {
+    const p = await window.electronAPI.selectSaveFile({ name, filters });
+    if (p) setPath(p);
+  };
 
   const diskSelect = (label: string, value: number | null, onChange: (i: number | null) => void) => (
     <div className="builder-row">
@@ -307,7 +353,15 @@ function ConfigBuilder() {
           ...compact({
             kind: 'restore',
             imagePath: restore.imagePath.trim(),
-            targetDiskIndex: restore.targetDiskIndex ?? undefined,
+            targetDiskIndex: restore.targetKind === 'disk' ? restore.targetDiskIndex ?? undefined : undefined,
+            targetVirtualDisk:
+              restore.targetKind === 'vhd' && restore.vhdPath.trim()
+                ? {
+                    path: restore.vhdPath.trim(),
+                    virtualSize: Math.round(restore.vhdSizeGb * 1024 ** 3),
+                    type: restore.vhdType
+                  }
+                : undefined,
             targetPartitions: restore.targetPartitions,
             verifyBeforeWrite: restore.verifyBeforeWrite,
             applyDeltas: restore.applyDeltas,
@@ -383,7 +437,11 @@ function ConfigBuilder() {
       if (!backup.destinationPath.trim()) missing.push('destination');
     } else if (t === 'restore') {
       if (!restore.imagePath.trim()) missing.push('image path');
-      if (restore.targetDiskIndex === null) missing.push('target disk');
+      if (restore.targetKind === 'disk') {
+        if (restore.targetDiskIndex === null) missing.push('target disk');
+      } else if (!restore.vhdPath.trim()) {
+        missing.push('virtual disk file');
+      }
       if (restore.targetPartitions.length === 0) missing.push('partitions');
     } else if (t === 'clone') {
       if (clone.sourceDiskIndex === null) missing.push('source disk');
@@ -406,6 +464,19 @@ function ConfigBuilder() {
   const applyParsed = (t: Tab, parsed: Record<string, unknown>): void => {
     const rest: Record<string, unknown> = { ...parsed };
     delete rest.kind;
+    // A restore config carries its virtual-disk target as targetVirtualDisk —
+    // fold it into the form fields and keep it out of the unknown-key extras
+    // (buildObject regenerates it from the form, so no stale copy can linger).
+    let parsedVhd: Record<string, unknown> | null = null;
+    if (
+      t === 'restore' &&
+      typeof rest.targetVirtualDisk === 'object' &&
+      rest.targetVirtualDisk !== null &&
+      !Array.isArray(rest.targetVirtualDisk)
+    ) {
+      parsedVhd = rest.targetVirtualDisk as Record<string, unknown>;
+      delete rest.targetVirtualDisk;
+    }
     const knownByTab: Record<Exclude<Tab, 'schedule'>, string[]> = {
       backup: Object.keys(DEFAULT_BACKUP),
       restore: Object.keys(DEFAULT_RESTORE),
@@ -436,10 +507,17 @@ function ConfigBuilder() {
         passphrase: asStr(rest.passphrase, prev.passphrase)
       }));
     } else if (t === 'restore') {
+      const vhdObj = parsedVhd;
+      const vhdPathParsed = vhdObj ? asStr(vhdObj.path, '') : '';
+      const vhdSizeParsed = vhdObj ? asNum(vhdObj.virtualSize, 0) : 0;
       setRestore((prev) => ({
         ...prev,
         imagePath: asStr(rest.imagePath, prev.imagePath),
+        targetKind: vhdPathParsed ? 'vhd' : rest.targetDiskIndex !== undefined && rest.targetDiskIndex !== null ? 'disk' : prev.targetKind,
         targetDiskIndex: asIndex(rest.targetDiskIndex, prev.targetDiskIndex),
+        vhdPath: vhdPathParsed || prev.vhdPath,
+        vhdSizeGb: vhdSizeParsed > 0 ? Math.max(1, Math.ceil(vhdSizeParsed / 1024 ** 3)) : prev.vhdSizeGb,
+        vhdType: vhdObj && vhdObj.type === 'fixed' ? 'fixed' : vhdObj ? 'dynamic' : prev.vhdType,
         targetPartitions: asList(rest.targetPartitions, prev.targetPartitions),
         verifyBeforeWrite: asBool(rest.verifyBeforeWrite, prev.verifyBeforeWrite),
         applyDeltas: asBool(rest.applyDeltas, prev.applyDeltas),
@@ -703,8 +781,78 @@ function ConfigBuilder() {
               </div>
             </div>
 
-            {diskSelect('Target disk', restore.targetDiskIndex, (i) =>
-              setRestore((prev) => ({ ...prev, targetDiskIndex: i, targetPartitions: [] })))}
+            <div className="builder-row">
+              <label>Target</label>
+              <select
+                value={restore.targetKind}
+                onChange={(e) =>
+                  setRestore((prev) => ({ ...prev, targetKind: e.target.value === 'vhd' ? 'vhd' : 'disk' }))
+                }
+              >
+                <option value="disk">Physical disk</option>
+                <option value="vhd">Virtual disk (VHD / VHDX)</option>
+              </select>
+            </div>
+
+            {restore.targetKind === 'disk' ? (
+              diskSelect('Target disk', restore.targetDiskIndex, (i) =>
+                setRestore((prev) => ({ ...prev, targetDiskIndex: i, targetPartitions: [] })))
+            ) : (
+              <>
+                <div className="builder-row">
+                  <label>Virtual disk file</label>
+                  <div className="path-input">
+                    <input
+                      type="text"
+                      value={restore.vhdPath}
+                      placeholder="D:\VMs\restore-target.vhdx"
+                      onChange={(e) => setRestore((prev) => ({ ...prev, vhdPath: e.target.value }))}
+                    />
+                    <button
+                      className="btn-secondary"
+                      onClick={() =>
+                        void pickSaveFile(
+                          (p) => setRestore((prev) => ({ ...prev, vhdPath: p })),
+                          'restore-target.vhdx',
+                          VHD_FILTERS
+                        )
+                      }
+                    >
+                      Browse…
+                    </button>
+                  </div>
+                </div>
+                <div className="builder-grid">
+                  <div className="builder-row">
+                    <label>Size (GB)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={restore.vhdSizeGb}
+                      onChange={(e) =>
+                        setRestore((prev) => ({ ...prev, vhdSizeGb: Math.max(1, Number(e.target.value) || 1) }))
+                      }
+                    />
+                  </div>
+                  <div className="builder-row">
+                    <label>Type</label>
+                    <select
+                      value={restore.vhdType}
+                      onChange={(e) =>
+                        setRestore((prev) => ({ ...prev, vhdType: e.target.value === 'fixed' ? 'fixed' : 'dynamic' }))
+                      }
+                    >
+                      <option value="dynamic">Dynamic (grows as data is written)</option>
+                      <option value="fixed">Fixed (pre-allocates the full size)</option>
+                    </select>
+                  </div>
+                </div>
+                <p className="field-hint">
+                  The size is only used when the file has to be created — an existing file's capacity
+                  is used as-is.
+                </p>
+              </>
+            )}
 
             <div className="builder-row">
               <label>Partitions to restore</label>
@@ -712,8 +860,11 @@ function ConfigBuilder() {
                 <button
                   className="btn-secondary btn-small"
                   onClick={() => {
-                    const disk = disks.find((d) => d.index === restore.targetDiskIndex);
-                    setRestore((prev) => ({ ...prev, targetPartitions: disk ? disk.partitions.map((p) => p.partitionIndex) : [] }));
+                    const all =
+                      restore.targetKind === 'disk'
+                        ? disks.find((d) => d.index === restore.targetDiskIndex)?.partitions.map((p) => p.partitionIndex) ?? []
+                        : (imageInfo?.partitions ?? []).map((p) => p.index);
+                    setRestore((prev) => ({ ...prev, targetPartitions: all }));
                   }}
                 >
                   Select all
@@ -726,8 +877,35 @@ function ConfigBuilder() {
                 </button>
               </div>
             </div>
-            {partitionList(restore.targetDiskIndex, restore.targetPartitions, (i) =>
-              setRestore((prev) => ({ ...prev, targetPartitions: toggle(prev.targetPartitions, i) })))}
+            {restore.targetKind === 'disk' ? (
+              partitionList(restore.targetDiskIndex, restore.targetPartitions, (i) =>
+                setRestore((prev) => ({ ...prev, targetPartitions: toggle(prev.targetPartitions, i) })))
+            ) : imageInfo?.partitions?.length ? (
+              <div className="partition-list builder-partitions">
+                {imageInfo.partitions.map((p) => (
+                  <label key={p.index} className="partition-item">
+                    <input
+                      type="checkbox"
+                      checked={restore.targetPartitions.includes(p.index)}
+                      onChange={() =>
+                        setRestore((prev) => ({ ...prev, targetPartitions: toggle(prev.targetPartitions, p.index) }))
+                      }
+                    />
+                    <span className="partition-info">
+                      Partition {p.index} · {formatSize(p.size)} · {p.fsType ?? 'Unknown'}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <p className="field-hint">
+                {restore.imagePath.trim()
+                  ? imageInfo
+                    ? 'No partitions found in this image.'
+                    : 'Could not read that image.'
+                  : 'Pick an image file to list its partitions.'}
+              </p>
+            )}
 
             <div className="builder-grid">
               <div className="builder-row">

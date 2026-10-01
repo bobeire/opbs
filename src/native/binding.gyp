@@ -10,6 +10,7 @@
         "src/disk_reader.cpp",
         "src/backup_format.cpp",
         "src/winfsp_mount.cpp",
+        "src/virtual_disk.cpp",
         "vendor/zstd/common/entropy_common.c",
         "vendor/zstd/common/error_private.c",
         "vendor/zstd/common/fse_decompress.c",
@@ -73,7 +74,8 @@
                   "-lvssapi",
                   "-ldbghelp",
                   "-lshell32",
-                  "-luser32"
+                  "-luser32",
+                  "-lVirtdisk"
                 ]
               }
             ]

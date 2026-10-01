@@ -7,10 +7,19 @@ import { RestoreJob, RestoreJobProgress, RestoreJobResult, RestoreTarget, JobEnc
 import { buildRestoreTablePlan, RestoreTableOptions } from './partition-table';
 import { launchElevatedJob } from '../helper/launcher';
 import { logger } from '../utils/logger';
+import { VirtualDiskTarget, resolveVirtualDiskSize } from '../utils/virtual-disk';
 
 export interface RestoreJobConfig {
   imagePath: string;
-  targetDiskIndex: number;
+  /** Target physical disk. Required unless `targetVirtualDisk` is set (the
+   *  elevated helper fills it in with the attached virtual disk's index). */
+  targetDiskIndex?: number;
+  /**
+   * Restore into a .vhd/.vhdx file instead of a physical disk. When set, the
+   * elevated helper creates the file if missing, attaches it, discovers the
+   * resulting disk index and then runs the ordinary restore against it.
+   */
+  targetVirtualDisk?: VirtualDiskTarget;
   targetPartitions: number[];
   verifyBeforeWrite?: boolean;
   /** Optional passphrase required to read an encrypted image. */
@@ -135,6 +144,16 @@ export function summarizeImage(imagePath: string): ImageSummary {
 
 type LaunchedRestoreJob = ReturnType<typeof launchElevatedJob<RestoreJob, RestoreJobProgress, RestoreJobResult>>;
 
+/**
+ * Elevated payload for a restore into a .vhd/.vhdx file. The helper creates
+ * the file when missing, attaches it, discovers the disk index, injects it
+ * into the config and then runs the ordinary restore job.
+ */
+export interface RestoreVhdJob {
+  type: 'restore-vhd';
+  config: RestoreJobConfig;
+}
+
 export class RestoreEngine implements RestoreCoordinator {
   private current: LaunchedRestoreJob | null = null;
 
@@ -182,7 +201,7 @@ export class RestoreEngine implements RestoreCoordinator {
       }
       targets.push({
         partitionIndex,
-        diskIndex: config.targetDiskIndex,
+        diskIndex: config.targetDiskIndex ?? -1,
         offset,
         size,
         label: `Partition ${partitionIndex}`
@@ -190,17 +209,27 @@ export class RestoreEngine implements RestoreCoordinator {
     }
 
     // Sanity check: the target disk must be large enough for every placement.
+    // A virtual-disk target before the helper attaches it has no disk entry —
+    // size checks use the backing file's (or the configured) virtual capacity.
+    const vhd = config.targetVirtualDisk;
     const disks = await this.diskEnumerator.getDisks();
-    const targetDisk = disks.find((d) => d.index === config.targetDiskIndex);
-    if (!targetDisk) {
-      throw new Error(`Target disk ${config.targetDiskIndex} not found`);
+    let targetDisk: (typeof disks)[number] | undefined;
+    if (config.targetDiskIndex != null) {
+      targetDisk = disks.find((d) => d.index === config.targetDiskIndex);
+      if (!targetDisk) {
+        throw new Error(`Target disk ${config.targetDiskIndex} not found`);
+      }
+    } else if (!vhd) {
+      throw new Error('No target disk selected');
     }
+    const targetDiskSize = targetDisk ? targetDisk.size : resolveVirtualDiskSize(vhd!);
+    const targetLabel = targetDisk ? `target disk ${config.targetDiskIndex}` : `virtual disk ${vhd!.path}`;
     for (const target of targets) {
       const partition = info.partitions.find((p) => p.partitionIndex === target.partitionIndex)!;
       const size = target.size ?? partition.size;
-      if (BigInt(target.offset) + BigInt(size) > BigInt(targetDisk.size)) {
+      if (BigInt(target.offset) + BigInt(size) > BigInt(targetDiskSize)) {
         throw new Error(
-          `Partition ${target.partitionIndex} (${size} bytes at offset ${target.offset}) does not fit on target disk ${config.targetDiskIndex} (${targetDisk.size} bytes)`
+          `Partition ${target.partitionIndex} (${size} bytes at offset ${target.offset}) does not fit on ${targetLabel} (${targetDiskSize} bytes)`
         );
       }
     }
@@ -221,8 +250,8 @@ export class RestoreEngine implements RestoreCoordinator {
     // explicit acknowledgement beyond the generic layout one.
     const sourceModel = info.header.sourceDiskModel ?? '';
     const sourceSerial = info.header.sourceDiskSerial ?? '';
-    const targetModel = targetDisk.model ?? '';
-    const targetSerial = targetDisk.serial ?? '';
+    const targetModel = targetDisk?.model ?? '';
+    const targetSerial = targetDisk?.serial ?? '';
     const warnings: string[] = [];
 
     const sameDisk = deviatesFromCaptured && sourceSerial !== '' && targetSerial === sourceSerial;
@@ -246,9 +275,6 @@ export class RestoreEngine implements RestoreCoordinator {
           'If this is the same physical drive, restoring will overwrite the source; verify the target disk if unsure.'
       );
     }
-    if (warnings.length > 0) {
-      logger.warn(warnings.join(' '));
-    }
 
     let writeTable: RestoreJob['writeTable'] = undefined;
     if (config.targetLayout && deviatesFromCaptured) {
@@ -271,11 +297,49 @@ export class RestoreEngine implements RestoreCoordinator {
             const partition = info.partitions.find((p) => p.partitionIndex === t.partitionIndex)!;
             return { partitionIndex: t.partitionIndex, offset: t.offset, size: t.size ?? partition.size };
           }),
-          targetDisk.size,
+          targetDiskSize,
           tableOptions
         );
         writeTable = { scheme: plan.scheme, diskSize: plan.diskSize, entries: plan.entries, diskGuid: plan.diskGuid };
       }
+    } else if (vhd && config.writePartitionTable !== false) {
+      // A virtual disk starts blank: without a partition table the restored
+      // volumes would be invisible in Explorer. Always lay one down (the
+      // captured layout is not "destroyed" — there is nothing to destroy, so
+      // no acknowledgement gate is needed). Prefer GPT for auto mode; fall
+      // back to MBR when the layout cannot be represented as GPT.
+      const tableOptions: RestoreTableOptions = {
+        scheme: config.tableScheme ?? 'auto',
+        diskGuid: config.tableDiskGuid,
+        typeGuids: config.tableTypeGuids,
+        bootPartition: config.tableBootPartition
+      };
+      const placements = targets.map((t) => {
+        const partition = info.partitions.find((p) => p.partitionIndex === t.partitionIndex)!;
+        return { partitionIndex: t.partitionIndex, offset: t.offset, size: t.size ?? partition.size };
+      });
+      let plan;
+      try {
+        plan = buildRestoreTablePlan(placements, targetDiskSize, {
+          ...tableOptions,
+          scheme: tableOptions.scheme === 'auto' ? 'gpt' : tableOptions.scheme
+        });
+      } catch (error) {
+        if (tableOptions.scheme !== 'auto') {
+          throw error;
+        }
+        plan = buildRestoreTablePlan(placements, targetDiskSize, tableOptions);
+      }
+      writeTable = { scheme: plan.scheme, diskSize: plan.diskSize, entries: plan.entries, diskGuid: plan.diskGuid };
+      warnings.push(
+        `A fresh ${plan.scheme.toUpperCase()} partition table will be written — the virtual disk is a blank target.`
+      );
+      if (config.targetDiskIndex == null) {
+        warnings.push('Disk identity and same-disk checks run again after the virtual disk is attached.');
+      }
+    }
+    if (warnings.length > 0) {
+      logger.warn(warnings.join(' '));
     }
 
     const encryption: JobEncryption | undefined = config.passphrase
@@ -308,13 +372,19 @@ export class RestoreEngine implements RestoreCoordinator {
   }
 
   async runRestore(config: RestoreJobConfig, onProgress: (p: RestoreJobProgress) => void): Promise<RestoreJobResult> {
-    const job = await this.buildJob(config);
+    // Virtual-disk targets are prepared inside the elevated helper (create /
+    // attach / discover), so the job file carries the raw config instead of a
+    // pre-built restore job.
+    const payload: RestoreJob | RestoreVhdJob = config.targetVirtualDisk
+      ? { type: 'restore-vhd', config }
+      : await this.buildJob(config);
 
-    logger.info(`Starting elevated restore from ${job.imagePath}`, {
-      targets: job.targets.length
+    logger.info(`Starting elevated restore from ${config.imagePath}`, {
+      targets: payload.type === 'restore' ? payload.targets.length : undefined,
+      virtualDisk: config.targetVirtualDisk?.path
     });
 
-    const launched = launchElevatedJob<RestoreJob, RestoreJobProgress, RestoreJobResult>(job);
+    const launched = launchElevatedJob<RestoreJob | RestoreVhdJob, RestoreJobProgress, RestoreJobResult>(payload);
     this.current = launched;
 
     launched.onProgress(onProgress);

@@ -1012,6 +1012,52 @@ body {
   margin-bottom: 20px;
 }
 
+/* Physical disk vs. virtual disk (VHD/VHDX) target toggle */
+.target-kind-toggle {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.target-kind-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background-color: var(--bg-color);
+  border: 2px solid var(--border-color);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: border-color 0.2s;
+}
+
+.target-kind-option:hover {
+  border-color: var(--primary-color);
+}
+
+.target-kind-option.selected {
+  border-color: var(--primary-color);
+  background-color: rgba(37, 99, 235, 0.1);
+}
+
+.target-kind-option input[type="radio"] {
+  accent-color: var(--primary-color);
+  margin: 0;
+}
+
+/* VHD/VHDX target fields */
+.vhd-target {
+  margin-bottom: 20px;
+}
+
+.vhd-options {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
 /* Restore preflight / dry-run */
 .preflight-panel {
   margin-top: 20px;

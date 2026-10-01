@@ -15,6 +15,7 @@ Website: https://opbs.rhitcs.com
 - **Used-blocks-only capture**: `usedBlocksOnly` (CLI `--used-blocks-only`) reads the NTFS `$Bitmap` and stores only blocks containing allocated clusters, dropping free space; non-NTFS partitions fall back to a full capture.
 - **Read-only mount via WinFsp**: mount a partition from a `.opbs` or Macrium image as a virtual drive letter with **zero extra disk usage** — file reads are served lazily by decompressing only the covering blocks. Requires the free WinFsp runtime (https://winfsp.dev).
 - **Disk-to-disk clone**: `clone` copies selected live partitions straight onto a different local disk (VSS snapshots, optional dissimilar layout + fresh GPT/MBR table, optional grow-on-restore), with no image file or cloud upload. The GUI **Partition Copy** screen makes this drag-and-drop: pick a target disk, drag partition chips onto it (or “Copy all partitions”), preview the auto-sequential 1 MiB-aligned layout with optional grow-to-fill, confirm the erase warning, and watch live progress.
+- **Restore into a virtual disk (VHD/VHDX)**: `targetVirtualDisk` writes a restore into a `.vhd`/`.vhdx` file instead of a physical disk — the helper creates the file when missing (dynamic or fixed, up to 64 TiB), attaches it, re-runs every physical-disk safety gate against the attached disk, writes a fresh GPT/MBR table so the volumes are visible in Windows, then detaches the disk again. Available from the restore wizard, the Config Builder and JSON configs.
 - **Disk tools**: the **Disk Tools** screen (sidebar 🔧) groups four maintenance utilities — **MBR & Boot Repair** (read partition-table info from `Get-Disk`/`Get-Partition`, read the raw 512-byte MBR sector elevated for a full entry/CHS breakdown including the boot and disk signatures, and repair boot code / rebuild the BCD store via elevated `bootrec.exe`), **Disk Error Check** (read-only `chkdsk /scan`, plus elevated `/f` and slow `/r` modes), **SSD TRIM** (query `fsutil behavior query DisableDeleteNotify` and run an elevated `defrag /L` retrim), and **SMART Health** (per-disk reliability counters for every physical disk).
 - **Encryption**: optional AES-256-GCM per-block encryption (master-key-derived via PBKDF2-SHA256)
 - **Verification**: self-check images after write and before restore
@@ -349,6 +350,44 @@ are patched from the image's metadata. Growing is **grow-only** — a size below
 the captured size is refused at job-build time; a target that is not
 cluster-aligned, or a filesystem that is not a simple single-run NTFS layout,
 is reported as a warning and the restore still completes.
+
+### Restore into a virtual disk (VHD/VHDX)
+
+A restore can write into a `.vhd`/`.vhdx` file instead of a physical disk —
+handy for building VM disks from a backup, testing a restore safely, or
+recovering when the physical target is unavailable:
+
+```json
+{
+  "kind": "restore",
+  "imagePath": "D:\\OPBS\\img_0_1746300000000.opbs",
+  "targetVirtualDisk": { "path": "D:\\VMs\\restored.vhdx", "virtualSize": 137438953472, "type": "dynamic" },
+  "targetPartitions": [0]
+}
+```
+
+```bash
+OPBS.exe --cli restore job-restore.json
+```
+
+- `targetVirtualDisk.path` is the `.vhd`/`.vhdx` file to write into.
+  `virtualSize` (bytes) is required only when the file does not exist yet —
+  the elevated helper creates it, dynamic by default (`type:"fixed"` for a
+  fully pre-allocated file; max 2040 GiB for `.vhd`, 64 TiB for `.vhdx`).
+  An existing file is attached as-is and its real capacity is used.
+- The helper creates/attaches the virtual disk, resolves the resulting
+  `\\.\PhysicalDriveN` (via `GetVirtualDiskPhysicalPath`, with a before/after
+  size-diff fallback) and runs the ordinary restore against it — so every
+  physical-disk safety gate (capacity fit, identity, same-disk) still
+  applies, re-checked after the disk appears. The disk is detached again
+  afterwards when this restore is the one that attached it.
+- A fresh target gets a **new partition table** (GPT preferred, MBR fallback;
+  override with `tableScheme`) so the restored volumes show up in Windows.
+  Use `writePartitionTable:false` to write raw blocks only.
+- In the GUI, choose **Virtual disk (VHD / VHDX)** on the restore wizard's
+  target step (path, size, dynamic/fixed) or in the Config Builder's Restore
+  tab; the preflight flags an existing file (`targetFileExists`) before you
+  confirm the overwrite.
 
 ### Automated restore drills
 

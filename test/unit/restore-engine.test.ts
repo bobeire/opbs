@@ -4,7 +4,16 @@ import * as os from 'os';
 import * as path from 'path';
 import { RestoreEngine } from '../../src/main/imaging/restore-engine';
 import { DiskEnumerator } from '../../src/main/utils/disk-enumerator';
+import { launchElevatedJob } from '../../src/main/helper/launcher';
 import { encodeHeader, encodePartitionEntry, encodeBlockIndexEntry, encodeBlockFrame, compressBlock, crc32, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
+
+vi.mock('../../src/main/helper/launcher', () => ({
+  launchElevatedJob: vi.fn(() => ({
+    promise: Promise.resolve({ ok: true }),
+    cancel: vi.fn(),
+    onProgress: vi.fn()
+  }))
+}));
 
 const BLOCK = 4096;
 
@@ -320,5 +329,101 @@ describe('RestoreEngine same-disk identity guards', () => {
     });
     expect(job.targets[0].offset).toBe(1048576);
     expect(job.warnings).toBeUndefined();
+  });
+});
+
+describe('RestoreEngine virtual-disk targets', () => {
+  let dir: string;
+  let imagePath: string;
+  let vhdPath: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-restore-vhd-'));
+    imagePath = path.join(dir, 'image.opbs');
+    vhdPath = path.join(dir, 'target.vhdx');
+    writeImage(imagePath);
+    vi.mocked(launchElevatedJob).mockClear();
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('preflights against the configured virtual size when no disk exists yet', async () => {
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const job = await engine.buildJob({
+      imagePath,
+      targetPartitions: [0],
+      targetVirtualDisk: { path: vhdPath, virtualSize: 2 * 1024 ** 3 }
+    });
+    expect(job.targets[0].diskIndex).toBe(-1);
+    // The captured layout fits: a fresh GPT table is planned for the blank file.
+    expect(job.writeTable).toBeDefined();
+    expect(job.writeTable!.scheme).toBe('gpt');
+    expect(job.writeTable!.diskSize).toBe(2 * 1024 ** 3);
+    expect(job.warnings?.join(' ')).toMatch(/blank target/);
+    expect(job.warnings?.join(' ')).toMatch(/after the virtual disk is attached/);
+  });
+
+  it('rejects a virtual disk that is too small for the captured layout', async () => {
+    const engine = new RestoreEngine(createFakeEnumerator());
+    await expect(
+      engine.buildJob({
+        imagePath,
+        targetPartitions: [0],
+        targetVirtualDisk: { path: vhdPath, virtualSize: 1048576 }
+      })
+    ).rejects.toThrow(/does not fit on virtual disk/);
+  });
+
+  it('runs the full disk gates once the helper has attached the disk', async () => {
+    const engine = new RestoreEngine(createTargetEnumerator({ model: 'MSFT Virtual Disk', size: 2 * 1024 ** 3 }));
+    const job = await engine.buildJob({
+      imagePath,
+      targetDiskIndex: 1,
+      targetPartitions: [0],
+      targetVirtualDisk: { path: vhdPath, virtualSize: 2 * 1024 ** 3 }
+    });
+    expect(job.targets[0].diskIndex).toBe(1);
+    expect(job.writeTable).toBeDefined();
+    expect(job.writeTable!.diskSize).toBe(2 * 1024 ** 3);
+    expect(job.warnings?.join(' ')).not.toMatch(/after the virtual disk is attached/);
+  });
+
+  it('skips the fresh table when writePartitionTable is false', async () => {
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const job = await engine.buildJob({
+      imagePath,
+      targetPartitions: [0],
+      targetVirtualDisk: { path: vhdPath, virtualSize: 2 * 1024 ** 3 },
+      writePartitionTable: false
+    });
+    expect(job.writeTable).toBeUndefined();
+  });
+
+  it('launches a restore-vhd payload for virtual-disk targets', async () => {
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const config = {
+      imagePath,
+      targetPartitions: [0],
+      targetVirtualDisk: { path: vhdPath, virtualSize: 2 * 1024 ** 3 }
+    };
+    const result = await engine.runRestore(config, () => undefined);
+    expect(result).toEqual({ ok: true });
+    expect(launchElevatedJob).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'restore-vhd', config })
+    );
+  });
+
+  it('builds and launches a normal restore job for physical targets', async () => {
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const result = await engine.runRestore(
+      { imagePath, targetDiskIndex: 1, targetPartitions: [0] },
+      () => undefined
+    );
+    expect(result).toEqual({ ok: true });
+    expect(launchElevatedJob).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'restore' })
+    );
   });
 });

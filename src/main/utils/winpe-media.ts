@@ -406,6 +406,8 @@ export function buildReadme(): string {
     'accepted as aliases for imagePath / targetDiskIndex):',
     '   imagePath          : the .opbs image to restore',
     '   targetDiskIndex    : target physical disk (list with the disks command)',
+    '   targetVirtualDisk  : {path, virtualSize, type} to restore into a .vhd/.vhdx',
+    '                        instead of a physical disk (replaces targetDiskIndex)',
     '   targetPartitions   : partition indexes to restore (0 = whole disk)',
     '   passphrase         : passphrase for encrypted images (leave empty if none)',
     '',
