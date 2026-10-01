@@ -2,12 +2,24 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { DiskEnumerator } from '../utils/disk-enumerator';
-import { readImageInfo, newImageCipher, metadataFromCipher, FLAG_INCREMENTAL, COMPRESSION_NONE } from './image-format';
+import {
+  readImageInfo,
+  newImageCipher,
+  metadataFromCipher,
+  deriveImageKey,
+  resolveImageChain,
+  FLAG_INCREMENTAL,
+  COMPRESSION_NONE,
+  CIPHER_NONE
+} from './image-format';
+import { detectPartitionFilesystem, inferTableTypeGuids } from './fs/file-browse';
 import { RestoreJob, RestoreJobProgress, RestoreJobResult, RestoreTarget, JobEncryption } from './imaging-job';
 import { buildRestoreTablePlan, RestoreTableOptions } from './partition-table';
 import { launchElevatedJob } from '../helper/launcher';
 import { logger } from '../utils/logger';
 import { VirtualDiskTarget, resolveVirtualDiskSize } from '../utils/virtual-disk';
+
+export { resolveImageChain };
 
 export interface RestoreJobConfig {
   imagePath: string;
@@ -93,29 +105,6 @@ export interface ImageSummary {
   sourceDisk?: { model: string; serial: string };
 }
 
-/**
- * Resolve the restore chain for an image: walk `baseImagePath` links back to
- * the root full image, then return [root, ...intermediates, image].
- */
-export function resolveImageChain(imagePath: string): string[] {
-  const chain: string[] = [];
-  const seen = new Set<string>();
-  let current = imagePath;
-  while (true) {
-    if (seen.has(current)) {
-      throw new Error(`Circular incremental chain detected at ${current}`);
-    }
-    seen.add(current);
-    chain.unshift(current);
-    const info = readImageInfo(current);
-    if (!(info.header.flags & FLAG_INCREMENTAL) || !info.header.baseImagePath) {
-      break;
-    }
-    current = info.header.baseImagePath;
-  }
-  return chain;
-}
-
 export function summarizeImage(imagePath: string): ImageSummary {
   const info = readImageInfo(imagePath);
   return {
@@ -123,7 +112,7 @@ export function summarizeImage(imagePath: string): ImageSummary {
     partitions: info.partitions.map((p) => ({
       index: p.partitionIndex,
       size: p.size,
-      fsType: 'Unknown',
+      fsType: detectPartitionFilesystem(imagePath, p.partitionIndex).fsType,
       offsetOnDisk: p.offsetOnDisk,
       blockCount: p.blockCount
     })),
@@ -276,6 +265,25 @@ export class RestoreEngine implements RestoreCoordinator {
       );
     }
 
+    // GPT type-GUID inference: probe the image contents for EFI System
+    // Partitions (FAT32 with the spec-required \EFI directory) so a freshly
+    // laid table is bootable in a VM. Explicit tableTypeGuids always win.
+    const willWriteTable =
+      config.writePartitionTable !== false &&
+      ((config.targetLayout != null && deviatesFromCaptured) || vhd != null);
+    const tableTypeGuids = willWriteTable
+      ? {
+          ...inferTableTypeGuids(
+            config.imagePath,
+            targets.map((t) => t.partitionIndex),
+            config.passphrase && info.header.cipherId !== CIPHER_NONE
+              ? deriveImageKey(config.passphrase, info.header.salt, info.header.kdfIterations)
+              : undefined
+          ),
+          ...config.tableTypeGuids
+        }
+      : config.tableTypeGuids;
+
     let writeTable: RestoreJob['writeTable'] = undefined;
     if (config.targetLayout && deviatesFromCaptured) {
       if (config.acknowledgeLayout !== true) {
@@ -289,7 +297,7 @@ export class RestoreEngine implements RestoreCoordinator {
         const tableOptions: RestoreTableOptions = {
           scheme: config.tableScheme ?? 'auto',
           diskGuid: config.tableDiskGuid,
-          typeGuids: config.tableTypeGuids,
+          typeGuids: tableTypeGuids,
           bootPartition: config.tableBootPartition
         };
         const plan = buildRestoreTablePlan(
@@ -311,7 +319,7 @@ export class RestoreEngine implements RestoreCoordinator {
       const tableOptions: RestoreTableOptions = {
         scheme: config.tableScheme ?? 'auto',
         diskGuid: config.tableDiskGuid,
-        typeGuids: config.tableTypeGuids,
+        typeGuids: tableTypeGuids,
         bootPartition: config.tableBootPartition
       };
       const placements = targets.map((t) => {

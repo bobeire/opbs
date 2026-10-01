@@ -1,8 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { resolveImageChain } from '../restore-engine';
 import { PartitionReader, partitionReaderForChain } from '../image-browse';
-import { baseVolumePath } from '../image-format';
+import { baseVolumePath, resolveImageChain } from '../image-format';
+import { GPT_EFI_SYSTEM_GUID } from '../partition-table';
 import { logger } from '../../utils/logger';
 import { parseBootSector, readFileRecords, buildTree, readFileData, readStreamData, readDirectoryIndex, NtfsFile, NtfsLayout, NtfsNode } from './ntfs';
 import { parseFat32BootSector, listFat32Directory, readFileData as readFat32FileData, Fat32Layout, Fat32Entry, detectFatType } from './fat32';
@@ -214,6 +214,53 @@ export function detectPartitionFilesystem(
     logger.warn(`detectPartitionFilesystem: partition ${partitionIndex} failed: ${e instanceof Error ? e.message : e}`);
     return { fsType: 'Unknown', browsable: false };
   }
+}
+
+/**
+ * Probe whether an image partition is an EFI System Partition: a FAT32 volume
+ * whose root contains the spec-required `\EFI` directory. Reads only the boot
+ * sector plus the root directory cluster — cheap enough to run while planning
+ * a restore. Never throws; failures (encrypted image without a key, corrupt
+ * data) mean "not an ESP".
+ */
+export function probeEspPartition(imagePath: string, partitionIndex: number, key?: Buffer): boolean {
+  try {
+    const { fsType } = detectPartitionFilesystem(imagePath, partitionIndex, key);
+    if (fsType !== 'FAT32') {
+      return false;
+    }
+    const session = openBrowse(imagePath, partitionIndex, key);
+    if (session.filesystem !== 'fat32') {
+      return false;
+    }
+    return listDirectory(session, '').some((n) => n.isDirectory && n.name.toUpperCase() === 'EFI');
+  } catch (e) {
+    logger.warn(`probeEspPartition: partition ${partitionIndex} failed: ${e instanceof Error ? e.message : e}`);
+    return false;
+  }
+}
+
+export type EspProbe = (imagePath: string, partitionIndex: number, key?: Buffer) => boolean;
+
+/**
+ * Infer GPT type GUIDs for the partitions a restore will lay down: every EFI
+ * System Partition gets `GPT_EFI_SYSTEM_GUID` so a restored disk boots in a
+ * VM out of the box; everything else keeps the plan's basic-data default.
+ * Callers merge explicit `tableTypeGuids` over the result so config wins.
+ */
+export function inferTableTypeGuids(
+  imagePath: string,
+  partitionIndexes: number[],
+  key?: Buffer,
+  probe: EspProbe = probeEspPartition
+): Record<number, string> {
+  const typeGuids: Record<number, string> = {};
+  for (const idx of partitionIndexes) {
+    if (probe(imagePath, idx, key)) {
+      typeGuids[idx] = GPT_EFI_SYSTEM_GUID;
+    }
+  }
+  return typeGuids;
 }
 
 function splitPath(relPath: string): string[] {

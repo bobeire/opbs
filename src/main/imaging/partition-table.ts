@@ -19,6 +19,8 @@ export const MBR_TWO_TIB = 2 * 1024 * 1024 * 1024 * 1024;
 
 /** Microsoft basic-data partition type GUID (NTFS/exFAT data partitions). */
 export const GPT_BASIC_DATA_GUID = 'EBD0A0A2-B9E5-4433-87C0-68B6B72699C7';
+/** EFI System Partition type GUID (UEFI spec; FAT32 volumes that hold bootloaders). */
+export const GPT_EFI_SYSTEM_GUID = 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B';
 export const MBR_TYPE_BASIC_DATA = 0x07;
 
 export type TableScheme = 'gpt' | 'mbr';

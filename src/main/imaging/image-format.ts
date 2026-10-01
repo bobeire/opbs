@@ -458,6 +458,29 @@ export function readFrameCompressed(
 }
 
 /**
+ * Resolve the restore chain for an image: walk `baseImagePath` links back to
+ * the root full image, then return [root, ...intermediates, image].
+ */
+export function resolveImageChain(imagePath: string): string[] {
+  const chain: string[] = [];
+  const seen = new Set<string>();
+  let current = imagePath;
+  while (true) {
+    if (seen.has(current)) {
+      throw new Error(`Circular incremental chain detected at ${current}`);
+    }
+    seen.add(current);
+    chain.unshift(current);
+    const info = readImageInfo(current);
+    if (!(info.header.flags & FLAG_INCREMENTAL) || !info.header.baseImagePath) {
+      break;
+    }
+    current = info.header.baseImagePath;
+  }
+  return chain;
+}
+
+/**
  * Strip a multi-volume suffix (`.001`, `.002`, ...) to get the base image path.
  */
 export function baseVolumePath(imagePath: string): string {

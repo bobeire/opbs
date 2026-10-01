@@ -2,7 +2,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { RestoreEngine } from '../../src/main/imaging/restore-engine';
+import { RestoreEngine, summarizeImage } from '../../src/main/imaging/restore-engine';
+import { GPT_BASIC_DATA_GUID, GPT_EFI_SYSTEM_GUID } from '../../src/main/imaging/partition-table';
+import { inferTableTypeGuids } from '../../src/main/imaging/fs/file-browse';
 import { DiskEnumerator } from '../../src/main/utils/disk-enumerator';
 import { launchElevatedJob } from '../../src/main/helper/launcher';
 import { encodeHeader, encodePartitionEntry, encodeBlockIndexEntry, encodeBlockFrame, compressBlock, crc32, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
@@ -17,7 +19,53 @@ vi.mock('../../src/main/helper/launcher', () => ({
 
 const BLOCK = 4096;
 
-function writeImage(imagePath: string, identity?: { model: string; serial: string }): void {
+/**
+ * A minimal but structurally valid FAT32 boot sector + FAT tables + root
+ * directory, sized to fill one 4 KiB image block. Layout: boot @0, FAT1 @512,
+ * FAT2 @1024, root directory cluster 2 @1536 (reserved=1, 2 FATs of 1 sector,
+ * 512-byte clusters). When `hasEfiDir` the root directory holds an `EFI`
+ * subdirectory entry — what makes the partition an ESP.
+ */
+function fat32Payload(hasEfiDir: boolean): Buffer {
+  const b = Buffer.alloc(BLOCK, 0);
+  b[0] = 0xeb;
+  b[1] = 0x58;
+  b[2] = 0x90;
+  b.write('MSDOS5.0', 3, 'ascii');
+  b.writeUInt16LE(512, 0x0b); // bytes per sector
+  b.writeUInt8(1, 0x0d); // sectors per cluster
+  b.writeUInt16LE(1, 0x0e); // reserved sectors
+  b.writeUInt8(2, 0x10); // number of FATs
+  b.writeUInt16LE(0, 0x11); // root entry count (0 => FAT32)
+  b.writeUInt32LE(16, 0x20); // total sectors (16 = one 8 KiB partition)
+  b.writeUInt32LE(1, 0x24); // sectors per FAT32
+  b.writeUInt32LE(2, 0x2c); // root directory cluster
+  b[510] = 0x55;
+  b[511] = 0xaa;
+  for (const fat of [512, 1024]) {
+    b.writeUInt32LE(0x0ffffff8, fat); // cluster 0: media
+    b.writeUInt32LE(0x0fffffff, fat + 4); // cluster 1
+    b.writeUInt32LE(0x0fffffff, fat + 8); // cluster 2 (root): end-of-chain
+  }
+  if (hasEfiDir) {
+    const entry = Buffer.alloc(32, 0);
+    entry.write('EFI        ', 0, 'ascii');
+    entry[11] = 0x10; // directory
+    entry.copy(b, 1536);
+  } else {
+    const entry = Buffer.alloc(32, 0);
+    entry.write('DATA       ', 0, 'ascii');
+    entry[11] = 0x20; // archive file
+    entry.copy(b, 1536);
+  }
+  return b;
+}
+
+function writeImage(
+  imagePath: string,
+  identity?: { model: string; serial: string },
+  opts?: { partitionPayload?: Buffer }
+): void {
   const partition: PartitionEntryMeta = {
     partitionIndex: 0,
     size: BLOCK * 2,
@@ -48,7 +96,7 @@ function writeImage(imagePath: string, identity?: { model: string; serial: strin
   let cursor = HEADER_SIZE + PARTITION_TABLE_ENTRY_SIZE;
   partition.firstBlockFileOffset = cursor;
   for (let b = 0; b < partition.blockCount; b++) {
-    const raw = Buffer.alloc(BLOCK, 0x41 + b);
+    const raw = b === 0 && opts?.partitionPayload ? Buffer.from(opts.partitionPayload) : Buffer.alloc(BLOCK, 0x41 + b);
     const comp = compressBlock(raw, 0, 3);
     const frame = encodeBlockFrame(raw, comp);
     fs.writeSync(fd, frame, 0, frame.length, cursor);
@@ -425,5 +473,80 @@ describe('RestoreEngine virtual-disk targets', () => {
     expect(launchElevatedJob).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'restore' })
     );
+  });
+});
+
+describe('RestoreEngine EFI type-GUID inference', () => {
+  let dir: string;
+  let imagePath: string;
+  let vhdPath: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-restore-esp-'));
+    imagePath = path.join(dir, 'image.opbs');
+    vhdPath = path.join(dir, 'target.vhdx');
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  function buildVhdJob(payload?: Buffer) {
+    writeImage(imagePath, undefined, { partitionPayload: payload });
+    const engine = new RestoreEngine(createFakeEnumerator());
+    return engine.buildJob({
+      imagePath,
+      targetPartitions: [0],
+      targetVirtualDisk: { path: vhdPath, virtualSize: 2 * 1024 ** 3 }
+    });
+  }
+
+  it('types a FAT32 ESP (root \\EFI) as the EFI System partition on a blank GPT target', async () => {
+    const job = await buildVhdJob(fat32Payload(true));
+    expect(job.writeTable).toBeDefined();
+    expect(job.writeTable!.scheme).toBe('gpt');
+    expect(job.writeTable!.entries[0].typeGuid).toBe(GPT_EFI_SYSTEM_GUID);
+  });
+
+  it('keeps a plain FAT32 data partition as basic data (no \\EFI directory)', async () => {
+    const job = await buildVhdJob(fat32Payload(false));
+    expect(job.writeTable!.entries[0].typeGuid).toBe(GPT_BASIC_DATA_GUID);
+  });
+
+  it('keeps the basic-data default for non-FAT32 payloads', async () => {
+    const job = await buildVhdJob();
+    expect(job.writeTable!.entries[0].typeGuid).toBe(GPT_BASIC_DATA_GUID);
+  });
+
+  it('an explicit tableTypeGuids entry overrides the inference', async () => {
+    writeImage(imagePath, undefined, { partitionPayload: fat32Payload(true) });
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const job = await engine.buildJob({
+      imagePath,
+      targetPartitions: [0],
+      targetVirtualDisk: { path: vhdPath, virtualSize: 2 * 1024 ** 3 },
+      tableTypeGuids: { 0: '11111111-2222-3333-4444-555555555555' }
+    });
+    expect(job.writeTable!.entries[0].typeGuid).toBe('11111111-2222-3333-4444-555555555555');
+  });
+
+  it('summarizeImage reports the detected filesystem', () => {
+    writeImage(imagePath, undefined, { partitionPayload: fat32Payload(true) });
+    const summary = summarizeImage(imagePath);
+    expect(summary.partitions[0].fsType).toBe('FAT32');
+  });
+});
+
+describe('inferTableTypeGuids', () => {
+  it('assigns the EFI GUID to every partition the probe accepts', () => {
+    const probe = vi.fn((_imagePath: string, idx: number) => idx === 1 || idx === 3);
+    const got = inferTableTypeGuids('image.opbs', [0, 1, 3], undefined, probe);
+    expect(got).toEqual({ 1: GPT_EFI_SYSTEM_GUID, 3: GPT_EFI_SYSTEM_GUID });
+    expect(probe).toHaveBeenCalledTimes(3);
+    expect(probe).toHaveBeenCalledWith('image.opbs', 1, undefined);
+  });
+
+  it('returns an empty map when nothing qualifies', () => {
+    expect(inferTableTypeGuids('image.opbs', [0, 1], undefined, () => false)).toEqual({});
   });
 });

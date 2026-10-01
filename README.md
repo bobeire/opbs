@@ -315,7 +315,10 @@ the target disk **before** any partition contents:
   ≤2 TiB disk, ≥LBA63 start, 32-bit LBAs), otherwise GPT. Override with
   `tableScheme` / `--table-scheme gpt|mbr`.
 - Optional knobs: `tableDiskGuid` (deterministic GPT disk GUID),
-  `tableTypeGuids` (per-partition GPT type GUIDs; default is basic-data), and
+  `tableTypeGuids` (per-partition GPT type GUIDs; defaults: automatic EFI
+  System detection — a FAT32 volume whose root contains the `\EFI` directory
+  gets the EFI System type `C12A7328-...` so a restored disk boots in a VM —
+  everything else is basic-data), and
   `tableBootPartition` (MBR boot flag).
 - `writePartitionTable:false`/`--no-write-table` restores raw blocks only
   (still moves data, but leaves whatever table the target already has).
@@ -383,7 +386,10 @@ OPBS.exe --cli restore job-restore.json
   afterwards when this restore is the one that attached it.
 - A fresh target gets a **new partition table** (GPT preferred, MBR fallback;
   override with `tableScheme`) so the restored volumes show up in Windows.
-  Use `writePartitionTable:false` to write raw blocks only.
+  A restored EFI System Partition (FAT32 with a root `\EFI` directory) is
+  automatically typed as the EFI System partition, so the disk is VM-bootable
+  without extra configuration; `tableTypeGuids` overrides any partition's
+  type. Use `writePartitionTable:false` to write raw blocks only.
 - In the GUI, choose **Virtual disk (VHD / VHDX)** on the restore wizard's
   target step (path, size, dynamic/fixed) or in the Config Builder's Restore
   tab; the preflight flags an existing file (`targetFileExists`) before you
