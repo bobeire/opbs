@@ -264,11 +264,21 @@ export function inferTableTypeGuids(
 }
 
 /**
+ * MBR partition type byte for a detected filesystem: FAT32→0x0C (FAT32 LBA),
+ * FAT16→0x06, FAT12→0x01, everything else (NTFS/exFAT/ReFS/unknown)→0x07.
+ */
+export function mbrTypeForFs(fsType: string): number {
+  if (fsType === 'FAT32') return 0x0c;
+  if (fsType === 'FAT16') return 0x06;
+  if (fsType === 'FAT12') return 0x01;
+  return 0x07;
+}
+
+/**
  * Infer MBR partition type bytes for the partitions a restore will lay down,
- * keyed by image partition index: FAT32→0x0C (FAT32 LBA), FAT16→0x06,
- * FAT12→0x01, everything else (NTFS/exFAT/unknown)→0x07 (Generic). Callers
- * layer ESP→0xEF over the result when a partition is an EFI System
- * Partition, and merge explicit config values over both.
+ * keyed by image partition index. Callers layer ESP→0xEF over the result when
+ * a partition is an EFI System Partition, and merge explicit config values
+ * over both.
  */
 export function inferMbrTypes(
   imagePath: string,
@@ -278,15 +288,7 @@ export function inferMbrTypes(
   const mbrTypes: Record<number, number> = {};
   for (const idx of partitionIndexes) {
     const { fsType } = detectPartitionFilesystem(imagePath, idx, key);
-    if (fsType === 'FAT32') {
-      mbrTypes[idx] = 0x0c;
-    } else if (fsType === 'FAT16') {
-      mbrTypes[idx] = 0x06;
-    } else if (fsType === 'FAT12') {
-      mbrTypes[idx] = 0x01;
-    } else {
-      mbrTypes[idx] = 0x07;
-    }
+    mbrTypes[idx] = mbrTypeForFs(fsType);
   }
   return mbrTypes;
 }

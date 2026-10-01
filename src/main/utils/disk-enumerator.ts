@@ -37,8 +37,14 @@ function queryVolumes(diskIndex: number): Map<number, VolumeInfo> {
     for (const item of arr) {
       const pn = Number(item.PartitionNumber);
       if (!Number.isFinite(pn)) continue;
+      // PowerShell serializes a letterless partition's [char]0 as a NUL
+      // character — a truthy string that would wrongly mark the volume as
+      // lettered (and route it through the VSS snapshot path). Normalize it
+      // to null along with empty/whitespace values.
+      const letter =
+        typeof item.DriveLetter === 'string' ? item.DriveLetter.replace(/[^A-Za-z]/g, '').trim() : '';
       result.set(pn, {
-        driveLetter: item.DriveLetter || null,
+        driveLetter: letter || null,
         fsType: item.FileSystem || 'Unknown',
         label: item.Label || '',
         usedSpace: Number(item.Used) || 0,

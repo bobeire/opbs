@@ -1827,6 +1827,14 @@ export async function runCloneJob(
     fs.writeFileSync(resultPath, JSON.stringify(result));
   } finally {
     deleteSnapshots();
+    try {
+      if (native.updateDiskProperties && job.targets.length > 0) {
+        const devicePath = native.getPhysicalDrivePath(job.targets[0].diskIndex);
+        native.updateDiskProperties(devicePath);
+      }
+    } catch {
+      /* best-effort re-read of the partition table */
+    }
   }
 }
 

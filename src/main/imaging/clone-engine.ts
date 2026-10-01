@@ -1,7 +1,8 @@
 import { DiskEnumerator } from '../utils/disk-enumerator';
 import { DEFAULT_BLOCK_SIZE } from './image-format';
 import { CloneJob, CloneJobProgress, CloneJobResult, ImagingPartition, RestoreTarget } from './imaging-job';
-import { buildRestoreTablePlan, RestoreTableOptions } from './partition-table';
+import { buildRestoreTablePlan, GPT_EFI_SYSTEM_GUID, RestoreTableOptions, RestoreTablePlan } from './partition-table';
+import { mbrTypeForFs } from './fs/file-browse';
 import { launchElevatedJob } from '../helper/launcher';
 import { logger } from '../utils/logger';
 import { canUseVssSnapshot } from '../utils/disk-tools';
@@ -149,6 +150,80 @@ export class CloneEngine implements CloneCoordinator {
       warnings.push(`Target disk is the clone's source disk; cloning onto the source disk in place.`);
     }
 
+    // A blank target (no partition table at all) must get a fresh table or
+    // the cloned volumes are invisible in Windows — same rule as restore.
+    // Skipped when a deviating custom layout already decides the table.
+    let blankTarget = false;
+    if (config.writePartitionTable !== false && !(config.targetLayout != null && deviatesFromCaptured)) {
+      try {
+        blankTarget = this.diskEnumerator.isDiskBlank(config.targetDiskIndex);
+      } catch {
+        blankTarget = false;
+      }
+    }
+
+    const willWriteTable =
+      config.writePartitionTable !== false &&
+      ((config.targetLayout != null && deviatesFromCaptured) || blankTarget);
+
+    // Source-side table-type inference (live disk, no image to probe): the
+    // native enumerator maps GPT types to their MBR equivalents, so type 0xEF
+    // marks an EFI System Partition — GPT gets the EFI type GUID and auto
+    // prefers GPT so a UEFI source cannot silently become an unbootable MBR
+    // clone. MBR type bytes come from the detected filesystem where a volume
+    // exists, else the mapped source type (0xEE "unknown" falls back to the
+    // generic 0x07). Explicit config tableTypeGuids always win.
+    let espDetected = false;
+    const mbrTypes: Record<number, number> = {};
+    const espTypeGuids: Record<number, string> = {};
+    if (willWriteTable) {
+      for (const part of selected) {
+        if (part.type === 0xef) {
+          espTypeGuids[part.partitionIndex] = GPT_EFI_SYSTEM_GUID;
+          mbrTypes[part.partitionIndex] = 0xef;
+          espDetected = true;
+          continue;
+        }
+        const fs = part.fsType;
+        if (fs && fs !== 'Unknown') {
+          mbrTypes[part.partitionIndex] = mbrTypeForFs(fs);
+        } else {
+          mbrTypes[part.partitionIndex] =
+            part.type >= 1 && part.type <= 255 && part.type !== 0xee ? part.type : 0x07;
+        }
+      }
+    }
+    const tableTypeGuids = { ...espTypeGuids, ...config.tableTypeGuids };
+
+    // Build a fresh partition-table plan for the cloned placements. In auto
+    // mode prefer GPT when the source contains an ESP; fall back to plain
+    // auto (MBR when representable) only when GPT cannot fit.
+    const buildFreshTablePlan = (): RestoreTablePlan => {
+      const placements = targets.map((t) => {
+        const part = items.find((p) => p.partitionIndex === t.partitionIndex)!;
+        return { partitionIndex: t.partitionIndex, offset: t.offset, size: t.size ?? part.size };
+      });
+      const requested = config.tableScheme || 'auto';
+      const tableOptions: RestoreTableOptions = {
+        scheme: requested,
+        diskGuid: config.tableDiskGuid,
+        typeGuids: tableTypeGuids,
+        mbrTypes,
+        bootPartition: config.tableBootPartition
+      };
+      if (requested !== 'auto') {
+        return buildRestoreTablePlan(placements, targetDisk.size, tableOptions);
+      }
+      if (espDetected) {
+        try {
+          return buildRestoreTablePlan(placements, targetDisk.size, { ...tableOptions, scheme: 'gpt' });
+        } catch {
+          // GPT unrepresentable — plain auto below picks a fitting scheme.
+        }
+      }
+      return buildRestoreTablePlan(placements, targetDisk.size, tableOptions);
+    };
+
     let writeTable: CloneJob['writeTable'] = undefined;
     if (config.targetLayout && deviatesFromCaptured) {
       if (config.acknowledgeLayout !== true) {
@@ -159,22 +234,15 @@ export class CloneEngine implements CloneCoordinator {
         );
       }
       if (config.writePartitionTable !== false) {
-        const tableOptions: RestoreTableOptions = {
-          scheme: config.tableScheme ?? 'auto',
-          diskGuid: config.tableDiskGuid,
-          typeGuids: config.tableTypeGuids,
-          bootPartition: config.tableBootPartition
-        };
-        const plan = buildRestoreTablePlan(
-          targets.map((t) => {
-            const part = items.find((p) => p.partitionIndex === t.partitionIndex)!;
-            return { partitionIndex: t.partitionIndex, offset: t.offset, size: t.size ?? part.size };
-          }),
-          targetDisk.size,
-          tableOptions
-        );
+        const plan = buildFreshTablePlan();
         writeTable = { scheme: plan.scheme, diskSize: plan.diskSize, entries: plan.entries, diskGuid: plan.diskGuid };
       }
+    } else if (blankTarget && config.writePartitionTable !== false) {
+      const plan = buildFreshTablePlan();
+      writeTable = { scheme: plan.scheme, diskSize: plan.diskSize, entries: plan.entries, diskGuid: plan.diskGuid };
+      warnings.push(
+        `Target disk ${config.targetDiskIndex} has no partition table — a fresh ${plan.scheme.toUpperCase()} partition table will be written.`
+      );
     }
 
     if (warnings.length > 0) {

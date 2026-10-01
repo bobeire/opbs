@@ -263,13 +263,23 @@ Backup Wizard also offers a **Resume an interrupted backup** checkbox.
 A **clone** copies selected live partitions straight onto another local disk
 — no intermediate image, no cloud upload. `CloneEngine` builds the job exactly
 like a restore (captured offsets by default, `targetLayout` to move/resize,
-fresh GPT/MBR partition table for dissimilar clones), but the source is the
-live volume: the helper creates VSS snapshots, reads allocated blocks (skipping
-free space with `--used-blocks-only`), and writes them to the target disk at
-`target.offset + blockIndex * blockSize`. Same safety gates as restore apply:
-a custom layout requires `--confirm-layout`, and cloning onto the source disk
-requires `--acknowledge-same-disk`. Any NTFS grow-on-restore request is honored
-the same way as a restore.
+fresh GPT/MBR partition table for dissimilar or blank targets), but the source
+is the live volume: the helper creates VSS snapshots, reads allocated blocks
+(skipping free space with `--used-blocks-only`), and writes them to the target
+disk at `target.offset + blockIndex * blockSize`. Same safety gates as restore
+apply: a custom layout requires `--confirm-layout`, and cloning onto the source
+disk requires `--acknowledge-same-disk`. Any NTFS grow-on-restore request is
+honored the same way as a restore.
+
+Table typing is inferred from the live source (the same rules a restore uses):
+an EFI System Partition (native type `0xEF`) is typed as `C12A7328-...` in a
+fresh GPT table and makes `auto` prefer GPT so a UEFI source cannot silently
+become an unbootable MBR clone; MBR type bytes come from each filesystem
+(ESP→`0xEF`, FAT32→`0x0C`, FAT16→`0x06`, FAT12→`0x01`, NTFS/exFAT/unknown→
+`0x07`, raw partitions keep their mapped source type) and the active flag
+defaults to the first cloned partition. A target disk with no partition table
+at all gets a fresh one automatically (no acknowledgement — there is no layout
+to destroy); an unreadable target layout is never overwritten.
 
 CLI: `clone <config.json> [--elevated] [--used-blocks-only] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk]`.
 
