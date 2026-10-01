@@ -72,11 +72,15 @@ void PutU64(uint8_t* dst, uint64_t v) {
     }
 }
 
-// Parse "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX" into 16 raw bytes.
+// Parse "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX" into the 16 raw bytes a GPT
+// stores on disk. GUIDs use the mixed-endian layout: the first three fields
+// are little-endian, the last two stay in text order (Windows shows an
+// EBD0A0A2-... basic-data type as A2 A0 D0 EB E5 B9 33 44 ...).
 bool ParseGuid(const std::string& text, uint8_t out[16]) {
     if (text.size() != 36) {
         return false;
     }
+    uint8_t tmp[16] = {0};
     int byteIndex = 0;
     for (size_t i = 0; i < 36;) {
         if (text[i] == '-') {
@@ -97,22 +101,37 @@ bool ParseGuid(const std::string& text, uint8_t out[16]) {
         if (hi < 0 || lo < 0) {
             return false;
         }
-        out[byteIndex++] = static_cast<uint8_t>((hi << 4) | lo);
+        tmp[byteIndex++] = static_cast<uint8_t>((hi << 4) | lo);
         i += 2;
     }
-    return byteIndex == 16;
+    if (byteIndex != 16) {
+        return false;
+    }
+    out[0] = tmp[3];
+    out[1] = tmp[2];
+    out[2] = tmp[1];
+    out[3] = tmp[0];
+    out[4] = tmp[5];
+    out[5] = tmp[4];
+    out[6] = tmp[7];
+    out[7] = tmp[6];
+    for (int i = 8; i < 16; i++) out[i] = tmp[i];
+    return true;
 }
 
+// Inverse of ParseGuid: raw mixed-endian bytes back to the text form.
 void FormatGuid(const uint8_t guid[16], std::string& out) {
     static const char* hex = "0123456789abcdef";
+    static const int order[16] = {3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15};
     char buf[37];
     int p = 0;
     for (int i = 0; i < 16; i++) {
         if (i == 4 || i == 6 || i == 8 || i == 10) {
             buf[p++] = '-';
         }
-        buf[p++] = hex[guid[i] >> 4];
-        buf[p++] = hex[guid[i] & 0xF];
+        uint8_t b = guid[order[i]];
+        buf[p++] = hex[b >> 4];
+        buf[p++] = hex[b & 0xF];
     }
     buf[p] = '\0';
     out.assign(buf);
@@ -188,6 +207,9 @@ void WriteGptEntry(uint8_t* entry, const TableEntry& e, const uint8_t diskGuid[1
     uint64_t firstLba = e.offset / kLbaSize;
     uint64_t sizeLba = e.size / kLbaSize;
     PutU64(entry + 32, firstLba);
+    // UEFI/GPT bytes 40-47 hold the INCLUSIVE ENDING LBA (not a size):
+    // Windows' own 100 MB EFI partition is start=2048, ending=206847, and
+    // Get-Partition sizes it as (ending - start + 1) * 512.
     PutU64(entry + 40, firstLba + sizeLba - 1);
     PutU64(entry + 48, 0);  // attributes
     size_t chars = std::min<size_t>(e.name.size(), 36);

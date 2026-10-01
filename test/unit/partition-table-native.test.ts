@@ -31,9 +31,11 @@ function crc32(buf: Buffer): number {
 }
 
 function guidHex(text: string): Buffer {
-  // "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX" -> stored LE form for fields 1-3.
+  // "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX" -> mixed-endian on-disk form:
+  // fields 1-3 little-endian, fields 4-5 in text order.
   const hex = text.replace(/-/g, '').match(/../g)!.map((h) => parseInt(h, 16));
-  return Buffer.from(hex);
+  const raw = Buffer.from(hex);
+  return Buffer.from([raw[3], raw[2], raw[1], raw[0], raw[5], raw[4], raw[7], raw[6], ...raw.subarray(8)]);
 }
 
 try {
@@ -105,12 +107,13 @@ describe('native GPT partition table builder', () => {
       const e0 = region.subarray(0, 128);
       expect(Buffer.from(e0.subarray(0, 16))).toEqual(guidHex('CB2FC206-64A9-4CD4-9A24-8A7F1A2E7F2E'));
       expect(e0.readBigUInt64LE(32)).toBe(2048n);
-      expect(e0.readBigUInt64LE(40)).toBe(2048n + 131072n - 1n);
+      expect(e0.readBigUInt64LE(40)).toBe(2048n + 131072n - 1n); // inclusive ending LBA
       expect(e0.subarray(56, 128).toString('utf16le').split('\u0000')[0]).toBe('System');
 
       const e1 = region.subarray(128, 256);
       expect(Buffer.from(e1.subarray(0, 16))).toEqual(guidHex('EBD0A0A2-B9E5-4433-87C0-68B6B72699C7'));
       expect(e1.readBigUInt64LE(32)).toBe(133500920n);
+      expect(e1.readBigUInt64LE(40)).toBe(133500920n + 16128n - 1n); // inclusive ending LBA
       expect(e1.subarray(56, 128).toString('utf16le').split('\u0000')[0]).toBe('Data');
     });
 
