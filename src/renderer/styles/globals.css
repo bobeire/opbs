@@ -2208,3 +2208,133 @@ body {
   color: var(--text-muted, #9ca3af);
   font-size: 13px;
 }
+
+/* ---------- Config Builder ---------- */
+.builder-note {
+  color: var(--text-muted, #9ca3af);
+  font-size: 13px;
+  margin: 0 0 16px;
+  max-width: 780px;
+}
+
+.builder-note code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.builder-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border-color, #374151);
+}
+
+.builder-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted, #9ca3af);
+  font-size: 13px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+.builder-tab:hover {
+  color: #e5e7eb;
+}
+
+.builder-tab.active {
+  color: #60a5fa;
+  border-bottom-color: #60a5fa;
+  font-weight: 600;
+}
+
+.builder-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 780px;
+}
+
+.builder-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.builder-row label {
+  color: var(--text-muted, #d1d5db);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.builder-row input[type="text"],
+.builder-row input[type="password"],
+.builder-row input[type="number"],
+.builder-row input[type="time"],
+.builder-row select {
+  padding: 8px 10px;
+  border: 1px solid var(--border-color, #4b5563);
+  border-radius: 4px;
+  background: var(--sidebar-bg, #111827);
+  color: var(--text-color, #f9fafb);
+  font-size: 13px;
+}
+
+.builder-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.builder-hint-row {
+  display: flex;
+  gap: 8px;
+}
+
+.builder-partitions {
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.builder-preview-block {
+  margin-top: 20px;
+}
+
+.builder-preview-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--text-muted, #d1d5db);
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.builder-preview {
+  margin: 0;
+  padding: 14px 16px;
+  background: var(--sidebar-bg, #111827);
+  border: 1px solid var(--border-color, #4b5563);
+  border-radius: 6px;
+  color: #d1d5db;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  max-height: 340px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.builder-missing {
+  margin-top: 12px;
+  color: var(--warning-color, #f59e0b);
+}
+
+.builder-actions {
+  margin-top: 16px;
+}

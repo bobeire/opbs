@@ -98,6 +98,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // File dialogs
   selectSaveFile: (options?: any) => ipcRenderer.invoke('select-save-file', options),
 
+  // Config builder (read/write config JSON files)
+  saveTextFile: (filePath: string, content: string) => ipcRenderer.invoke('save-text-file', filePath, content),
+  loadTextFile: (filePath: string) => ipcRenderer.invoke('load-text-file', filePath),
+
   // About dialog
   showAbout: () => ipcRenderer.invoke('show-about'),
 

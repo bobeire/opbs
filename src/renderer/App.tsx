@@ -4,6 +4,7 @@ import BackupWizard from './components/BackupWizard';
 import RestoreWizard from './components/RestoreWizard';
 import Settings from './components/Settings';
 import Schedules from './components/Schedules';
+import ConfigBuilder from './components/ConfigBuilder';
 import VssView from './components/VssView';
 import BrowseView from './components/BrowseView';
 import MediaView from './components/MediaView';
@@ -24,6 +25,7 @@ type Page =
   | 'browse'
   | 'media'
   | 'schedules'
+  | 'builder'
   | 'network'
   | 'logs'
   | 'vss'
@@ -143,6 +145,8 @@ function App() {
         return <LogViewer onClose={() => setCurrentPage('dashboard')} />;
       case 'schedules':
         return <Schedules />;
+      case 'builder':
+        return <ConfigBuilder />;
       case 'vss':
         return <VssView />;
       case 'settings':
@@ -229,6 +233,15 @@ function App() {
             >
               <span className="nav-icon">🕐</span>
               Schedules
+            </button>
+          </li>
+          <li>
+            <button
+              className={`nav-item ${currentPage === 'builder' ? 'active' : ''}`}
+              onClick={() => setCurrentPage('builder')}
+            >
+              <span className="nav-icon">📝</span>
+              Config Builder
             </button>
           </li>
           <li>

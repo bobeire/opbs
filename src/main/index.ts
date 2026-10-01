@@ -1469,6 +1469,22 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     return result.canceled ? undefined : result.filePath;
   });
 
+  // Config builder: persist/refresh job config JSON files chosen via dialog
+  ipcMain.handle('save-text-file', async (_, filePath: string, content: string) => {
+    if (typeof filePath !== 'string' || typeof content !== 'string') {
+      throw new Error('save-text-file requires a file path and content');
+    }
+    fs.writeFileSync(filePath, content, 'utf-8');
+    return { ok: true, path: filePath };
+  });
+
+  ipcMain.handle('load-text-file', async (_, filePath: string) => {
+    if (typeof filePath !== 'string') {
+      throw new Error('load-text-file requires a file path');
+    }
+    return fs.readFileSync(filePath, 'utf-8');
+  });
+
   // WinPE recovery media
   ipcMain.handle('media-check', async () => {
     const arch = peArchForProcess();

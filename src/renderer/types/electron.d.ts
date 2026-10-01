@@ -60,6 +60,8 @@ declare global {
       selectDirectory: (options?: { title?: string; defaultPath?: string }) => Promise<string | undefined>;
       selectFile: (options?: any) => Promise<string | undefined>;
       selectSaveFile: (options?: any) => Promise<string | undefined>;
+      saveTextFile: (filePath: string, content: string) => Promise<{ ok: boolean; path: string }>;
+      loadTextFile: (filePath: string) => Promise<string>;
       planRetention: (directory: string, options?: any) => Promise<any>;
       applyRetention: (directory: string, options?: any) => Promise<any>;
       listImages: (directory: string) => Promise<any>;

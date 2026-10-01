@@ -537,6 +537,11 @@ Example `job-backup.json`:
 `compressionThreads` (0 = synchronous, 1+ = multithreaded) is optional and
 defaults to a sensible count on the app path.
 
+These config files can be written by hand, generated as templates with
+`--cli new-config`, or built from a form in the GUI: **sidebar → Config Builder**
+(backup, restore, clone and drill job JSON with live preview, Copy/Save/Load,
+plus a generator for the `schedule install-*` command lines).
+
 Backup/restore still require the UAC prompt (raw I/O). Verification, listing,
 pruning and health checks do not.
 
