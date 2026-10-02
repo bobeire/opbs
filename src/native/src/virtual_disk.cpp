@@ -235,10 +235,11 @@ Napi::Value CreateVirtualDiskJs(const Napi::CallbackInfo& info) {
 Napi::Value AttachVirtualDiskJs(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
     if (info.Length() < 1 || !info[0].IsString()) {
-        Napi::TypeError::New(env, "attachVirtualDisk expects (path)").ThrowAsJavaScriptException();
+        Napi::TypeError::New(env, "attachVirtualDisk expects (path, readOnly?)").ThrowAsJavaScriptException();
         return env.Undefined();
     }
     std::wstring path = Widen(info[0].As<Napi::String>().Utf8Value());
+    bool readOnly = info.Length() >= 2 && info[1].IsBoolean() && info[1].As<Napi::Boolean>().Value();
 
     DWORD err = ERROR_SUCCESS;
     HANDLE handle = OpenForModify(path, &err);
@@ -255,11 +256,13 @@ Napi::Value AttachVirtualDiskJs(const Napi::CallbackInfo& info) {
     // call and without the flag Windows detaches the disk again on the last
     // handle close (verified: probe after close returns err 55). A retry with
     // plain NO_DRIVE_LETTER would attach-then-instantly-detach, so any failure
-    // surfaces as-is instead of being masked.
-    err = AttachVirtualDisk(
-        handle, nullptr,
-        ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER | ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME,
-        0, &params, nullptr);
+    // surfaces as-is instead of being masked. READ_ONLY is used for backup
+    // sources so a quiescent VHD can never be written to by the imaging path.
+    ATTACH_VIRTUAL_DISK_FLAG flags = ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER | ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME;
+    if (readOnly) {
+        flags = flags | ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY;
+    }
+    err = AttachVirtualDisk(handle, nullptr, flags, 0, &params, nullptr);
     CloseHandle(handle);
 
     if (err != ERROR_SUCCESS) {

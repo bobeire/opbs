@@ -482,7 +482,9 @@ function cmdAnalytics(ctx: CommandContext): Promise<number> {
 async function cmdBackup(ctx: CommandContext): Promise<number> {
   const configPath = ctx.argv[0];
   if (!configPath) {
-    console.error('Usage: backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume]');
+    console.error(
+      'Usage: backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume] [--source-vhd <path>]'
+    );
     return 1;
   }
   const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
@@ -501,12 +503,24 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
     const parsed = Number(threadsFlag);
     config.compressionThreads = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
   }
+  const sourceVhdFlag = flagValue(ctx.argv, '--source-vhd');
+  if (sourceVhdFlag !== undefined) {
+    // Source is a VHD/VHDX file: the helper attaches it read-only, discovers
+    // the disk index and builds the job. Empty sourcePartitions = all.
+    config.sourceVirtualDisk = sourceVhdFlag;
+    config.sourceDiskIndex = -1;
+    if (!Array.isArray(config.sourcePartitions) || config.sourcePartitions.length === 0) {
+      config.sourcePartitions = [];
+    }
+  }
 
   if (ctx.argv.includes('--elevated')) {
     // In-process execution: used inside an elevated scheduled task, so the
     // job runs here without spawning the UAC helper relaunch.
-    return await runJobInProcess(function () {
-      return imagingEngine.buildJob(config);
+    return await runJobInProcess(async function () {
+      return config.sourceVirtualDisk
+        ? { type: 'backup-vhd', config }
+        : imagingEngine.buildJob(config);
     }, ctx);
   }
 

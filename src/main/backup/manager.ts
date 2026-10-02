@@ -12,6 +12,7 @@ import { recordBackupAnalytics } from '../utils/backup-analytics';
 import { buildParity } from '../imaging/parity';
 import { checkMediaHealth } from '../utils/media-health';
 import { isNonFilesystemLocation } from '../utils/location';
+import { isVirtualDiskPath } from '../utils/virtual-disk';
 import { logger } from '../utils/logger';
 
 export type BackupConfig = BackupJobConfig;
@@ -189,6 +190,18 @@ export class BackupManager extends EventEmitter {
     const stats = fs.statSync(destinationPath);
     if (!stats.isDirectory()) {
       throw new Error('Destination path is not a directory');
+    }
+
+    if (config.sourceVirtualDisk) {
+      // VHD sources carry no disk index or partition selection until the
+      // helper attaches the file — only the path can be validated here.
+      if (!isVirtualDiskPath(config.sourceVirtualDisk)) {
+        throw new Error(`Source is not a .vhd/.vhdx file: ${config.sourceVirtualDisk}`);
+      }
+      if (!fs.existsSync(config.sourceVirtualDisk)) {
+        throw new Error(`Source virtual disk not found: ${config.sourceVirtualDisk}`);
+      }
+      return;
     }
 
     if (config.sourcePartitions.length === 0) {

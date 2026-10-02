@@ -1646,6 +1646,21 @@ body {
   font-weight: 500;
 }
 
+.vhd-source-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.vhd-source-path {
+  flex: 1;
+  min-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .progress-disk-label {
   font-size: 13px;
   color: var(--text-muted);

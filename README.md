@@ -15,6 +15,7 @@ Website: https://opbs.rhitcs.com
 - **Used-blocks-only capture**: `usedBlocksOnly` (CLI `--used-blocks-only`) reads the NTFS `$Bitmap` and stores only blocks containing allocated clusters, dropping free space; non-NTFS partitions fall back to a full capture.
 - **Read-only mount via WinFsp**: mount a partition from a `.opbs` or Macrium image as a virtual drive letter with **zero extra disk usage** — file reads are served lazily by decompressing only the covering blocks. Requires the free WinFsp runtime (https://winfsp.dev).
 - **Disk-to-disk clone**: `clone` copies selected live partitions straight onto a different local disk (VSS snapshots, optional dissimilar layout + fresh GPT/MBR table, optional grow-on-restore), with no image file or cloud upload. The GUI **Partition Copy** screen makes this drag-and-drop: pick a target disk, drag partition chips onto it (or “Copy all partitions”), preview the auto-sequential 1 MiB-aligned layout with optional grow-to-fill, confirm the erase warning, and watch live progress.
+- **Backup from a virtual disk (VHD/VHDX)**: `sourceVirtualDisk` (CLI `--source-vhd`, or "Back up from a VHD/VHDX file…" on the backup wizard's source step) images a `.vhd`/`.vhdx` file directly — the elevated helper attaches the file **write-protected** (no drive letter), discovers the physical disk index it maps to, builds the ordinary backup job (empty partition selection = every partition on the file), runs it, then detaches. No need to mount the volume or run the backup against the host's live disks.
 - **Restore into a virtual disk (VHD/VHDX)**: `targetVirtualDisk` writes a restore into a `.vhd`/`.vhdx` file instead of a physical disk — the helper creates the file when missing (dynamic or fixed, up to 64 TiB), attaches it, re-runs every physical-disk safety gate against the attached disk, writes a fresh GPT/MBR table so the volumes are visible in Windows, then detaches the disk again. Available from the restore wizard, the Config Builder and JSON configs.
 - **Disk tools**: the **Disk Tools** screen (sidebar 🔧) groups four maintenance utilities — **MBR & Boot Repair** (read partition-table info from `Get-Disk`/`Get-Partition`, read the raw 512-byte MBR sector elevated for a full entry/CHS breakdown including the boot and disk signatures, and repair boot code / rebuild the BCD store via elevated `bootrec.exe`), **Disk Error Check** (read-only `chkdsk /scan`, plus elevated `/f` and slow `/r` modes), **SSD TRIM** (query `fsutil behavior query DisableDeleteNotify` and run an elevated `defrag /L` retrim), and **SMART Health** (per-disk reliability counters for every physical disk).
 - **Encryption**: optional AES-256-GCM per-block encryption (master-key-derived via PBKDF2-SHA256)
@@ -257,6 +258,32 @@ shows how many block frames have already been written (and how many bytes those
 frames represent), so you can judge how close a partial image was to finishing.
 Run `backup --resume <config.json>` to continue from where it stopped. The
 Backup Wizard also offers a **Resume an interrupted backup** checkbox.
+
+### Backing up from a virtual disk (VHD/VHDX)
+
+A `.vhd`/`.vhdx` file can be imaged directly instead of selecting one of the
+machine's physical disks:
+
+```bash
+# CLI: set the source in the config (or override with --source-vhd)
+OPBS.exe --cli backup backup.json --source-vhd "D:\VMs\win11.vhdx"
+```
+
+- The GUI: on the backup wizard's source step, **Back up from a VHD/VHDX
+  file…** picks the file; the disk list is replaced by the path, and *every
+  partition on the virtual disk* is captured (the file's layout is only known
+  once it is attached, so no checkboxes are shown).
+- The elevated helper attaches the file **read-only** and without a drive
+  letter, discovers the `\.\PhysicalDriveN` it maps to (exact virtdisk API
+  path first, before/after disk-list diff as fallback), injects that index,
+  builds the ordinary backup job and runs it — VSS snapshots and used-blocks
+  capture behave exactly as for a physical source; anything the snapshot path
+  cannot handle falls back to raw block reads. The file is detached when the
+  job finishes (only if this run attached it; a file you attached yourself is
+  left alone).
+- `sourcePartitions: []` means "all partitions"; an explicit list is matched
+  against the file's partitions after attach. Incremental (`baseImagePath`),
+  `usedBlocksOnly`, encryption, resume and verification all work as usual.
 
 ## How a clone runs
 

@@ -45,7 +45,7 @@ declare module 'opbs-native' {
   /** Create a new .vhd/.vhdx file. `format` is 'vhd' | 'vhdx'. */
   export function createVirtualDisk(path: string, sizeBytes: number, format: string, fixed: boolean): void;
   /** Attach without a drive letter (admin only). */
-  export function attachVirtualDisk(path: string): boolean;
+  export function attachVirtualDisk(path: string, readOnly?: boolean): boolean;
   /** Detach (admin only). */
   export function detachVirtualDisk(path: string): boolean;
   /** Size/attachment info; works unelevated. */

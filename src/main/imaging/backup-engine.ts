@@ -26,6 +26,12 @@ import { logger } from '../utils/logger';
 export interface BackupJobConfig {
   sourceDiskIndex: number;
   sourcePartitions: number[];
+  /** Source is a .vhd/.vhdx file instead of a physical disk. The elevated
+   *  helper attaches the file (read-only), discovers the disk index and
+   *  injects it into `sourceDiskIndex` before the job is built. When set and
+   *  `sourcePartitions` is empty, every partition on the virtual disk is
+   *  captured. */
+  sourceVirtualDisk?: string;
   destinationPath: string;
   compressionLevel: number;
   verificationEnabled: boolean;
@@ -69,7 +75,15 @@ export interface BackupCoordinator {
   cancel(): Promise<void>;
 }
 
-type LaunchedBackupJob = ReturnType<typeof launchElevatedJob<ImagingJob, JobProgress, JobResult>>;
+/** Elevated payload for backups whose source is a VHD/VHDX file: the helper
+ *  attaches the file, discovers the disk index, builds and runs the ordinary
+ *  backup job, then detaches. */
+export interface BackupVhdJob {
+  type: 'backup-vhd';
+  config: BackupJobConfig;
+}
+
+type LaunchedBackupJob = ReturnType<typeof launchElevatedJob<ImagingJob | BackupVhdJob, JobProgress, JobResult>>;
 
 /**
  * Sanitise a user-supplied image name: strip any directory components and
@@ -92,7 +106,13 @@ export class ImagingEngine implements BackupCoordinator {
     const diskIndex = config.sourceDiskIndex;
 
     const partitions = await this.diskEnumerator.getPartitions(diskIndex);
-    const selected = partitions.filter((p) => config.sourcePartitions.includes(p.partitionIndex));
+    // An empty selection on a VHD source means "every partition": the file's
+    // layout is only known after the helper attaches it, so callers cannot
+    // enumerate partition indexes up front.
+    const selected =
+      config.sourceVirtualDisk && config.sourcePartitions.length === 0
+        ? partitions
+        : partitions.filter((p) => config.sourcePartitions.includes(p.partitionIndex));
 
     if (selected.length === 0) {
       throw new Error(
@@ -309,15 +329,27 @@ export class ImagingEngine implements BackupCoordinator {
   }
 
   async runBackup(config: BackupJobConfig, onProgress: (p: JobProgress) => void): Promise<JobResult> {
-    const job = await this.buildJob(config);
+    // A VHD source cannot be built here (the file is not attached yet): the
+    // helper attaches it read-only, discovers the disk index and builds the
+    // job itself — same pattern as restore-vhd targets.
+    const payload: ImagingJob | BackupVhdJob = config.sourceVirtualDisk
+      ? { type: 'backup-vhd', config }
+      : await this.buildJob(config);
 
-    logger.info(`Starting elevated backup to ${job.imagePath}`, {
-      partitions: job.partitions.length,
-      totalBytes: job.partitions.reduce((s, p) => s + p.size, 0),
-      usedBlocksOnly: !!job.usedBlocksOnly
-    });
+    logger.info(
+      payload.type === 'backup'
+        ? `Starting elevated backup to ${payload.imagePath}`
+        : `Starting elevated backup from virtual disk ${config.sourceVirtualDisk}`,
+      payload.type === 'backup'
+        ? {
+            partitions: payload.partitions.length,
+            totalBytes: payload.partitions.reduce((s, p) => s + p.size, 0),
+            usedBlocksOnly: !!payload.usedBlocksOnly
+          }
+        : { destination: config.destinationPath }
+    );
 
-    const launched = launchElevatedJob<ImagingJob, JobProgress, JobResult>(job);
+    const launched = launchElevatedJob<ImagingJob | BackupVhdJob, JobProgress, JobResult>(payload);
     this.current = launched;
 
     launched.onProgress(onProgress);

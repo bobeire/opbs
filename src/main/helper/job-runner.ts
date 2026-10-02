@@ -1970,6 +1970,11 @@ export async function dispatchHelperJob(
     await runRestoreVhdJob(jobPath, resultPath, progressPath, cancelPath, nativeApi, pipeClient);
     return;
   }
+  if (raw.type === 'backup-vhd') {
+    const { runBackupVhdJob } = await import('./backup-vhd-job');
+    await runBackupVhdJob(jobPath, resultPath, progressPath, cancelPath, nativeApi, pipeClient);
+    return;
+  }
   if (raw.type === 'clone') {
     await runCloneJob(jobPath, resultPath, progressPath, cancelPath, nativeApi, pipeClient);
     return;

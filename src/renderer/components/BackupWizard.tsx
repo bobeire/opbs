@@ -37,6 +37,7 @@ function isRecoveryType(type: string): boolean {
 interface BackupConfig {
   sourceDiskIndex: number;
   sourcePartitions: number[];
+  sourceVirtualDisk?: string;
   destinationPath: string;
   imageName?: string;
   compressionLevel: number;
@@ -119,6 +120,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   const [disks, setDisks] = useState<DiskInfo[]>([]);
   const [selectedDisk, setSelectedDisk] = useState<DiskInfo | null>(null);
   const [selectedPartitions, setSelectedPartitions] = useState<number[]>([]);
+  const [sourceVhdPath, setSourceVhdPath] = useState<string | null>(null);
   const [allDisks, setAllDisks] = useState(initialAllDisks ?? false);
   const [destinationPath, setDestinationPath] = useState(initialDestination ?? '');
   const [imageName, setImageName] = useState('');
@@ -285,6 +287,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   const eligibleDisks = disks.filter((d) => d.partitions.length > 0);
 
   const applyProfile = (profile: any) => {
+    setSourceVhdPath(null);
     const disk = disks.find((d) => d.index === profile.sourceDiskIndex);
     if (!disk) {
       setProfileMsg({ kind: 'err', text: `Profile "${profile.name}" references disk ${profile.sourceDiskIndex}, which is not present on this machine.` });
@@ -315,10 +318,30 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     setSelectedProfileId('');
   };
 
+  const pickSourceVhd = async () => {
+    const picked = await window.electronAPI.selectFile({
+      title: 'Select a virtual disk to back up',
+      filters: [
+        { name: 'Virtual Disks', extensions: ['vhdx', 'vhd'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+    if (picked) {
+      setSourceVhdPath(picked);
+      setSelectedDisk(null);
+      setSelectedPartitions([]);
+      setAllDisks(false);
+    }
+  };
+
   const saveAsProfile = async () => {
     setProfileMsg(null);
     if (!profileName.trim()) {
       setProfileMsg({ kind: 'err', text: 'Enter a profile name.' });
+      return;
+    }
+    if (sourceVhdPath) {
+      setProfileMsg({ kind: 'err', text: 'Profiles store physical disk sources — select a disk instead of a VHD/VHDX file.' });
       return;
     }
     if (!selectedDisk || !destinationPath.trim()) {
@@ -372,7 +395,17 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     };
 
     try {
-      if (allDisks) {
+      if (sourceVhdPath) {
+        setDiskLabel(null);
+        const config: BackupConfig = {
+          ...common,
+          sourceVirtualDisk: sourceVhdPath,
+          sourceDiskIndex: -1,
+          sourcePartitions: [],
+          ...(incrementalEnabled && baseImagePath ? { baseImagePath } : {})
+        };
+        await window.electronAPI.startBackup(config);
+      } else if (allDisks) {
         for (let i = 0; i < eligibleDisks.length; i++) {
           const disk = eligibleDisks[i];
           setDiskLabel(`Disk ${i + 1} of ${eligibleDisks.length}: ${disk.model}`);
@@ -466,6 +499,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                   <input
                     type="checkbox"
                     checked={allDisks}
+                    disabled={!!sourceVhdPath}
                     onChange={(e) => {
                       setAllDisks(e.target.checked);
                       if (e.target.checked) {
@@ -482,6 +516,33 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                   imaged sequentially to the destination you choose next.
                 </p>
               </>
+            )}
+
+            <div className="setting-item vhd-source-row">
+              <span>Virtual disk:</span>
+              {sourceVhdPath ? (
+                <>
+                  <span className="field-hint vhd-source-path" title={sourceVhdPath}>
+                    {sourceVhdPath}
+                  </span>
+                  <button className="btn-secondary btn-small" onClick={() => void pickSourceVhd()}>
+                    Change…
+                  </button>
+                  <button className="btn-secondary btn-small" onClick={() => setSourceVhdPath(null)}>
+                    Use a disk instead
+                  </button>
+                </>
+              ) : (
+                <button className="btn-secondary btn-small" onClick={() => void pickSourceVhd()}>
+                  Back up from a VHD/VHDX file…
+                </button>
+              )}
+            </div>
+            {sourceVhdPath && (
+              <p className="field-hint">
+                All partitions on the virtual disk are captured — the file's layout is read when the
+                backup starts (attached write-protected, then detached).
+              </p>
             )}
 
             {!allDisks && (
@@ -522,7 +583,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
               </>
             )}
 
-            {!allDisks && (
+            {!allDisks && !sourceVhdPath && (
               <div className="disk-list">
                 {disks.map((disk) => (
                   <div
@@ -552,7 +613,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
               </div>
             )}
             
-{selectedDisk && (
+{selectedDisk && !sourceVhdPath && (
               <div className="partition-selection">
                 <h3>Select Partitions to Backup</h3>
                 <div className="partition-list">
@@ -589,7 +650,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
               <button className="btn-secondary" onClick={onComplete}>Cancel</button>
               <button
                 className="btn-primary"
-                disabled={!allDisks && (!selectedDisk || selectedPartitions.length === 0)}
+                disabled={!allDisks && !sourceVhdPath && (!selectedDisk || selectedPartitions.length === 0)}
                 onClick={() => setCurrentStep('select_destination')}
               >
                 Next
@@ -813,7 +874,13 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
             <div className="summary">
               <h3>Backup Summary</h3>
               <ul>
-                {allDisks ? (
+                {sourceVhdPath ? (
+                  <>
+                    <li>Source: Virtual disk file</li>
+                    <li>File: {sourceVhdPath}</li>
+                    <li>Partitions: All (resolved when the file is attached)</li>
+                  </>
+                ) : allDisks ? (
                   <>
                     <li>Source: Entire system ({eligibleDisks.length} disks)</li>
                     <li>Disks: {eligibleDisks.map((d) => d.model).join(' | ') || 'none found'}</li>

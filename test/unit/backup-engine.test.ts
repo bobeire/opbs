@@ -17,6 +17,15 @@ import {
 } from '../../src/main/imaging/image-format';
 import { DiskEnumerator } from '../../src/main/utils/disk-enumerator';
 import { JobProgress } from '../../src/main/imaging/imaging-job';
+import { launchElevatedJob } from '../../src/main/helper/launcher';
+
+vi.mock('../../src/main/helper/launcher', () => ({
+  launchElevatedJob: vi.fn(() => ({
+    promise: Promise.resolve({ ok: true }),
+    cancel: vi.fn(),
+    onProgress: vi.fn()
+  }))
+}));
 
 function createFakeEnumerator(): DiskEnumerator {
   return {
@@ -186,6 +195,42 @@ describe('ImagingEngine', () => {
       expect(job.compressionThreads).toBeUndefined();
     });
 
+    it('captures every partition when a VHD source has no partition selection', async () => {
+      const job = await engine.buildJob({
+        sourceDiskIndex: 0,
+        sourcePartitions: [],
+        sourceVirtualDisk: 'C:/vms/source.vhdx',
+        destinationPath: dir,
+        compressionLevel: 3,
+        verificationEnabled: false
+      });
+      expect(job.partitions.map((p) => p.partitionIndex)).toEqual([0, 2]);
+    });
+
+    it('still filters explicit partitions on a VHD source', async () => {
+      const job = await engine.buildJob({
+        sourceDiskIndex: 0,
+        sourcePartitions: [2],
+        sourceVirtualDisk: 'C:/vms/source.vhdx',
+        destinationPath: dir,
+        compressionLevel: 3,
+        verificationEnabled: false
+      });
+      expect(job.partitions.map((p) => p.partitionIndex)).toEqual([2]);
+    });
+
+    it('throws on an empty selection for a physical source', async () => {
+      await expect(
+        engine.buildJob({
+          sourceDiskIndex: 0,
+          sourcePartitions: [],
+          destinationPath: dir,
+          compressionLevel: 3,
+          verificationEnabled: false
+        })
+      ).rejects.toThrow(/no matching partitions/i);
+    });
+
     it('throws when no selected partitions match', async () => {
       await expect(
         engine.buildJob({
@@ -337,6 +382,56 @@ async function buildPartialImageAtDefaultName(eng: ImagingEngine, destDir: strin
   fs.closeSync(fd);
   return defaultPath;
 }
+
+describe('ImagingEngine runBackup payloads', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-engine-payload-'));
+    vi.mocked(launchElevatedJob).mockClear();
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('launches a backup-vhd payload when the source is a virtual disk file', async () => {
+    const engine = new ImagingEngine(createFakeEnumerator());
+    const config = {
+      sourceDiskIndex: -1,
+      sourcePartitions: [],
+      sourceVirtualDisk: 'C:/vms/source.vhdx',
+      destinationPath: dir,
+      compressionLevel: 3,
+      verificationEnabled: false
+    };
+    const result = await engine.runBackup(config, () => undefined);
+    expect(result).toEqual({ ok: true });
+    expect(launchElevatedJob).toHaveBeenCalledTimes(1);
+    expect(launchElevatedJob).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'backup-vhd', config })
+    );
+  });
+
+  it('builds and launches an ordinary backup job for disk sources', async () => {
+    const engine = new ImagingEngine(createFakeEnumerator());
+    const result = await engine.runBackup(
+      {
+        sourceDiskIndex: 0,
+        sourcePartitions: [0],
+        destinationPath: dir,
+        compressionLevel: 3,
+        verificationEnabled: false
+      },
+      () => undefined
+    );
+    expect(result).toEqual({ ok: true });
+    expect(launchElevatedJob).toHaveBeenCalledTimes(1);
+    expect(launchElevatedJob).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'backup', partitions: expect.any(Array) })
+    );
+  });
+});
 
 describe('mapJobProgress', () => {
   const base: JobProgress = {

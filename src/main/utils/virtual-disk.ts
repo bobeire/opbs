@@ -42,7 +42,7 @@ export interface VirtualDiskInfo {
 
 interface VirtualDiskNativeApi {
   createVirtualDisk(path: string, sizeBytes: number, format: string, fixed: boolean): void;
-  attachVirtualDisk(path: string): boolean;
+  attachVirtualDisk(path: string, readOnly?: boolean): boolean;
   detachVirtualDisk(path: string): boolean;
   getVirtualDiskInfo(path: string): VirtualDiskInfo;
   getVirtualDiskPhysicalPath(path: string): string;
@@ -197,9 +197,10 @@ export function createVirtualDiskFile(target: VirtualDiskTarget): void {
   vdNative().createVirtualDisk(target.path, size, format, target.type === 'fixed');
 }
 
-/** Attach without a drive letter. Requires elevation. */
-export function attachVirtualDiskFile(path: string): void {
-  vdNative().attachVirtualDisk(path);
+/** Attach without a drive letter. Requires elevation.
+ *  `readOnly` attaches the disk write-protected (backup sources). */
+export function attachVirtualDiskFile(path: string, opts?: { readOnly?: boolean }): void {
+  vdNative().attachVirtualDisk(path, opts?.readOnly === true);
 }
 
 /** Detach. Requires elevation. Throws when the disk is not attached. */
