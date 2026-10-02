@@ -308,6 +308,22 @@ defaults to the first cloned partition. A target disk with no partition table
 at all gets a fresh one automatically (no acknowledgement — there is no layout
 to destroy); an unreadable target layout is never overwritten.
 
+A clone is **source-table non-deviating** and byte-exact by construction: the
+job only ever opens the source disk for reads — the fresh partition table and
+every content block are written exclusively to the target drive — so the
+source's MBR, GPT header/entries and backup GPT are hash-identical before and
+after a clone (covered by `test/unit/clone-job.test.ts`). On the target side,
+the helper issues a disk rescan *immediately after* writing the fresh table,
+while the new partitions are still empty. That matters: Windows' first look at
+a partition normally happens before any filesystem content exists, and if a
+rescan instead *discovers an already-filled FAT32 volume*, Windows' arrival
+processing asynchronously pokes a handful of bytes after the job reports
+success (the BPB reserved byte at boot-sector offset `0x41` flips `0x00`→
+`0x01`, plus a few data-area bytes). With the early rescan the later one only
+refreshes layout, the OS never touches the copied data, and the target stays
+byte-identical to the source — verified against a 100 MB FAT32 partition with
+a zero-byte diff after settle.
+
 CLI: `clone <config.json> [--elevated] [--used-blocks-only] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk]`.
 
 ## How a restore runs

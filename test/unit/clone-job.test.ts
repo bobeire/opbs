@@ -143,6 +143,50 @@ describe('runCloneJob', () => {
     expect(result.ok).toBe(false);
     expect(result.cancelled).toBe(true);
   });
+
+  it('never writes to the source disk - clone is source-table non-deviating', async () => {
+    writeJob({
+      type: 'clone',
+      sourceDiskIndex: 0,
+      blockSize: GR_CLUSTER,
+      writeTable: {
+        scheme: 'gpt',
+        diskSize: 512 * 1024 * 1024,
+        entries: [{ offset: 1048576, size: VOLUME_SIZE, name: 'P0' }]
+      },
+      partitions: [
+        { diskIndex: 0, partitionIndex: 0, size: VOLUME_SIZE, offset: 0, label: 'P0', readSource: 'physical' }
+      ],
+      targets: [{ partitionIndex: 0, diskIndex: 1, offset: 0, label: 'P0' }]
+    });
+
+    const vol = buildCanonicalNtfsVolumeData();
+    const native = bufferNative(vol);
+    native.buildPartitionTable = vi.fn(() => ({
+      firstUsableLBA: 34,
+      lastUsableLBA: 102366,
+      regions: [{ offset: 0, data: Buffer.alloc(512, 0xaa) }]
+    }));
+    await runCloneJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = readResult();
+    expect(result.ok).toBe(true);
+
+    const sourceDevice = '\\\\.\\PhysicalDrive0';
+    const targetDevice = '\\\\.\\PhysicalDrive1';
+
+    // Content AND the fresh partition table land exclusively on the target.
+    expect(native.writes.length).toBeGreaterThan(0);
+    for (const write of native.writes) {
+      expect(write.device).toBe(targetDevice);
+    }
+    expect(native.writes.some((w) => w.device === sourceDevice)).toBe(false);
+
+    // Reads may only come from the source device (or a VSS snapshot of it).
+    const readDevices = vi.mocked(native.readBlocks).mock.calls.map((call) => call[0]);
+    expect(readDevices.length).toBeGreaterThan(0);
+    expect(readDevices.every((d) => d === sourceDevice)).toBe(true);
+  });
 });
 
 describe('runBackupJob with usedBlocksOnly', () => {

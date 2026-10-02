@@ -920,6 +920,42 @@ class CancelledError extends Error {
 }
 
 /**
+ * After a fresh partition table is written and rescanned, wait until Windows
+ * reports the new partitions and then hold briefly so volume-arrival work
+ * finishes while the partitions are still empty.
+ *
+ * Discovery timing decides whether the target stays byte-exact: Windows
+ * arriving at an empty partition never touches content, but a rescan that
+ * *discovers an already-filled FAT32 volume* runs arrival processing that
+ * asynchronously pokes bytes into it (boot-sector BS_Resvd at offset 0x41,
+ * FSInfo, FAT) after the job reports success. Starting the content writes
+ * during that same enumeration can also fail the first write with a
+ * transient "device not ready"/sharing error.
+ */
+async function settleAfterFreshTable(
+  native: NativeImagingApi,
+  diskIndex: number,
+  expectedEntries: number
+): Promise<void> {
+  if (typeof native.getPartitions === 'function') {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      let visible: boolean;
+      try {
+        const parts = native.getPartitions(diskIndex);
+        visible = Array.isArray(parts) && parts.length >= expectedEntries;
+      } catch {
+        // Layout query unavailable; rely on the fixed settle below.
+        break;
+      }
+      if (visible) break;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  }
+  await new Promise((resolve) => setTimeout(resolve, 800));
+}
+
+/**
  * Restores partitions from a .opbs image to a target disk. Runs in the
  * elevated helper process.
  *
@@ -1183,6 +1219,13 @@ export async function runRestoreJob(
           `Partition table write at ${region.offset}`
         );
       }
+      // Same early rescan as runCloneJob: let Windows discover the fresh
+      // (still empty) partitions now, so the post-job rescan does not trigger
+      // arrival processing that asynchronously modifies restored content.
+      if (native.updateDiskProperties) {
+        native.updateDiskProperties(tableDevicePath);
+      }
+      await settleAfterFreshTable(native, job.targets[0].diskIndex, job.writeTable.entries.length);
     }
 
     for (const target of job.targets) {
@@ -1674,6 +1717,18 @@ export async function runCloneJob(
         }
         native.writeBlocks(tableDevicePath, BigInt(region.offset), Buffer.from(region.data));
       }
+      // Rescan while the new partitions are still empty so Windows takes its
+      // first snapshot of them before any filesystem content exists. A rescan
+      // that first discovers an already-filled FAT32 volume races Windows'
+      // arrival processing, which asynchronously pokes a handful of bytes in
+      // the boot sector and data area (BS_Resvd at offset 0x41 among them)
+      // after the job reports success - making the clone non byte-exact.
+      // With this early rescan the later one only refreshes layout, and the
+      // target stays byte-identical to the source.
+      if (native.updateDiskProperties) {
+        native.updateDiskProperties(tableDevicePath);
+      }
+      await settleAfterFreshTable(native, job.targets[0].diskIndex, job.writeTable.entries.length);
     }
 
     for (const target of job.targets) {
@@ -1738,11 +1793,28 @@ export async function runCloneJob(
           continue;
         }
 
-        try {
-          native.writeBlocks(targetDevice, BigInt(target.offset) + offset, raw);
-        } catch (error) {
+        // A transient write failure (device re-enumeration right after the
+        // early table rescan, USB hiccup) must not silently drop a block:
+        // retry before giving up, and always surface it as a warning.
+        let writeError: unknown = null;
+        for (let attempt = 0; attempt < 4; attempt++) {
+          if (attempt > 0) {
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            if (isCancelled()) {
+              throw new CancelledError();
+            }
+          }
+          try {
+            native.writeBlocks(targetDevice, BigInt(target.offset) + offset, raw);
+            writeError = null;
+            break;
+          } catch (error) {
+            writeError = error;
+          }
+        }
+        if (writeError) {
           warnings.push(
-            `Write failed for ${target.label} block ${b} at ${BigInt(target.offset) + offset}: ${errorMessage(error)}`
+            `Write failed for ${target.label} block ${b} at ${BigInt(target.offset) + offset}: ${errorMessage(writeError)}`
           );
           continue;
         }

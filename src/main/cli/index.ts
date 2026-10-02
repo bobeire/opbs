@@ -1017,6 +1017,12 @@ async function runJobInProcess(
       console.log(JSON.stringify(result, null, 2));
     } else {
       console.log(result.ok ? `Job OK (${formatBytes(result.bytesWritten)})` : `Job FAILED: ${result.error}`);
+      const jobWarnings = (result as { warnings?: string[] }).warnings;
+      if (result.ok && jobWarnings?.length) {
+        for (const warning of jobWarnings) {
+          console.log(`warning: ${warning}`);
+        }
+      }
     }
     return result.ok ? 0 : 1;
   } finally {

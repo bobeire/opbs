@@ -19,6 +19,8 @@ export interface NativeImagingApi {
   releaseLockedVolumes?(): void;
   /** Ask Windows to re-read the partition table after a raw restore. */
   updateDiskProperties?(devicePath: string): boolean;
+  /** Windows' current view of a disk's partitions (post-rescan layout). */
+  getPartitions?(diskIndex: number): Array<{ partitionIndex: number; offset: number; size: number; type?: number }>;
   /**
    * Build a GPT or MBR partition table. Returns the regions (byte offset + data)
    * the elevated helper writes via writeBlocks before restoring partitions.
