@@ -141,6 +141,28 @@ export class CompressionPool {
         [transferable.buffer]
       );
     }
+    this.refreshKeepalive();
+  }
+
+  /**
+   * Keep the event loop alive while operations are pending. Workers are
+   * created unref()'d so an idle pool never holds a process open — but while
+   * a job is in flight the process must stay alive until the result is
+   * delivered. Without this, a plain-node CLI (WinPE / elevated helper)
+   * awaiting a pool result has an empty event loop and Node exits with code 0
+   * mid-job: no exception, no result file, image truncated at the drain
+   * window, and the caller still sees exit=0. Electron runs never hit this
+   * because the app itself keeps the loop alive.
+   */
+  private refreshKeepalive(): void {
+    const active = this.pending.size > 0;
+    for (const worker of this.workers) {
+      if (active) {
+        worker.ref();
+      } else {
+        worker.unref();
+      }
+    }
   }
 
   private onResult(seq: number, ok: boolean, data?: Buffer, error?: string): void {
@@ -170,17 +192,21 @@ export class CompressionPool {
   }
 
   private settle(): void {
-    while (true) {
-      const op = this.pending.get(this.nextResolve);
-      if (!op) return;
-      if (!op.done) return;
-      if (op.error) {
-        op.reject(op.error);
-      } else {
-        op.resolve(op.result!);
+    try {
+      while (true) {
+        const op = this.pending.get(this.nextResolve);
+        if (!op) return;
+        if (!op.done) return;
+        if (op.error) {
+          op.reject(op.error);
+        } else {
+          op.resolve(op.result!);
+        }
+        this.pending.delete(this.nextResolve);
+        this.nextResolve++;
       }
-      this.pending.delete(this.nextResolve);
-      this.nextResolve++;
+    } finally {
+      this.refreshKeepalive();
     }
   }
 

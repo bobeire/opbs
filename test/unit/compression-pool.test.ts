@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { spawnSync } from 'child_process';
+import * as path from 'path';
 import { CompressionPool } from '../../src/main/imaging/compression-pool';
 import { compressBlock, decompressBlock, COMPRESSION_ZSTD, COMPRESSION_DEFLATE } from '../../src/main/imaging/image-format';
 
@@ -96,4 +98,44 @@ describe('CompressionPool', () => {
     }
     pool.stop();
   });
+
+  // Regression: workers are created unref()'d so an idle pool never holds a
+  // process open — but while work is pending the plain-node CLI (WinPE /
+  // elevated helper) must stay alive until the pool result arrives. Without
+  // the keepalive, a bare `node` process awaiting compress() has an empty
+  // event loop and exits with code 0 mid-job: no exception, no result file,
+  // truncated image, caller still sees exit=0. Vitest and Electron keep the
+  // loop alive themselves, so only a spawned plain-node child exposes this.
+  it('keeps a plain-node process alive while pool work is pending', () => {
+    const poolPath = path.resolve(__dirname, '../../dist/imaging/compression-pool.js');
+    const script = `
+      const { CompressionPool } = require(${JSON.stringify(poolPath)});
+      (async () => {
+        const pool = new CompressionPool(4, 1, 'deflate');
+        try {
+          for (let i = 0; i < 24; i++) {
+            const raw = Buffer.alloc(64 * 1024, i & 0xff);
+            const out = await pool.compress(raw);
+            if (!Buffer.isBuffer(out) || out.length === 0) {
+              throw new Error('empty compress result at ' + i);
+            }
+          }
+          process.stdout.write('POOL-KEEPALIVE-DONE');
+        } finally {
+          pool.stop();
+        }
+      })().catch((e) => {
+        process.stderr.write(String((e && e.stack) || e));
+        process.exit(1);
+      });
+    `;
+    const r = spawnSync(process.execPath, ['-e', script], {
+      encoding: 'utf8',
+      timeout: 60000,
+      cwd: path.resolve(__dirname, '../..')
+    });
+    expect(r.stderr || '').toBe('');
+    expect(r.status).toBe(0);
+    expect(r.stdout || '').toContain('POOL-KEEPALIVE-DONE');
+  }, 90000);
 });
