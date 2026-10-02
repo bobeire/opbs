@@ -1233,7 +1233,7 @@ body {
 
 .file-table-head, .file-row {
   display: grid;
-  grid-template-columns: 1fr 110px 170px 90px;
+  grid-template-columns: 1fr 110px 170px 150px;
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
@@ -1283,6 +1283,15 @@ body {
 
 .col-actions {
   text-align: right;
+}
+
+.col-actions button + button {
+  margin-left: 6px;
+}
+
+.btn-extract-dir {
+  margin-left: auto;
+  white-space: nowrap;
 }
 
 .btn-small {

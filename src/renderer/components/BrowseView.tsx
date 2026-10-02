@@ -213,25 +213,24 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
     void loadDirectory(stripLastSegment(cwd));
   };
 
-  const handleExtract = async (node: BrowseNode) => {
+  const extractTarget = async (relPath: string, displayName: string, isDir: boolean) => {
     if (partitionIndex === null) return;
-    const relPath = joinPath(cwd, node.name);
     let outPath: string | undefined;
-    if (node.isDirectory) {
+    if (isDir) {
       // Folder picker: the chosen folder is the destination root, and the
       // directory is recreated inside it as <folder>/<name>.
       outPath = await window.electronAPI.selectDirectory({
-        title: `Choose a folder to extract "${node.name}" into`
+        title: `Choose a folder to extract "${displayName}" into`
       });
     } else {
-      const suggested = node.name.replace(/[<>:"/\\|?*]/g, '_');
+      const suggested = displayName.replace(/[<>:"/\\|?*]/g, '_');
       outPath = await window.electronAPI.selectSaveFile({
         filters: [{ name: 'Extracted files', extensions: ['*'] }],
         name: suggested
       });
     }
     if (!outPath) return;
-    setExtracting(node.isDirectory ? `${node.name}/…` : node.name);
+    setExtracting(relPath);
     setNotice('');
     try {
       const result = await window.electronAPI.browseExtract(
@@ -247,6 +246,15 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
     } finally {
       setExtracting(null);
     }
+  };
+
+  const handleExtract = (node: BrowseNode) =>
+    void extractTarget(joinPath(cwd, node.name), node.name, node.isDirectory);
+
+  const handleExtractCurrent = () => {
+    if (partitionIndex === null) return;
+    const displayName = cwd ? cwd.split('/').pop() ?? cwd : `partition ${partitionIndex}`;
+    void extractTarget(cwd, displayName, true);
   };
 
   const handleMount = async (): Promise<void> => {
@@ -433,6 +441,14 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
                 );
               })}
             </div>
+            <button
+              className="btn-secondary btn-small btn-extract-dir"
+              disabled={loading || extracting !== null}
+              onClick={handleExtractCurrent}
+              title="Extract the folder you are currently viewing"
+            >
+              {extracting === cwd ? 'Extracting…' : 'Extract folder'}
+            </button>
           </div>
 
           <div className="file-table">
@@ -470,21 +486,30 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
                   </span>
                   <span className="col-actions">
                     {node.isDirectory ? (
-                      <button className="btn-secondary btn-small" onClick={() => onEnterDir(node)}>
-                        Open
-                      </button>
+                      <>
+                        <button className="btn-secondary btn-small" onClick={() => onEnterDir(node)}>
+                          Open
+                        </button>
+                        <button
+                          className="btn-primary btn-small"
+                          disabled={extracting !== null}
+                          onClick={() => handleExtract(node)}
+                        >
+                          {extracting === joinPath(cwd, node.name) ? 'Extracting…' : 'Extract'}
+                        </button>
+                      </>
                     ) : (
                       <button
                         className="btn-primary btn-small"
-                        disabled={node.isEncrypted}
-                        onClick={() => void handleExtract(node)}
+                        disabled={node.isEncrypted || extracting !== null}
+                        onClick={() => handleExtract(node)}
                         title={
                           node.isEncrypted
                             ? 'EFS-encrypted files cannot be extracted from the image'
                             : undefined
                         }
                       >
-                        {node.isEncrypted ? 'Encrypted' : extracting === node.name ? 'Extracting…' : 'Extract'}
+                        {node.isEncrypted ? 'Encrypted' : extracting === joinPath(cwd, node.name) ? 'Extracting…' : 'Extract'}
                       </button>
                     )}
                   </span>

@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   parseEfsAttribute,
   parseBootSector,
@@ -118,5 +121,20 @@ describe('EFS-encrypted files across the browse path', () => {
 
   it('extractPath rejects an encrypted file before writing anything', () => {
     expect(() => extractPath(efsSession(), 'secret.txt', '__nope__')).toThrow(EfsEncryptedError);
+  });
+
+  it('folder extraction skips the encrypted file instead of aborting', () => {
+    const session = efsSession();
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-efs-'));
+    try {
+      // hello.txt + docs/big.bin extract; secret.txt is skipped (ciphertext
+      // cannot be decrypted offline), and the walk must not throw part-way.
+      expect(extractPath(session, '', out)).toBe(4);
+      expect(fs.readFileSync(path.join(out, 'hello.txt'), 'utf8')).toBe('Hello, OPBS world!');
+      expect(fs.existsSync(path.join(out, 'docs', 'big.bin'))).toBe(true);
+      expect(fs.existsSync(path.join(out, 'secret.txt'))).toBe(false);
+    } finally {
+      fs.rmSync(out, { recursive: true, force: true });
+    }
   });
 });

@@ -7,7 +7,7 @@ import { GPT_BASIC_DATA_GUID, GPT_EFI_SYSTEM_GUID } from '../../src/main/imaging
 import { inferMbrTypes, inferTableTypeGuids } from '../../src/main/imaging/fs/file-browse';
 import { DiskEnumerator } from '../../src/main/utils/disk-enumerator';
 import { launchElevatedJob } from '../../src/main/helper/launcher';
-import { encodeHeader, encodePartitionEntry, encodeBlockIndexEntry, encodeBlockFrame, compressBlock, crc32, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
+import { encodeHeader, encodePartitionEntry, encodeBlockIndexEntry, encodeBlockFrame, compressBlock, crc32, newImageCipher, ImageCipher, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
 
 vi.mock('../../src/main/helper/launcher', () => ({
   launchElevatedJob: vi.fn(() => ({
@@ -64,7 +64,7 @@ function fat32Payload(hasEfiDir: boolean): Buffer {
 function writeImage(
   imagePath: string,
   identity?: { model: string; serial: string },
-  opts?: { partitionPayload?: Buffer }
+  opts?: { partitionPayload?: Buffer; cipher?: ImageCipher }
 ): void {
   const partition: PartitionEntryMeta = {
     partitionIndex: 0,
@@ -82,9 +82,9 @@ function writeImage(
     partitionCount: 1,
     flags: FLAG_HAS_BLOCK_INDEX,
     blockIndexOffset: 0,
-    cipherId: 0,
-    kdfIterations: 0,
-    salt: Buffer.alloc(16),
+    cipherId: opts?.cipher ? opts.cipher.cipherId : 0,
+    kdfIterations: opts?.cipher ? opts.cipher.kdfIterations : 0,
+    salt: opts?.cipher ? opts.cipher.salt : Buffer.alloc(16),
     baseImagePath: '',
     sourceDiskModel: identity?.model ?? '',
     sourceDiskSerial: identity?.serial ?? ''
@@ -98,7 +98,7 @@ function writeImage(
   for (let b = 0; b < partition.blockCount; b++) {
     const raw = b === 0 && opts?.partitionPayload ? Buffer.from(opts.partitionPayload) : Buffer.alloc(BLOCK, 0x41 + b);
     const comp = compressBlock(raw, 0, 3);
-    const frame = encodeBlockFrame(raw, comp);
+    const frame = encodeBlockFrame(raw, comp, opts?.cipher);
     fs.writeSync(fd, frame, 0, frame.length, cursor);
     blocks.push({ partitionIndex: 0, blockIndex: b, fileOffset: cursor, rawSize: raw.length, compSize: comp.length, rawCrc32: crc32(raw) });
     cursor += frame.length;
@@ -600,6 +600,25 @@ describe('RestoreEngine blank physical targets', () => {
     expect(job.writeTable!.entries[0].mbrType).toBe(0x0c);
     expect(job.writeTable!.entries[0].bootable).toBe(true);
     expect(job.warnings!.join(' ')).toMatch(/has no partition table/);
+  });
+
+  it('infers an ESP through an encrypted image when the passphrase is provided', async () => {
+    const cipher = newImageCipher('correct horse battery staple');
+    writeImage(imagePath, undefined, { partitionPayload: fat32Payload(true), cipher });
+    const engine = new RestoreEngine(createBlankEnumerator());
+
+    // Without the key the probe cannot read the volume, so no ESP is claimed.
+    const blind = await engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] });
+    expect(blind.writeTable!.scheme).toBe('mbr');
+
+    const job = await engine.buildJob({
+      imagePath,
+      targetDiskIndex: 1,
+      targetPartitions: [0],
+      passphrase: 'correct horse battery staple'
+    });
+    expect(job.writeTable!.scheme).toBe('gpt');
+    expect(job.writeTable!.entries[0].typeGuid).toBe(GPT_EFI_SYSTEM_GUID);
   });
 
   it('does not write a table on a target that already has partitions', async () => {

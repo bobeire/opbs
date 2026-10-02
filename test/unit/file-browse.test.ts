@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { encodeHeader, encodePartitionEntry, encodeBlockIndexEntry, encodeBlockFrame, compressBlock, crc32, readImageInfo, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, COMPRESSION_ZSTD, COMPRESSION_NONE, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
 import { ChainPartitionReader, partitionReaderForChain } from '../../src/main/imaging/image-browse';
-import { openBrowse, listDirectory, readPath, resolvePath } from '../../src/main/imaging/fs/file-browse';
+import { openBrowse, listDirectory, readPath, resolvePath, extractPath } from '../../src/main/imaging/fs/file-browse';
 import { buildNtfsVolume, CLUSTER } from '../helpers/ntfs-fixture';
 
 /** Write a .opbs image whose single partition holds `raw` bytes. */
@@ -167,6 +167,33 @@ describe('image browse', () => {
     expect(rec?.name).toBe('big.bin');
     expect(rec?.id).toBeDefined();
     expect(typeof rec?.id).toBe('number');
+  });
+
+  it('extracts a folder recursively, and the partition root, without re-entering itself', () => {
+    const volume = buildNtfsVolume();
+    writeImageFromBytes(imagePath, volume.read(0, volume.size), CLUSTER, COMPRESSION_NONE);
+
+    const session = openBrowse(imagePath, 0);
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-extract-'));
+    try {
+      expect(extractPath(session, 'docs', out)).toBe(1);
+      const big = fs.readFileSync(path.join(out, 'docs', 'big.bin'));
+      expect(big.length).toBe(2 * CLUSTER);
+      expect(big[0]).toBe((32 * 31) & 0xff);
+
+      // The root record lists itself as a child; extracting the root must
+      // land the volume contents in out/ rather than recurse forever.
+      const rootOut = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-extract-root-'));
+      try {
+        expect(extractPath(session, '', rootOut)).toBe(4);
+        expect(fs.readFileSync(path.join(rootOut, 'hello.txt'), 'utf8')).toBe('Hello, OPBS world!');
+        expect(fs.existsSync(path.join(rootOut, 'docs', 'big.bin'))).toBe(true);
+      } finally {
+        fs.rmSync(rootOut, { recursive: true, force: true });
+      }
+    } finally {
+      fs.rmSync(out, { recursive: true, force: true });
+    }
   });
 
   it('falls back to the directory tree when index entries miss the MFT cache', () => {

@@ -653,11 +653,16 @@ function extractNtfs(session: NtfsBrowseSession, relPath: string, outPath: strin
 function extractNtfsDir(session: NtfsBrowseSession, recordNumber: number, outDir: string): number {
   let count = 0;
   for (const node of session.children.get(recordNumber) ?? []) {
+    // The root record lists itself as a child (its $FILE_NAME parent is 5);
+    // extracting it would recurse into the same directory forever.
+    if (node.recordNumber === recordNumber) continue;
     const rec = session.records.get(node.recordNumber)!;
     const dest = path.join(outDir, node.name);
     if (rec.isDirectory) {
       fs.mkdirSync(dest, { recursive: true });
       count += extractNtfsDir(session, rec.recordNumber, dest);
+    } else if (rec.isEncrypted) {
+      continue;
     } else {
       fs.writeFileSync(dest, readFileData(session.reader, session.layout, rec));
       writeAlternateStreams(session, rec, dest);

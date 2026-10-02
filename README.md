@@ -472,8 +472,15 @@ OPBS.exe --cli extract img.opbs --partition 2 --path "Users\me" --out D:\restore
 For encrypted images pass `--passphrase p`. The NTFS reader supports directory
 trees, resident and non-resident files (via data runlists), chains of
 full + delta images, sparse runs, LZNT1-compressed files, and alternate data
-streams. EFS-encrypted files are detected and skipped (browse shows a 🔒 and
-extract refuses) — decryption is not implemented.
+streams. EFS-encrypted files are detected and skipped (browse shows a 🔒,
+single-file extract refuses, folder extraction skips them) — decryption is
+not implemented.
+
+The GUI's Browse page exposes the same actions: every row has an **Extract**
+button — for a folder this extracts the whole subtree recursively into a
+folder you pick — and **Extract folder** in the breadcrumb bar extracts the
+directory you are currently viewing (at the volume root, its contents land
+directly in the chosen folder).
 
 ## Browsing Macrium images (.mrimgx and .mrimg)
 
@@ -753,7 +760,7 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   per-block CRC-32 verification, encrypted images (AES-256-GCM), incremental
   backups + chain restore, retention/GFS pruning + manifest, cron scheduling +
   toast/webhook notifications, SMART/disk-health reporting, headless CLI, NTFS
-  browse/extract (sparse, LZNT1, ADS, EFS detection), used-blocks-only capture
+  browse/extract (folder trees, sparse, LZNT1, ADS, EFS detection), used-blocks-only capture
   via NTFS `$Bitmap`, disk-to-disk clone (live VSS copy, dissimilar layout +
   fresh partition table), Macrium `.mrimgx`/`.mrimg` browse/extract, read-only
   WinFsp mount of image partitions (GUI + CLI), WinPE media with driver
