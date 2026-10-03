@@ -176,6 +176,39 @@ implemented; **Investigate** items need spike work first.
 - ⬜ **Remaining**: live smoke test on a machine with the WinFsp runtime
   installed (auto-detected; GUI shows a hint when missing).
 
+### Immutable repositories (shipped 0.6.48 — Phase 1)
+- ✅ Repository format (`imaging/repository.ts`): `opbs-repo.json` header
+  (uuid, algo, key id, default lock) + append-only `opbs-repo.journal` where
+  every record (create / prune / unlock) is HMAC-SHA256 signed and chained
+  via `seq`/`prev`; `create` records carry per-volume SHA-256 hashes and a
+  lock-until date. Key never stored inside the repo — keyfile
+  (`~/.opbs/repo-keys/<id>.key`, `OPBS_REPO_KEY_DIR`, `--keyfile`) or
+  passphrase-derived (PBKDF2-SHA256, 210k iterations, no file written).
+- ✅ Write protection (`utils/file-protect.ts`): a deny ACE with the exact
+  mask `DELETE | FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA |
+  FILE_WRITE_ATTRIBUTES` (applied via PowerShell/.NET — icacls shorthand and
+  .NET-with-SYNCHRONIZE both break Node reads) keeps every read working for
+  verify/browse/restore while blocking all write/encrypt paths. The journal
+  must stay appendable, so it is chain-verified instead of ACL-protected.
+- ✅ Deletion honesty: Windows falls back to the parent folder's
+  `FILE_DELETE_CHILD` when a readable file denies DELETE, so deletion cannot
+  be ACL-blocked without breaking reads — it is *detected* instead (missing
+  files / orphans fail `repo verify`).
+- ✅ CLI: `repo init/list/verify/prune/unlock` + `backup --repo <dir>
+  [--lock-days N]` (image written into `images/`, signed create record
+  appended). Prune chain rules: a root waits for all of its deltas to be
+  eligible, deltas prune individually, unlock does not cascade; dry-run
+  needs no key. Flag/positional parsing shared in `cli/flags.ts`.
+- ✅ Retention guard: automatic retention never touches a repository —
+  `planRetention`/`applyRetention` short-circuit with a "use `repo prune`"
+  reminder (prevents silent deletes by the normal GFS path).
+- ✅ Tests: `test/unit/repository.test.ts` (22 tests — key handling, chain
+  tamper/truncation/size/hash/orphan detection, prune eligibility + root
+  protection, unlock, retention guard, win32 write-block roundtrip).
+- ⬜ **Remaining**: Phase 2 — GUI surface (repo browser, lock badges,
+  verify/prune screens); Phase 3 — S3 Object Lock backend (true WORM) and
+  an external journal anchor (off-box copy defeats local journal rollback).
+
 ## Planned
 
 ### Cloud / network destinations
