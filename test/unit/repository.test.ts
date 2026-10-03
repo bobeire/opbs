@@ -358,7 +358,9 @@ describe('finalizeBackupRepo (backup hook)', () => {
     const image = makeImage(repoDir, 'hooked.opbs', base64Block(14));
     const result = { ok: true, imagePath: image } as JobResult;
     const config = {} as BackupJobConfig;
-    await finalizeBackupRepo(repoDir, config, result, { keyfile, quiet: true, lockDays: 5 });
+    const record = await finalizeBackupRepo(repoDir, config, result, { keyfile, quiet: true, lockDays: 5 });
+    expect(record?.image).toBe('hooked.opbs');
+    expect(Date.parse(record!.lockUntil)).toBeGreaterThan(Date.now() + 4 * 86_400_000);
     const records = loadJournal(repoDir);
     expect(records).toHaveLength(1);
     expect(records[0].image).toBe('hooked.opbs');

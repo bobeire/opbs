@@ -215,8 +215,8 @@ export async function finalizeBackupRepo(
   config: BackupJobConfig,
   result: JobResult,
   opts: RepoKeyOptions & { lockDays?: number; quiet?: boolean } = {}
-): Promise<void> {
-  if (!result.ok) return;
+): Promise<{ image: string; lockUntil: string } | undefined> {
+  if (!result.ok) return undefined;
 
   let imagePath = result.imagePath;
   if (!imagePath || !fs.existsSync(imagePath)) {
@@ -245,4 +245,5 @@ export async function finalizeBackupRepo(
         `immutable until ${lockUntil}`
     );
   }
+  return { image: record.image, lockUntil };
 }

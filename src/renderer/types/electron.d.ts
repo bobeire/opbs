@@ -5,7 +5,13 @@ declare global {
     electronAPI: {
       getDisks: () => Promise<any[]>;
       getPartitions: (diskIndex: number) => Promise<any[]>;
-      startBackup: (config: any) => Promise<void>;
+      startBackup: (config: any) => Promise<{
+        ok: boolean;
+        error?: string;
+        imagePath?: string;
+        warnings?: string[];
+        repoRecord?: { image: string; lockUntil: string };
+      } | undefined>;
       cancelBackup: () => Promise<void>;
       isBackupRunning: () => Promise<boolean>;
       isHelperTaskRegistered: () => Promise<boolean>;

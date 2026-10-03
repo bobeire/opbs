@@ -513,10 +513,14 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   }
   const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
-  const repoDir = flagValue(ctx.argv, '--repo');
+  // --repo flag wins; config-driven runs (GUI wizard / scheduled) can carry
+  // repoDir + repoLockDays inside the job JSON instead.
+  const repoDir: string | undefined =
+    flagValue(ctx.argv, '--repo') ??
+    (typeof config.repoDir === 'string' && config.repoDir ? config.repoDir : undefined);
   let lockDays: number | undefined;
   try {
-    lockDays = parseLockDays(ctx.argv);
+    lockDays = parseLockDays(ctx.argv) ?? (typeof config.repoLockDays === 'number' ? config.repoLockDays : undefined);
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
     return 1;

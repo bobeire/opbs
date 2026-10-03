@@ -214,9 +214,16 @@ implemented; **Investigate** items need spike work first.
   IPC handlers over `repoOverview()` + the existing repository API; smoke
   tested end-to-end (init → verify → prune → error path) and covered by the
   gui-click integration test.
+- ✅ Backup-wizard integration: destination step **"Use a repository…"**
+  picker (validated via `repo-open`, routes images to `<repo>/images`,
+  per-run lock-days input defaulting to the repository setting),
+  `start-backup` finalizes the signed journal record after the run
+  (`JobResult.repoRecord`, failures surface as warnings), and the completion
+  screen shows the lock date. `repoDir`/`repoLockDays` inside a job JSON
+  work for the CLI/scheduler too (`--repo` overrides), profiles persist the
+  repository link.
 - ⬜ **Remaining**: Phase 3 — S3 Object Lock backend (true WORM) and an
-  external journal anchor (off-box copy defeats local journal rollback);
-  backup-wizard "destination = repository" integration.
+  external journal anchor (off-box copy defeats local journal rollback).
 
 ## Planned
 

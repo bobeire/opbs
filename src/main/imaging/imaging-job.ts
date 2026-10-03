@@ -202,6 +202,8 @@ export interface JobResult {
   incremental?: boolean;
   resumed?: boolean;
   warnings: string[];
+  /** Set when the image was journaled into an immutable repository. */
+  repoRecord?: { image: string; lockUntil: string };
 }
 
 export interface RestoreJobProgress {

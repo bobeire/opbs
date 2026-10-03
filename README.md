@@ -729,6 +729,15 @@ files missing), and run **Verify** (full or fast, with streamed progress),
 **Prune** (dry-run first, then a two-step confirm) and **Unlock** (per image
 or all). The last opened repository is remembered across restarts.
 
+Backups can also *target* a repository straight from the wizard: on the
+destination step, **Use a repository…** validates the pick, switches the
+destination to `<repo>\images` and offers the lock window (defaulting to the
+repository's). After the run the image is write-protected and journaled, and
+the completion screen shows the lock-until date. The same
+`repoDir`/`repoLockDays` fields inside a job JSON make CLI and scheduled
+backups repository-aware (the `--repo` flag overrides them), and backup
+profiles remember the repository link.
+
 Protection layers (and their honest limits):
 
 1. **Write protection** — completed images and the header get a Windows deny

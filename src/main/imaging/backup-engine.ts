@@ -68,6 +68,12 @@ export interface BackupJobConfig {
    *  instead of starting fresh. Completed partitions are kept and the run
    *  resumes at the next partition boundary. */
   resume?: boolean;
+  /** Immutable repository: the image is written into `<repoDir>/images` and
+   *  journaled as immutable after the run (GUI wizard / config-driven runs;
+   *  the `--repo` CLI flag is the equivalent). */
+  repoDir?: string;
+  /** Lock window in days for the journaled image (repository default when unset). */
+  repoLockDays?: number;
 }
 
 export interface BackupCoordinator {

@@ -48,6 +48,8 @@ interface BackupConfig {
   baseImagePath?: string;
   passphrase?: string;
   resume?: boolean;
+  repoDir?: string;
+  repoLockDays?: number;
 }
 
 interface BackupProgress {
@@ -149,6 +151,12 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   const [blChecking, setBlChecking] = useState(false);
   const [blNeedsElevation, setBlNeedsElevation] = useState(false);
   const [blError, setBlError] = useState<string | null>(null);
+  const [repoDir, setRepoDir] = useState('');
+  const [repoLockDays, setRepoLockDays] = useState(30);
+  const [repoError, setRepoError] = useState<string | null>(null);
+  const [prevDestination, setPrevDestination] = useState('');
+  const [repoNote, setRepoNote] = useState<string | null>(null);
+  const [repoWarn, setRepoWarn] = useState<string | null>(null);
 
   useEffect(() => {
     loadDisks();
@@ -271,6 +279,37 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     }
   };
 
+  const handleSelectRepository = async () => {
+    setRepoError(null);
+    const picked = await window.electronAPI.selectDirectory({ title: 'Select an OPBS repository' });
+    if (!picked) return;
+    try {
+      const res = await window.electronAPI.repoOpen(picked);
+      if (!res.ok) {
+        setRepoError(res.error ?? 'Not an OPBS repository — initialize one in the Repositories view first.');
+        return;
+      }
+      const imagesPath = `${picked.replace(/[\\/]+$/, '')}\\images`;
+      setPrevDestination(destinationPath);
+      setRepoDir(picked);
+      setRepoLockDays(res.header?.defaultLockDays ?? 30);
+      setDestinationPath(imagesPath);
+      resolveNewestBase(imagesPath);
+    } catch (error) {
+      setRepoError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const clearRepository = () => {
+    setRepoDir('');
+    setRepoError(null);
+    if (prevDestination) {
+      setDestinationPath(prevDestination);
+      resolveNewestBase(prevDestination);
+    }
+    setPrevDestination('');
+  };
+
   const resolveNewestBase = async (dir: string) => {
     try {
       const result = await window.electronAPI.listImages(dir);
@@ -298,6 +337,14 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     if (profile.destinationPath) {
       setDestinationPath(profile.destinationPath);
       void resolveNewestBase(profile.destinationPath);
+    }
+    if (profile.repoDir) {
+      setRepoDir(profile.repoDir);
+      setRepoLockDays(profile.repoLockDays ?? 30);
+      setRepoError(null);
+    } else {
+      setRepoDir('');
+      setRepoError(null);
     }
     setCompressionLevel(profile.compressionLevel ?? 3);
     setCompressionType(profile.compressionType ?? 'zstd');
@@ -364,7 +411,8 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       usedBlocksOnly,
       incremental: incrementalEnabled,
       ...(resumeEnabled ? { resume: true } : {}),
-      ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {})
+      ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {}),
+      ...(repoDir ? { repoDir, repoLockDays } : {})
     };
     const created = await window.electronAPI.addBackupProfile(payload);
     if (created) {
@@ -381,6 +429,8 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     setCurrentStep('progress');
     setErrorMsg(null);
     setProgress(null);
+    setRepoNote(null);
+    setRepoWarn(null);
 
     const common: Omit<BackupConfig, 'sourceDiskIndex' | 'sourcePartitions'> = {
       destinationPath,
@@ -391,7 +441,18 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       verificationEnabled,
       usedBlocksOnly,
       ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {}),
-      ...(resumeEnabled ? { resume: true } : {})
+      ...(resumeEnabled ? { resume: true } : {}),
+      ...(repoDir ? { repoDir, repoLockDays } : {})
+    };
+
+    const trackResult = (result: Awaited<ReturnType<typeof window.electronAPI.startBackup>>) => {
+      if (result?.repoRecord) {
+        setRepoNote(
+          `Journaled: ${result.repoRecord.image} — immutable until ${new Date(result.repoRecord.lockUntil).toLocaleString()}`
+        );
+      }
+      const journalWarn = (result?.warnings ?? []).find((w) => w.toLowerCase().includes('journaled'));
+      if (journalWarn) setRepoWarn(journalWarn);
     };
 
     try {
@@ -404,7 +465,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
           sourcePartitions: [],
           ...(incrementalEnabled && baseImagePath ? { baseImagePath } : {})
         };
-        await window.electronAPI.startBackup(config);
+        trackResult(await window.electronAPI.startBackup(config));
       } else if (allDisks) {
         for (let i = 0; i < eligibleDisks.length; i++) {
           const disk = eligibleDisks[i];
@@ -416,7 +477,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
             sourcePartitions: disk.partitions.map((p) => p.partitionIndex),
             ...(incrementalEnabled && baseImagePath ? { baseImagePath } : {})
           };
-          await window.electronAPI.startBackup(config);
+          trackResult(await window.electronAPI.startBackup(config));
         }
       } else {
         setDiskLabel(null);
@@ -426,7 +487,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
           sourcePartitions: selectedPartitions,
           ...(incrementalEnabled && baseImagePath ? { baseImagePath } : {})
         };
-        await window.electronAPI.startBackup(config);
+        trackResult(await window.electronAPI.startBackup(config));
       }
       setCurrentStep('complete');
     } catch (error) {
@@ -672,9 +733,12 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                     type="text"
                     value={destinationPath}
                     onChange={(e) => handleDestinationChange(e.target.value)}
+                    readOnly={!!repoDir}
                     placeholder="Local folder, s3://bucket/prefix or sftp://user@host/path"
                   />
-                  <button onClick={handleSelectDestination}>Browse</button>
+                  <button onClick={handleSelectDestination} disabled={!!repoDir}>
+                    Browse
+                  </button>
                 </div>
                 <div className="net-browse-row">
                   <button
@@ -713,6 +777,46 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                   Base name for the image file. <code>.opbs</code> is appended automatically; multi-volume
                   images add <code>.001</code>, <code>.002</code>, … suffixes.
                 </p>
+              </div>
+
+              <div className="current-path">
+                <label>Immutable repository:</label>
+                {repoDir ? (
+                  <div className="path-input">
+                    <input type="text" readOnly value={repoDir} />
+                    <button onClick={clearRepository}>Clear</button>
+                  </div>
+                ) : (
+                  <div className="net-browse-row">
+                    <button className="btn-secondary" onClick={() => void handleSelectRepository()}>
+                      Use a repository…
+                    </button>
+                  </div>
+                )}
+                {repoError && <p className="error-message">{repoError}</p>}
+                {repoDir ? (
+                  <>
+                    <div className="setting-item" style={{ marginTop: 6 }}>
+                      <label>Lock (days):</label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={repoLockDays}
+                        onChange={(e) => setRepoLockDays(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                        style={{ width: 90 }}
+                      />
+                    </div>
+                    <p className="field-hint">
+                      The image goes to <code>{repoDir}\images</code>, is write-protected, and is journaled as
+                      immutable for {repoLockDays} day(s). Track it in the Repositories view.
+                    </p>
+                  </>
+                ) : (
+                  <p className="field-hint">
+                    Store backups in an append-only, signed repository — images are write-protected and
+                    time-locked, and <code>repo verify</code> detects edits or deletions.
+                  </p>
+                )}
               </div>
             </div>
             
@@ -1012,7 +1116,9 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
             
             <div className="success-message">
               <p>Your backup has been created successfully!</p>
+              {repoNote && <p>✓ {repoNote}</p>}
             </div>
+            {repoWarn && <div className="error-message">{repoWarn}</div>}
             
             <div className="wizard-actions">
               {progress?.imagePath && onViewImage && (

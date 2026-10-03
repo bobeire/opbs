@@ -144,6 +144,9 @@ export interface BackupProfile {
   passphrase?: string;
   /** Only capture allocated clusters (NTFS/FAT32/exFAT); skip free space. */
   usedBlocksOnly?: boolean;
+  /** Immutable repository destination (images journaled + write-protected). */
+  repoDir?: string;
+  repoLockDays?: number;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {

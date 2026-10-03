@@ -567,12 +567,26 @@ function setupIpcHandlers(): void {
   });
 
   // Backup operations
-  ipcMain.handle('start-backup', async (_, config) => {
+  ipcMain.handle('start-backup', async (_, rawConfig) => {
+    let config = rawConfig;
+    const repoDir: string | undefined =
+      typeof config?.repoDir === 'string' && config.repoDir ? config.repoDir : undefined;
+    if (repoDir) {
+      const { isRepository } = await import('./imaging/repository');
+      if (!isRepository(repoDir)) {
+        throw new Error(`Not an OPBS repository — run 'repo init ${repoDir}' first.`);
+      }
+      if (/^(s3|sftp|ftps?):\/\//i.test(config?.destinationPath ?? '')) {
+        throw new Error('Repositories are local directories — cloud destinations are not supported.');
+      }
+      // Single source of truth: the image always lands in <repo>/images.
+      config = { ...config, destinationPath: path.join(repoDir, 'images') };
+    }
     const merged =
       config?.destinationPath?.startsWith('s3://')
         ? { ...config, s3Profile: s3ProfileFromSettings() }
         : config?.destinationPath?.startsWith('sftp://')
-          ? { ...config, sftpProfile: sftpProfileFromSettings() }
+          ? { ...config, sftpProfile: s3ProfileFromSettings() }
           : config?.destinationPath?.startsWith('ftp://')
             ? { ...config, ftpProfile: ftpProfileFromSettings() }
             : config;
@@ -580,7 +594,20 @@ function setupIpcHandlers(): void {
     // session / image-info cache pointing at the old content.
     browseSessions.clear();
     clearImageInfoCache();
-    return backupManager.startBackup(merged);
+    const result = await backupManager.startBackup(merged);
+    if (repoDir && result.ok) {
+      try {
+        const { finalizeBackupRepo } = await import('./cli/repo');
+        const lockDays = typeof config.repoLockDays === 'number' ? config.repoLockDays : undefined;
+        result.repoRecord = await finalizeBackupRepo(repoDir, config, result, { lockDays, quiet: true });
+      } catch (error) {
+        // The image exists but is not journaled — verify would flag it as an
+        // orphan, so surface the failure loudly without discarding the result.
+        const message = error instanceof Error ? error.message : String(error);
+        result.warnings.push(`Image written but NOT journaled in the repository: ${message}`);
+      }
+    }
+    return result;
   });
 
   ipcMain.handle('cancel-backup', async () => {
