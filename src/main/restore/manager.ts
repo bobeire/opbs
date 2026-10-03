@@ -266,7 +266,7 @@ export class RestoreManager extends EventEmitter {
             (p.driveLetter || '').replace(':', '').toUpperCase() === systemDrive
         ) ?? false;
       if (!targetIsSystemDisk) {
-        const sysDisk = querySystemDiskIndex();
+        const sysDisk = await querySystemDiskIndex();
         targetIsSystemDisk = sysDisk !== null && sysDisk === config.targetDiskIndex;
       }
 

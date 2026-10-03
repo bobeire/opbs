@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const execFileSync = vi.fn();
+const execFileMock = vi.hoisted(() => vi.fn());
 vi.mock('child_process', () => ({
-  execFileSync: (...args: unknown[]) => execFileSync(...args)
+  execFile: (...args: unknown[]) => execFileMock(...args),
+  execFileSync: vi.fn()
 }));
 
 import { DiskEnumerator, NativeDiskApi } from '../../src/main/utils/disk-enumerator';
@@ -31,6 +32,15 @@ function psPartition(overrides: Record<string, unknown>): string {
   ]);
 }
 
+/** The async disk-enumerator invokes execFile(cmd, args, opts, callback). */
+function mockPsOutput(json: string): void {
+  execFileMock.mockImplementation(
+    (_cmd: unknown, _args: unknown, _opts: unknown, cb: (err: Error | null, stdout: string) => void) => {
+      cb(null, json);
+    }
+  );
+}
+
 describe('DiskEnumerator queryVolumes enrichment', () => {
   let mockNative: NativeDiskApi;
   let enumerator: DiskEnumerator;
@@ -48,7 +58,7 @@ describe('DiskEnumerator queryVolumes enrichment', () => {
     // Get-Partition serializes an absent DriveLetter as [char]0, which
     // ConvertTo-Json emits as a NUL character — a truthy string in JS that
     // would wrongly mark the volume as lettered (VSS snapshot path).
-    execFileSync.mockReturnValue(psPartition({ DriveLetter: String.fromCharCode(0) }));
+    mockPsOutput(psPartition({ DriveLetter: String.fromCharCode(0) }));
 
     const partitions = await enumerator.getPartitions(0);
 
@@ -56,9 +66,7 @@ describe('DiskEnumerator queryVolumes enrichment', () => {
   });
 
   it('keeps a real drive letter and volume details', async () => {
-    execFileSync.mockReturnValue(
-      psPartition({ DriveLetter: 'C', FileSystem: 'NTFS', Label: 'Windows', IsBoot: true })
-    );
+    mockPsOutput(psPartition({ DriveLetter: 'C', FileSystem: 'NTFS', Label: 'Windows', IsBoot: true }));
 
     const partitions = await enumerator.getPartitions(0);
 
@@ -69,10 +77,24 @@ describe('DiskEnumerator queryVolumes enrichment', () => {
   });
 
   it('treats an empty letter as null', async () => {
-    execFileSync.mockReturnValue(psPartition({ DriveLetter: '' }));
+    mockPsOutput(psPartition({ DriveLetter: '' }));
 
     const partitions = await enumerator.getPartitions(0);
 
     expect(partitions[0].driveLetter).toBeNull();
+  });
+
+  it('still returns partitions when PowerShell fails', async () => {
+    execFileMock.mockImplementation(
+      (_cmd: unknown, _args: unknown, _opts: unknown, cb: (err: Error) => void) => {
+        cb(new Error('powershell unavailable'));
+      }
+    );
+
+    const partitions = await enumerator.getPartitions(0);
+
+    expect(partitions).toHaveLength(1);
+    expect(partitions[0].driveLetter).toBeNull();
+    expect(partitions[0].fsType).toBe('Unknown');
   });
 });

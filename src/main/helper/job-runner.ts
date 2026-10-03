@@ -932,6 +932,36 @@ class CancelledError extends Error {
  * during that same enumeration can also fail the first write with a
  * transient "device not ready"/sharing error.
  */
+// Windows can briefly hold an exclusive lock on a freshly discovered volume
+// (AUTOCHK on a dirty filesystem, Explorer mounting the new letter), which
+// makes raw WriteFile fail with ERROR_ACCESS_DENIED until it finishes. Those
+// are the only errors worth waiting for — anything else (disk full, I/O
+// error, access rights) fails every attempt just the same.
+const TRANSIENT_WRITE_ERROR = /access is denied|being used by another process|the semaphore timeout period has expired/i;
+
+/**
+ * Run a raw device write, retrying transient lock errors with a fixed delay.
+ * The native layer closes and drops its cached handle when a write fails, so
+ * each retry reopens the device cleanly.
+ */
+export async function writeRawWithRetry(
+  attemptWrite: () => void | Promise<unknown>,
+  attempts = 20,
+  delayMs = 500
+): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await attemptWrite();
+      return;
+    } catch (error) {
+      if (attempt >= attempts || !TRANSIENT_WRITE_ERROR.test(errorMessage(error))) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 async function settleAfterFreshTable(
   native: NativeImagingApi,
   diskIndex: number,
@@ -1135,11 +1165,13 @@ export async function runRestoreJob(
 
   const writeRaw = async (devicePath: string, offset: bigint, data: Buffer, what: string): Promise<void> => {
     try {
-      if (native.writeBlocksAsync) {
-        await native.writeBlocksAsync(devicePath, offset, data);
-      } else {
+      await writeRawWithRetry(() => {
+        if (native.writeBlocksAsync) {
+          return native.writeBlocksAsync(devicePath, offset, data);
+        }
         native.writeBlocks(devicePath, offset, data);
-      }
+        return undefined;
+      });
     } catch (error) {
       throw new Error(`${what}: ${errorMessage(error)}`, { cause: error });
     }
@@ -1174,21 +1206,27 @@ export async function runRestoreJob(
     }
 
     // Dismount target volumes so ntfs.sys is not serving (or flushing back)
-    // pre-restore metadata while we overwrite the physical disk.
-    if (native.closeAllHandles) {
-      native.closeAllHandles();
-    }
-    if (native.lockAndDismountVolume && native.getVolumePath) {
-      for (const target of job.targets) {
-        const volumePath = native.getVolumePath(target.diskIndex, target.offset);
-        if (!volumePath) continue;
-        if (!native.lockAndDismountVolume(volumePath)) {
-          warnings.push(
-            `Could not dismount ${target.label} before restore; eject and reinsert the drive (or reboot) if Explorer still shows stale files.`
-          );
+    // pre-restore metadata while we overwrite the physical disk. Called once
+    // before writing and again after the fresh partition table has settled —
+    // that is when Windows auto-mounts the new volumes, and a volume locked
+    // by AUTOCHK/Explorer turns raw writes into ERROR_ACCESS_DENIED.
+    const dismountTargets = (phase: string): void => {
+      if (native.closeAllHandles) {
+        native.closeAllHandles();
+      }
+      if (native.lockAndDismountVolume && native.getVolumePath) {
+        for (const target of job.targets) {
+          const volumePath = native.getVolumePath(target.diskIndex, target.offset);
+          if (!volumePath) continue;
+          if (!native.lockAndDismountVolume(volumePath)) {
+            warnings.push(
+              `Could not dismount ${target.label} ${phase}; eject and reinsert the drive (or reboot) if Explorer still shows stale files.`
+            );
+          }
         }
       }
-    }
+    };
+    dismountTargets('before restore');
 
     // Dissimilar-hardware restore: lay down the new partition table (GPT with
     // protective MBR, or MBR) before writing any partition contents, so
@@ -1226,6 +1264,10 @@ export async function runRestoreJob(
         native.updateDiskProperties(tableDevicePath);
       }
       await settleAfterFreshTable(native, job.targets[0].diskIndex, job.writeTable.entries.length);
+      // The fresh partitions have just arrived: Windows may have auto-mounted
+      // them, and an exclusive volume lock (AUTOCHK, Explorer) makes raw
+      // writes fail with ERROR_ACCESS_DENIED. Dismount again before contents.
+      dismountTargets('after partition-table write');
     }
 
     for (const target of job.targets) {

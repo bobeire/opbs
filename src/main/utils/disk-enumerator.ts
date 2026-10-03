@@ -1,10 +1,30 @@
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
 import * as path from 'path';
 import { loadNative } from './native-loader';
 
 const powershellExe = process.env.SystemRoot
   ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   : 'powershell.exe';
+
+/**
+ * Run a PowerShell snippet asynchronously. PowerShell startup (3-4 s, worse
+ * under antivirus) must never block the Electron main process: a sync call
+ * here froze the whole UI — and Playwright's click bookkeeping — on every
+ * view that enumerates disks.
+ */
+function runPowerShell(script: string, timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      powershellExe,
+      ['-NoProfile', '-NonInteractive', '-Command', script],
+      { encoding: 'utf-8', timeout: timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+      (error, stdout) => {
+        if (error) reject(error);
+        else resolve(String(stdout ?? ''));
+      }
+    );
+  });
+}
 
 interface VolumeInfo {
   driveLetter: string | null;
@@ -16,7 +36,7 @@ interface VolumeInfo {
 }
 
 /** Query drive letter / filesystem / label / used space / system-boot flags per partition via PowerShell. */
-function queryVolumes(diskIndex: number): Map<number, VolumeInfo> {
+async function queryVolumes(diskIndex: number): Promise<Map<number, VolumeInfo>> {
   const result = new Map<number, VolumeInfo>();
   try {
     const script =
@@ -26,11 +46,7 @@ function queryVolumes(diskIndex: number): Map<number, VolumeInfo> {
       `FileSystem=if($v){[string]$v.FileSystem}else{''}; Label=if($v){[string]$v.FileSystemLabel}else{''}; ` +
       `Used=if($v -and $v.Size){[int64]($v.Size - $v.SizeRemaining)}else{0}; ` +
       `IsSystem=[bool]$p.IsSystem; IsBoot=[bool]$p.IsBoot } } | ConvertTo-Json -Compress`;
-    const out = execFileSync(powershellExe, ['-NoProfile', '-NonInteractive', '-Command', script], {
-      encoding: 'utf-8',
-      timeout: 15_000,
-      windowsHide: true
-    }).trim();
+    const out = (await runPowerShell(script, 15_000)).trim();
     if (!out) return result;
     const parsed = JSON.parse(out);
     const arr: any[] = Array.isArray(parsed) ? parsed : [parsed];
@@ -59,17 +75,14 @@ function queryVolumes(diskIndex: number): Map<number, VolumeInfo> {
 }
 
 /** Disk number holding %SystemDrive% (usually C:), or null if unknown. */
-export function querySystemDiskIndex(): number | null {
+export async function querySystemDiskIndex(): Promise<number | null> {
   try {
     const letter = (process.env.SystemDrive || 'C:').replace(':', '');
-    const out = execFileSync(
-      powershellExe,
-      ['-NoProfile', '-NonInteractive', '-Command', `(Get-Partition -DriveLetter '${letter}' -ErrorAction Stop).DiskNumber | Out-String`],
-      {
-        encoding: 'utf-8',
-        timeout: 10_000,
-        windowsHide: true
-      }
+    const out = (
+      await runPowerShell(
+        `(Get-Partition -DriveLetter '${letter}' -ErrorAction Stop).DiskNumber | Out-String`,
+        10_000
+      )
     ).trim();
     const n = Number(out);
     return Number.isFinite(n) ? n : null;
@@ -144,26 +157,27 @@ export class DiskEnumerator {
     try {
       const disks = this.native.getDisks();
 
-      const result: DiskInfo[] = [];
-      for (const disk of disks) {
-        const fullDisk: DiskInfo = {
-          index: disk.index,
-          model: disk.model,
-          size: disk.size,
-          serial: disk.serial,
-          partitions: []
-        };
+      // Enrich disks concurrently: the PowerShell volume query is the slow
+      // part and serializing it per disk multiplied the latency.
+      return await Promise.all(
+        disks.map(async (disk): Promise<DiskInfo> => {
+          const fullDisk: DiskInfo = {
+            index: disk.index,
+            model: disk.model,
+            size: disk.size,
+            serial: disk.serial,
+            partitions: []
+          };
 
-        try {
-          fullDisk.partitions = await this.getPartitions(disk.index);
-        } catch (error) {
-          console.error(`Failed to enumerate partitions for disk ${disk.index}:`, error);
-        }
+          try {
+            fullDisk.partitions = await this.getPartitions(disk.index);
+          } catch (error) {
+            console.error(`Failed to enumerate partitions for disk ${disk.index}:`, error);
+          }
 
-        result.push(fullDisk);
-      }
-
-      return result;
+          return fullDisk;
+        })
+      );
     } catch (error) {
       console.error('Failed to enumerate disks:', error);
       return [];
@@ -173,7 +187,7 @@ export class DiskEnumerator {
   async getPartitions(diskIndex: number): Promise<PartitionInfo[]> {
     try {
       const partitions = this.native.getPartitions(diskIndex);
-      const volumes = queryVolumes(diskIndex);
+      const volumes = await queryVolumes(diskIndex);
 
       return partitions.map((partition) => {
         // PartitionNumber is 1-based; partitionIndex is 0-based.
