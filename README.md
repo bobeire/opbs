@@ -21,6 +21,7 @@ Website: https://opbs.rhitcs.com
 - **Encryption**: optional AES-256-GCM per-block encryption (master-key-derived via PBKDF2-SHA256)
 - **Verification**: self-check images after write and before restore
 - **Retention / GFS pruning**: keep the newest N full chains plus a bounded number of trailing deltas per chain; old images are pruned leaf-first. Retention runs after backup/verification when global auto-cleanup is on, and each scheduled backup can opt into its own retention policy (keep counts + age floor) independent of the global setting.
+- **Immutable repositories**: append-only, HMAC-signed local repositories with time-based locks (`repo init` / `list` / `verify` / `prune` / `unlock`), write-protected images (reads keep working, writes are refused) and a tamper-evident chain of signed audit records — software-based WORM for backups, no special hardware needed.
 - **Scheduling + notifications**: scheduled backups run from a friendly
   day-picker (daily / chosen weekdays / a specific day of the month + time,
   with a raw cron editor for power users), with Windows toast + optional
@@ -639,6 +640,11 @@ OPBS.exe --cli prune s3://bucket/backups --keep-full 3 --keep-deltas 3 --dry-run
 OPBS.exe --cli usn-changes C: --count 20
 OPBS.exe --cli mount D:\OPBS\img_0_1746300000000.opbs --partition 2 --letter E:
 OPBS.exe --cli mount --check
+OPBS.exe --cli repo init D:\BackupRepo --lock-days 30
+OPBS.exe --cli backup job-backup.json --repo D:\BackupRepo --lock-days 14
+OPBS.exe --cli repo list D:\BackupRepo
+OPBS.exe --cli repo verify D:\BackupRepo --fast
+OPBS.exe --cli repo prune D:\BackupRepo --dry-run
 ```
 
 Example `job-backup.json`:
@@ -669,6 +675,74 @@ plus a generator for the `schedule install-*` command lines).
 
 Backup/restore still require the UAC prompt (raw I/O). Verification, listing,
 pruning and health checks do not.
+
+## Immutable repositories
+
+An **immutable repository** is a directory managed by OPBS that keeps backups
+append-only and tamper-evident — a poor-man's WORM that needs no special
+hardware. Create one with:
+
+```
+OPBS.exe --cli repo init D:\BackupRepo --lock-days 30
+```
+
+which writes:
+
+- `opbs-repo.json` — the repository header (id, algorithm, key id, default
+  lock window)
+- `opbs-repo.journal` — an append-only log; every record is HMAC-SHA256
+  signed and chained to the previous one (`seq`/`prev`), covering image
+  creation, prune and unlock events
+- `images/` — protected image storage
+
+The signing key is **never stored inside the repository**: by default it lives
+in a keyfile under `~/.opbs/repo-keys/<id>.key` (override with `--keyfile f`
+or the `OPBS_REPO_KEY_DIR` environment variable), or it is derived from
+`--passphrase` (PBKDF2-SHA256, 210,000 iterations, no file written).
+
+Back up into a repository with the `--repo` flag:
+
+```
+OPBS.exe --cli backup job-backup.json --repo D:\BackupRepo --lock-days 14
+```
+
+The image is written into `images/` and a signed `create` record locks it for
+`--lock-days` days (the repository default when omitted).
+
+Repository commands:
+
+- `repo list <dir> [--json]` — images with lock/expiry state
+- `repo verify <dir> [--fast] [--json]` — verifies the journal chain and all
+  signatures, then re-hashes every image; detects edits, truncation, missing
+  files and orphaned images (and therefore deletions)
+- `repo prune <dir> [--dry-run] [--json]` — deletes only images whose lock
+  has expired, and only when every delta in their chain is also eligible (a
+  locked delta keeps its full base). Dry-run shows the plan and needs no key.
+- `repo unlock <dir> <image|--all> [--passphrase p] [--keyfile f]` — the
+  audited escape hatch: appends a signed `unlock` record instead of silently
+  mutating the journal. Afterwards run `repo prune`.
+
+Protection layers (and their honest limits):
+
+1. **Write protection** — completed images and the header get a Windows deny
+   ACL for Everyone (`DELETE | FILE_WRITE_DATA | FILE_APPEND_DATA |
+   FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES`). Reads keep working for OPBS
+   itself (verify, browse, restore), but any write or encryption attempt from
+   a running process — including ransomware running as the same user — fails.
+   The journal must stay appendable, so it is protected by its hash chain
+   instead of an ACL.
+2. **Detection** — `repo verify` fails on modified, truncated or missing
+   files, broken signatures, or images absent from the journal. Windows does
+   not allow blocking deletion of a readable file with ACLs (the delete falls
+   back to the parent folder's `FILE_DELETE_CHILD` grant), so deletion is
+   handled by detection rather than prevention.
+3. **Known limits** — a local administrator can still delete the entire
+   folder or roll the journal back together with its images; rollback is not
+   detectable without an external anchor (e.g. an off-box copy of the
+   journal). True WORM guarantees come with S3 Object Lock (roadmap phase 3).
+
+Retention stays journal-aware: automatic cleanup skips repository images and
+points you at `repo prune` instead.
 
 ## Scheduled runs (Windows Task Scheduler)
 

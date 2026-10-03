@@ -34,6 +34,9 @@ import { detectTamper } from '../utils/tamper';
 import { buildStorageHealthReport } from '../utils/storage-health';
 import { runDiskPerfTest, assessWriteSpeed } from '../utils/disk-perf';
 import { queryVssServiceState, normalizeVolumeRoot, VssJob, VssJobResult } from '../utils/vss';
+import { flagValue } from './flags';
+import { cmdRepo, finalizeBackupRepo, parseLockDays } from './repo';
+import { isRepository } from '../imaging/repository';
 
 const diskEnumerator = new DiskEnumerator();
 const imagingEngine = new ImagingEngine(diskEnumerator);
@@ -44,7 +47,7 @@ export interface CliOptions {
   json: boolean;
 }
 
-interface CommandContext {
+export interface CommandContext {
   argv: string[];
   opts: CliOptions;
 }
@@ -104,6 +107,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdSchedule(ctx);
       case 'prune':
         return await cmdPrune(ctx);
+      case 'repo':
+        return await cmdRepo(ctx);
       case 'health':
         return await cmdHealth(ctx);
       case 'media':
@@ -149,7 +154,10 @@ Commands:
                                          (default: backup location). Shows how many frames were
                                          already written so a later backup --resume can continue.
   backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume]
-                           Run a backup job (config as JSON file).
+                           [--repo <dir>] [--lock-days N]
+                           Run a backup job (config as JSON file). With --repo, the image is
+                           written into the repository's images/ directory and journaled as
+                           immutable for --lock-days days (default: the repository default).
   restore <config.json> [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk] Run a restore job (config as JSON file).
   wizard                             Interactive restore wizard: scans the drives for .opbs
                                      images, picks a target disk and partitions, preflights,
@@ -227,7 +235,26 @@ Commands:
   schedule install-drill <name> --dir <dir> --disk <targetDiskIndex> [--verify] [--time HH:MM|--on-login] [--run-as-user]
   schedule list                          List Windows scheduled tasks.
   schedule remove <name>                 Delete a scheduled task.
-  prune <directory> [options]            Apply retention/GFS policy.
+  prune <directory> [options]            Apply retention/GFS policy. Never runs inside a
+                                         repository — use 'repo prune' there.
+  repo init <dir> [--lock-days N] [--passphrase p] [--keyfile f]
+                                         Create an immutable repository: append-only signed
+                                         journal + OS-level delete protection on every image.
+                                         Default lock is 30 days. The signing key stays OUTSIDE
+                                         the repository (keyfile in ~/.opbs/repo-keys, or
+                                         passphrase-derived — nothing stored). Back the key up:
+                                         without it the journal cannot be signed or verified.
+  repo list <dir> [--json]               List repository images with lock/unlock/expiry state.
+  repo verify <dir> [--fast] [--json]    Verify journal chain + signatures and re-hash every
+                                         image (catches tampering, truncation, silent
+                                         encryption). --fast checks sizes only. Exits 1 on any
+                                         problem. Without the key only structure is checked.
+  repo prune <dir> [--dry-run] [--json]  Delete images whose lock expired or that were
+                                         explicitly unlocked. Locked images are never touched;
+                                         a chain root waits for all of its deltas.
+  repo unlock <dir> <image|--all>        Audited escape hatch: append an unlock record and drop
+                                         the OS protection so the image can be pruned or
+                                         deleted manually. Afterwards run 'repo prune'.
   health <diskIndex>                     Report SMART/reliability health (no elevation needed).
   media smart [--json]                   SMART health inventory of every physical disk:
                                          temperature, SSD wear, unreliable sectors, read errors.
@@ -280,10 +307,7 @@ Global:
 `);
 }
 
-function flagValue(argv: string[], name: string): string | undefined {
-  const index = argv.indexOf(name);
-  return index !== -1 ? argv[index + 1] : undefined;
-}
+
 
 async function cmdDisks(ctx: CommandContext): Promise<number> {
   const disks = await diskEnumerator.getDisks();
@@ -483,11 +507,38 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   const configPath = ctx.argv[0];
   if (!configPath) {
     console.error(
-      'Usage: backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume] [--source-vhd <path>]'
+      'Usage: backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume] [--source-vhd <path>] [--repo <dir>] [--lock-days N]'
     );
     return 1;
   }
   const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+  const repoDir = flagValue(ctx.argv, '--repo');
+  let lockDays: number | undefined;
+  try {
+    lockDays = parseLockDays(ctx.argv);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    return 1;
+  }
+  if (repoDir) {
+    if (!isRepository(repoDir)) {
+      console.error(`Not an OPBS repository — run 'repo init ${repoDir}' first.`);
+      return 1;
+    }
+    const dest = typeof config.destinationPath === 'string' ? config.destinationPath : '';
+    if (dest.startsWith('s3://') || dest.startsWith('sftp://') || dest.startsWith('ftp://')) {
+      console.error('--repo requires a local destination (cloud repositories are not supported yet).');
+      return 1;
+    }
+    config.destinationPath = path.join(repoDir, 'images');
+  }
+  const repoOpts = {
+    lockDays,
+    quiet: ctx.opts.json,
+    passphrase: flagValue(ctx.argv, '--passphrase'),
+    keyfile: flagValue(ctx.argv, '--keyfile')
+  };
 
   if (ctx.argv.includes('--zstd')) {
     config.compressionType = 'zstd';
@@ -517,11 +568,17 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   if (ctx.argv.includes('--elevated')) {
     // In-process execution: used inside an elevated scheduled task, so the
     // job runs here without spawning the UAC helper relaunch.
-    return await runJobInProcess(async function () {
-      return config.sourceVirtualDisk
-        ? { type: 'backup-vhd', config }
-        : imagingEngine.buildJob(config);
-    }, ctx);
+    return await runJobInProcess(
+      async function () {
+        return config.sourceVirtualDisk
+          ? { type: 'backup-vhd', config }
+          : imagingEngine.buildJob(config);
+      },
+      ctx,
+      async (result) => {
+        if (repoDir) await finalizeBackupRepo(repoDir, config, result, repoOpts);
+      }
+    );
   }
 
   const result = await imagingEngine.runBackup(config, (progress) => {
@@ -550,6 +607,14 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   }
   if (typeof config.destinationPath === 'string') {
     await writeManifest(config.destinationPath).catch(() => undefined);
+  }
+  if (repoDir && result.ok) {
+    try {
+      await finalizeBackupRepo(repoDir, config, result, repoOpts);
+    } catch (error) {
+      console.error(`Repository record failed: ${error instanceof Error ? error.message : error}`);
+      return 1;
+    }
   }
   return result.ok ? 0 : 1;
 }
@@ -1001,7 +1066,8 @@ async function cmdClone(ctx: CommandContext): Promise<number> {
 /** Execute a prebuilt job in this process (scheduled/elevated context). */
 async function runJobInProcess(
   buildJob: () => Promise<unknown>,
-  ctx: CommandContext
+  ctx: CommandContext,
+  onResult?: (result: JobResult) => Promise<void> | void
 ): Promise<number> {
   const job = await buildJob();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-scheduled-'));
@@ -1022,6 +1088,14 @@ async function runJobInProcess(
         for (const warning of jobWarnings) {
           console.log(`warning: ${warning}`);
         }
+      }
+    }
+    if (onResult && result.ok) {
+      try {
+        await onResult(result);
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : error);
+        return 1;
       }
     }
     return result.ok ? 0 : 1;

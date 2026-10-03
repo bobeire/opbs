@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { readImageInfo, FLAG_INCREMENTAL, FLAG_VERIFIED, ImageInfo } from '../imaging/image-format';
+import { isRepository } from '../imaging/repository';
 import { logger } from '../utils/logger';
 
 export interface BackupImageEntry {
@@ -130,6 +131,19 @@ export function groupIntoChains(entries: BackupImageEntry[]): RetentionChain[] {
 }
 
 export function planRetention(input: BackupImageEntry[] | string, options: RetentionOptions): RetentionPlan {
+  if (typeof input === 'string' && isRepository(input)) {
+    // Automatic retention must never touch a repository: its immutability
+    // journal is the authority. Only 'repo prune' deletes inside one.
+    return {
+      keep: [],
+      prune: [],
+      chains: [],
+      reason: {},
+      reminders: [
+        `Skipped: ${input} is an OPBS repository — automatic retention never modifies repositories; use 'repo prune' instead.`
+      ]
+    };
+  }
   const entries = typeof input === 'string' ? scanBackupDirectory(input) : input;
   const chains = groupIntoChains(entries);
 
@@ -272,6 +286,10 @@ export function planRetention(input: BackupImageEntry[] | string, options: Reten
 }
 
 export async function applyRetention(dir: string, options: RetentionOptions): Promise<RetentionPlan> {
+  if (isRepository(dir)) {
+    // Same guard as planRetention, but also skip the manifest rewrite below.
+    return planRetention(dir, options);
+  }
   const plan = planRetention(dir, options);
   if (options.dryRun) {
     return plan;
