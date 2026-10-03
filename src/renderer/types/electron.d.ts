@@ -364,6 +364,84 @@ declare global {
       onNav: (callback: (page: string) => void) => () => void;
       onOpenImage: (callback: (payload: { verb: string; imagePath: string }) => void) => () => void;
       onActivity: (callback: (event: any) => void) => () => void;
+
+      // Immutable repositories
+      repoOpen: (dir: string) => Promise<RepoOpenResult>;
+      repoInit: (options: { dir: string; lockDays?: number; passphrase?: string }) => Promise<RepoInitResult>;
+      repoVerify: (options: { dir: string; fast?: boolean; passphrase?: string }) => Promise<RepoVerifyResult>;
+      repoPrune: (options: { dir: string; dryRun?: boolean; passphrase?: string }) => Promise<RepoPruneResult>;
+      repoUnlock: (options: { dir: string; target: string; passphrase?: string }) => Promise<RepoActionResult>;
+      onRepoProgress: (callback: (progress: { message: string }) => void) => () => void;
     };
+  }
+
+  interface RepoHeaderInfo {
+    schema: number;
+    id: string;
+    createdAt: string;
+    algo: string;
+    defaultLockDays: number;
+    kdf: { alg: string; iterations: number; saltHex: string } | null;
+    keyId: string;
+  }
+
+  interface RepoImageStateInfo {
+    name: string;
+    active: boolean;
+    created: string;
+    lockUntil: string | null;
+    expired: boolean;
+    unlocked: boolean;
+    bytes: number;
+    base?: string;
+    filesPresent: boolean;
+  }
+
+  interface RepoOpenResult {
+    ok: boolean;
+    notRepo?: boolean;
+    error?: string;
+    header?: RepoHeaderInfo;
+    recordCount?: number;
+    chainOk?: boolean;
+    keyAvailable?: boolean;
+    states?: RepoImageStateInfo[];
+    orphanCount?: number;
+  }
+
+  interface RepoInitResult {
+    ok: boolean;
+    error?: string;
+    header?: RepoHeaderInfo;
+    keyfile?: string | null;
+  }
+
+  interface RepoVerifyResult {
+    ok: boolean;
+    error?: string;
+    problems: { kind: string; detail: string }[];
+    states: RepoImageStateInfo[];
+    signaturesVerified: boolean;
+  }
+
+  interface RepoPruneEntry {
+    name: string;
+    reason: string;
+    bytes: number;
+  }
+
+  interface RepoPruneResult {
+    ok: boolean;
+    error?: string;
+    dryRun?: boolean;
+    eligible?: RepoPruneEntry[];
+    skipped?: RepoPruneEntry[];
+    removed?: RepoPruneEntry[];
+  }
+
+  interface RepoActionResult {
+    ok: boolean;
+    error?: string;
+    unlocked?: string[];
   }
 }

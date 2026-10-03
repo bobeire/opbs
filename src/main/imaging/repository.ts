@@ -440,6 +440,60 @@ export function chainDescendants(states: RepoImageState[]): Map<string, string[]
   return chains;
 }
 
+export interface RepoOverview {
+  header: RepoHeader;
+  /** Total journal records (create + prune + unlock). */
+  recordCount: number;
+  chainOk: boolean;
+  /** The signing key resolves right now (keyfile present / passphrase given). */
+  keyAvailable: boolean;
+  /** Active images (pruned ones filtered out), with file-presence checked. */
+  states: RepoImageState[];
+  /** *.opbs files on disk with no active journal record. */
+  orphanCount: number;
+}
+
+/**
+ * Cheap repository snapshot for the GUI: journal replay + file existence only,
+ * no hashing or signature verification (`verifyRepository` does that).
+ */
+export function repoOverview(repoDir: string, opts: RepoKeyOptions = {}): RepoOverview {
+  const header = loadHeader(repoDir);
+  const records = loadJournal(repoDir);
+  const chainError = verifyChain(records);
+  const states = repoImageStates(records).filter((s) => s.active);
+
+  const lastCreate = new Map<string, JournalRecord>();
+  for (const record of records) {
+    if (record.type === 'create') lastCreate.set(record.image, record);
+  }
+  for (const state of states) {
+    const volumes = lastCreate.get(state.name)?.volumes ?? [];
+    state.filesPresent = volumes.length > 0 && volumes.every((volume) => fs.existsSync(path.join(imagesDir(repoDir), volume.name)));
+  }
+
+  let orphanCount = 0;
+  const referenced = new Set(states.map((s) => s.name));
+  try {
+    for (const name of fs.readdirSync(imagesDir(repoDir))) {
+      if (!/\.(opbs|opbs\.\d{3}|opbs\.bitlocker\.json|opbs\.usn)$/i.test(name)) continue;
+      const base = name.replace(/\.(bitlocker\.json|usn)$/, '').replace(/\.(\d{3})$/, '');
+      if (!referenced.has(base)) orphanCount++;
+    }
+  } catch {
+    // Missing images directory — verify reports it properly.
+  }
+
+  return {
+    header,
+    recordCount: records.length,
+    chainOk: !chainError,
+    keyAvailable: hasRepositoryKey(header, opts),
+    states,
+    orphanCount
+  };
+}
+
 export interface CreateResult {
   record: JournalRecord;
   lockUntil: string;
@@ -491,6 +545,8 @@ export async function recordImageCreate(
 
 export interface VerifyOptions extends RepoKeyOptions {
   fast?: boolean;
+  /** Optional per-stage progress sink (GUI progress line). */
+  onProgress?: (message: string) => void;
 }
 
 export interface VerifyProblem {
@@ -515,11 +571,13 @@ export async function verifyRepository(
   const records = loadJournal(repoDir);
   const problems: VerifyProblem[] = [];
 
+  opts.onProgress?.('Checking journal chain…');
   const chainError = verifyChain(records);
   if (chainError) problems.push({ kind: 'chain', detail: chainError });
 
   let signaturesVerified = false;
   if (!chainError) {
+    opts.onProgress?.('Verifying journal signatures…');
     let key: Buffer | null = null;
     try {
       key = resolveRepoKey(header, opts);
@@ -550,6 +608,7 @@ export async function verifyRepository(
     byName.set(record.image, list);
   }
 
+  opts.onProgress?.('Checking image files…');
   for (const state of active) {
     const creates = byName.get(state.name) ?? [];
     const volumes = creates[creates.length - 1]?.volumes ?? [];
@@ -572,6 +631,7 @@ export async function verifyRepository(
         continue;
       }
       if (!opts.fast && signaturesVerified) {
+        opts.onProgress?.(`Hashing ${volume.name}…`);
         const { sha256 } = await hashFile(file);
         if (sha256 !== volume.sha256) {
           problems.push({
@@ -599,6 +659,7 @@ export async function verifyRepository(
   }
 
   // Journal truncation / foreign files: *.opbs on disk with no active record.
+  opts.onProgress?.('Scanning for orphaned files…');
   try {
     for (const name of fs.readdirSync(imagesDir(repoDir))) {
       if (!/\.(opbs|opbs\.\d{3}|opbs\.bitlocker\.json|opbs\.usn)$/i.test(name)) continue;

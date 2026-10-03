@@ -16,6 +16,7 @@ const NAV: NavTarget[] = [
   { label: /New Backup/, heading: /New Backup/i },
   { label: /Restore/, heading: /Restore/i },
   { label: /Browse Files/, heading: /Browse/i },
+  { label: /Repositories/, heading: /Repositories/i },
   { label: /Recovery Media/, heading: /Recovery Media|Media/i },
   { label: /Settings/, heading: /Settings/i }
 ];

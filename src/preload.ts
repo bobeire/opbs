@@ -219,5 +219,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
   chkdskBadSectors: (volume: string) => ipcRenderer.invoke('chkdsk-bad-sectors', volume),
   getTrimStatus: () => ipcRenderer.invoke('get-trim-status'),
   retrimVolume: (volume: string) => ipcRenderer.invoke('retrim-volume', volume),
-  getSmartAllDisks: () => ipcRenderer.invoke('get-smart-all-disks')
+  getSmartAllDisks: () => ipcRenderer.invoke('get-smart-all-disks'),
+
+  // Immutable repositories
+  repoOpen: (dir: string) => ipcRenderer.invoke('repo-open', dir),
+  repoInit: (options: { dir: string; lockDays?: number; passphrase?: string }) =>
+    ipcRenderer.invoke('repo-init', options),
+  repoVerify: (options: { dir: string; fast?: boolean; passphrase?: string }) =>
+    ipcRenderer.invoke('repo-verify', options),
+  repoPrune: (options: { dir: string; dryRun?: boolean; passphrase?: string }) =>
+    ipcRenderer.invoke('repo-prune', options),
+  repoUnlock: (options: { dir: string; target: string; passphrase?: string }) =>
+    ipcRenderer.invoke('repo-unlock', options),
+  onRepoProgress: (callback: (progress: { message: string }) => void) => {
+    const handler = (_event: unknown, progress: { message: string }) => callback(progress);
+    ipcRenderer.on('repo-progress', handler);
+    return () => {
+      ipcRenderer.removeListener('repo-progress', handler);
+    };
+  }
 });

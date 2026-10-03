@@ -13,7 +13,8 @@ import {
   pruneRepository,
   unlockRepository,
   repoImageStates,
-  verifyChain
+  verifyChain,
+  repoOverview
 } from '../../src/main/imaging/repository';
 import { protectFiles, unprotectFiles } from '../../src/main/utils/file-protect';
 import { applyRetention } from '../../src/main/backup/retention';
@@ -374,6 +375,42 @@ describe('finalizeBackupRepo (backup hook)', () => {
     await expect(
       finalizeBackupRepo(repoDir, config, { ok: true, imagePath: '' } as JobResult, { keyfile, quiet: true })
     ).rejects.toThrow(/could not be located/);
+  });
+});
+
+describe('repoOverview', () => {
+  it('reports chain, key and file presence without hashing', async () => {
+    const { repoDir, keyfile } = await newRepo();
+
+    const empty = repoOverview(repoDir, { keyfile });
+    expect(empty.chainOk).toBe(true);
+    expect(empty.keyAvailable).toBe(true);
+    expect(empty.recordCount).toBe(0);
+    expect(empty.states).toHaveLength(0);
+    expect(empty.orphanCount).toBe(0);
+
+    const header = loadHeader(repoDir);
+    const key = resolveRepoKey(header, { keyfile });
+    const image = makeImage(repoDir, 'a.opbs', 'fake-image');
+    await recordImageCreate(repoDir, header, key, image, { lockDays: 30 });
+
+    const withImage = repoOverview(repoDir, { keyfile });
+    expect(withImage.recordCount).toBe(1);
+    expect(withImage.states).toHaveLength(1);
+    expect(withImage.states[0].filesPresent).toBe(true);
+    expect(withImage.states[0].expired).toBe(false);
+    expect(withImage.orphanCount).toBe(0);
+
+    // Deleted volume file: still journaled, but no longer present.
+    fs.rmSync(image);
+    expect(repoOverview(repoDir, { keyfile }).states[0].filesPresent).toBe(false);
+
+    // A stray image on disk counts as an orphan (journal truncation signal).
+    makeImage(repoDir, 'stray.opbs', 'stray');
+    expect(repoOverview(repoDir, { keyfile }).orphanCount).toBe(1);
+
+    // Keyfile lives in a custom location here, so the default lookup misses it.
+    expect(repoOverview(repoDir).keyAvailable).toBe(false);
   });
 });
 

@@ -34,6 +34,8 @@ export interface AppSettings {
   scrubIntervalHours: number;
   /** Cloud destination credentials (used for s3:// backup destinations). */
   cloud: CloudSettings;
+  /** Last repository directory opened in the Repositories view. */
+  lastRepoDir: string;
 }
 
 export interface CloudSettings {
@@ -148,6 +150,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   defaultCompression: 3,
   defaultVerification: true,
   backupLocation: '',
+  lastRepoDir: '',
   logLevel: 'info',
   autoCleanup: false,
   retentionDays: 30,

@@ -722,6 +722,13 @@ Repository commands:
   audited escape hatch: appends a signed `unlock` record instead of silently
   mutating the journal. Afterwards run `repo prune`.
 
+The same workflow lives in the GUI under **sidebar → 🗄️ Repositories**:
+pick or initialize a repository, watch header / key / chain badges, browse
+the image table with per-image lock badges (locked until, expired, unlocked,
+files missing), and run **Verify** (full or fast, with streamed progress),
+**Prune** (dry-run first, then a two-step confirm) and **Unlock** (per image
+or all). The last opened repository is remembered across restarts.
+
 Protection layers (and their honest limits):
 
 1. **Write protection** — completed images and the header get a Windows deny

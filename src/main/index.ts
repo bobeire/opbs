@@ -1638,4 +1638,81 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       return { ok: false, error: error instanceof Error ? error.message : 'Connection failed' };
     }
   });
+
+  // Immutable repositories (Repositories view)
+  ipcMain.handle('repo-open', async (_event, dir: string) => {
+    try {
+      const { isRepository, repoOverview } = await import('./imaging/repository');
+      if (!isRepository(dir)) {
+        return { ok: false, notRepo: true, error: `Not an OPBS repository: ${dir}` };
+      }
+      return { ok: true, ...repoOverview(dir) };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle('repo-init', async (_event, options: { dir: string; lockDays?: number; passphrase?: string }) => {
+    try {
+      const { initRepository } = await import('./imaging/repository');
+      const result = await initRepository(options.dir, {
+        lockDays: options.lockDays,
+        ...(options.passphrase ? { passphrase: options.passphrase } : {})
+      });
+      return { ok: true, header: result.header, keyfile: result.keyfilePath ?? null };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle('repo-verify', async (event, options: { dir: string; fast?: boolean; passphrase?: string }) => {
+    try {
+      const { verifyRepository } = await import('./imaging/repository');
+      const report = await verifyRepository(options.dir, {
+        fast: options.fast,
+        ...(options.passphrase ? { passphrase: options.passphrase } : {}),
+        onProgress: (message: string) => {
+          try {
+            event.sender.send('repo-progress', { message });
+          } catch {
+            // Renderer navigated away mid-verify.
+          }
+        }
+      });
+      return report;
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        problems: [],
+        states: [],
+        signaturesVerified: false
+      };
+    }
+  });
+
+  ipcMain.handle('repo-prune', async (_event, options: { dir: string; dryRun?: boolean; passphrase?: string }) => {
+    try {
+      const { pruneRepository } = await import('./imaging/repository');
+      const result = await pruneRepository(options.dir, {
+        dryRun: options.dryRun,
+        ...(options.passphrase ? { passphrase: options.passphrase } : {})
+      });
+      return { ok: true, ...result };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle('repo-unlock', async (_event, options: { dir: string; target: string; passphrase?: string }) => {
+    try {
+      const { unlockRepository } = await import('./imaging/repository');
+      const unlocked = await unlockRepository(options.dir, options.target, {
+        ...(options.passphrase ? { passphrase: options.passphrase } : {})
+      });
+      return { ok: true, unlocked };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
 }

@@ -205,9 +205,18 @@ implemented; **Investigate** items need spike work first.
 - ✅ Tests: `test/unit/repository.test.ts` (22 tests — key handling, chain
   tamper/truncation/size/hash/orphan detection, prune eligibility + root
   protection, unlock, retention guard, win32 write-block roundtrip).
-- ⬜ **Remaining**: Phase 2 — GUI surface (repo browser, lock badges,
-  verify/prune screens); Phase 3 — S3 Object Lock backend (true WORM) and
-  an external journal anchor (off-box copy defeats local journal rollback).
+- ✅ Phase 2 — GUI: sidebar **Repositories** view (`Repositories.tsx`):
+  pick/initialize a repository (remembers the last one via
+  `settings.lastRepoDir`), header card with key/chain/orphan badges,
+  image table with per-image lock badges, **Verify** (full/fast, streamed
+  `repo-progress` events), **Prune** (dry-run → two-step confirm) and
+  **Unlock** (per image or all). Backed by `repo-open/init/verify/prune/unlock`
+  IPC handlers over `repoOverview()` + the existing repository API; smoke
+  tested end-to-end (init → verify → prune → error path) and covered by the
+  gui-click integration test.
+- ⬜ **Remaining**: Phase 3 — S3 Object Lock backend (true WORM) and an
+  external journal anchor (off-box copy defeats local journal rollback);
+  backup-wizard "destination = repository" integration.
 
 ## Planned
 
