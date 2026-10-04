@@ -37,6 +37,7 @@ import { queryVssServiceState, normalizeVolumeRoot, VssJob, VssJobResult } from 
 import { flagValue } from './flags';
 import { cmdRepo, finalizeBackupRepo, parseLockDays } from './repo';
 import { isRepository } from '../imaging/repository';
+import { openRepoSession, type RepoSession } from '../imaging/repo-s3';
 
 const diskEnumerator = new DiskEnumerator();
 const imagingEngine = new ImagingEngine(diskEnumerator);
@@ -518,7 +519,7 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   const configPath = ctx.argv[0];
   if (!configPath) {
     console.error(
-      'Usage: backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume] [--source-vhd <path>] [--repo <dir>] [--lock-days N]'
+      'Usage: backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume] [--source-vhd <path>] [--repo <dir|s3://bucket/prefix>] [--lock-days N]'
     );
     return 1;
   }
@@ -526,7 +527,7 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
 
   // --repo flag wins; config-driven runs (GUI wizard / scheduled) can carry
   // repoDir + repoLockDays inside the job JSON instead.
-  const repoDir: string | undefined =
+  const repoTarget: string | undefined =
     flagValue(ctx.argv, '--repo') ??
     (typeof config.repoDir === 'string' && config.repoDir ? config.repoDir : undefined);
   let lockDays: number | undefined;
@@ -536,23 +537,41 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
     console.error(error instanceof Error ? error.message : error);
     return 1;
   }
-  if (repoDir) {
-    if (!isRepository(repoDir)) {
-      console.error(`Not an OPBS repository — run 'repo init ${repoDir}' first.`);
+  let repoSession: RepoSession | undefined;
+  if (repoTarget) {
+    try {
+      // S3-hosted repositories hydrate here: the job stages image volumes in
+      // the cache, `finalizeBackupRepo` uploads + journals them, and the
+      // session flushes the journal to the bucket afterwards.
+      repoSession = await openRepoSession(repoTarget);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      return 1;
+    }
+    if (!isRepository(repoSession.dir)) {
+      console.error(`Not an OPBS repository — run 'repo init ${repoTarget}' first.`);
       return 1;
     }
     const dest = typeof config.destinationPath === 'string' ? config.destinationPath : '';
-    if (dest.startsWith('s3://') || dest.startsWith('sftp://') || dest.startsWith('ftp://')) {
-      console.error('--repo requires a local destination (cloud repositories are not supported yet).');
+    if ((dest.startsWith('s3://') || dest.startsWith('sftp://') || dest.startsWith('ftp://')) && dest !== repoTarget) {
+      console.error('--repo cannot be combined with a different cloud destination — images go to the repository.');
       return 1;
     }
-    config.destinationPath = path.join(repoDir, 'images');
+    config.destinationPath = path.join(repoSession.dir, 'images');
   }
   const repoOpts = {
     lockDays,
     quiet: ctx.opts.json,
     passphrase: flagValue(ctx.argv, '--passphrase'),
     keyfile: flagValue(ctx.argv, '--keyfile')
+  };
+  const finalizeRepoBackup = async (result: JobResult): Promise<void> => {
+    if (!repoSession || !result.ok) return;
+    await finalizeBackupRepo(repoSession.dir, config, result, repoOpts);
+    // Journal to S3 before dropping the staged volumes — a failed flush must
+    // leave the local copy in place for inspection/retry.
+    await repoSession.flush();
+    await repoSession.cleanup();
   };
 
   if (ctx.argv.includes('--zstd')) {
@@ -591,7 +610,7 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
       },
       ctx,
       async (result) => {
-        if (repoDir) await finalizeBackupRepo(repoDir, config, result, repoOpts);
+        await finalizeRepoBackup(result);
       }
     );
   }
@@ -623,9 +642,9 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   if (typeof config.destinationPath === 'string') {
     await writeManifest(config.destinationPath).catch(() => undefined);
   }
-  if (repoDir && result.ok) {
+  if (repoTarget && result.ok) {
     try {
-      await finalizeBackupRepo(repoDir, config, result, repoOpts);
+      await finalizeRepoBackup(result);
     } catch (error) {
       console.error(`Repository record failed: ${error instanceof Error ? error.message : error}`);
       return 1;

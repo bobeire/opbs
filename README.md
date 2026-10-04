@@ -743,23 +743,24 @@ OPBS.exe --cli backup job-backup.json --repo D:\BackupRepo --lock-days 14
 ```
 
 The image is written into `images/` and a signed `create` record locks it for
-`--lock-days` days (the repository default when omitted).
+`--lock-days` days (the repository default when omitted). `<dir|s3://bucket/prefix>`
+below also accepts an S3-hosted repository (see *Repository on S3*).
 
 Repository commands:
 
-- `repo list <dir> [--json]` — images with lock/expiry state
-- `repo verify <dir> [--fast] [--anchor <target>] [--json]` — verifies the
+- `repo list <dir|s3://…> [--json]` — images with lock/expiry state
+- `repo verify <dir|s3://…> [--fast] [--anchor <target>] [--json]` — verifies the
   journal chain and all signatures, then re-hashes every image; detects
   edits, truncation, missing files and orphaned images (and therefore
   deletions). With `--anchor`, also byte-compares the journal against the
   off-box snapshot (see below).
-- `repo prune <dir> [--dry-run] [--json]` — deletes only images whose lock
+- `repo prune <dir|s3://…> [--dry-run] [--json]` — deletes only images whose lock
   has expired, and only when every delta in their chain is also eligible (a
   locked delta keeps its full base). Dry-run shows the plan and needs no key.
-- `repo unlock <dir> <image|--all> [--passphrase p] [--keyfile f]` — the
+- `repo unlock <dir|s3://…> <image|--all> [--passphrase p] [--keyfile f]` — the
   audited escape hatch: appends a signed `unlock` record instead of silently
   mutating the journal. Afterwards run `repo prune`.
-- `repo anchor <dir> --to <target> [--passphrase p] [--keyfile f]` — writes
+- `repo anchor <dir|s3://…> --to <target> [--passphrase p] [--keyfile f]` — writes
   an off-box snapshot of the exact header + journal bytes to a local
   directory, `s3://bucket/prefix` or `sftp://host/path`, stored as
   `<target>/<repo-id>/opbs-repo.anchor`.
@@ -801,10 +802,51 @@ OPBS.exe --cli repo init D:\BackupRepo --lock-days 30 --remote=s3://bucket/backu
   the local chain/hash findings. `--fast` and `--anchor` keep working as
   usual.
 
+### Repository on S3
+
+The whole repository — header, journal **and** image volumes — can live in an
+Object-Lock-enabled bucket instead of a local directory:
+
+```
+OPBS.exe --cli repo init --passphrase pw --lock-days 30 --remote-lock GOVERNANCE s3://bucket/backups
+OPBS.exe --cli backup job.json --repo s3://bucket/backups
+OPBS.exe --cli repo verify --passphrase pw --json s3://bucket/backups
+```
+
+- **Init** writes `opbs-repo.json` + `opbs-repo.journal` straight into the
+  bucket with conditional puts (`If-None-Match: *`, so two inits cannot both
+  win) and — with `--remote-lock` — Object Lock retention on the metadata
+  versions themselves. The header records the repository's own location
+  (`remote.uri`), which is how every later volume upload knows where to go.
+- **Sessions, not a live mount:** each command hydrates header + journal into
+  a throwaway local cache (`~/.opbs/cache/repos/<hash>/s-…`, override with
+  `OPBS_REPO_CACHE_DIR`), runs the normal repository logic there, and flushes
+  on the way out. Flushes are conditional on the ETags that were hydrated, so
+  a second writer anywhere produces a clear
+  `Repository changed in S3 while it was open (concurrent writer)` error
+  instead of silently overwriting history. Expect **one writer at a time**.
+  Cache staging dirs are removed after a successful run and swept after 24 h;
+  image volumes are never cached — only staged while a backup runs, uploaded
+  before the journal record is appended, then deleted after the flush.
+- **Verify** lists the bucket once (presence, sizes, pruned-but-present
+  objects, never-referenced orphans) and streams each active volume's SHA-256
+  unless `--fast`. **Prune** and **unlock** operate on the bucket directly.
+- **Backups:** `--repo s3://…` (GUI: *Open S3 repo* on the wizard's
+  destination step) stages the image in the cache, uploads it with the
+  repository's lock mode, journals it and flushes. The wizard performs full
+  backups into S3 repositories (no local base image to delta against).
+- **Credentials** never appear in the header: the GUI reads **Settings →
+  Cloud (S3)**; headless CLI reads `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` plus `OPBS_S3_ENDPOINT` /
+  `OPBS_S3_FORCE_PATH_STYLE=1` for S3-compatible stores (MinIO, Ceph).
+- `repo anchor` works against an S3 repository too, and `--anchor` verification
+  runs against the hydrated journal as usual.
+
 > **Argument forms:** Electron silently rejects a command line (exit `-1`,
 > no output) when a bare `scheme://…` token is followed by more arguments.
 > Pass URIs in the equals form (`--remote=s3://…`, `--to=s3://…`), as the
-> final argument, or put a standalone `--` before the URI-bearing arguments
+> final argument (`repo verify --passphrase pw s3://bucket/x`), or put a
+> standalone `--` before the URI-bearing arguments
 > (`--cli repo init D:\Repo --remote -- s3://bucket/x`). The `--flag=…` form
 > is recommended — it works in any position.
 
@@ -819,7 +861,11 @@ in every Verify (which then reports `Anchor OK — through seq N`); the target
 is remembered, and successful repository backups re-anchor automatically.
 Initializing a repository offers an optional **S3 mirror** URI with an Object
 Lock mode (validated before the header is written), and a mirror badge in the
-header grid shows the target once configured.
+header grid shows the target once configured. A repository directory field (or
+the wizard's **Open S3 repo** input) also accepts an `s3://bucket/prefix`
+target: the view hydrates it into the same cache, badges it as *S3 storage*,
+and the init form switches to S3 wording (storing header, journal and images
+in the bucket) when the target is a URI.
 
 Backups can also *target* a repository straight from the wizard: on the
 destination step, **Use a repository…** validates the pick, switches the

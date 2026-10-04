@@ -70,6 +70,8 @@ function Repositories() {
     setNotice('');
   };
 
+  const dirIsS3 = /^s3:\/\//i.test(dir.trim());
+
   const openRepo = async (showErrors = true): Promise<boolean> => {
     if (!dir) return false;
     setBusy('open');
@@ -119,11 +121,20 @@ function Repositories() {
     try {
       const lockDays = Number(initLockDays);
       const uri = remoteUri.trim();
+      const lockMode = remoteLock || undefined;
+      // For an s3:// path the target IS the storage location — the mirror
+      // input is hidden and only the lock mode matters; a typed mirror URI
+      // that points elsewhere is rejected server-side.
+      const remote = uri
+        ? { uri, ...(remoteLock ? { lockMode } : {}) }
+        : dirIsS3
+          ? { uri: dir.trim(), ...(lockMode ? { lockMode } : {}) }
+          : undefined;
       const res = await window.electronAPI.repoInit({
         dir,
         lockDays: Number.isFinite(lockDays) && lockDays >= 0 ? lockDays : undefined,
         passphrase: passphrase || undefined,
-        ...(uri ? { remote: { uri, ...(remoteLock ? { lockMode: remoteLock } : {}) } } : {})
+        ...(remote ? { remote } : {})
       });
       if (!res.ok) {
         fail(res.error ?? 'Initialization failed');
@@ -263,7 +274,7 @@ function Repositories() {
           <input
             type="text"
             value={dir}
-            placeholder="Repository directory…"
+            placeholder="Repository directory or s3://bucket/prefix…"
             onChange={(e) => {
               setDir(e.target.value);
               setOverview(null);
@@ -294,9 +305,18 @@ function Repositories() {
         <div className="settings-section">
           <h3>Initialize a repository here</h3>
           <p className="field-hint">
-            Creates <code>opbs-repo.json</code>, an append-only signed journal and an <code>images/</code> directory.
-            The signing key is stored outside the repository (keyfile under <code>~/.opbs/repo-keys</code>) unless a
-            passphrase is given above.
+            {dirIsS3 ? (
+              <>
+                Stores <code>opbs-repo.json</code>, the append-only signed journal and every image volume directly
+                in the bucket at <code>{dir.trim()}</code> (S3-hosted repository).
+              </>
+            ) : (
+              <>
+                Creates <code>opbs-repo.json</code>, an append-only signed journal and an <code>images/</code>{' '}
+                directory. The signing key is stored outside the repository (keyfile under{' '}
+                <code>~/.opbs/repo-keys</code>) unless a passphrase is given above.
+              </>
+            )}
           </p>
           <div className="disk-tools-row">
             <label>Default lock (days)</label>
@@ -312,25 +332,37 @@ function Repositories() {
             </button>
           </div>
           <div className="disk-tools-row" style={{ marginTop: 8 }}>
-            <label>S3 mirror (optional)</label>
-            <input
-              type="text"
-              value={remoteUri}
-              placeholder="s3://bucket/prefix — WORM copies of every image volume"
-              onChange={(e) => setRemoteUri(e.target.value)}
-              style={{ flex: 1, minWidth: 240 }}
-            />
+            <label>{dirIsS3 ? 'Object Lock (bucket objects)' : 'S3 mirror (optional)'}</label>
+            {!dirIsS3 && (
+              <input
+                type="text"
+                value={remoteUri}
+                placeholder="s3://bucket/prefix — WORM copies of every image volume"
+                onChange={(e) => setRemoteUri(e.target.value)}
+                style={{ flex: 1, minWidth: 240 }}
+              />
+            )}
             <label>Object Lock</label>
             <select value={remoteLock} onChange={(e) => setRemoteLock(e.target.value as '' | 'GOVERNANCE' | 'COMPLIANCE')}>
-              <option value="">None (mirror only)</option>
+              <option value="">{dirIsS3 ? 'None' : 'None (mirror only)'}</option>
               <option value="GOVERNANCE">Governance</option>
               <option value="COMPLIANCE">Compliance</option>
             </select>
           </div>
           <p className="field-hint">
-            The mirror keeps a locked (Object Lock) copy of every image volume in S3 — journal and header stay
-            local. Credentials come from <strong>Settings → Cloud (S3)</strong> or <code>AWS_*</code> environment
-            variables.
+            {dirIsS3 ? (
+              <>
+                The header, journal and image volumes all live in the bucket — with Object Lock, S3 itself refuses
+                modification and deletion until retention expires. Credentials come from{' '}
+                <strong>Settings → Cloud (S3)</strong> or <code>AWS_*</code> environment variables.
+              </>
+            ) : (
+              <>
+                The mirror keeps a locked (Object Lock) copy of every image volume in S3 — journal and header stay
+                local. Credentials come from <strong>Settings → Cloud (S3)</strong> or <code>AWS_*</code> environment
+                variables.
+              </>
+            )}
           </p>
         </div>
       )}
@@ -365,7 +397,7 @@ function Repositories() {
               </div>
               {overview.header.remote && (
                 <div>
-                  <span className="field-hint">S3 mirror</span>
+                  <span className="field-hint">{overview.s3Repo ? 'S3 storage' : 'S3 mirror'}</span>
                   <p className="mono-value">
                     {overview.header.remote.uri}
                     {overview.header.remote.lockMode ? ` · ${overview.header.remote.lockMode}` : ''}

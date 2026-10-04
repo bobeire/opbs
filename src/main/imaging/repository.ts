@@ -7,10 +7,12 @@ import type { S3Config } from '../utils/s3';
 import {
   checkRemoteVolumes,
   deleteRemoteVolumes,
+  listRemoteVolumes,
   remoteStore,
   uploadRemoteVolumes,
   type RepoRemoteConfig
 } from './repo-remote';
+import { isS3RepoTarget } from './repo-s3';
 
 /**
  * Immutable repository format v1 (file-per-image).
@@ -327,6 +329,8 @@ export interface InitOptions extends RepoKeyOptions {
   lockDays?: number;
   /** Mirror image volumes to this s3:// location (checked on every verify). */
   remote?: { uri: string; lockMode?: 'GOVERNANCE' | 'COMPLIANCE' };
+  /** S3 credentials for an `s3://` repository target (omit for AWS_* env fallback). */
+  s3Profile?: Partial<S3Config>;
 }
 
 export interface InitResult {
@@ -334,14 +338,12 @@ export interface InitResult {
   keyfilePath?: string;
 }
 
-/** Create a new repository. Refuses to run twice over the same directory. */
-export async function initRepository(repoDir: string, opts: InitOptions = {}): Promise<InitResult> {
-  if (isRepository(repoDir)) {
-    throw new Error(`Already an OPBS repository: ${repoDir}`);
-  }
-  if (fs.existsSync(headerPath(repoDir)) || fs.existsSync(path.join(repoDir, REPO_JOURNAL_NAME))) {
-    throw new Error(`Repository files already exist in ${repoDir}`);
-  }
+/**
+ * Validate init options, derive the signing key (keyfile write or KDF salt)
+ * and build the header. Shared by the local and S3 init paths so both stay
+ * byte-identical apart from where the header lands.
+ */
+function buildInitState(opts: InitOptions): { header: RepoHeader; keyfilePath?: string } {
   const id = crypto.randomUUID();
   const lockDays = opts.lockDays ?? DEFAULT_LOCK_DAYS;
   if (!Number.isFinite(lockDays) || lockDays < 0) {
@@ -383,6 +385,21 @@ export async function initRepository(repoDir: string, opts: InitOptions = {}): P
     keyId: keyFingerprint(key),
     ...(opts.remote ? { remote: opts.remote } : {})
   };
+  return { header, keyfilePath };
+}
+
+/** Create a new repository. Refuses to run twice over the same directory. */
+export async function initRepository(repoDir: string, opts: InitOptions = {}): Promise<InitResult> {
+  if (isS3RepoTarget(repoDir)) {
+    return initRepositoryS3(repoDir.trim(), opts);
+  }
+  if (isRepository(repoDir)) {
+    throw new Error(`Already an OPBS repository: ${repoDir}`);
+  }
+  if (fs.existsSync(headerPath(repoDir)) || fs.existsSync(path.join(repoDir, REPO_JOURNAL_NAME))) {
+    throw new Error(`Repository files already exist in ${repoDir}`);
+  }
+  const { header, keyfilePath } = buildInitState(opts);
 
   fs.mkdirSync(imagesDir(repoDir), { recursive: true });
   fs.writeFileSync(headerPath(repoDir), JSON.stringify(header, null, 2) + '\n');
@@ -391,6 +408,60 @@ export async function initRepository(repoDir: string, opts: InitOptions = {}): P
   await protectFiles([headerPath(repoDir)]);
   await protectJournal(journalPath(repoDir));
 
+  return { header, keyfilePath };
+}
+
+/**
+ * `repo init s3://bucket/prefix`: the header + empty journal are written
+ * straight into the bucket (both with `If-None-Match: *` so concurrent inits
+ * cannot both win) and, when `--remote-lock` is set, with Object Lock
+ * retention so past header/journal versions cannot be purged from the
+ * bucket's version history either. Image volumes later live under the same
+ * location (`header.remote`), uploaded with the same lock mode.
+ */
+async function initRepositoryS3(uri: string, opts: InitOptions): Promise<InitResult> {
+  if (opts.remote?.uri && opts.remote.uri.trim() !== uri) {
+    throw new Error(`--remote (${opts.remote.uri}) cannot point away from the repository target (${uri})`);
+  }
+  const remote: RepoRemoteConfig = {
+    uri,
+    ...(opts.remote?.lockMode ? { lockMode: opts.remote.lockMode } : {})
+  };
+  const store = remoteStore(remote, opts.s3Profile);
+  const existing = await store.head(REPO_HEADER_NAME);
+  if (existing) {
+    throw new Error(`Already an OPBS repository: ${uri}`);
+  }
+  const { header, keyfilePath } = buildInitState({ ...opts, remote });
+  const objectLock =
+    header.remote?.lockMode && header.defaultLockDays > 0
+      ? {
+          mode: header.remote.lockMode,
+          retainUntil: new Date(Date.now() + header.defaultLockDays * MS_PER_DAY).toISOString()
+        }
+      : undefined;
+  const created = await store.putIf(REPO_HEADER_NAME, Buffer.from(JSON.stringify(header, null, 2) + '\n'), {
+    ifNoneMatch: true,
+    ...(objectLock ? { objectLock } : {})
+  });
+  if (!created) {
+    throw new Error(`Already an OPBS repository: ${uri}`);
+  }
+  let journal: { etag: string } | null;
+  try {
+    journal = await store.putIf(REPO_JOURNAL_NAME, Buffer.alloc(0), {
+      ifNoneMatch: true,
+      ...(objectLock ? { objectLock } : {})
+    });
+  } catch (error) {
+    // Never leave a header without its journal.
+    await store.delete(REPO_HEADER_NAME).catch(() => undefined);
+    throw error;
+  }
+  if (!journal) {
+    await store.delete(REPO_HEADER_NAME).catch(() => undefined);
+    throw new Error(`A journal already exists at ${uri} without a header — remove it or choose another location`);
+  }
   return { header, keyfilePath };
 }
 
@@ -480,11 +551,24 @@ export interface RepoOverview {
   orphanCount: number;
 }
 
+/** Names/sizes of the repository's image objects — a bucket listing for S3 repositories, precomputed by the caller (repoOverview stays synchronous). */
+export interface RepoImageIndex {
+  names: Set<string>;
+  sizes: Map<string, number>;
+}
+
 /**
  * Cheap repository snapshot for the GUI: journal replay + file existence only,
  * no hashing or signature verification (`verifyRepository` does that).
+ *
+ * For repositories living in S3 the caller passes `imageIndex` (one
+ * ListObjectsV2 of the `images/` prefix) — presence and orphan counting then
+ * run against the bucket instead of local disk.
  */
-export function repoOverview(repoDir: string, opts: RepoKeyOptions = {}): RepoOverview {
+export function repoOverview(
+  repoDir: string,
+  opts: RepoKeyOptions & { imageIndex?: RepoImageIndex } = {}
+): RepoOverview {
   const header = loadHeader(repoDir);
   const records = loadJournal(repoDir);
   const chainError = verifyChain(records);
@@ -496,19 +580,29 @@ export function repoOverview(repoDir: string, opts: RepoKeyOptions = {}): RepoOv
   }
   for (const state of states) {
     const volumes = lastCreate.get(state.name)?.volumes ?? [];
-    state.filesPresent = volumes.length > 0 && volumes.every((volume) => fs.existsSync(path.join(imagesDir(repoDir), volume.name)));
+    state.filesPresent =
+      volumes.length > 0 &&
+      volumes.every((volume) =>
+        opts.imageIndex ? opts.imageIndex.sizes.has(volume.name) : fs.existsSync(path.join(imagesDir(repoDir), volume.name))
+      );
   }
 
   let orphanCount = 0;
   const referenced = new Set(states.map((s) => s.name));
-  try {
-    for (const name of fs.readdirSync(imagesDir(repoDir))) {
-      if (!/\.(opbs|opbs\.\d{3}|opbs\.bitlocker\.json|opbs\.usn)$/i.test(name)) continue;
-      const base = name.replace(/\.(bitlocker\.json|usn)$/, '').replace(/\.(\d{3})$/, '');
-      if (!referenced.has(base)) orphanCount++;
-    }
-  } catch {
-    // Missing images directory — verify reports it properly.
+  const imageNames = opts.imageIndex
+    ? [...opts.imageIndex.names]
+    : (() => {
+        try {
+          return fs.readdirSync(imagesDir(repoDir));
+        } catch {
+          // Missing images directory — verify reports it properly.
+          return [] as string[];
+        }
+      })();
+  for (const name of imageNames) {
+    if (!/\.(opbs|opbs\.\d{3}|opbs\.bitlocker\.json|opbs\.usn)$/i.test(name)) continue;
+    const base = name.replace(/\.(bitlocker\.json|usn)$/, '').replace(/\.(\d{3})$/, '');
+    if (!referenced.has(base)) orphanCount++;
   }
 
   return {
@@ -585,6 +679,11 @@ export interface VerifyOptions extends RepoKeyOptions {
   onProgress?: (message: string) => void;
   /** S3 credentials for the header's mirror (omit for AWS_* env fallback). */
   s3Profile?: Partial<S3Config>;
+  /**
+   * The repository itself lives in S3 (session-hydrated): images are listed
+   * and hashed in the bucket, and local-disk checks are skipped entirely.
+   */
+  remoteOnly?: boolean;
 }
 
 export interface VerifyProblem {
@@ -662,72 +761,81 @@ export async function verifyRepository(repoDir: string, opts: VerifyOptions = {}
     byName.set(record.image, list);
   }
 
-  opts.onProgress?.('Checking image files…');
-  for (const state of active) {
-    const creates = byName.get(state.name) ?? [];
-    const volumes = creates[creates.length - 1]?.volumes ?? [];
-    referencedActive.add(state.name);
-    for (const volume of volumes) {
-      state.filesPresent = true;
-      const file = path.join(imagesDir(repoDir), volume.name);
-      let stat: fs.Stats;
-      try {
-        stat = fs.statSync(file);
-      } catch {
-        problems.push({ kind: 'missing-file', detail: `Missing image file: ${volume.name}` });
-        continue;
-      }
-      if (stat.size !== volume.size) {
-        problems.push({
-          kind: 'size-mismatch',
-          detail: `${volume.name}: size ${stat.size}, journal says ${volume.size}`
-        });
-        continue;
-      }
-      if (!opts.fast && signaturesVerified) {
-        opts.onProgress?.(`Hashing ${volume.name}…`);
-        const { sha256 } = await hashFile(file);
-        if (sha256 !== volume.sha256) {
+  if (!opts.remoteOnly) {
+    opts.onProgress?.('Checking image files…');
+    for (const state of active) {
+      const creates = byName.get(state.name) ?? [];
+      const volumes = creates[creates.length - 1]?.volumes ?? [];
+      referencedActive.add(state.name);
+      for (const volume of volumes) {
+        state.filesPresent = true;
+        const file = path.join(imagesDir(repoDir), volume.name);
+        let stat: fs.Stats;
+        try {
+          stat = fs.statSync(file);
+        } catch {
+          problems.push({ kind: 'missing-file', detail: `Missing image file: ${volume.name}` });
+          continue;
+        }
+        if (stat.size !== volume.size) {
           problems.push({
-            kind: 'hash-mismatch',
-            detail: `${volume.name}: content hash differs from journal — file was modified`
+            kind: 'size-mismatch',
+            detail: `${volume.name}: size ${stat.size}, journal says ${volume.size}`
+          });
+          continue;
+        }
+        if (!opts.fast && signaturesVerified) {
+          opts.onProgress?.(`Hashing ${volume.name}…`);
+          const { sha256 } = await hashFile(file);
+          if (sha256 !== volume.sha256) {
+            problems.push({
+              kind: 'hash-mismatch',
+              detail: `${volume.name}: content hash differs from journal — file was modified`
+            });
+          }
+        }
+      }
+    }
+
+    for (const state of pruned) {
+      referencedPruned.add(state.name);
+      const creates = byName.get(state.name) ?? [];
+      const volumes = creates[creates.length - 1]?.volumes ?? [];
+      for (const volume of volumes) {
+        const file = path.join(imagesDir(repoDir), volume.name);
+        if (fs.existsSync(file)) {
+          problems.push({
+            kind: 'orphan',
+            detail: `${volume.name}: pruned in journal but still present on disk`
           });
         }
       }
     }
-  }
 
-  for (const state of pruned) {
-    referencedPruned.add(state.name);
-    const creates = byName.get(state.name) ?? [];
-    const volumes = creates[creates.length - 1]?.volumes ?? [];
-    for (const volume of volumes) {
-      const file = path.join(imagesDir(repoDir), volume.name);
-      if (fs.existsSync(file)) {
-        problems.push({
-          kind: 'orphan',
-          detail: `${volume.name}: pruned in journal but still present on disk`
-        });
+    // Journal truncation / foreign files: *.opbs on disk with no active record.
+    opts.onProgress?.('Scanning for orphaned files…');
+    try {
+      for (const name of fs.readdirSync(imagesDir(repoDir))) {
+        if (!/\.(opbs|opbs\.\d{3}|opbs\.bitlocker\.json|opbs\.usn)$/i.test(name)) continue;
+        const base = name.replace(/\.(bitlocker\.json|usn)$/, '').replace(/\.(\d{3})$/, '');
+        if (referencedActive.has(base)) continue;
+        problems.push({ kind: 'orphan', detail: `File not in journal: ${name}` });
       }
+    } catch {
+      problems.push({ kind: 'missing-file', detail: `Missing images directory: ${imagesDir(repoDir)}` });
     }
-  }
-
-  // Journal truncation / foreign files: *.opbs on disk with no active record.
-  opts.onProgress?.('Scanning for orphaned files…');
-  try {
-    for (const name of fs.readdirSync(imagesDir(repoDir))) {
-      if (!/\.(opbs|opbs\.\d{3}|opbs\.bitlocker\.json|opbs\.usn)$/i.test(name)) continue;
-      const base = name.replace(/\.(bitlocker\.json|usn)$/, '').replace(/\.(\d{3})$/, '');
-      if (referencedActive.has(base)) continue;
-      problems.push({ kind: 'orphan', detail: `File not in journal: ${name}` });
+  } else {
+    for (const state of active) {
+      referencedActive.add(state.name);
     }
-  } catch {
-    problems.push({ kind: 'missing-file', detail: `Missing images directory: ${imagesDir(repoDir)}` });
+    for (const state of pruned) {
+      referencedPruned.add(state.name);
+    }
   }
 
   // S3 mirror presence/size (cheap ListObjectsV2 — the local copies stay the
   // hash-verified originals; Object Lock protects the mirror bytes).
-  if (header.remote) {
+  if (header.remote && !opts.remoteOnly) {
     opts.onProgress?.('Checking S3 mirror…');
     try {
       const store = remoteStore(header.remote, opts.s3Profile);
@@ -750,6 +858,77 @@ export async function verifyRepository(repoDir: string, opts: VerifyOptions = {}
         kind: 'remote-error',
         detail: `S3 mirror check failed: ${error instanceof Error ? error.message : String(error)}`
       });
+    }
+  }
+
+  // Repository hosted in S3: the bucket IS the image store. One listing
+  // covers presence, sizes, pruned-but-present and never-referenced objects;
+  // full verification additionally streams each active volume's hash.
+  if (opts.remoteOnly) {
+    if (!header.remote) {
+      problems.push({
+        kind: 'remote-error',
+        detail: 'S3 repository header has no storage location (remote) — cannot check images'
+      });
+    } else {
+      opts.onProgress?.('Listing images in S3…');
+      try {
+        const store = remoteStore(header.remote, opts.s3Profile);
+        const listed = await listRemoteVolumes(store);
+        for (const state of active) {
+          const creates = byName.get(state.name) ?? [];
+          const volumes = creates[creates.length - 1]?.volumes ?? [];
+          let present = volumes.length > 0;
+          for (const volume of volumes) {
+            const size = listed.get(volume.name);
+            if (size === undefined) {
+              present = false;
+              problems.push({ kind: 'remote-missing', detail: `S3 repository object missing: ${volume.name}` });
+              continue;
+            }
+            if (size !== volume.size) {
+              problems.push({
+                kind: 'remote-size',
+                detail: `${volume.name}: size ${size}, journal says ${volume.size}`
+              });
+              continue;
+            }
+            if (!opts.fast && signaturesVerified) {
+              opts.onProgress?.(`Hashing ${volume.name} (S3)…`);
+              const { sha256 } = await store.hashObject(`images/${volume.name}`);
+              if (sha256 !== volume.sha256) {
+                problems.push({
+                  kind: 'hash-mismatch',
+                  detail: `${volume.name}: content hash differs from journal — object was modified`
+                });
+              }
+            }
+          }
+          if (present) state.filesPresent = true;
+        }
+        for (const state of pruned) {
+          const creates = byName.get(state.name) ?? [];
+          for (const volume of creates[creates.length - 1]?.volumes ?? []) {
+            if (listed.has(volume.name)) {
+              problems.push({
+                kind: 'orphan',
+                detail: `${volume.name}: pruned in journal but still present in S3`
+              });
+            }
+          }
+        }
+        for (const name of listed.keys()) {
+          if (!/\.(opbs|opbs\.\d{3}|opbs\.bitlocker\.json|opbs\.usn)$/i.test(name)) continue;
+          const base = name.replace(/\.(bitlocker\.json|usn)$/, '').replace(/\.(\d{3})$/, '');
+          if (referencedActive.has(base) || referencedPruned.has(base)) continue;
+          problems.push({ kind: 'orphan', detail: `File not in journal: ${name}` });
+        }
+      } catch (error) {
+        problems.push({
+          kind: 'remote-error',
+          detail: `S3 repository image check failed: ${error instanceof Error ? error.message : String(error)}`
+        });
+      }
     }
   }
 
@@ -777,7 +956,7 @@ export interface PruneResult {
  */
 export async function pruneRepository(
   repoDir: string,
-  opts: RepoKeyOptions & { dryRun?: boolean; s3Profile?: Partial<S3Config> } = {}
+  opts: RepoKeyOptions & { dryRun?: boolean; s3Profile?: Partial<S3Config>; remoteOnly?: boolean } = {}
 ): Promise<PruneResult> {
   const header = loadHeader(repoDir);
   const records = loadJournal(repoDir);
@@ -848,13 +1027,17 @@ export async function pruneRepository(
         volumes.map((v) => v.name)
       );
     }
-    const files = volumes.map((v) => path.join(imagesDir(repoDir), v.name));
-    await unprotectFiles(files);
-    for (const file of files) {
-      try {
-        fs.unlinkSync(file);
-      } catch (error) {
-        throw new Error(`Failed to delete ${file}`, { cause: error });
+    // S3-hosted repositories have no local copies to remove — the remote
+    // delete above already was the real one.
+    if (!opts.remoteOnly) {
+      const files = volumes.map((v) => path.join(imagesDir(repoDir), v.name));
+      await unprotectFiles(files);
+      for (const file of files) {
+        try {
+          fs.unlinkSync(file);
+        } catch (error) {
+          throw new Error(`Failed to delete ${file}`, { cause: error });
+        }
       }
     }
     const current = loadJournal(repoDir);
@@ -878,7 +1061,7 @@ export async function pruneRepository(
 export async function unlockRepository(
   repoDir: string,
   target: string,
-  opts: RepoKeyOptions = {}
+  opts: RepoKeyOptions & { remoteOnly?: boolean } = {}
 ): Promise<string[]> {
   const header = loadHeader(repoDir);
   const records = loadJournal(repoDir);
@@ -907,7 +1090,9 @@ export async function unlockRepository(
   for (const name of wanted) {
     const creates = records.filter((r) => r.type === 'create' && r.image === name);
     const volumes = creates[creates.length - 1]?.volumes ?? [];
-    await unprotectFiles(volumes.map((v) => path.join(imagesDir(repoDir), v.name)));
+    if (!opts.remoteOnly) {
+      await unprotectFiles(volumes.map((v) => path.join(imagesDir(repoDir), v.name)));
+    }
     const current = loadJournal(repoDir);
     appendJournalRecord(
       repoDir,

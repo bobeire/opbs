@@ -308,13 +308,11 @@ export async function verifyWithAnchor(
   repoDir: string,
   opts: VerifyOptions & { anchorTarget: string } & AnchorTransportOptions
 ): Promise<VerifyWithAnchorResult> {
-  const { anchorTarget, s3Profile, sftpProfile, ...verifyOpts } = opts;
+  // s3Profile must reach BOTH the verify (S3-hosted repo image check) and the
+  // anchor fetch — dropping it would silently fall back to AWS_* env.
+  const { anchorTarget, sftpProfile, ...verifyOpts } = opts;
   const base = await verifyRepository(repoDir, verifyOpts);
-  const check = await checkRepositoryAnchor(repoDir, anchorTarget, {
-    ...verifyOpts,
-    s3Profile,
-    sftpProfile
-  });
+  const check = await checkRepositoryAnchor(repoDir, anchorTarget, { ...verifyOpts, sftpProfile });
   const problems = [...base.problems, ...check.problems];
   return {
     ...base,

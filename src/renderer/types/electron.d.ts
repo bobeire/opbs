@@ -421,6 +421,10 @@ declare global {
     ok: boolean;
     notRepo?: boolean;
     error?: string;
+    /** The target as requested (the hydrated cache is internal). */
+    target?: string;
+    /** The repository lives in S3 (header + journal + images in the bucket). */
+    s3Repo?: boolean;
     header?: RepoHeaderInfo;
     recordCount?: number;
     chainOk?: boolean;

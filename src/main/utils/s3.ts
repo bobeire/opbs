@@ -112,8 +112,9 @@ export function resolveS3Config(
     secretAccessKey: profile?.secretAccessKey ?? env.AWS_SECRET_ACCESS_KEY ?? '',
     bucket: bucket || profile?.bucket || '',
     prefix: prefix || profile?.prefix || '',
-    endpoint: profile?.endpoint || undefined,
-    forcePathStyle: profile?.forcePathStyle,
+    endpoint: profile?.endpoint || env.OPBS_S3_ENDPOINT || undefined,
+    forcePathStyle:
+      profile?.forcePathStyle ?? (env.OPBS_S3_FORCE_PATH_STYLE ? env.OPBS_S3_FORCE_PATH_STYLE !== '0' : undefined),
     objectLockMode,
     objectLockRetainDays
   };
@@ -181,13 +182,13 @@ export class S3Store {
     return url.hostname;
   }
 
-  private async request(
-    method: 'GET' | 'PUT' | 'DELETE' | 'POST',
+  private async perform(
+    method: 'GET' | 'PUT' | 'DELETE' | 'POST' | 'HEAD',
     key: string,
     body?: Buffer | { stream: Readable; length: number; sha256: string },
     query?: URLSearchParams,
     extraHeaders?: Record<string, string>
-  ): Promise<{ status: number; body: Buffer; headers: http.IncomingHttpHeaders }> {
+  ): Promise<http.IncomingMessage> {
     const url = new URL(this.endpoint);
     const objectKey = this.objectKey(key);
     const path = this.forcePathStyle
@@ -249,11 +250,7 @@ export class S3Store {
             ...(contentLength !== undefined ? { 'Content-Length': contentLength } : {})
           }
         },
-        (res) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (c) => chunks.push(Buffer.from(c)));
-          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks), headers: res.headers }));
-        }
+        (res) => resolve(res)
       );
       req.on('error', reject);
       if (!body) {
@@ -267,12 +264,91 @@ export class S3Store {
     });
   }
 
+  private async request(
+    method: 'GET' | 'PUT' | 'DELETE' | 'POST' | 'HEAD',
+    key: string,
+    body?: Buffer | { stream: Readable; length: number; sha256: string },
+    query?: URLSearchParams,
+    extraHeaders?: Record<string, string>
+  ): Promise<{ status: number; body: Buffer; headers: http.IncomingHttpHeaders }> {
+    const res = await this.perform(method, key, body, query, extraHeaders);
+    const chunks: Buffer[] = [];
+    await new Promise<void>((resolve, reject) => {
+      res.on('data', (c) => chunks.push(Buffer.from(c)));
+      res.on('end', () => resolve());
+      res.on('error', reject);
+    });
+    return { status: res.statusCode ?? 0, body: Buffer.concat(chunks), headers: res.headers };
+  }
+
   /** Upload `data` to `key` (relative to the configured prefix). */
   async put(key: string, data: Buffer, objectLock?: ObjectLockRequest): Promise<void> {
     const res = await this.request('PUT', key, data, undefined, objectLock ? objectLockHeaders(objectLock) : undefined);
     if (res.status < 200 || res.status >= 300) {
       throw new Error(`S3 PUT ${key} failed: HTTP ${res.status} ${res.body.toString('utf8')}`);
     }
+  }
+
+  /**
+   * Conditional PUT for repository metadata: `ifNoneMatch` (`If-None-Match: *`)
+   * only creates, `ifMatch` (`If-Match: <etag>`) only overwrites the exact
+   * version. Returns `null` on a 412 precondition failure (concurrent writer)
+   * instead of throwing.
+   */
+  async putIf(
+    key: string,
+    data: Buffer,
+    opts: { ifNoneMatch?: boolean; ifMatch?: string; objectLock?: ObjectLockRequest } = {}
+  ): Promise<{ etag: string } | null> {
+    const extra: Record<string, string> = {};
+    if (opts.ifNoneMatch) extra['if-none-match'] = '*';
+    if (opts.ifMatch) extra['if-match'] = opts.ifMatch;
+    if (opts.objectLock) Object.assign(extra, objectLockHeaders(opts.objectLock));
+    const res = await this.request('PUT', key, data, undefined, extra);
+    if (res.status === 412) return null;
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(`S3 PUT ${key} failed: HTTP ${res.status} ${res.body.toString('utf8')}`);
+    }
+    return { etag: String(res.headers.etag ?? '') };
+  }
+
+  /** Object metadata: `null` when the key does not exist. */
+  async head(key: string): Promise<{ size: number; etag: string } | null> {
+    const res = await this.request('HEAD', key);
+    if (res.status === 404) return null;
+    if (res.status !== 200) {
+      throw new Error(`S3 HEAD ${key} failed: HTTP ${res.status} ${res.body.toString('utf8')}`);
+    }
+    return { size: Number(res.headers['content-length'] ?? 0), etag: String(res.headers.etag ?? '') };
+  }
+
+  /**
+   * Streamed SHA-256 + size of an object — one GET, constant memory, so
+   * multi-hundred-GB volumes can be re-hashed during `repo verify` without
+   * buffering them.
+   */
+  async hashObject(key: string): Promise<{ size: number; sha256: string }> {
+    const res = await this.perform('GET', key);
+    if (res.statusCode !== 200) {
+      const chunks: Buffer[] = [];
+      await new Promise<void>((resolve) => {
+        res.on('data', (c) => chunks.push(Buffer.from(c)));
+        res.on('end', () => resolve());
+        res.on('error', () => resolve());
+      });
+      throw new Error(`S3 GET ${key} failed: HTTP ${res.statusCode} ${Buffer.concat(chunks).toString('utf8')}`);
+    }
+    const hash = crypto.createHash('sha256');
+    let size = 0;
+    await new Promise<void>((resolve, reject) => {
+      res.on('data', (c: Buffer) => {
+        hash.update(c);
+        size += c.length;
+      });
+      res.on('end', () => resolve());
+      res.on('error', reject);
+    });
+    return { size, sha256: hash.digest('hex') };
   }
 
   /**

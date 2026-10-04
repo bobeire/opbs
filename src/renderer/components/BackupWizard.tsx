@@ -152,6 +152,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   const [blNeedsElevation, setBlNeedsElevation] = useState(false);
   const [blError, setBlError] = useState<string | null>(null);
   const [repoDir, setRepoDir] = useState('');
+  const [s3RepoUri, setS3RepoUri] = useState('');
   const [repoLockDays, setRepoLockDays] = useState(30);
   const [repoError, setRepoError] = useState<string | null>(null);
   const [prevDestination, setPrevDestination] = useState('');
@@ -308,6 +309,33 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       resolveNewestBase(prevDestination);
     }
     setPrevDestination('');
+  };
+
+  const openS3Repository = async () => {
+    setRepoError(null);
+    const uri = s3RepoUri.trim();
+    if (!/^s3:\/\//i.test(uri)) {
+      setRepoError('Enter an s3://bucket/prefix location.');
+      return;
+    }
+    try {
+      const res = await window.electronAPI.repoOpen(uri);
+      if (!res.ok) {
+        setRepoError(res.error ?? 'Not an OPBS repository — initialize one in the Repositories view first.');
+        return;
+      }
+      setPrevDestination(destinationPath);
+      setRepoDir(uri);
+      setRepoLockDays(res.header?.defaultLockDays ?? 30);
+      // The repository IS the destination; start-backup stages the image in
+      // the local cache and uploads it to the bucket.
+      setDestinationPath(uri);
+      setS3RepoUri('');
+      setBaseImagePath(undefined);
+      setBaseImageName(undefined);
+    } catch (error) {
+      setRepoError(error instanceof Error ? error.message : String(error));
+    }
   };
 
   const resolveNewestBase = async (dir: string) => {
@@ -798,6 +826,20 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                     <button className="btn-secondary" onClick={() => void handleSelectRepository()}>
                       Use a repository…
                     </button>
+                    <input
+                      type="text"
+                      placeholder="s3://bucket/prefix"
+                      value={s3RepoUri}
+                      onChange={(e) => setS3RepoUri(e.target.value)}
+                      style={{ flex: 1, minWidth: 180 }}
+                    />
+                    <button
+                      className="btn-secondary"
+                      disabled={!s3RepoUri.trim()}
+                      onClick={() => void openS3Repository()}
+                    >
+                      Open S3 repo
+                    </button>
                   </div>
                 )}
                 {repoError && <p className="error-message">{repoError}</p>}
@@ -814,8 +856,17 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                       />
                     </div>
                     <p className="field-hint">
-                      The image goes to <code>{repoDir}\images</code>, is write-protected, and is journaled as
-                      immutable for {repoLockDays} day(s). Track it in the Repositories view.
+                      {/^s3:\/\//i.test(repoDir) ? (
+                        <>
+                          The image is uploaded to <code>{repoDir}/images</code> in S3 and journaled as immutable
+                          for {repoLockDays} day(s). Track it in the Repositories view.
+                        </>
+                      ) : (
+                        <>
+                          The image goes to <code>{repoDir}\images</code>, is write-protected, and is journaled as
+                          immutable for {repoLockDays} day(s). Track it in the Repositories view.
+                        </>
+                      )}
                     </p>
                   </>
                 ) : (

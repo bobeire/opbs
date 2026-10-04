@@ -574,18 +574,35 @@ function setupIpcHandlers(): void {
   // Backup operations
   ipcMain.handle('start-backup', async (_, rawConfig) => {
     let config = rawConfig;
-    const repoDir: string | undefined =
+    const repoTarget: string | undefined =
       typeof config?.repoDir === 'string' && config.repoDir ? config.repoDir : undefined;
-    if (repoDir) {
+    let repoSession: import('./imaging/repo-s3').RepoSession | undefined;
+    if (repoTarget) {
       const { isRepository } = await import('./imaging/repository');
-      if (!isRepository(repoDir)) {
-        throw new Error(`Not an OPBS repository — run 'repo init ${repoDir}' first.`);
+      const { openRepoSession } = await import('./imaging/repo-s3');
+      try {
+        // S3-hosted repositories hydrate header + journal into the local
+        // cache; the job stages volumes there and they upload to the bucket.
+        repoSession = await openRepoSession(repoTarget, { s3Profile: s3ProfileFromSettings() ?? undefined });
+      } catch (error) {
+        throw new Error(`Not an OPBS repository: ${error instanceof Error ? error.message : String(error)}`, {
+          cause: error
+        });
       }
-      if (/^(s3|sftp|ftps?):\/\//i.test(config?.destinationPath ?? '')) {
-        throw new Error('Repositories are local directories — cloud destinations are not supported.');
+      if (!isRepository(repoSession.dir)) {
+        throw new Error(`Not an OPBS repository — run 'repo init ${repoTarget}' first.`);
+      }
+      // A *different* cloud destination alongside a repository is a
+      // misconfiguration (the repository wins); the wizard may legitimately
+      // set destinationPath equal to an s3:// repository target.
+      const dest = typeof config?.destinationPath === 'string' ? config.destinationPath : '';
+      if (/^(s3|sftp|ftps?):\/\//i.test(dest) && dest !== repoTarget) {
+        throw new Error(
+          `Cannot combine a repository with a cloud destination — the repository already stores its images (${repoTarget}).`
+        );
       }
       // Single source of truth: the image always lands in <repo>/images.
-      config = { ...config, destinationPath: path.join(repoDir, 'images') };
+      config = { ...config, destinationPath: path.join(repoSession.dir, 'images') };
     }
     const merged =
       config?.destinationPath?.startsWith('s3://')
@@ -600,28 +617,42 @@ function setupIpcHandlers(): void {
     browseSessions.clear();
     clearImageInfoCache();
     const result = await backupManager.startBackup(merged);
-    if (repoDir && result.ok) {
+    if (repoSession && result.ok) {
+      let journaled = false;
+      let flushed = false;
       try {
         const { finalizeBackupRepo } = await import('./cli/repo');
         const lockDays = typeof config.repoLockDays === 'number' ? config.repoLockDays : undefined;
-        result.repoRecord = await finalizeBackupRepo(repoDir, config, result, {
+        result.repoRecord = await finalizeBackupRepo(repoSession.dir, config, result, {
           lockDays,
           quiet: true,
           s3Profile: s3ProfileFromSettings() ?? undefined
         });
+        journaled = true;
       } catch (error) {
         // The image exists but is not journaled — verify would flag it as an
         // orphan, so surface the failure loudly without discarding the result.
         const message = error instanceof Error ? error.message : String(error);
         result.warnings.push(`Image written but NOT journaled in the repository: ${message}`);
       }
+      try {
+        await repoSession.flush();
+        flushed = true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        result.warnings.push(`Repository journal NOT flushed to S3: ${message}`);
+      }
+      if (journaled && flushed) {
+        await repoSession.cleanup();
+      }
       // Re-anchor the journal off-box when a target is configured, so a
-      // subsequent local rollback shows up in Verify.
+      // subsequent local rollback shows up in Verify. Skipped when the flush
+      // failed — the anchor must snapshot what the bucket actually holds.
       const anchorTarget = settingsManager.getSettings().lastRepoAnchorTarget?.trim();
-      if (anchorTarget) {
+      if (anchorTarget && flushed) {
         try {
           const { writeRepositoryAnchor } = await import('./imaging/repo-anchor');
-          const anchor = await writeRepositoryAnchor(repoDir, anchorTarget, {
+          const anchor = await writeRepositoryAnchor(repoSession.dir, anchorTarget, {
             s3Profile: s3ProfileFromSettings() ?? undefined,
             sftpProfile: sftpProfileFromSettings() ?? undefined
           });
@@ -630,6 +661,8 @@ function setupIpcHandlers(): void {
           const message = error instanceof Error ? error.message : String(error);
           result.warnings.push(`Journal NOT anchored off-box: ${message}`);
         }
+      } else if (anchorTarget && !flushed) {
+        result.warnings.push('Journal NOT anchored off-box: the S3 flush failed.');
       }
     }
     return result;
@@ -1696,12 +1729,24 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
   ipcMain.handle('repo-open', async (_event, dir: string) => {
     try {
       const { isRepository, repoOverview } = await import('./imaging/repository');
-      if (!isRepository(dir)) {
+      const { openRepoSession } = await import('./imaging/repo-s3');
+      const session = await openRepoSession(dir, { s3Profile: s3ProfileFromSettings() ?? undefined });
+      if (!isRepository(session.dir)) {
         return { ok: false, notRepo: true, error: `Not an OPBS repository: ${dir}` };
       }
-      return { ok: true, ...repoOverview(dir) };
+      let imageIndex: import('./imaging/repository').RepoImageIndex | undefined;
+      if (session.isS3 && session.store) {
+        const { listRemoteVolumes } = await import('./imaging/repo-remote');
+        const sizes = await listRemoteVolumes(session.store);
+        imageIndex = { names: new Set(sizes.keys()), sizes };
+      }
+      return { ok: true, target: dir, s3Repo: session.isS3, ...repoOverview(session.dir, { imageIndex }) };
     } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      const message = error instanceof Error ? error.message : String(error);
+      if (/Not an OPBS repository/.test(message)) {
+        return { ok: false, notRepo: true, error: message };
+      }
+      return { ok: false, error: message };
     }
   });
 
@@ -1716,7 +1761,8 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
         const result = await initRepository(options.dir, {
           lockDays: options.lockDays,
           ...(options.passphrase ? { passphrase: options.passphrase } : {}),
-          ...(options.remote ? { remote: options.remote } : {})
+          ...(options.remote ? { remote: options.remote } : {}),
+          s3Profile: s3ProfileFromSettings() ?? undefined
         });
         return { ok: true, header: result.header, keyfile: result.keyfilePath ?? null };
       } catch (error) {
@@ -1736,19 +1782,23 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       };
       const keyOpts = { ...(options.passphrase ? { passphrase: options.passphrase } : {}) };
       const s3Profile = s3ProfileFromSettings() ?? undefined;
+      const { openRepoSession } = await import('./imaging/repo-s3');
+      const session = await openRepoSession(options.dir, { s3Profile });
+      const remoteOnly = session.isS3;
       if (options.anchorTarget) {
         const { verifyWithAnchor } = await import('./imaging/repo-anchor');
-        return await verifyWithAnchor(options.dir, {
+        return await verifyWithAnchor(session.dir, {
           fast: options.fast,
           ...keyOpts,
           onProgress,
           anchorTarget: options.anchorTarget,
+          remoteOnly,
           s3Profile,
           sftpProfile: sftpProfileFromSettings() ?? undefined
         });
       }
       const { verifyRepository } = await import('./imaging/repository');
-      return await verifyRepository(options.dir, { fast: options.fast, ...keyOpts, onProgress, s3Profile });
+      return await verifyRepository(session.dir, { fast: options.fast, ...keyOpts, onProgress, remoteOnly, s3Profile });
     } catch (error) {
       return {
         ok: false,
@@ -1763,7 +1813,9 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
   ipcMain.handle('repo-anchor', async (_event, options: { dir: string; target: string }) => {
     try {
       const { writeRepositoryAnchor } = await import('./imaging/repo-anchor');
-      const result = await writeRepositoryAnchor(options.dir, options.target, {
+      const { openRepoSession } = await import('./imaging/repo-s3');
+      const session = await openRepoSession(options.dir, { s3Profile: s3ProfileFromSettings() ?? undefined });
+      const result = await writeRepositoryAnchor(session.dir, options.target, {
         s3Profile: s3ProfileFromSettings() ?? undefined,
         sftpProfile: sftpProfileFromSettings() ?? undefined
       });
@@ -1774,28 +1826,53 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
   });
 
   ipcMain.handle('repo-prune', async (_event, options: { dir: string; dryRun?: boolean; passphrase?: string }) => {
+    let session: import('./imaging/repo-s3').RepoSession | undefined;
     try {
       const { pruneRepository } = await import('./imaging/repository');
-      const result = await pruneRepository(options.dir, {
+      const { openRepoSession } = await import('./imaging/repo-s3');
+      session = await openRepoSession(options.dir, { s3Profile: s3ProfileFromSettings() ?? undefined });
+      const result = await pruneRepository(session.dir, {
         dryRun: options.dryRun,
         ...(options.passphrase ? { passphrase: options.passphrase } : {}),
-        s3Profile: s3ProfileFromSettings() ?? undefined
+        s3Profile: s3ProfileFromSettings() ?? undefined,
+        remoteOnly: session.isS3
       });
       return { ok: true, ...result };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      // Prune appends per image — flush partial progress even on failure.
+      if (session) {
+        try {
+          await session.flush();
+        } catch {
+          // Surface on the next open/verify; the local cache still holds it.
+        }
+      }
     }
   });
 
   ipcMain.handle('repo-unlock', async (_event, options: { dir: string; target: string; passphrase?: string }) => {
+    let session: import('./imaging/repo-s3').RepoSession | undefined;
     try {
       const { unlockRepository } = await import('./imaging/repository');
-      const unlocked = await unlockRepository(options.dir, options.target, {
-        ...(options.passphrase ? { passphrase: options.passphrase } : {})
+      const { openRepoSession } = await import('./imaging/repo-s3');
+      session = await openRepoSession(options.dir, { s3Profile: s3ProfileFromSettings() ?? undefined });
+      const unlocked = await unlockRepository(session.dir, options.target, {
+        ...(options.passphrase ? { passphrase: options.passphrase } : {}),
+        remoteOnly: session.isS3
       });
       return { ok: true, unlocked };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      if (session) {
+        try {
+          await session.flush();
+        } catch {
+          // Best-effort — a failed flush surfaces on the next operation.
+        }
+      }
     }
   });
 }

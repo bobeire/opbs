@@ -264,9 +264,33 @@ implemented; **Investigate** items need spike work first.
   use `--flag=` or precede them with `--`). Covered by
   `test/unit/repo-remote.test.ts` (8 tests, mock-S3 ordering/refusal
   paths) and `test/unit/cli-flags.test.ts` (10 tests).
-- ⬜ **Remaining**: Phase 3 — repository-on-S3 backend (header + journal +
-  images living in an Object-Lock-enabled bucket, storage abstraction in
-  `repository.ts`; the volume mirror above only copies `images/`).
+- ✅ Repository-on-S3 backend (0.6.54): `repo init s3://bucket/prefix` writes
+  the header + empty journal into the bucket with conditional
+  `If-None-Match: *` puts (plus Object Lock retention when `--remote-lock` is
+  set) and records the repository's own location in `header.remote`. Every
+  later command runs through `openRepoSession` (`repo-s3.ts`): header +
+  journal hydrate into a per-open cache staging dir
+  (`~/.opbs/cache/repos/<hash>/s-…`, `OPBS_REPO_CACHE_DIR` override, 24 h
+  sweep), the existing local logic runs there, and `flush()` uploads changed
+  metadata with `If-Match` against the hydrated ETags — a concurrent writer
+  gets a `Repository changed in S3 while it was open` error instead of
+  history being overwritten. Image volumes are staged (never cached),
+  uploaded before the signed `create` record lands, and the staging dir is
+  removed after a successful flush. `repo verify` for S3 targets is
+  remoteOnly: one listing covers presence/size/pruned-present/orphans and
+  `S3Store.hashObject` streams each active volume's SHA-256 (size-only with
+  `--fast`); prune/unlock skip local fs work; `repoOverview` takes a
+  precomputed `imageIndex` from the listing. CLI gains `OPBS_S3_ENDPOINT` /
+  `OPBS_S3_FORCE_PATH_STYLE` env fallbacks (MinIO/Ceph) and `--remote-lock`
+  now applies to s3 init without `--remote`; `verifyWithAnchor` no longer
+  drops `s3Profile` from the base verify. Backup (CLI + GUI `start-backup`)
+  and all repo IPC handlers are session-wired (flush → cleanup → optional
+  re-anchor); a cloud `destinationPath` equal to the repo target is allowed.
+  GUI: repository dir accepts `s3://…` (badge *S3 storage*), init form
+  switches wording + hides the mirror field, wizard gains *Open S3 repo*.
+  Covered by `test/unit/repo-s3.test.ts` (13 tests: conditional init,
+  hydrate/flush/conflict, end-to-end verify/tamper/orphans, Object-Lock prune
+  refusal, anchor round-trip, cleanup).
 
 ## Planned
 

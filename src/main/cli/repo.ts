@@ -20,6 +20,7 @@ import {
   type VerifyResult
 } from '../imaging/repository';
 import { verifyWithAnchor, writeRepositoryAnchor, type VerifyWithAnchorResult } from '../imaging/repo-anchor';
+import { openRepoSession, isS3RepoTarget, type RepoSession } from '../imaging/repo-s3';
 import type { S3Config } from '../utils/s3';
 
 function keyOpts(argv: string[]): RepoKeyOptions {
@@ -45,25 +46,60 @@ export function parseLockDays(argv: string[]): number | undefined {
 function usage(): string {
   return [
     'Usage:',
-    '  repo init <dir> [--lock-days N] [--remote s3://bucket/prefix] [--remote-lock GOVERNANCE|COMPLIANCE]',
-    '           [--passphrase p] [--keyfile f]',
-    '  repo list <dir> [--json]',
-    '  repo verify <dir> [--fast] [--anchor <target>] [--json] [--passphrase p] [--keyfile f]',
-    '  repo anchor <dir> --to <target> [--passphrase p] [--keyfile f]',
-    '  repo prune <dir> [--dry-run] [--json] [--passphrase p] [--keyfile f]',
-    '  repo unlock <dir> <image|--all> [--passphrase p] [--keyfile f]'
+    '  repo init <dir|s3://bucket/prefix> [--lock-days N] [--remote s3://bucket/prefix]',
+    '           [--remote-lock GOVERNANCE|COMPLIANCE] [--passphrase p] [--keyfile f]',
+    '  repo list <dir|s3://bucket/prefix> [--json]',
+    '  repo verify <dir|s3://bucket/prefix> [--fast] [--anchor <target>] [--json] [--passphrase p] [--keyfile f]',
+    '  repo anchor <dir|s3://bucket/prefix> --to <target> [--passphrase p] [--keyfile f]',
+    '  repo prune <dir|s3://bucket/prefix> [--dry-run] [--json] [--passphrase p] [--keyfile f]',
+    '  repo unlock <dir|s3://bucket/prefix> <image|--all> [--passphrase p] [--keyfile f]',
+    '',
+    'An s3:// target stores the header, journal and image volumes in the bucket',
+    '(credentials from the OPBS cloud profile or the AWS_* environment).'
   ].join('\n');
 }
 
 export async function cmdRepo(ctx: CommandContext): Promise<number> {
   const action = ctx.argv[0];
   const pos = positionals(ctx.argv.slice(1));
-  const dir = pos[0];
-  if (!action || !dir) {
+  const target = pos[0];
+  if (!action || !target) {
     console.error(usage());
     return 1;
   }
 
+  // S3-hosted repositories hydrate header + journal into a local cache and
+  // flush any journal changes back (conditional on the hydrated ETags) —
+  // even when the action itself failed halfway.
+  let session: RepoSession | undefined;
+  if (action !== 'init') {
+    try {
+      session = await openRepoSession(target);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      return 1;
+    }
+  }
+  const dir = session ? session.dir : target;
+  const code = await runRepoAction(ctx, action, pos, dir, session?.isS3 ?? isS3RepoTarget(target));
+  if (session) {
+    try {
+      await session.flush();
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      return 1;
+    }
+  }
+  return code;
+}
+
+async function runRepoAction(
+  ctx: CommandContext,
+  action: string,
+  pos: string[],
+  dir: string,
+  isS3: boolean
+): Promise<number> {
   try {
     switch (action) {
       case 'init': {
@@ -72,11 +108,18 @@ export async function cmdRepo(ctx: CommandContext): Promise<number> {
         if (remoteLock && remoteLock !== 'GOVERNANCE' && remoteLock !== 'COMPLIANCE') {
           throw new Error(`Invalid --remote-lock mode: ${remoteLock} (use GOVERNANCE or COMPLIANCE)`);
         }
+        // On an s3:// target the repository IS remote: --remote-lock applies
+        // even without --remote (the storage location comes from the target).
+        const remote =
+          remoteUri || (remoteLock && isS3RepoTarget(dir))
+            ? {
+                uri: remoteUri ?? dir,
+                ...(remoteLock ? { lockMode: remoteLock as 'GOVERNANCE' | 'COMPLIANCE' } : {})
+              }
+            : undefined;
         const result = await initRepository(dir, {
           lockDays: parseLockDays(ctx.argv),
-          ...(remoteUri
-            ? { remote: { uri: remoteUri, ...(remoteLock ? { lockMode: remoteLock as 'GOVERNANCE' | 'COMPLIANCE' } : {}) } }
-            : {}),
+          ...(remote ? { remote } : {}),
           ...keyOpts(ctx.argv)
         });
         const keyNote = result.keyfilePath
@@ -89,8 +132,9 @@ export async function cmdRepo(ctx: CommandContext): Promise<number> {
           console.log(`  id: ${result.header.id}`);
           console.log(`  default lock: ${result.header.defaultLockDays} day(s)`);
           if (result.header.remote) {
+            const label = isS3 ? 'storage' : 'mirror';
             console.log(
-              `  mirror: ${result.header.remote.uri}` +
+              `  ${label}: ${result.header.remote.uri}` +
                 (result.header.remote.lockMode ? ` (Object Lock: ${result.header.remote.lockMode})` : '')
             );
           }
@@ -124,7 +168,8 @@ export async function cmdRepo(ctx: CommandContext): Promise<number> {
           console.log(JSON.stringify({ header, signaturesVerified: hasKey, images: states }, null, 2));
           return 0;
         }
-        console.log(`Repository ${dir}`);
+        // For S3 repos `dir` is the hydrate cache — show the real target.
+        console.log(`Repository ${pos[0] ?? dir}`);
         console.log(`  id: ${header.id}  default lock: ${header.defaultLockDays} day(s)`);
         console.log(`  signatures: ${hasKey ? 'verified (key available)' : 'unverified (key not available)'}`);
         if (states.length === 0) {
@@ -151,11 +196,13 @@ export async function cmdRepo(ctx: CommandContext): Promise<number> {
           ? await verifyWithAnchor(dir, {
               fast: ctx.argv.includes('--fast'),
               ...keyOpts(ctx.argv),
-              anchorTarget
+              anchorTarget,
+              remoteOnly: isS3
             })
           : await verifyRepository(dir, {
               fast: ctx.argv.includes('--fast'),
-              ...keyOpts(ctx.argv)
+              ...keyOpts(ctx.argv),
+              remoteOnly: isS3
             });
         if (ctx.opts.json) {
           console.log(JSON.stringify(report, null, 2));
@@ -211,7 +258,7 @@ export async function cmdRepo(ctx: CommandContext): Promise<number> {
           return 1;
         }
         const dryRun = ctx.argv.includes('--dry-run');
-        const result = await pruneRepository(dir, { dryRun, ...keyOpts(ctx.argv) });
+        const result = await pruneRepository(dir, { dryRun, ...keyOpts(ctx.argv), remoteOnly: isS3 });
         if (ctx.opts.json) {
           console.log(JSON.stringify(result, null, 2));
           return 0;
@@ -237,7 +284,10 @@ export async function cmdRepo(ctx: CommandContext): Promise<number> {
           console.error('Usage: repo unlock <dir> <image|--all>');
           return 1;
         }
-        const unlocked = await unlockRepository(dir, target === '--all' ? '*' : target, keyOpts(ctx.argv));
+        const unlocked = await unlockRepository(dir, target === '--all' ? '*' : target, {
+          ...keyOpts(ctx.argv),
+          remoteOnly: isS3
+        });
         if (ctx.opts.json) {
           console.log(JSON.stringify({ ok: true, unlocked }, null, 2));
         } else {

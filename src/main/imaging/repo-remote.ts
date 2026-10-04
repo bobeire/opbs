@@ -85,6 +85,20 @@ export async function deleteRemoteVolumes(store: S3Store, names: string[]): Prom
 }
 
 /**
+ * Object name → size for every volume under a repository's `images/` prefix
+ * (one ListObjectsV2, no downloads).
+ */
+export async function listRemoteVolumes(store: S3Store): Promise<Map<string, number>> {
+  const listed = await store.listWithMeta(store.resolveKey(IMAGES_PREFIX));
+  const sizes = new Map<string, number>();
+  for (const item of listed) {
+    const name = item.key.startsWith(IMAGES_PREFIX) ? item.key.slice(IMAGES_PREFIX.length) : item.key;
+    if (name) sizes.set(name, item.size);
+  }
+  return sizes;
+}
+
+/**
  * Presence + size check of the mirrored volumes (cheap: one ListObjectsV2,
  * no downloads — the local copies remain the hash-verified originals, and
  * the mirror is protected by Object Lock rather than by re-hashing).
@@ -93,12 +107,7 @@ export async function checkRemoteVolumes(
   store: S3Store,
   volumes: RemoteVolume[]
 ): Promise<RemoteFinding[]> {
-  const listed = await store.listWithMeta(store.resolveKey(IMAGES_PREFIX));
-  const sizes = new Map<string, number>();
-  for (const item of listed) {
-    const name = item.key.startsWith(IMAGES_PREFIX) ? item.key.slice(IMAGES_PREFIX.length) : item.key;
-    sizes.set(name, item.size);
-  }
+  const sizes = await listRemoteVolumes(store);
   const findings: RemoteFinding[] = [];
   for (const volume of volumes) {
     const size = sizes.get(volume.name);
