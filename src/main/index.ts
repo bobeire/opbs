@@ -586,7 +586,7 @@ function setupIpcHandlers(): void {
       config?.destinationPath?.startsWith('s3://')
         ? { ...config, s3Profile: s3ProfileFromSettings() }
         : config?.destinationPath?.startsWith('sftp://')
-          ? { ...config, sftpProfile: s3ProfileFromSettings() }
+          ? { ...config, sftpProfile: sftpProfileFromSettings() }
           : config?.destinationPath?.startsWith('ftp://')
             ? { ...config, ftpProfile: ftpProfileFromSettings() }
             : config;
@@ -605,6 +605,22 @@ function setupIpcHandlers(): void {
         // orphan, so surface the failure loudly without discarding the result.
         const message = error instanceof Error ? error.message : String(error);
         result.warnings.push(`Image written but NOT journaled in the repository: ${message}`);
+      }
+      // Re-anchor the journal off-box when a target is configured, so a
+      // subsequent local rollback shows up in Verify.
+      const anchorTarget = settingsManager.getSettings().lastRepoAnchorTarget?.trim();
+      if (anchorTarget) {
+        try {
+          const { writeRepositoryAnchor } = await import('./imaging/repo-anchor');
+          const anchor = await writeRepositoryAnchor(repoDir, anchorTarget, {
+            s3Profile: s3ProfileFromSettings() ?? undefined,
+            sftpProfile: sftpProfileFromSettings() ?? undefined
+          });
+          result.repoAnchor = { target: anchor.target, seq: anchor.seq, anchoredAt: anchor.anchoredAt };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          result.warnings.push(`Journal NOT anchored off-box: ${message}`);
+        }
       }
     }
     return result;
@@ -1692,21 +1708,29 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     }
   });
 
-  ipcMain.handle('repo-verify', async (event, options: { dir: string; fast?: boolean; passphrase?: string }) => {
+  ipcMain.handle('repo-verify', async (event, options: { dir: string; fast?: boolean; passphrase?: string; anchorTarget?: string }) => {
     try {
-      const { verifyRepository } = await import('./imaging/repository');
-      const report = await verifyRepository(options.dir, {
-        fast: options.fast,
-        ...(options.passphrase ? { passphrase: options.passphrase } : {}),
-        onProgress: (message: string) => {
-          try {
-            event.sender.send('repo-progress', { message });
-          } catch {
-            // Renderer navigated away mid-verify.
-          }
+      const onProgress = (message: string) => {
+        try {
+          event.sender.send('repo-progress', { message });
+        } catch {
+          // Renderer navigated away mid-verify.
         }
-      });
-      return report;
+      };
+      const keyOpts = { ...(options.passphrase ? { passphrase: options.passphrase } : {}) };
+      if (options.anchorTarget) {
+        const { verifyWithAnchor } = await import('./imaging/repo-anchor');
+        return await verifyWithAnchor(options.dir, {
+          fast: options.fast,
+          ...keyOpts,
+          onProgress,
+          anchorTarget: options.anchorTarget,
+          s3Profile: s3ProfileFromSettings() ?? undefined,
+          sftpProfile: sftpProfileFromSettings() ?? undefined
+        });
+      }
+      const { verifyRepository } = await import('./imaging/repository');
+      return await verifyRepository(options.dir, { fast: options.fast, ...keyOpts, onProgress });
     } catch (error) {
       return {
         ok: false,
@@ -1715,6 +1739,19 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
         states: [],
         signaturesVerified: false
       };
+    }
+  });
+
+  ipcMain.handle('repo-anchor', async (_event, options: { dir: string; target: string }) => {
+    try {
+      const { writeRepositoryAnchor } = await import('./imaging/repo-anchor');
+      const result = await writeRepositoryAnchor(options.dir, options.target, {
+        s3Profile: s3ProfileFromSettings() ?? undefined,
+        sftpProfile: sftpProfileFromSettings() ?? undefined
+      });
+      return { ok: true, ...result };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   });
 

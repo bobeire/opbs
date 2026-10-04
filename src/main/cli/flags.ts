@@ -5,7 +5,7 @@ export function flagValue(argv: string[], name: string): string | undefined {
 }
 
 /** Flags that consume the following token as their value. */
-export const VALUE_FLAGS = ['--lock-days', '--passphrase', '--keyfile'];
+export const VALUE_FLAGS = ['--lock-days', '--passphrase', '--keyfile', '--to', '--anchor'];
 
 /**
  * Positional (non-flag) tokens, skipping flags and the values of

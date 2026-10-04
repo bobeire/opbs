@@ -18,7 +18,9 @@ import { protectFiles, protectJournal, unprotectFiles } from '../utils/file-prot
  * files is caught by replaying the journal against the directory (missing
  * volumes); a rewritten journal without the key fails signature checks.
  * Full rollback by an attacker holding the key cannot be detected without an
- * external anchor — documented in the README.
+ * external anchor — `repo anchor` / the Repositories view can push one
+ * off-box (local directory, s3://, sftp://) and verification then catches
+ * rolled-back or rewritten journals. Documented in the README.
  *
  * The signing key is never stored inside the repository: either a keyfile
  * outside it (default: ~/.opbs/repo-keys/<id>.key) or a passphrase-derived
@@ -550,8 +552,24 @@ export interface VerifyOptions extends RepoKeyOptions {
 }
 
 export interface VerifyProblem {
-  kind: 'chain' | 'signature' | 'missing-key' | 'missing-file' | 'size-mismatch' | 'hash-mismatch' | 'orphan';
+  kind:
+    | 'chain'
+    | 'signature'
+    | 'missing-key'
+    | 'missing-file'
+    | 'size-mismatch'
+    | 'hash-mismatch'
+    | 'orphan'
+    | 'anchor-missing'
+    | 'anchor-mismatch';
   detail: string;
+}
+
+export interface VerifyResult {
+  ok: boolean;
+  problems: VerifyProblem[];
+  states: RepoImageState[];
+  signaturesVerified: boolean;
 }
 
 /**
@@ -563,10 +581,7 @@ export interface VerifyProblem {
  *  4. images on disk not in the journal (catches journal truncation)
  *  5. pruned images whose files reappeared
  */
-export async function verifyRepository(
-  repoDir: string,
-  opts: VerifyOptions = {}
-): Promise<{ ok: boolean; problems: VerifyProblem[]; states: RepoImageState[]; signaturesVerified: boolean }> {
+export async function verifyRepository(repoDir: string, opts: VerifyOptions = {}): Promise<VerifyResult> {
   const header = loadHeader(repoDir);
   const records = loadJournal(repoDir);
   const problems: VerifyProblem[] = [];

@@ -245,10 +245,17 @@ Commands:
                                          passphrase-derived — nothing stored). Back the key up:
                                          without it the journal cannot be signed or verified.
   repo list <dir> [--json]               List repository images with lock/unlock/expiry state.
-  repo verify <dir> [--fast] [--json]    Verify journal chain + signatures and re-hash every
+  repo verify <dir> [--fast] [--anchor t] Verify journal chain + signatures and re-hash every
                                          image (catches tampering, truncation, silent
-                                         encryption). --fast checks sizes only. Exits 1 on any
+                                         encryption). --fast checks sizes only. --anchor
+                                         <target> also compares the journal against an
+                                         off-box snapshot (detects rollback). Exits 1 on any
                                          problem. Without the key only structure is checked.
+  repo anchor <dir> --to <target>         Snapshot header + journal off-box (local directory,
+                                         s3://bucket/prefix or sftp://host/path). After a
+                                         local journal rollback, 'repo verify --anchor'
+                                         reports it. Anchor targets are written under
+                                         <target>/<repo-id>/opbs-repo.anchor.
   repo prune <dir> [--dry-run] [--json]  Delete images whose lock expired or that were
                                          explicitly unlocked. Locked images are never touched;
                                          a chain root waits for all of its deltas.

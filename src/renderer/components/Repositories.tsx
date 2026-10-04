@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-type BusyAction = 'open' | 'init' | 'verify' | 'prune' | 'unlock' | null;
+type BusyAction = 'open' | 'init' | 'verify' | 'prune' | 'unlock' | 'anchor' | null;
 
 function formatBytes(bytes: number): string {
   if (!bytes) return '—';
@@ -42,6 +42,8 @@ function Repositories() {
   const [verifyReport, setVerifyReport] = useState<RepoVerifyResult | null>(null);
   const [pruneResult, setPruneResult] = useState<RepoPruneResult | null>(null);
   const [initLockDays, setInitLockDays] = useState('30');
+  const [anchorTarget, setAnchorTarget] = useState('');
+  const [anchorStatus, setAnchorStatus] = useState('');
   const [confirmPrune, setConfirmPrune] = useState(false);
   const [confirmUnlockAll, setConfirmUnlockAll] = useState(false);
   const [confirmUnlockRow, setConfirmUnlockRow] = useState('');
@@ -53,10 +55,11 @@ function Repositories() {
     return off;
   }, [busy]);
 
-  // Remember the last opened repository.
+  // Remember the last opened repository and anchor target.
   useEffect(() => {
     void window.electronAPI.getSettings().then((settings) => {
       if (settings?.lastRepoDir) setDir(settings.lastRepoDir);
+      if (settings?.lastRepoAnchorTarget) setAnchorTarget(settings.lastRepoAnchorTarget);
     });
   }, []);
 
@@ -141,7 +144,12 @@ function Repositories() {
     setVerifyReport(null);
     setProgress('');
     try {
-      const res = await window.electronAPI.repoVerify({ dir, fast, passphrase: passphrase || undefined });
+      const res = await window.electronAPI.repoVerify({
+        dir,
+        fast,
+        passphrase: passphrase || undefined,
+        anchorTarget: anchorTarget.trim() || undefined
+      });
       setVerifyReport(res);
       if (res.error) setError(res.error);
       await openRepo(false);
@@ -149,6 +157,31 @@ function Repositories() {
       fail(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setProgress('');
+      setBusy(null);
+    }
+  };
+
+  const runAnchor = async () => {
+    const target = anchorTarget.trim();
+    if (!dir || !target) return;
+    setBusy('anchor');
+    setError('');
+    setNotice('');
+    setAnchorStatus('');
+    try {
+      const res = await window.electronAPI.repoAnchor({ dir, target });
+      if (!res.ok) {
+        fail(res.error ?? 'Anchor failed');
+        return;
+      }
+      setAnchorStatus(`Anchored through seq ${res.seq} at ${formatDate(res.anchoredAt ?? '')}`);
+      setNotice(
+        `Journal anchored off-box through seq ${res.seq} (${res.journalBytes} bytes) → ${res.target ?? target}.`
+      );
+      void window.electronAPI.updateSettings({ lastRepoAnchorTarget: target });
+    } catch (caught) {
+      fail(caught instanceof Error ? caught.message : String(caught));
+    } finally {
       setBusy(null);
     }
   };
@@ -363,6 +396,28 @@ function Repositories() {
               )}
             </div>
 
+            <div className="path-input" style={{ flex: 1, minWidth: 260, marginTop: 8 }}>
+              <input
+                type="text"
+                value={anchorTarget}
+                placeholder="Anchor target: directory, s3://bucket/prefix or sftp://host/path…"
+                onChange={(e) => setAnchorTarget(e.target.value)}
+              />
+              <button
+                className="btn-secondary"
+                disabled={busy !== null || !anchorTarget.trim()}
+                onClick={() => void runAnchor()}
+              >
+                {busy === 'anchor' ? 'Anchoring…' : 'Anchor now'}
+              </button>
+            </div>
+            <p className="field-hint">
+              An off-box snapshot of the header + journal. After a local journal rollback or rewrite,{' '}
+              <strong>Verify</strong> (which checks the anchor when a target is set) reports it. Successful
+              repository backups re-anchor automatically.
+              {anchorStatus && <span className="mono-value"> — {anchorStatus}</span>}
+            </p>
+
             {verifying && <p className="field-hint">{progress || 'Working…'}</p>}
 
             {verifyReport && !verifyReport.error && (
@@ -372,6 +427,12 @@ function Repositories() {
                 </p>
                 <p className="field-hint">
                   Signatures {verifyReport.signaturesVerified ? 'verified' : 'not verified (key unavailable)'}.
+                  {verifyReport.anchor &&
+                    (verifyReport.anchor.ok
+                      ? ` Anchor OK — through seq ${verifyReport.anchor.seq} (anchored ${formatDate(
+                          verifyReport.anchor.anchoredAt
+                        )}).`
+                      : ' Anchor check FAILED.')}
                 </p>
                 {verifyReport.problems.length > 0 && (
                   <ul className="repo-problem-list">

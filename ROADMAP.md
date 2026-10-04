@@ -222,8 +222,21 @@ implemented; **Investigate** items need spike work first.
   screen shows the lock date. `repoDir`/`repoLockDays` inside a job JSON
   work for the CLI/scheduler too (`--repo` overrides), profiles persist the
   repository link.
-- ⬜ **Remaining**: Phase 3 — S3 Object Lock backend (true WORM) and an
-  external journal anchor (off-box copy defeats local journal rollback).
+- ✅ Off-box journal anchor (0.6.51): `repo anchor <dir> --to <target>`
+  snapshots the exact header + journal bytes (with SHA-256 checksums) to a
+  local directory, `s3://bucket/prefix` or `sftp://host/path`, stored as
+  `<target>/<repo-id>/opbs-repo.anchor`; `repo verify --anchor <target>`
+  byte-compares local vs anchored state and reports rollback (shorter
+  journal), rewritten history, header swaps, corrupted anchors and forged
+  snapshots as `anchor-missing`/`anchor-mismatch`/`signature` problems.
+  GUI: **Anchor target** field + "Anchor now" in the Repositories view
+  (target remembered in `settings.lastRepoAnchorTarget`), Verify includes
+  the anchor line, and successful repository backups re-anchor automatically
+  (`JobResult.repoAnchor`, surfaced on the wizard's completion screen).
+  Covered by `test/unit/repo-anchor.test.ts` (14 tests, incl. a mock-S3
+  roundtrip). Also fixed: `start-backup` passed the S3 profile into
+  `sftpProfile` for `sftp://` destinations.
+- ⬜ **Remaining**: Phase 3 — S3 Object Lock repository backend (true WORM).
 
 ## Planned
 

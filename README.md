@@ -712,22 +712,42 @@ The image is written into `images/` and a signed `create` record locks it for
 Repository commands:
 
 - `repo list <dir> [--json]` — images with lock/expiry state
-- `repo verify <dir> [--fast] [--json]` — verifies the journal chain and all
-  signatures, then re-hashes every image; detects edits, truncation, missing
-  files and orphaned images (and therefore deletions)
+- `repo verify <dir> [--fast] [--anchor <target>] [--json]` — verifies the
+  journal chain and all signatures, then re-hashes every image; detects
+  edits, truncation, missing files and orphaned images (and therefore
+  deletions). With `--anchor`, also byte-compares the journal against the
+  off-box snapshot (see below).
 - `repo prune <dir> [--dry-run] [--json]` — deletes only images whose lock
   has expired, and only when every delta in their chain is also eligible (a
   locked delta keeps its full base). Dry-run shows the plan and needs no key.
 - `repo unlock <dir> <image|--all> [--passphrase p] [--keyfile f]` — the
   audited escape hatch: appends a signed `unlock` record instead of silently
   mutating the journal. Afterwards run `repo prune`.
+- `repo anchor <dir> --to <target> [--passphrase p] [--keyfile f]` — writes
+  an off-box snapshot of the exact header + journal bytes to a local
+  directory, `s3://bucket/prefix` or `sftp://host/path`, stored as
+  `<target>/<repo-id>/opbs-repo.anchor`.
+
+Rollback detection needs that anchor: journal history is tamper-evident but
+not rollback-proof on its own. `repo verify <dir> --anchor <target>` compares
+the local files against the snapshot byte-for-byte — a truncated journal
+(rollback), rewritten records, a swapped header or a corrupted anchor all
+fail with `anchor-mismatch`/`anchor-missing`, and the snapshot's embedded
+HMAC chain is re-verified when the key is available. Appending records after
+anchoring is fine (the anchored text stays a prefix until you anchor again),
+so anchor after every repository backup — or just let OPBS do it: when an
+anchor target is configured, successful repository backups re-anchor
+automatically.
 
 The same workflow lives in the GUI under **sidebar → 🗄️ Repositories**:
 pick or initialize a repository, watch header / key / chain badges, browse
 the image table with per-image lock badges (locked until, expired, unlocked,
 files missing), and run **Verify** (full or fast, with streamed progress),
 **Prune** (dry-run first, then a two-step confirm) and **Unlock** (per image
-or all). The last opened repository is remembered across restarts.
+or all). The last opened repository is remembered across restarts. The
+**Anchor target** field writes the off-box snapshot on demand and is included
+in every Verify (which then reports `Anchor OK — through seq N`); the target
+is remembered, and successful repository backups re-anchor automatically.
 
 Backups can also *target* a repository straight from the wizard: on the
 destination step, **Use a repository…** validates the pick, switches the
@@ -753,9 +773,11 @@ Protection layers (and their honest limits):
    back to the parent folder's `FILE_DELETE_CHILD` grant), so deletion is
    handled by detection rather than prevention.
 3. **Known limits** — a local administrator can still delete the entire
-   folder or roll the journal back together with its images; rollback is not
-   detectable without an external anchor (e.g. an off-box copy of the
-   journal). True WORM guarantees come with S3 Object Lock (roadmap phase 3).
+   folder. Rolling the journal back together with its images is *detected*
+   (not prevented) by `repo verify --anchor` when an off-box anchor exists —
+   keep the anchor target on storage the attacker cannot also rewrite (a
+   separate machine, bucket, or ideally an Object-Lock bucket). True WORM
+   guarantees come with S3 Object Lock (roadmap phase 3).
 
 Retention stays journal-aware: automatic cleanup skips repository images and
 points you at `repo prune` instead.

@@ -204,6 +204,8 @@ export interface JobResult {
   warnings: string[];
   /** Set when the image was journaled into an immutable repository. */
   repoRecord?: { image: string; lockUntil: string };
+  /** Set when the repository journal was re-anchored off-box after the run. */
+  repoAnchor?: { target: string; seq: number; anchoredAt: string };
 }
 
 export interface RestoreJobProgress {

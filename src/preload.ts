@@ -225,8 +225,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   repoOpen: (dir: string) => ipcRenderer.invoke('repo-open', dir),
   repoInit: (options: { dir: string; lockDays?: number; passphrase?: string }) =>
     ipcRenderer.invoke('repo-init', options),
-  repoVerify: (options: { dir: string; fast?: boolean; passphrase?: string }) =>
+  repoVerify: (options: { dir: string; fast?: boolean; passphrase?: string; anchorTarget?: string }) =>
     ipcRenderer.invoke('repo-verify', options),
+  repoAnchor: (options: { dir: string; target: string }) => ipcRenderer.invoke('repo-anchor', options),
   repoPrune: (options: { dir: string; dryRun?: boolean; passphrase?: string }) =>
     ipcRenderer.invoke('repo-prune', options),
   repoUnlock: (options: { dir: string; target: string; passphrase?: string }) =>

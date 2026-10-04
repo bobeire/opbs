@@ -11,6 +11,7 @@ declare global {
         imagePath?: string;
         warnings?: string[];
         repoRecord?: { image: string; lockUntil: string };
+        repoAnchor?: { target: string; seq: number; anchoredAt: string };
       } | undefined>;
       cancelBackup: () => Promise<void>;
       isBackupRunning: () => Promise<boolean>;
@@ -374,7 +375,13 @@ declare global {
       // Immutable repositories
       repoOpen: (dir: string) => Promise<RepoOpenResult>;
       repoInit: (options: { dir: string; lockDays?: number; passphrase?: string }) => Promise<RepoInitResult>;
-      repoVerify: (options: { dir: string; fast?: boolean; passphrase?: string }) => Promise<RepoVerifyResult>;
+      repoVerify: (options: {
+        dir: string;
+        fast?: boolean;
+        passphrase?: string;
+        anchorTarget?: string;
+      }) => Promise<RepoVerifyResult>;
+      repoAnchor: (options: { dir: string; target: string }) => Promise<RepoAnchorResult>;
       repoPrune: (options: { dir: string; dryRun?: boolean; passphrase?: string }) => Promise<RepoPruneResult>;
       repoUnlock: (options: { dir: string; target: string; passphrase?: string }) => Promise<RepoActionResult>;
       onRepoProgress: (callback: (progress: { message: string }) => void) => () => void;
@@ -428,6 +435,19 @@ declare global {
     problems: { kind: string; detail: string }[];
     states: RepoImageStateInfo[];
     signaturesVerified: boolean;
+    /** Present when the verify ran against an off-box anchor target. */
+    anchor?: { ok: boolean; seq: number; records: number; anchoredAt: string };
+  }
+
+  interface RepoAnchorResult {
+    ok: boolean;
+    error?: string;
+    target?: string;
+    repoId?: string;
+    seq?: number;
+    records?: number;
+    journalBytes?: number;
+    anchoredAt?: string;
   }
 
   interface RepoPruneEntry {

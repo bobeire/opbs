@@ -446,12 +446,19 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     };
 
     const trackResult = (result: Awaited<ReturnType<typeof window.electronAPI.startBackup>>) => {
+      const parts: string[] = [];
       if (result?.repoRecord) {
-        setRepoNote(
+        parts.push(
           `Journaled: ${result.repoRecord.image} — immutable until ${new Date(result.repoRecord.lockUntil).toLocaleString()}`
         );
       }
-      const journalWarn = (result?.warnings ?? []).find((w) => w.toLowerCase().includes('journaled'));
+      if (result?.repoAnchor) {
+        parts.push(`journal anchored off-box through seq ${result.repoAnchor.seq}`);
+      }
+      if (parts.length > 0) setRepoNote(parts.join(' · '));
+      const journalWarn = (result?.warnings ?? []).find(
+        (w) => w.toLowerCase().includes('journaled') || w.toLowerCase().includes('anchored')
+      );
       if (journalWarn) setRepoWarn(journalWarn);
     };
 

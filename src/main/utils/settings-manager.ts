@@ -36,6 +36,12 @@ export interface AppSettings {
   cloud: CloudSettings;
   /** Last repository directory opened in the Repositories view. */
   lastRepoDir: string;
+  /**
+   * Off-box journal anchor target for the last repository (local dir,
+   * s3://bucket/prefix or sftp://host/path). When set, successful repository
+   * backups re-anchor automatically and Verify checks against it.
+   */
+  lastRepoAnchorTarget: string;
 }
 
 export interface CloudSettings {
@@ -154,6 +160,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   defaultVerification: true,
   backupLocation: '',
   lastRepoDir: '',
+  lastRepoAnchorTarget: '',
   logLevel: 'info',
   autoCleanup: false,
   retentionDays: 30,

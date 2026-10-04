@@ -16,8 +16,10 @@ import {
   verifyRepository,
   pruneRepository,
   unlockRepository,
-  type RepoKeyOptions
+  type RepoKeyOptions,
+  type VerifyResult
 } from '../imaging/repository';
+import { verifyWithAnchor, writeRepositoryAnchor, type VerifyWithAnchorResult } from '../imaging/repo-anchor';
 
 function keyOpts(argv: string[]): RepoKeyOptions {
   const opts: RepoKeyOptions = {};
@@ -44,7 +46,8 @@ function usage(): string {
     'Usage:',
     '  repo init <dir> [--lock-days N] [--passphrase p] [--keyfile f]',
     '  repo list <dir> [--json]',
-    '  repo verify <dir> [--fast] [--json] [--passphrase p] [--keyfile f]',
+    '  repo verify <dir> [--fast] [--anchor <target>] [--json] [--passphrase p] [--keyfile f]',
+    '  repo anchor <dir> --to <target> [--passphrase p] [--keyfile f]',
     '  repo prune <dir> [--dry-run] [--json] [--passphrase p] [--keyfile f]',
     '  repo unlock <dir> <image|--all> [--passphrase p] [--keyfile f]'
   ].join('\n');
@@ -127,10 +130,17 @@ export async function cmdRepo(ctx: CommandContext): Promise<number> {
           console.error(`Not an OPBS repository (run 'repo init ${dir}')`);
           return 1;
         }
-        const report = await verifyRepository(dir, {
-          fast: ctx.argv.includes('--fast'),
-          ...keyOpts(ctx.argv)
-        });
+        const anchorTarget = flagValue(ctx.argv, '--anchor');
+        const report: VerifyResult & { anchor?: VerifyWithAnchorResult['anchor'] } = anchorTarget
+          ? await verifyWithAnchor(dir, {
+              fast: ctx.argv.includes('--fast'),
+              ...keyOpts(ctx.argv),
+              anchorTarget
+            })
+          : await verifyRepository(dir, {
+              fast: ctx.argv.includes('--fast'),
+              ...keyOpts(ctx.argv)
+            });
         if (ctx.opts.json) {
           console.log(JSON.stringify(report, null, 2));
           return report.ok ? 0 : 1;
@@ -141,10 +151,42 @@ export async function cmdRepo(ctx: CommandContext): Promise<number> {
             `signatures ${report.signaturesVerified ? 'verified' : 'not verified'}, ` +
             `hash mode: ${ctx.argv.includes('--fast') ? 'size only (--fast)' : 'full sha256'}`
         );
+        if (report.anchor) {
+          console.log(
+            report.anchor.ok
+              ? `  anchor: OK — through seq ${report.anchor.seq} (anchored ${report.anchor.anchoredAt})`
+              : '  anchor: FAILED'
+          );
+        }
         for (const problem of report.problems) {
           console.error(`  [${problem.kind}] ${problem.detail}`);
         }
         return report.ok ? 0 : 1;
+      }
+
+      case 'anchor': {
+        if (!isRepository(dir)) {
+          console.error(`Not an OPBS repository (run 'repo init ${dir}')`);
+          return 1;
+        }
+        const target = flagValue(ctx.argv, '--to');
+        if (!target) {
+          console.error('Usage: repo anchor <dir> --to <local-dir | s3://bucket/prefix | sftp://host/path>');
+          return 1;
+        }
+        const result = await writeRepositoryAnchor(dir, target, keyOpts(ctx.argv));
+        if (ctx.opts.json) {
+          console.log(JSON.stringify({ ok: true, ...result }, null, 2));
+        } else {
+          console.log(
+            `Anchored through seq ${result.seq} (${result.records} record(s), ${result.journalBytes} bytes)` +
+              `\n  target: ${result.target}\n  at: ${result.anchoredAt}`
+          );
+          console.log(
+            'Run "repo verify <dir> --anchor <target>" to check the local journal against this snapshot.'
+          );
+        }
+        return 0;
       }
 
       case 'prune': {
