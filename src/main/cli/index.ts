@@ -237,13 +237,17 @@ Commands:
   schedule remove <name>                 Delete a scheduled task.
   prune <directory> [options]            Apply retention/GFS policy. Never runs inside a
                                          repository — use 'repo prune' there.
-  repo init <dir> [--lock-days N] [--passphrase p] [--keyfile f]
+  repo init <dir> [--lock-days N] [--remote s3://…] [--remote-lock MODE]
                                          Create an immutable repository: append-only signed
                                          journal + OS-level delete protection on every image.
                                          Default lock is 30 days. The signing key stays OUTSIDE
                                          the repository (keyfile in ~/.opbs/repo-keys, or
                                          passphrase-derived — nothing stored). Back the key up:
                                          without it the journal cannot be signed or verified.
+                                         --remote mirrors image volumes to s3://bucket/prefix
+                                         (AWS_* env creds); --remote-lock GOVERNANCE|COMPLIANCE
+                                         adds S3 Object Lock retention equal to the journal
+                                         lock, so the WORM copy outlives the backup machine.
   repo list <dir> [--json]               List repository images with lock/unlock/expiry state.
   repo verify <dir> [--fast] [--anchor t] Verify journal chain + signatures and re-hash every
                                          image (catches tampering, truncation, silent

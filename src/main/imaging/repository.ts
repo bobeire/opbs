@@ -3,6 +3,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { protectFiles, protectJournal, unprotectFiles } from '../utils/file-protect';
+import type { S3Config } from '../utils/s3';
+import {
+  checkRemoteVolumes,
+  deleteRemoteVolumes,
+  remoteStore,
+  uploadRemoteVolumes,
+  type RepoRemoteConfig
+} from './repo-remote';
 
 /**
  * Immutable repository format v1 (file-per-image).
@@ -44,6 +52,12 @@ export interface RepoHeader {
   defaultLockDays: number;
   kdf: null | { alg: 'pbkdf2-sha256'; iterations: number; saltHex: string };
   keyId: string;
+  /**
+   * Optional S3 mirror for image volumes (`repo init --remote`). The journal
+   * and header stay local; volumes are copied to `<uri>/images/<name>`,
+   * optionally with S3 Object Lock retention equal to the journal lock.
+   */
+  remote?: RepoRemoteConfig;
 }
 
 export interface RepoVolume {
@@ -311,6 +325,8 @@ function prevSig(records: JournalRecord[]): string {
 
 export interface InitOptions extends RepoKeyOptions {
   lockDays?: number;
+  /** Mirror image volumes to this s3:// location (checked on every verify). */
+  remote?: { uri: string; lockMode?: 'GOVERNANCE' | 'COMPLIANCE' };
 }
 
 export interface InitResult {
@@ -330,6 +346,14 @@ export async function initRepository(repoDir: string, opts: InitOptions = {}): P
   const lockDays = opts.lockDays ?? DEFAULT_LOCK_DAYS;
   if (!Number.isFinite(lockDays) || lockDays < 0) {
     throw new Error('--lock-days must be a non-negative number');
+  }
+  if (opts.remote) {
+    if (!/^s3:\/\//i.test(opts.remote.uri)) {
+      throw new Error(`--remote must be an s3:// location: ${opts.remote.uri}`);
+    }
+    if (opts.remote.lockMode && opts.remote.lockMode !== 'GOVERNANCE' && opts.remote.lockMode !== 'COMPLIANCE') {
+      throw new Error(`Invalid --remote-lock mode: ${opts.remote.lockMode} (use GOVERNANCE or COMPLIANCE)`);
+    }
   }
 
   let kdf: RepoHeader['kdf'] = null;
@@ -356,7 +380,8 @@ export async function initRepository(repoDir: string, opts: InitOptions = {}): P
     algo: 'sha256',
     defaultLockDays: lockDays,
     kdf,
-    keyId: keyFingerprint(key)
+    keyId: keyFingerprint(key),
+    ...(opts.remote ? { remote: opts.remote } : {})
   };
 
   fs.mkdirSync(imagesDir(repoDir), { recursive: true });
@@ -505,6 +530,8 @@ export interface RecordCreateOptions {
   lockDays?: number;
   /** Basename of the base image for incremental backups (chain bookkeeping). */
   base?: string;
+  /** S3 credentials for the header's mirror (omit for AWS_* env fallback). */
+  s3Profile?: Partial<S3Config>;
 }
 
 /** Record a freshly-written image as immutable until `lockDays` from now. */
@@ -523,6 +550,13 @@ export async function recordImageCreate(
   }
   const until = new Date(Date.now() + days * MS_PER_DAY).toISOString();
   const base = opts.base ? path.basename(opts.base) : undefined;
+
+  // Mirror FIRST: a failed upload must never leave a journaled image without
+  // its remote copy (ordering rule — see repo-remote.ts).
+  if (header.remote) {
+    const store = remoteStore(header.remote, opts.s3Profile);
+    await uploadRemoteVolumes(store, header.remote, volumes, imagesDir(repoDir), days > 0 ? until : undefined);
+  }
 
   const records = loadJournal(repoDir);
   const record = appendJournalRecord(
@@ -549,6 +583,8 @@ export interface VerifyOptions extends RepoKeyOptions {
   fast?: boolean;
   /** Optional per-stage progress sink (GUI progress line). */
   onProgress?: (message: string) => void;
+  /** S3 credentials for the header's mirror (omit for AWS_* env fallback). */
+  s3Profile?: Partial<S3Config>;
 }
 
 export interface VerifyProblem {
@@ -561,7 +597,10 @@ export interface VerifyProblem {
     | 'hash-mismatch'
     | 'orphan'
     | 'anchor-missing'
-    | 'anchor-mismatch';
+    | 'anchor-mismatch'
+    | 'remote-missing'
+    | 'remote-size'
+    | 'remote-error';
   detail: string;
 }
 
@@ -686,6 +725,34 @@ export async function verifyRepository(repoDir: string, opts: VerifyOptions = {}
     problems.push({ kind: 'missing-file', detail: `Missing images directory: ${imagesDir(repoDir)}` });
   }
 
+  // S3 mirror presence/size (cheap ListObjectsV2 — the local copies stay the
+  // hash-verified originals; Object Lock protects the mirror bytes).
+  if (header.remote) {
+    opts.onProgress?.('Checking S3 mirror…');
+    try {
+      const store = remoteStore(header.remote, opts.s3Profile);
+      const mirrored: Array<{ name: string; size: number }> = [];
+      for (const state of active) {
+        const creates = byName.get(state.name) ?? [];
+        for (const volume of creates[creates.length - 1]?.volumes ?? []) {
+          mirrored.push({ name: volume.name, size: volume.size });
+        }
+      }
+      const findings = await checkRemoteVolumes(store, mirrored);
+      for (const finding of findings) {
+        problems.push({
+          kind: finding.kind === 'missing' ? 'remote-missing' : 'remote-size',
+          detail: finding.detail
+        });
+      }
+    } catch (error) {
+      problems.push({
+        kind: 'remote-error',
+        detail: `S3 mirror check failed: ${error instanceof Error ? error.message : String(error)}`
+      });
+    }
+  }
+
   return { ok: problems.length === 0, problems, states, signaturesVerified };
 }
 
@@ -710,7 +777,7 @@ export interface PruneResult {
  */
 export async function pruneRepository(
   repoDir: string,
-  opts: RepoKeyOptions & { dryRun?: boolean } = {}
+  opts: RepoKeyOptions & { dryRun?: boolean; s3Profile?: Partial<S3Config> } = {}
 ): Promise<PruneResult> {
   const header = loadHeader(repoDir);
   const records = loadJournal(repoDir);
@@ -772,6 +839,15 @@ export async function pruneRepository(
   for (const entry of ordered) {
     const creates = records.filter((r) => r.type === 'create' && r.image === entry.name);
     const volumes = creates[creates.length - 1]?.volumes ?? [];
+    // Remote copy first: if Object Lock still refuses the delete, the image
+    // stays fully intact (local files untouched, journal record untouched).
+    if (header.remote && volumes.length > 0) {
+      const store = remoteStore(header.remote, opts.s3Profile);
+      await deleteRemoteVolumes(
+        store,
+        volumes.map((v) => v.name)
+      );
+    }
     const files = volumes.map((v) => path.join(imagesDir(repoDir), v.name));
     await unprotectFiles(files);
     for (const file of files) {

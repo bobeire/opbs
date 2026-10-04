@@ -248,9 +248,25 @@ implemented; **Investigate** items need spike work first.
   keep the in-memory `put`. Covered by `s3.test.ts` (16 tests: mock MPU
   initiate/part/complete with assembled-bytes equality, lock headers at PUT
   and initiate, `buildObjectLock` validation, profile/env resolution).
+- ✅ Repository S3 mirror (0.6.53): `repo init --remote=s3://bucket/prefix
+  [--remote-lock GOVERNANCE|COMPLIANCE]` stores the mirror target in the
+  header (no credentials on disk); `recordImageCreate` streams every volume
+  to S3 (Object-Lock headers when a lock mode is set) *before* the signed
+  `create` record is appended, `repo prune` deletes remote copies first (an
+  Object-Lock refusal aborts with the image fully intact), and `repo verify`
+  checks the mirror via listing/size (`remote-missing`/`remote-size`/
+  `remote-error`). S3 profile plumbed through `repo init|verify|prune` and
+  `start-backup` finalization for both CLI and GUI; GUI init form gains the
+  mirror URI + Object Lock select, header grid a mirror badge. CLI hardening:
+  `flagValue` accepts `--flag=…` and a stray `--` is stripped, because
+  Electron's protocol-handler argv check silently exits (-1) when a
+  `scheme://` token appears before other arguments (URI args must be last,
+  use `--flag=` or precede them with `--`). Covered by
+  `test/unit/repo-remote.test.ts` (8 tests, mock-S3 ordering/refusal
+  paths) and `test/unit/cli-flags.test.ts` (10 tests).
 - ⬜ **Remaining**: Phase 3 — repository-on-S3 backend (header + journal +
-  images in an Object-Lock-enabled bucket, storage abstraction in
-  `repository.ts`).
+  images living in an Object-Lock-enabled bucket, storage abstraction in
+  `repository.ts`; the volume mirror above only copies `images/`).
 
 ## Planned
 

@@ -775,6 +775,39 @@ so anchor after every repository backup — or just let OPBS do it: when an
 anchor target is configured, successful repository backups re-anchor
 automatically.
 
+### Repository S3 mirror
+
+A repository can keep a **WORM mirror** of every image volume in an S3
+bucket. Initialize with `--remote`:
+
+```
+OPBS.exe --cli repo init D:\BackupRepo --lock-days 30 --remote=s3://bucket/backups --remote-lock GOVERNANCE
+```
+
+- The mirror target is stored in the header (`remote.uri` +
+  `remote.lockMode`). Credentials never are: they come from **Settings →
+  Cloud (S3)** in the GUI, or the `OPBS_S3_*` / `AWS_*` environment variables
+  in headless CLI runs.
+- With `--remote-lock GOVERNANCE|COMPLIANCE`, each mirrored volume is uploaded
+  with S3 Object Lock retention headers — the bucket itself then refuses
+  deletion (including by OPBS) until retention expires.
+- Ordering is fail-safe in both directions: volumes are uploaded *before* the
+  signed `create` record is appended (a failed upload never leaves a
+  journaled image without its mirror), and `repo prune` deletes remote copies
+  *before* local files (an Object-Lock refusal aborts the prune with the
+  image fully intact locally and remotely).
+- `repo verify` checks the mirror as well (listing + object sizes) and
+  reports `remote-missing`, `remote-size` and `remote-error` problems next to
+  the local chain/hash findings. `--fast` and `--anchor` keep working as
+  usual.
+
+> **Argument forms:** Electron silently rejects a command line (exit `-1`,
+> no output) when a bare `scheme://…` token is followed by more arguments.
+> Pass URIs in the equals form (`--remote=s3://…`, `--to=s3://…`), as the
+> final argument, or put a standalone `--` before the URI-bearing arguments
+> (`--cli repo init D:\Repo --remote -- s3://bucket/x`). The `--flag=…` form
+> is recommended — it works in any position.
+
 The same workflow lives in the GUI under **sidebar → 🗄️ Repositories**:
 pick or initialize a repository, watch header / key / chain badges, browse
 the image table with per-image lock badges (locked until, expired, unlocked,
@@ -784,6 +817,9 @@ or all). The last opened repository is remembered across restarts. The
 **Anchor target** field writes the off-box snapshot on demand and is included
 in every Verify (which then reports `Anchor OK — through seq N`); the target
 is remembered, and successful repository backups re-anchor automatically.
+Initializing a repository offers an optional **S3 mirror** URI with an Object
+Lock mode (validated before the header is written), and a mirror badge in the
+header grid shows the target once configured.
 
 Backups can also *target* a repository straight from the wizard: on the
 destination step, **Use a repository…** validates the pick, switches the

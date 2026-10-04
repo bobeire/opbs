@@ -414,7 +414,10 @@ function main(): void {
   // Headless CLI mode: run the requested command and exit without a window.
   const cliIndex = process.argv.indexOf('--cli');
   if (cliIndex !== -1) {
-    const cliArgs = process.argv.slice(cliIndex + 1);
+    // Drop standalone `--` tokens: Electron's protocol-handler argv check
+    // stops scanning at `--`, so users (and schedules) may place it before
+    // URI-bearing args (`--remote s3://…`). It reaches us as a real token.
+    const cliArgs = process.argv.slice(cliIndex + 1).filter((arg) => arg !== '--');
     app.disableHardwareAcceleration();
     app.whenReady().then(async () => {
       const code = await runCli(cliArgs);
@@ -601,7 +604,11 @@ function setupIpcHandlers(): void {
       try {
         const { finalizeBackupRepo } = await import('./cli/repo');
         const lockDays = typeof config.repoLockDays === 'number' ? config.repoLockDays : undefined;
-        result.repoRecord = await finalizeBackupRepo(repoDir, config, result, { lockDays, quiet: true });
+        result.repoRecord = await finalizeBackupRepo(repoDir, config, result, {
+          lockDays,
+          quiet: true,
+          s3Profile: s3ProfileFromSettings() ?? undefined
+        });
       } catch (error) {
         // The image exists but is not journaled — verify would flag it as an
         // orphan, so surface the failure loudly without discarding the result.
@@ -1698,18 +1705,25 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     }
   });
 
-  ipcMain.handle('repo-init', async (_event, options: { dir: string; lockDays?: number; passphrase?: string }) => {
-    try {
-      const { initRepository } = await import('./imaging/repository');
-      const result = await initRepository(options.dir, {
-        lockDays: options.lockDays,
-        ...(options.passphrase ? { passphrase: options.passphrase } : {})
-      });
-      return { ok: true, header: result.header, keyfile: result.keyfilePath ?? null };
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  ipcMain.handle(
+    'repo-init',
+    async (
+      _event,
+      options: { dir: string; lockDays?: number; passphrase?: string; remote?: { uri: string; lockMode?: 'GOVERNANCE' | 'COMPLIANCE' } }
+    ) => {
+      try {
+        const { initRepository } = await import('./imaging/repository');
+        const result = await initRepository(options.dir, {
+          lockDays: options.lockDays,
+          ...(options.passphrase ? { passphrase: options.passphrase } : {}),
+          ...(options.remote ? { remote: options.remote } : {})
+        });
+        return { ok: true, header: result.header, keyfile: result.keyfilePath ?? null };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
     }
-  });
+  );
 
   ipcMain.handle('repo-verify', async (event, options: { dir: string; fast?: boolean; passphrase?: string; anchorTarget?: string }) => {
     try {
@@ -1721,6 +1735,7 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
         }
       };
       const keyOpts = { ...(options.passphrase ? { passphrase: options.passphrase } : {}) };
+      const s3Profile = s3ProfileFromSettings() ?? undefined;
       if (options.anchorTarget) {
         const { verifyWithAnchor } = await import('./imaging/repo-anchor');
         return await verifyWithAnchor(options.dir, {
@@ -1728,12 +1743,12 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
           ...keyOpts,
           onProgress,
           anchorTarget: options.anchorTarget,
-          s3Profile: s3ProfileFromSettings() ?? undefined,
+          s3Profile,
           sftpProfile: sftpProfileFromSettings() ?? undefined
         });
       }
       const { verifyRepository } = await import('./imaging/repository');
-      return await verifyRepository(options.dir, { fast: options.fast, ...keyOpts, onProgress });
+      return await verifyRepository(options.dir, { fast: options.fast, ...keyOpts, onProgress, s3Profile });
     } catch (error) {
       return {
         ok: false,
@@ -1763,7 +1778,8 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       const { pruneRepository } = await import('./imaging/repository');
       const result = await pruneRepository(options.dir, {
         dryRun: options.dryRun,
-        ...(options.passphrase ? { passphrase: options.passphrase } : {})
+        ...(options.passphrase ? { passphrase: options.passphrase } : {}),
+        s3Profile: s3ProfileFromSettings() ?? undefined
       });
       return { ok: true, ...result };
     } catch (error) {

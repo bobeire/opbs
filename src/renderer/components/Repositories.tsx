@@ -42,6 +42,8 @@ function Repositories() {
   const [verifyReport, setVerifyReport] = useState<RepoVerifyResult | null>(null);
   const [pruneResult, setPruneResult] = useState<RepoPruneResult | null>(null);
   const [initLockDays, setInitLockDays] = useState('30');
+  const [remoteUri, setRemoteUri] = useState('');
+  const [remoteLock, setRemoteLock] = useState<'' | 'GOVERNANCE' | 'COMPLIANCE'>('');
   const [anchorTarget, setAnchorTarget] = useState('');
   const [anchorStatus, setAnchorStatus] = useState('');
   const [confirmPrune, setConfirmPrune] = useState(false);
@@ -116,10 +118,12 @@ function Repositories() {
     setNotice('');
     try {
       const lockDays = Number(initLockDays);
+      const uri = remoteUri.trim();
       const res = await window.electronAPI.repoInit({
         dir,
         lockDays: Number.isFinite(lockDays) && lockDays >= 0 ? lockDays : undefined,
-        passphrase: passphrase || undefined
+        passphrase: passphrase || undefined,
+        ...(uri ? { remote: { uri, ...(remoteLock ? { lockMode: remoteLock } : {}) } } : {})
       });
       if (!res.ok) {
         fail(res.error ?? 'Initialization failed');
@@ -307,6 +311,27 @@ function Repositories() {
               {busy === 'init' ? 'Initializing…' : 'Initialize repository'}
             </button>
           </div>
+          <div className="disk-tools-row" style={{ marginTop: 8 }}>
+            <label>S3 mirror (optional)</label>
+            <input
+              type="text"
+              value={remoteUri}
+              placeholder="s3://bucket/prefix — WORM copies of every image volume"
+              onChange={(e) => setRemoteUri(e.target.value)}
+              style={{ flex: 1, minWidth: 240 }}
+            />
+            <label>Object Lock</label>
+            <select value={remoteLock} onChange={(e) => setRemoteLock(e.target.value as '' | 'GOVERNANCE' | 'COMPLIANCE')}>
+              <option value="">None (mirror only)</option>
+              <option value="GOVERNANCE">Governance</option>
+              <option value="COMPLIANCE">Compliance</option>
+            </select>
+          </div>
+          <p className="field-hint">
+            The mirror keeps a locked (Object Lock) copy of every image volume in S3 — journal and header stay
+            local. Credentials come from <strong>Settings → Cloud (S3)</strong> or <code>AWS_*</code> environment
+            variables.
+          </p>
         </div>
       )}
 
@@ -338,6 +363,15 @@ function Repositories() {
                   </span>
                 </p>
               </div>
+              {overview.header.remote && (
+                <div>
+                  <span className="field-hint">S3 mirror</span>
+                  <p className="mono-value">
+                    {overview.header.remote.uri}
+                    {overview.header.remote.lockMode ? ` · ${overview.header.remote.lockMode}` : ''}
+                  </p>
+                </div>
+              )}
               <div>
                 <span className="field-hint">Chain</span>
                 <p>

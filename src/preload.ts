@@ -223,7 +223,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Immutable repositories
   repoOpen: (dir: string) => ipcRenderer.invoke('repo-open', dir),
-  repoInit: (options: { dir: string; lockDays?: number; passphrase?: string }) =>
+  repoInit: (options: { dir: string; lockDays?: number; passphrase?: string; remote?: { uri: string; lockMode?: 'GOVERNANCE' | 'COMPLIANCE' } }) =>
     ipcRenderer.invoke('repo-init', options),
   repoVerify: (options: { dir: string; fast?: boolean; passphrase?: string; anchorTarget?: string }) =>
     ipcRenderer.invoke('repo-verify', options),

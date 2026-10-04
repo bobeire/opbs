@@ -374,7 +374,12 @@ declare global {
 
       // Immutable repositories
       repoOpen: (dir: string) => Promise<RepoOpenResult>;
-      repoInit: (options: { dir: string; lockDays?: number; passphrase?: string }) => Promise<RepoInitResult>;
+      repoInit: (options: {
+        dir: string;
+        lockDays?: number;
+        passphrase?: string;
+        remote?: { uri: string; lockMode?: 'GOVERNANCE' | 'COMPLIANCE' };
+      }) => Promise<RepoInitResult>;
       repoVerify: (options: {
         dir: string;
         fast?: boolean;
@@ -396,6 +401,8 @@ declare global {
     defaultLockDays: number;
     kdf: { alg: string; iterations: number; saltHex: string } | null;
     keyId: string;
+    /** Optional S3 mirror for image volumes (set at repo init). */
+    remote?: { uri: string; lockMode?: 'GOVERNANCE' | 'COMPLIANCE' };
   }
 
   interface RepoImageStateInfo {

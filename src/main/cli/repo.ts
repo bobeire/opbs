@@ -20,6 +20,7 @@ import {
   type VerifyResult
 } from '../imaging/repository';
 import { verifyWithAnchor, writeRepositoryAnchor, type VerifyWithAnchorResult } from '../imaging/repo-anchor';
+import type { S3Config } from '../utils/s3';
 
 function keyOpts(argv: string[]): RepoKeyOptions {
   const opts: RepoKeyOptions = {};
@@ -44,7 +45,8 @@ export function parseLockDays(argv: string[]): number | undefined {
 function usage(): string {
   return [
     'Usage:',
-    '  repo init <dir> [--lock-days N] [--passphrase p] [--keyfile f]',
+    '  repo init <dir> [--lock-days N] [--remote s3://bucket/prefix] [--remote-lock GOVERNANCE|COMPLIANCE]',
+    '           [--passphrase p] [--keyfile f]',
     '  repo list <dir> [--json]',
     '  repo verify <dir> [--fast] [--anchor <target>] [--json] [--passphrase p] [--keyfile f]',
     '  repo anchor <dir> --to <target> [--passphrase p] [--keyfile f]',
@@ -65,8 +67,16 @@ export async function cmdRepo(ctx: CommandContext): Promise<number> {
   try {
     switch (action) {
       case 'init': {
+        const remoteUri = flagValue(ctx.argv, '--remote');
+        const remoteLock = flagValue(ctx.argv, '--remote-lock')?.toUpperCase();
+        if (remoteLock && remoteLock !== 'GOVERNANCE' && remoteLock !== 'COMPLIANCE') {
+          throw new Error(`Invalid --remote-lock mode: ${remoteLock} (use GOVERNANCE or COMPLIANCE)`);
+        }
         const result = await initRepository(dir, {
           lockDays: parseLockDays(ctx.argv),
+          ...(remoteUri
+            ? { remote: { uri: remoteUri, ...(remoteLock ? { lockMode: remoteLock as 'GOVERNANCE' | 'COMPLIANCE' } : {}) } }
+            : {}),
           ...keyOpts(ctx.argv)
         });
         const keyNote = result.keyfilePath
@@ -78,6 +88,12 @@ export async function cmdRepo(ctx: CommandContext): Promise<number> {
           console.log(`Initialized repository: ${dir}`);
           console.log(`  id: ${result.header.id}`);
           console.log(`  default lock: ${result.header.defaultLockDays} day(s)`);
+          if (result.header.remote) {
+            console.log(
+              `  mirror: ${result.header.remote.uri}` +
+                (result.header.remote.lockMode ? ` (Object Lock: ${result.header.remote.lockMode})` : '')
+            );
+          }
           console.log(`  ${keyNote}`);
         }
         return 0;
@@ -256,7 +272,7 @@ export async function finalizeBackupRepo(
   repoDir: string,
   config: BackupJobConfig,
   result: JobResult,
-  opts: RepoKeyOptions & { lockDays?: number; quiet?: boolean } = {}
+  opts: RepoKeyOptions & { lockDays?: number; quiet?: boolean; s3Profile?: Partial<S3Config> } = {}
 ): Promise<{ image: string; lockUntil: string } | undefined> {
   if (!result.ok) return undefined;
 
@@ -279,7 +295,8 @@ export async function finalizeBackupRepo(
   const key = resolveRepoKey(header, opts);
   const { record, lockUntil } = await recordImageCreate(repoDir, header, key, imagePath, {
     lockDays: opts.lockDays,
-    base: config.baseImagePath ?? undefined
+    base: config.baseImagePath ?? undefined,
+    s3Profile: opts.s3Profile
   });
   if (!opts.quiet && !process.env.OPBS_TEST_SILENT) {
     console.log(

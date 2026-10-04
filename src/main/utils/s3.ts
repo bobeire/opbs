@@ -400,7 +400,7 @@ export class S3Store {
   async delete(key: string): Promise<void> {
     const res = await this.request('DELETE', key);
     if (res.status < 200 || res.status >= 300) {
-      throw new Error(`S3 DELETE ${key} failed: HTTP ${res.status}`);
+      throw new Error(`S3 DELETE ${key} failed: HTTP ${res.status} ${res.body.toString('utf8')}`);
     }
   }
 
