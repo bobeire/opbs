@@ -18,7 +18,7 @@ import { ImagingJob, JobProgress, JobResult, ImagingPartition, JobEncryption, Re
 import { launchElevatedJob } from '../helper/launcher';
 import { canUseVssSnapshot } from '../utils/disk-tools';
 import { normalizeBackupLocation, isNonFilesystemLocation, detectFilesystemType, getMaxVolumeSizeForFs } from '../utils/location';
-import { S3Store, resolveS3Config, S3Config } from '../utils/s3';
+import { S3Store, resolveS3Config, buildObjectLock, S3Config } from '../utils/s3';
 import { SftpStore, resolveSftpConfig, SftpConfig } from '../utils/sftp';
 import { FtpStore, resolveFtpConfig, FtpConfig } from '../utils/ftp';
 import { logger } from '../utils/logger';
@@ -387,12 +387,15 @@ export class ImagingEngine implements BackupCoordinator {
     if (!config.accessKeyId || !config.secretAccessKey) {
       throw new Error('S3 access keys are required to upload to S3 (set the cloud profile in Settings or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)');
     }
+    const objectLock = buildObjectLock(config);
     const store = new S3Store(config);
     const key = path.basename(imagePath);
-    logger.info(`Uploading ${imagePath} to s3://${config.bucket}/${config.prefix ? config.prefix + '/' : ''}${key}`);
-    await store.put(key, fs.readFileSync(imagePath));
+    logger.info(`Uploading ${imagePath} to s3://${config.bucket}/${config.prefix ? config.prefix + '/' : ''}${key}${objectLock ? ` (Object Lock ${objectLock.mode} until ${objectLock.retainUntil})` : ''}`);
+    // putFile streams (multipart for big images) instead of buffering the
+    // whole image in memory, and carries the Object Lock retention headers.
+    await store.putFile(imagePath, key, { objectLock });
     await this.uploadBitlockerSidecar(imagePath, (localPath, remoteKey) =>
-      store.put(remoteKey, fs.readFileSync(localPath))
+      store.put(remoteKey, fs.readFileSync(localPath), objectLock)
     );
     try {
       fs.rmSync(path.dirname(imagePath), { recursive: true, force: true });

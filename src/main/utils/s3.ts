@@ -1,11 +1,18 @@
 import * as crypto from 'crypto';
+import * as fs from 'fs';
 import * as https from 'https';
 import * as http from 'http';
+import type { Readable } from 'stream';
 
 /**
  * Minimal S3 client using AWS Signature v4. No external SDK: it signs and sends
  * PUT/GET/LIST requests directly. Supports custom endpoints (MinIO, tests) via
  * `endpoint` and path-style addressing.
+ *
+ * Uploads of local files go through `putFile`, which streams (single PUT for
+ * small files, multipart otherwise) instead of buffering the whole image in
+ * memory, and can attach S3 Object Lock retention headers (`x-amz-object-lock-*`)
+ * for true WORM writes when the bucket has Object Lock enabled.
  */
 
 export interface S3Config {
@@ -17,6 +24,48 @@ export interface S3Config {
   /** Custom endpoint (e.g. https://minio.local) or the AWS regional endpoint. */
   endpoint?: string;
   forcePathStyle?: boolean;
+  /** Object Lock retention mode; requires an Object-Lock-enabled bucket. */
+  objectLockMode?: ObjectLockMode;
+  /** Days of retention applied to uploaded objects (when mode is set). */
+  objectLockRetainDays?: number;
+}
+
+export type ObjectLockMode = 'GOVERNANCE' | 'COMPLIANCE';
+
+export interface ObjectLockRequest {
+  mode: ObjectLockMode;
+  /** ISO timestamp until which the object is locked. */
+  retainUntil: string;
+}
+
+/**
+ * Derive the Object Lock headers for an upload from the config.
+ * Returns undefined when Object Lock is not configured; throws on a
+ * retention window that S3 would reject (< 1 day).
+ */
+export function buildObjectLock(
+  config: Pick<S3Config, 'objectLockMode' | 'objectLockRetainDays'>,
+  now: Date = new Date()
+): ObjectLockRequest | undefined {
+  if (!config.objectLockMode) return undefined;
+  if (config.objectLockMode !== 'GOVERNANCE' && config.objectLockMode !== 'COMPLIANCE') {
+    throw new Error(`Invalid Object Lock mode: ${config.objectLockMode} (use GOVERNANCE or COMPLIANCE)`);
+  }
+  const days = config.objectLockRetainDays ?? 0;
+  if (!Number.isFinite(days) || days < 1) {
+    throw new Error('Object Lock retention must be at least 1 day');
+  }
+  return {
+    mode: config.objectLockMode,
+    retainUntil: new Date(now.getTime() + days * 86_400_000).toISOString()
+  };
+}
+
+function objectLockHeaders(lock: ObjectLockRequest): Record<string, string> {
+  return {
+    'x-amz-object-lock-mode': lock.mode,
+    'x-amz-object-lock-retain-until-date': lock.retainUntil
+  };
 }
 
 export interface ParsedS3Location {
@@ -50,6 +99,13 @@ export function resolveS3Config(
   env: NodeJS.ProcessEnv = process.env
 ): S3Config {
   const { bucket, prefix } = parseS3Location(uri);
+  const envMode = env.OPBS_S3_OBJECT_LOCK_MODE;
+  const objectLockMode =
+    profile?.objectLockMode ??
+    (envMode === 'GOVERNANCE' || envMode === 'COMPLIANCE' ? envMode : undefined);
+  const objectLockRetainDays =
+    profile?.objectLockRetainDays ??
+    (env.OPBS_S3_OBJECT_LOCK_RETAIN_DAYS ? Number(env.OPBS_S3_OBJECT_LOCK_RETAIN_DAYS) : undefined);
   return {
     region: profile?.region ?? env.AWS_REGION ?? 'us-east-1',
     accessKeyId: profile?.accessKeyId ?? env.AWS_ACCESS_KEY_ID ?? '',
@@ -57,12 +113,28 @@ export function resolveS3Config(
     bucket: bucket || profile?.bucket || '',
     prefix: prefix || profile?.prefix || '',
     endpoint: profile?.endpoint || undefined,
-    forcePathStyle: profile?.forcePathStyle
+    forcePathStyle: profile?.forcePathStyle,
+    objectLockMode,
+    objectLockRetainDays
   };
 }
 
 function sha256(data: Buffer): string {
   return crypto.createHash('sha256').update(data).digest('hex');
+}
+
+/** Streamed single PUT below this size; multipart upload above it. */
+const SINGLE_PUT_MAX = 16 * 1024 * 1024;
+const PART_SIZE = 16 * 1024 * 1024;
+
+function hashFileSha256(file: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(file);
+    stream.on('error', reject);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
 }
 
 function hmac(key: Buffer, value: string): Buffer {
@@ -110,12 +182,12 @@ export class S3Store {
   }
 
   private async request(
-    method: 'GET' | 'PUT' | 'DELETE',
+    method: 'GET' | 'PUT' | 'DELETE' | 'POST',
     key: string,
-    body?: Buffer,
+    body?: Buffer | { stream: Readable; length: number; sha256: string },
     query?: URLSearchParams,
     extraHeaders?: Record<string, string>
-  ): Promise<{ status: number; body: Buffer }> {
+  ): Promise<{ status: number; body: Buffer; headers: http.IncomingHttpHeaders }> {
     const url = new URL(this.endpoint);
     const objectKey = this.objectKey(key);
     const path = this.forcePathStyle
@@ -123,7 +195,11 @@ export class S3Store {
       : `/${objectKey.split('/').map(uriEncode).join('/')}`;
     const queryString = query ? query.toString() : '';
     const canonicalUri = queryString ? `${path}?${queryString}` : path;
-    const payloadHash = sha256(body ?? Buffer.alloc(0));
+    const payloadHash = !body
+      ? sha256(Buffer.alloc(0))
+      : Buffer.isBuffer(body)
+        ? sha256(body)
+        : body.sha256;
     const now = new Date();
     const amzDate = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
     const dateStamp = amzDate.slice(0, 8);
@@ -157,6 +233,7 @@ export class S3Store {
     const signingKey = sign(this.secretAccessKey, dateStamp, this.region, 's3');
     const signature = crypto.createHmac('sha256', Buffer.from(signingKey, 'hex')).update(stringToSign).digest('hex');
     const authorization = `AWS4-HMAC-SHA256 Credential=${this.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+    const contentLength = body ? body.length : undefined;
 
     return new Promise((resolve, reject) => {
       const mod = url.protocol === 'https:' ? https : http;
@@ -166,25 +243,147 @@ export class S3Store {
           hostname: url.hostname,
           port: url.port ? Number(url.port) : url.protocol === 'https:' ? 443 : 80,
           path: canonicalUri,
-          headers: { ...headers, Authorization: authorization, ...(body ? { 'Content-Length': body.length } : {}) }
+          headers: {
+            ...headers,
+            Authorization: authorization,
+            ...(contentLength !== undefined ? { 'Content-Length': contentLength } : {})
+          }
         },
         (res) => {
           const chunks: Buffer[] = [];
           res.on('data', (c) => chunks.push(Buffer.from(c)));
-          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks) }));
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks), headers: res.headers }));
         }
       );
       req.on('error', reject);
-      if (body) req.write(body);
-      req.end();
+      if (!body) {
+        req.end();
+      } else if (Buffer.isBuffer(body)) {
+        req.end(body);
+      } else {
+        body.stream.on('error', (error) => req.destroy(error));
+        body.stream.pipe(req);
+      }
     });
   }
 
   /** Upload `data` to `key` (relative to the configured prefix). */
-  async put(key: string, data: Buffer): Promise<void> {
-    const res = await this.request('PUT', key, data);
+  async put(key: string, data: Buffer, objectLock?: ObjectLockRequest): Promise<void> {
+    const res = await this.request('PUT', key, data, undefined, objectLock ? objectLockHeaders(objectLock) : undefined);
     if (res.status < 200 || res.status >= 300) {
       throw new Error(`S3 PUT ${key} failed: HTTP ${res.status} ${res.body.toString('utf8')}`);
+    }
+  }
+
+  /**
+   * Upload a local file to `key` without buffering it in memory: a streamed
+   * single PUT up to `SINGLE_PUT_MAX`, multipart upload above it. Object Lock
+   * headers are applied to the finished object either way.
+   */
+  async putFile(localPath: string, key: string, opts: { objectLock?: ObjectLockRequest } = {}): Promise<void> {
+    const size = fs.statSync(localPath).size;
+    if (size <= SINGLE_PUT_MAX) {
+      const digest = await hashFileSha256(localPath);
+      const res = await this.request(
+        'PUT',
+        key,
+        { stream: fs.createReadStream(localPath), length: size, sha256: digest },
+        undefined,
+        opts.objectLock ? objectLockHeaders(opts.objectLock) : undefined
+      );
+      if (res.status < 200 || res.status >= 300) {
+        throw new Error(`S3 PUT ${key} failed: HTTP ${res.status} ${res.body.toString('utf8')}`);
+      }
+      return;
+    }
+    await this.multipartUpload(localPath, key, size, opts.objectLock);
+  }
+
+  private async multipartUpload(
+    localPath: string,
+    key: string,
+    size: number,
+    objectLock?: ObjectLockRequest
+  ): Promise<void> {
+    const initiate = await this.request(
+      'POST',
+      key,
+      undefined,
+      new URLSearchParams({ uploads: '' }),
+      objectLock ? objectLockHeaders(objectLock) : undefined
+    );
+    if (initiate.status < 200 || initiate.status >= 300) {
+      throw new Error(
+        `S3 multipart init for ${key} failed: HTTP ${initiate.status} ${initiate.body.toString('utf8')}`
+      );
+    }
+    const uploadId = /<UploadId>([^<]+)<\/UploadId>/.exec(initiate.body.toString('utf8'))?.[1];
+    if (!uploadId) {
+      throw new Error(`S3 multipart init for ${key} returned no UploadId`);
+    }
+
+    const parts: Array<{ PartNumber: number; ETag: string }> = [];
+    try {
+      const handle = await fs.promises.open(localPath, 'r');
+      try {
+        const buffer = Buffer.alloc(PART_SIZE);
+        let position = 0;
+        let partNumber = 1;
+        for (;;) {
+          const { bytesRead } = await handle.read(buffer, 0, PART_SIZE, position);
+          if (bytesRead === 0) break;
+          const data = bytesRead === PART_SIZE ? buffer : buffer.subarray(0, bytesRead);
+          const res = await this.request(
+            'PUT',
+            key,
+            data,
+            new URLSearchParams({ partNumber: String(partNumber), uploadId }),
+            { 'content-md5': crypto.createHash('md5').update(data).digest('base64') }
+          );
+          if (res.status < 200 || res.status >= 300) {
+            throw new Error(
+              `S3 multipart part ${partNumber} for ${key} failed: HTTP ${res.status} ${res.body.toString('utf8')}`
+            );
+          }
+          const etag = res.headers.etag;
+          if (!etag) throw new Error(`S3 multipart part ${partNumber} for ${key} returned no ETag`);
+          parts.push({ PartNumber: partNumber, ETag: etag });
+          position += bytesRead;
+          partNumber++;
+          if (bytesRead < PART_SIZE) break;
+        }
+      } finally {
+        await handle.close();
+      }
+
+      const completeXml =
+        '<CompleteMultipartUpload>' +
+        parts.map((p) => `<Part><PartNumber>${p.PartNumber}</PartNumber><ETag>${p.ETag}</ETag></Part>`).join('') +
+        '</CompleteMultipartUpload>';
+      const complete = await this.request(
+        'POST',
+        key,
+        Buffer.from(completeXml, 'utf8'),
+        new URLSearchParams({ uploadId })
+      );
+      if (complete.status < 200 || complete.status >= 300) {
+        throw new Error(
+          `S3 multipart complete for ${key} failed: HTTP ${complete.status} ${complete.body.toString('utf8')}`
+        );
+      }
+      if (size === 0) {
+        // S3 requires at least one part; a zero-byte file never reaches here
+        // (it takes the single-PUT path), but keep the invariant explicit.
+        throw new Error(`S3 multipart upload for ${key} produced no parts`);
+      }
+    } catch (error) {
+      // Best-effort abort so a failed large upload does not leak parts.
+      try {
+        await this.request('DELETE', key, undefined, new URLSearchParams({ uploadId }));
+      } catch {
+        /* abort is best-effort */
+      }
+      throw error;
     }
   }
 

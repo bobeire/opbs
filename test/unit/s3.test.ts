@@ -1,57 +1,138 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import * as fs from 'fs';
 import * as http from 'http';
+import * as os from 'os';
+import * as path from 'path';
 import { AddressInfo } from 'net';
-import { S3Store, parseS3Location, resolveS3Config } from '../../src/main/utils/s3';
+import { S3Store, parseS3Location, resolveS3Config, buildObjectLock } from '../../src/main/utils/s3';
 
 describe('S3 store', () => {
   let server: http.Server;
   let baseUrl: string;
   let objects: Map<string, Buffer>;
+  let objectHeaders: Map<string, http.IncomingHttpHeaders>;
+  let mpu: Map<string, { id: string; parts: Map<number, Buffer> }>;
+  let initiateHeaders: http.IncomingHttpHeaders | undefined;
+  let mpuCounter = 0;
+  const tempFiles: string[] = [];
+
+  const readBody = (req: http.IncomingMessage): Promise<Buffer> =>
+    new Promise((resolve) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c) => chunks.push(Buffer.from(c)));
+      req.on('end', () => resolve(Buffer.concat(chunks)));
+    });
 
   beforeAll(async () => {
     objects = new Map();
+    objectHeaders = new Map();
+    mpu = new Map();
     server = http.createServer((req, res) => {
-      const url = new URL(req.url ?? '/', 'http://localhost');
-      if (req.method === 'GET' && url.searchParams.get('list-type') === '2') {
-        const prefix = url.searchParams.get('prefix') ?? '';
-        const contents = [...objects.keys()]
-          .filter((k) => k.startsWith(prefix))
-          .map((k) => `<Contents><Key>${k}</Key><Size>${objects.get(k)!.length}</Size></Contents>`)
-          .join('');
-        res.writeHead(200, { 'Content-Type': 'application/xml' });
-        res.end(`<ListBucketResult><IsTruncated>false</IsTruncated>${contents}</ListBucketResult>`);
-        return;
-      }
-      const key = url.pathname.replace(/^\/[^/]*\//, '').replace(/^\//, '');
-      if (req.method === 'PUT') {
-        const chunks: Buffer[] = [];
-        req.on('data', (c) => chunks.push(Buffer.from(c)));
-        req.on('end', () => {
-          objects.set(key, Buffer.concat(chunks));
+      void (async () => {
+        const url = new URL(req.url ?? '/', 'http://localhost');
+        const method = req.method ?? 'GET';
+        if (method === 'GET' && url.searchParams.get('list-type') === '2') {
+          const prefix = url.searchParams.get('prefix') ?? '';
+          const contents = [...objects.keys()]
+            .filter((k) => k.startsWith(prefix))
+            .map((k) => `<Contents><Key>${k}</Key><Size>${objects.get(k)!.length}</Size></Contents>`)
+            .join('');
+          res.writeHead(200, { 'Content-Type': 'application/xml' });
+          res.end(`<ListBucketResult><IsTruncated>false</IsTruncated>${contents}</ListBucketResult>`);
+          return;
+        }
+        const key = decodeURIComponent(url.pathname.replace(/^\/[^/]*\//, '').replace(/^\//, ''));
+
+        // Multipart: initiate.
+        if (method === 'POST' && url.searchParams.has('uploads')) {
+          const id = `upload-${++mpuCounter}`;
+          mpu.set(key, { id, parts: new Map() });
+          initiateHeaders = req.headers;
+          res.writeHead(200, { 'Content-Type': 'application/xml' });
+          res.end(
+            `<InitiateMultipartUploadResult><Bucket>test</Bucket><Key>${key}</Key><UploadId>${id}</UploadId></InitiateMultipartUploadResult>`
+          );
+          return;
+        }
+        // Multipart: complete.
+        if (method === 'POST' && url.searchParams.has('uploadId')) {
+          const id = url.searchParams.get('uploadId');
+          const entry = mpu.get(key);
+          if (!entry || entry.id !== id) {
+            res.writeHead(404);
+            res.end();
+            return;
+          }
+          await readBody(req);
+          const order = [...entry.parts.keys()].sort((a, b) => a - b);
+          objects.set(key, Buffer.concat(order.map((n) => entry.parts.get(n)!)));
+          mpu.delete(key);
+          res.writeHead(200, { 'Content-Type': 'application/xml' });
+          res.end(
+            `<CompleteMultipartUploadResult><Location>x</Location><Bucket>test</Bucket><Key>${key}</Key><ETag>"agg"</ETag></CompleteMultipartUploadResult>`
+          );
+          return;
+        }
+        // Multipart: part upload.
+        if (method === 'PUT' && url.searchParams.has('partNumber')) {
+          const partNumber = Number(url.searchParams.get('partNumber'));
+          const id = url.searchParams.get('uploadId');
+          const entry = mpu.get(key);
+          if (!entry || entry.id !== id) {
+            res.writeHead(404);
+            res.end();
+            return;
+          }
+          entry.parts.set(partNumber, await readBody(req));
+          res.writeHead(200, { ETag: `"part-${partNumber}"` });
+          res.end();
+          return;
+        }
+        // Multipart: abort.
+        if (method === 'DELETE' && url.searchParams.has('uploadId')) {
+          mpu.delete(key);
+          res.writeHead(204);
+          res.end();
+          return;
+        }
+
+        if (method === 'PUT') {
+          objectHeaders.set(key, req.headers);
+          objects.set(key, await readBody(req));
           res.writeHead(200, { 'x-amz-request-id': 'test' });
           res.end();
-        });
-      } else if (req.method === 'GET') {
-        const data = objects.get(key);
-        if (data) {
-          res.writeHead(200);
-          res.end(data);
+        } else if (method === 'GET') {
+          const data = objects.get(key);
+          if (data) {
+            res.writeHead(200);
+            res.end(data);
+          } else {
+            res.writeHead(404);
+            res.end('NoSuchKey');
+          }
+        } else if (method === 'DELETE') {
+          objects.delete(key);
+          res.writeHead(204);
+          res.end();
         } else {
           res.writeHead(404);
-          res.end('NoSuchKey');
+          res.end();
         }
-      } else {
-        res.writeHead(404);
+      })().catch(() => {
+        res.writeHead(500);
         res.end();
-      }
+      });
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const addr = server.address() as AddressInfo;
     baseUrl = `http://127.0.0.1:${addr.port}`;
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     server.close();
+    for (const file of tempFiles) {
+      await fs.promises.rm(file, { force: true });
+    }
   });
 
   it('parses s3:// URIs into bucket and prefix', () => {
@@ -127,6 +208,98 @@ describe('S3 store', () => {
 
     validating.close();
   });
+
+  it('putFile streams a small file and attaches Object Lock headers', async () => {
+    const file = path.join(os.tmpdir(), `opbs-s3-small-${Date.now()}.txt`);
+    tempFiles.push(file);
+    fs.writeFileSync(file, 'streamed small file');
+    const store = new S3Store({
+      region: 'us-east-1',
+      accessKeyId: 'AKIAEXAMPLE',
+      secretAccessKey: 'SECRET',
+      bucket: 'testbucket',
+      prefix: 'backups',
+      endpoint: baseUrl,
+      forcePathStyle: true
+    });
+    await store.putFile(file, 'small.opbs', {
+      objectLock: { mode: 'GOVERNANCE', retainUntil: '2030-01-01T00:00:00.000Z' }
+    });
+    expect(objects.get('backups/small.opbs')?.toString()).toBe('streamed small file');
+    const headers = objectHeaders.get('backups/small.opbs');
+    expect(headers?.['x-amz-object-lock-mode']).toBe('GOVERNANCE');
+    expect(headers?.['x-amz-object-lock-retain-until-date']).toBe('2030-01-01T00:00:00.000Z');
+  });
+
+  it('putFile multiparts large files (>16MB), assembles parts and locks at initiate', async () => {
+    const file = path.join(os.tmpdir(), `opbs-s3-big-${Date.now()}.bin`);
+    tempFiles.push(file);
+    const big = Buffer.alloc(16 * 1024 * 1024 + 4096, 7);
+    fs.writeFileSync(file, big);
+    const store = new S3Store({
+      region: 'us-east-1',
+      accessKeyId: 'AKIAEXAMPLE',
+      secretAccessKey: 'SECRET',
+      bucket: 'testbucket',
+      prefix: 'backups',
+      endpoint: baseUrl,
+      forcePathStyle: true
+    });
+    await store.putFile(file, 'big.opbs', {
+      objectLock: { mode: 'COMPLIANCE', retainUntil: '2031-06-01T00:00:00.000Z' }
+    });
+    expect(objects.get('backups/big.opbs')?.equals(big)).toBe(true);
+    expect(initiateHeaders?.['x-amz-object-lock-mode']).toBe('COMPLIANCE');
+    expect(initiateHeaders?.['x-amz-object-lock-retain-until-date']).toBe('2031-06-01T00:00:00.000Z');
+    expect(mpu.size).toBe(0);
+  });
+
+  it('putFile round-trips without Object Lock when it is not configured', async () => {
+    const file = path.join(os.tmpdir(), `opbs-s3-nolock-${Date.now()}.txt`);
+    tempFiles.push(file);
+    fs.writeFileSync(file, 'plain upload');
+    const store = new S3Store({
+      region: 'us-east-1',
+      accessKeyId: 'AKIAEXAMPLE',
+      secretAccessKey: 'SECRET',
+      bucket: 'testbucket',
+      prefix: 'backups',
+      endpoint: baseUrl,
+      forcePathStyle: true
+    });
+    await store.putFile(file, 'plain.opbs');
+    expect(objects.get('backups/plain.opbs')?.toString()).toBe('plain upload');
+    const headers = objectHeaders.get('backups/plain.opbs');
+    expect(headers?.['x-amz-object-lock-mode']).toBeUndefined();
+  });
+});
+
+describe('buildObjectLock', () => {
+  it('returns undefined when Object Lock is off', () => {
+    expect(buildObjectLock({})).toBeUndefined();
+    expect(buildObjectLock({ objectLockRetainDays: 30 })).toBeUndefined();
+  });
+
+  it('computes retainUntil from the retention days', () => {
+    const lock = buildObjectLock(
+      { objectLockMode: 'GOVERNANCE', objectLockRetainDays: 30 },
+      new Date('2026-01-01T00:00:00.000Z')
+    );
+    expect(lock).toEqual({ mode: 'GOVERNANCE', retainUntil: '2026-01-31T00:00:00.000Z' });
+  });
+
+  it('rejects retention windows below one day', () => {
+    expect(() => buildObjectLock({ objectLockMode: 'GOVERNANCE', objectLockRetainDays: 0 })).toThrow(
+      /at least 1 day/
+    );
+    expect(() => buildObjectLock({ objectLockMode: 'COMPLIANCE' })).toThrow(/at least 1 day/);
+  });
+
+  it('rejects unknown modes', () => {
+    expect(() =>
+      buildObjectLock({ objectLockMode: 'SOMETIMES' as never, objectLockRetainDays: 5 })
+    ).toThrow(/Invalid Object Lock mode/);
+  });
 });
 
 describe('resolveS3Config', () => {
@@ -171,5 +344,26 @@ describe('resolveS3Config', () => {
     expect(config.region).toBe('ap-southeast-2');
     expect(config.bucket).toBe('bucket');
     expect(config.prefix).toBe('path');
+  });
+
+  it('passes Object Lock from the profile, with env fallback for CLI runs', () => {
+    const fromProfile = resolveS3Config(
+      { objectLockMode: 'COMPLIANCE', objectLockRetainDays: 14 },
+      's3://b/p'
+    );
+    expect(fromProfile.objectLockMode).toBe('COMPLIANCE');
+    expect(fromProfile.objectLockRetainDays).toBe(14);
+
+    const fromEnv = resolveS3Config(undefined, 's3://b/p', {
+      OPBS_S3_OBJECT_LOCK_MODE: 'GOVERNANCE',
+      OPBS_S3_OBJECT_LOCK_RETAIN_DAYS: '7'
+    } as NodeJS.ProcessEnv);
+    expect(fromEnv.objectLockMode).toBe('GOVERNANCE');
+    expect(fromEnv.objectLockRetainDays).toBe(7);
+
+    const noLock = resolveS3Config(undefined, 's3://b/p', {
+      OPBS_S3_OBJECT_LOCK_MODE: 'bogus'
+    } as NodeJS.ProcessEnv);
+    expect(noLock.objectLockMode).toBeUndefined();
   });
 });

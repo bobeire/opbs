@@ -44,6 +44,8 @@ interface S3Profile {
   accessKeyId: string;
   secretAccessKey: string;
   forcePathStyle: boolean;
+  objectLockMode: '' | 'GOVERNANCE' | 'COMPLIANCE';
+  objectLockRetainDays: number;
 }
 
 interface SftpProfile {
@@ -156,7 +158,9 @@ const DEFAULT_SETTINGS: Settings = {
       prefix: '',
       accessKeyId: '',
       secretAccessKey: '',
-      forcePathStyle: false
+      forcePathStyle: false,
+      objectLockMode: '',
+      objectLockRetainDays: 30
     },
     sftp: {
       host: '',
@@ -890,6 +894,41 @@ function Settings() {
             Force path-style requests (MinIO and most S3-compatible endpoints)
           </label>
         </div>
+
+        <div className="setting-item">
+          <label>Object Lock (WORM) mode:</label>
+          <select
+            value={settings.cloud.s3.objectLockMode}
+            onChange={(e) => handleS3Change('objectLockMode', e.target.value)}
+          >
+            <option value="">Off</option>
+            <option value="GOVERNANCE">GOVERNANCE (bypassable by admins)</option>
+            <option value="COMPLIANCE">COMPLIANCE (cannot be shortened)</option>
+          </select>
+        </div>
+        {settings.cloud.s3.objectLockMode && (
+          <div className="setting-item">
+            <label>Lock retention (days):</label>
+            <input
+              type="number"
+              min={1}
+              value={settings.cloud.s3.objectLockRetainDays}
+              onChange={(e) =>
+                handleS3Change(
+                  'objectLockRetainDays',
+                  Math.max(1, Math.floor(Number(e.target.value) || 1))
+                )
+              }
+              style={{ width: 100 }}
+            />
+          </div>
+        )}
+        <p className="field-hint">
+          When set, every object uploaded to an <code>s3://</code> destination (images, sidecars, manual chain
+          uploads) carries S3 Object Lock retention headers and becomes undeletable/unmodifiable in S3 for the
+          retention window — <strong>true WORM</strong>, even against a local admin. The bucket must have Object
+          Lock enabled (with or without a default retention); otherwise the upload fails with an S3 error.
+        </p>
 
         {s3Result && (
           s3Result.ok ? (

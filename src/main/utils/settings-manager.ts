@@ -58,6 +58,14 @@ export interface S3ProfileSettings {
   accessKeyId: string;
   secretAccessKey: string;
   forcePathStyle: boolean;
+  /**
+   * Object Lock retention mode applied to uploaded objects ('' = off).
+   * Requires an Object-Lock-enabled bucket; GOVERNANCE can be bypassed by
+   * accounts with s3:BypassGovernanceRetention, COMPLIANCE cannot.
+   */
+  objectLockMode: '' | 'GOVERNANCE' | 'COMPLIANCE';
+  /** Retention window in days for uploaded objects (>= 1 when mode is set). */
+  objectLockRetainDays: number;
 }
 
 export interface NotificationSettings {
@@ -215,7 +223,9 @@ const DEFAULT_SETTINGS: AppSettings = {
       prefix: '',
       accessKeyId: '',
       secretAccessKey: '',
-      forcePathStyle: false
+      forcePathStyle: false,
+      objectLockMode: '',
+      objectLockRetainDays: 30
     },
     sftp: {
       host: '',

@@ -31,7 +31,9 @@ Website: https://opbs.rhitcs.com
 - **Network-share destinations**: `destinationPath` accepts local paths, UNC
   (`\\server\share`), and `file://`/`smb://` URIs (normalised to filesystem
   paths). `s3://bucket/prefix` destinations write locally then upload to S3
-  (SigV4, `AWS_*` env vars); `sftp://user@host/path` destinations stream the
+  (SigV4, `AWS_*` env vars), streamed multipart above 16 MB, with optional
+  **S3 Object Lock retention** — true WORM enforced by S3 itself (see
+  “S3 Object Lock” below); `sftp://user@host/path` destinations stream the
   finished image over the `ssh2` SFTP client (`SFTP_USER`/`SFTP_PASSWORD`/
   `SFTP_PRIVATE_KEY` env vars or the Settings cloud profiles); `ftp://` and
   `ftps://` destinations stream over the `basic-ftp` client (FTPS — explicit
@@ -676,6 +678,40 @@ plus a generator for the `schedule install-*` command lines).
 Backup/restore still require the UAC prompt (raw I/O). Verification, listing,
 pruning and health checks do not.
 
+## S3 Object Lock (true WORM)
+
+When **Settings → Cloud (S3)** has an Object Lock mode configured (Off /
+GOVERNANCE / COMPLIANCE plus a retention window in days), every object OPBS
+uploads to an `s3://` destination — images, BitLocker key sidecars, manual
+chain uploads — carries S3 Object Lock retention headers
+(`x-amz-object-lock-mode`, `x-amz-object-lock-retain-until-date`). For the
+retention window the objects cannot be deleted or overwritten **by anyone,
+including the account that wrote them** (COMPLIANCE), or by anyone without
+the `s3:BypassGovernanceRetention` permission (GOVERNANCE). This is
+S3-enforced WORM, not application-level protection: it holds even if the
+backup machine itself is compromised.
+
+Notes:
+
+- The bucket must have Object Lock enabled (AWS console: S3 → bucket →
+  Object Lock; a bucket-wide default retention is optional — OPBS sets
+  per-object retention). Uploading to a bucket *without* Object Lock while
+  the mode is set fails with an S3 error — leave the mode Off for ordinary
+  buckets.
+- Retention starts at upload time and lasts `objectLockRetainDays`
+  (minimum 1 day). Uploads stream: single PUT up to 16 MB, multipart above
+  that (aborted on failure), so multi-hundred-GB images no longer need to
+  fit in RAM.
+- Headless CLI jobs (which don’t read the settings profile) fall back to
+  `OPBS_S3_OBJECT_LOCK_MODE=GOVERNANCE|COMPLIANCE` and
+  `OPBS_S3_OBJECT_LOCK_RETAIN_DAYS=N`.
+- Object deletion by `store prune` / retention cleanup is rejected by S3
+  while an object is still locked — that is the point. Already-locked
+  objects keep their retention; the setting only affects future uploads.
+- Combine with the repository anchor below: images in S3 are WORM-protected
+  there, and the local journal is rollback-evident against an off-box
+  snapshot.
+
 ## Immutable repositories
 
 An **immutable repository** is a directory managed by OPBS that keeps backups
@@ -776,8 +812,10 @@ Protection layers (and their honest limits):
    folder. Rolling the journal back together with its images is *detected*
    (not prevented) by `repo verify --anchor` when an off-box anchor exists —
    keep the anchor target on storage the attacker cannot also rewrite (a
-   separate machine, bucket, or ideally an Object-Lock bucket). True WORM
-   guarantees come with S3 Object Lock (roadmap phase 3).
+   separate machine, bucket, or ideally an Object-Lock bucket). For
+   S3-stored copies, **S3 Object Lock** (see above) makes deletion
+   impossible for the retention window — true WORM enforced outside the
+   machine.
 
 Retention stays journal-aware: automatic cleanup skips repository images and
 points you at `repo prune` instead.

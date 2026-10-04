@@ -30,7 +30,7 @@ import { createRecoveryMedia, resolveNodeExe, MediaCreateOptions } from './utils
 import { installAdkExe } from './utils/adk-install';
 import { installNodeRuntime } from './utils/node-install';
 import { installWinfsp } from './utils/winfsp-install';
-import { S3Store, resolveS3Config } from './utils/s3';
+import { S3Store, resolveS3Config, buildObjectLock } from './utils/s3';
 import { SftpStore, resolveSftpConfig } from './utils/sftp';
 import { FtpStore, resolveFtpConfig } from './utils/ftp';
 import { getRecentDestinations, addRecentDestination } from './utils/recent';
@@ -172,7 +172,9 @@ function s3ProfileFromSettings() {
     bucket: s3.bucket,
     prefix: s3.prefix,
     endpoint: s3.endpoint || undefined,
-    forcePathStyle: s3.forcePathStyle
+    forcePathStyle: s3.forcePathStyle,
+    objectLockMode: s3.objectLockMode || undefined,
+    objectLockRetainDays: s3.objectLockMode ? s3.objectLockRetainDays : undefined
   };
 }
 
@@ -1159,10 +1161,11 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       if (useS3) {
         const uri = `s3://${profileS3.bucket}${profileS3.prefix ? '/' + profileS3.prefix : ''}`;
         const config = resolveS3Config(profileS3, uri);
+        const objectLock = buildObjectLock(config);
         const store = new S3Store(config);
         for (const item of chain) {
           if (!fs.existsSync(item)) continue;
-          await store.put(path.basename(item), fs.readFileSync(item));
+          await store.putFile(item, path.basename(item), { objectLock });
           uploaded.push(`${config.prefix}/${path.basename(item)}`.replace(/^\/+/, ''));
         }
       }

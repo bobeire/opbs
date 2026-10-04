@@ -236,7 +236,21 @@ implemented; **Investigate** items need spike work first.
   Covered by `test/unit/repo-anchor.test.ts` (14 tests, incl. a mock-S3
   roundtrip). Also fixed: `start-backup` passed the S3 profile into
   `sftpProfile` for `sftp://` destinations.
-- ⬜ **Remaining**: Phase 3 — S3 Object Lock repository backend (true WORM).
+- ✅ S3 Object Lock uploads (0.6.52): `objectLockMode`/`objectLockRetainDays`
+  on the S3 profile (**Settings → Cloud (S3)** UI, or
+  `OPBS_S3_OBJECT_LOCK_MODE`/`OPBS_S3_OBJECT_LOCK_RETAIN_DAYS` env for CLI
+  jobs) → `buildObjectLock()` attaches `x-amz-object-lock-mode` +
+  `x-amz-object-lock-retain-until-date` to every image, sidecar and manual
+  chain upload — S3-enforced WORM (GOVERNANCE or COMPLIANCE) that holds
+  against a compromised machine. `S3Store.putFile` streams single PUTs ≤16 MB
+  and multiparts above (aborting failed uploads), replacing the old
+  read-the-whole-image-into-`readFileSync` path; `store put`-style callers
+  keep the in-memory `put`. Covered by `s3.test.ts` (16 tests: mock MPU
+  initiate/part/complete with assembled-bytes equality, lock headers at PUT
+  and initiate, `buildObjectLock` validation, profile/env resolution).
+- ⬜ **Remaining**: Phase 3 — repository-on-S3 backend (header + journal +
+  images in an Object-Lock-enabled bucket, storage abstraction in
+  `repository.ts`).
 
 ## Planned
 
