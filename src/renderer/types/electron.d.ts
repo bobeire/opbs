@@ -286,7 +286,7 @@ declare global {
           unhealthy: boolean;
         }>
       >;
-      browsePartitions: (imagePath: string) => Promise<{ encrypted: boolean; partitions: Array<{ partitionIndex: number; size: number; offsetOnDisk: number; blockCount: number; fsType?: string; browsable?: boolean }> }>;
+      browsePartitions: (imagePath: string) => Promise<{ encrypted: boolean; imageFormat?: string; partitions: Array<{ partitionIndex: number; size: number; offsetOnDisk: number; blockCount: number; fsType?: string; browsable?: boolean; reason?: string }> }>;
       browseList: (imagePath: string, partitionIndex: number, relPath: string, passphrase?: string) => Promise<any[]>;
       browseExtract: (imagePath: string, partitionIndex: number, relPath: string, outPath: string, passphrase?: string) => Promise<any>;
       browseClose: () => Promise<void>;

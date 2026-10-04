@@ -111,8 +111,16 @@ implemented; **Investigate** items need spike work first.
   compression. Browsing works for partition images whose volume carries a
   resident boot sector; block streams without one (e.g. data-only backups)
   report a clear error instead of a listing.
-- ⬜ **Remaining**: encrypted images, split multi-.0000 volume files, and
-  v7 delta/incremental chains are detected and refused with `MacriumUnsupportedError`.
+- ✅ **Unsupported-variant detection (0.6.56)**: encrypted, split and
+  delta/incremental images are detected from file contents — mrimgx
+  `_encryption`/`split_file`/`delta_index`/`backup_type` plus a skipped
+  (never misparsed) delta `$INDEX` walk, and v7 footer XML `<aes>`/`<method>`
+  plus the `-<inc>-<file>.mrimg` filename (sibling parts prove a split) — and
+  refused with `MacriumUnsupportedError` from a single shared predicate
+  (`macriumUnsupportedReason`) used by the partition reader, the filesystem
+  probe (which now surfaces the reason instead of collapsing to "Unknown"),
+  and `mrimg info` (prints an `unsupported:` line). The GUI browse view shows
+  the refusal reason and hides the useless passphrase box for Macrium images.
 
 ### Disk-to-disk clone (selected partitions → another disk)
 - ✅ `CloneEngine` (`imaging/clone-engine.ts`): builds clone jobs exactly like

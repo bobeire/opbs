@@ -20,6 +20,8 @@ interface BrowsePartition {
   fsType?: string;
   /** Whether the built-in browser can read this partition. */
   browsable?: boolean;
+  /** Why the partition cannot be browsed (recognised-but-refused container). */
+  reason?: string;
 }
 
 interface MountStatus {
@@ -38,7 +40,11 @@ interface BrowseViewProps {
 
 function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps) {
   const [imagePath, setImagePath] = useState('');
-  const [info, setInfo] = useState<{ encrypted: boolean; partitions: BrowsePartition[] } | null>(null);
+  const [info, setInfo] = useState<{
+    encrypted: boolean;
+    imageFormat?: string;
+    partitions: BrowsePartition[];
+  } | null>(null);
   const [partitionIndex, setPartitionIndex] = useState<number | null>(null);
   const [passphrase, setPassphrase] = useState('');
   const [cwd, setCwd] = useState('');
@@ -147,9 +153,15 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         setPartitionIndex(browsable[0].partitionIndex);
       } else if (loaded.partitions.length > 0) {
         // Partitions exist but none are browsable — still show the list so the
-        // user can see which filesystems are present.
+        // user can see which filesystems are present, and prefer the exact
+        // refusal reason (encrypted/split/delta Macrium container) over the
+        // generic filesystem hint.
         setPartitionIndex(loaded.partitions[0].partitionIndex);
-        setError('No browsable partitions in this image. Only NTFS, FAT32 and exFAT partitions can be browsed.');
+        const refusal = loaded.partitions.find((p: BrowsePartition) => p.reason)?.reason;
+        setError(
+          refusal ??
+            'No browsable partitions in this image. Only NTFS, FAT32 and exFAT partitions can be browsed.'
+        );
       } else {
         setError('This image has no partitions.');
       }
@@ -332,7 +344,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
           </div>
         </div>
 
-        {info?.encrypted && (
+        {info?.encrypted && info.imageFormat !== 'mrimg' && info.imageFormat !== 'mrimgx' && (
           <div className="setting-item">
             <label>Passphrase:</label>
             <input

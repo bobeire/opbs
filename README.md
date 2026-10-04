@@ -583,8 +583,16 @@ OPBS.exe --cli extract img.mrimg --partition 1 --path "Users\me\notes.txt" --out
   includes a clean-room decoder (`src/main/imaging/mrimg/quicklz.ts`) whose
   output is validated against each block's stored MD5, so corrupt images are
   detected rather than silently misread.
-- Recognised-but-unreadable features are refused with a clear error instead of
-  failing mid-browse: encryption, split multi-part images, and v7 delta chains.
+- Recognised-but-unreadable variants are **detected up front and refused with
+  `MacriumUnsupportedError`** instead of failing mid-browse with a confusing
+  parse error: password-protected images (mrimgx `$JSON` encryption / v7
+  footer `<aes>`), split multi-part sets (mrimgx `split_file` / a v7 sibling
+  part next to a `-00-00` filename), and delta/incremental chains (mrimgx
+  `delta_index`/`backup_type` / v7 `<method>` and `-01-00` filenames).
+  Detection is shared across every path — `mrimg info` prints an
+  `unsupported:` line with the same verdict, browse/extract/mount throw the
+  refusal, and the GUI browse view shows the exact reason instead of the
+  generic "no browsable partitions" hint.
 - Whether a partition can be listed depends on the volume: partition images of
   NTFS/FAT volumes browse and extract normally; block streams without a
   resident boot sector (e.g. file/data backups) report that no filesystem is

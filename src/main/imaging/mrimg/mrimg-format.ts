@@ -114,6 +114,28 @@ export interface MacriumImageInfo {
 /** Raised when a Macrium image is structurally supported but not yet readable. */
 export class MacriumUnsupportedError extends Error {}
 
+/**
+ * First unsupported-container reason for a parsed Macrium image, or null when
+ * the container itself is readable. Detection is format-agnostic (both the
+ * Reflect X `$JSON` header and the v7 footer XML feed it) so the partition
+ * reader, the filesystem probe and `mrimg info` all report the same verdict.
+ */
+export function macriumUnsupportedReason(info: MacriumImageInfo): string | null {
+  if (info.encryption.enable) {
+    return `${info.imagePath}: password-protected Macrium images are not supported yet.`;
+  }
+  if (info.splitFile) {
+    return `${info.imagePath}: split Macrium images (multi-part .mrimgx/.0001 files) are not supported yet.`;
+  }
+  if (info.deltaIndex) {
+    return `${info.imagePath}: delta-incremental Macrium chains are not supported yet; restore or merge the chain in Reflect first.`;
+  }
+  if (/incremental|differential/i.test(info.backupType ?? '')) {
+    return `${info.imagePath}: ${info.backupType} Macrium images are not supported yet; restore or merge the chain in Reflect first.`;
+  }
+  return null;
+}
+
 function readFileRange(imagePath: string, offset: number, length: number): Buffer {
   const fd = getCachedFd(imagePath);
   const buf = Buffer.allocUnsafe(length);
@@ -297,6 +319,104 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
   const pathText = footer.subarray(13, 13 + pathLen).toString('latin1');
   const bound = footer.length - MRIMG_V7_TRAILER_SIZE;
 
+  // Parse the backup-definition XML and its disk descriptor up front: the
+  // encryption/method markers it carries (together with the on-disk filename)
+  // decide how the block-index scan below is read, and failures must surface
+  // as MacriumUnsupportedError instead of generic parse errors.
+  // The XML is u16 length-prefixed immediately before "<?xml" (u32 when the
+  // prefix is 0xFFFF, past 64 KiB).
+  let netbiosName: string | undefined;
+  let backupFormat = 'disk';
+  let isFileBackup = false;
+  let diskFormat = '';
+  let diskSignature: string | undefined;
+  let diskSizeBytes = 0;
+  let backupTime: number | undefined;
+  let aesValue = 0;
+  let methodValue = -1;
+  {
+    const xmlStart = footer.indexOf('<?xml', 13 + pathLen);
+    if (xmlStart >= 20 && xmlStart + 7 <= footer.length) {
+      let xmlLen: number;
+      if (footer.readUInt16LE(xmlStart - 6) === 0xffff && footer[xmlStart - 7] === 0xff) {
+        xmlLen = footer.readUInt32LE(xmlStart - 4);
+      } else {
+        xmlLen = footer.readUInt16LE(xmlStart - 2);
+      }
+      if (xmlLen > 0 && xmlStart + xmlLen <= footer.length) {
+        const xmlText = footer.subarray(xmlStart, xmlStart + xmlLen).toString('latin1');
+        const netbios = /<netbios>([^<]*)<\/netbios>/.exec(xmlText);
+        if (netbios) netbiosName = netbios[1];
+        const bt = /<backup_type>(\d+)<\/backup_type>/.exec(xmlText);
+        isFileBackup = !!(bt && bt[1] === '1');
+        const dir = /<directory>([^<]*)<\/directory>/.exec(xmlText);
+        backupFormat = isFileBackup
+          ? dir
+            ? `file_and_folder (${dir[1].replace(/[\\/:]/g, '/').replace(/\/+$/, '')})`
+            : 'file_and_folder'
+          : 'disk';
+        // <aes>: 0 = none, 1-3 = AES variants (image is password-protected).
+        const aes = /<aes>(\d+)<\/aes>/.exec(xmlText);
+        if (aes) aesValue = Number(aes[1]);
+        // <method>: 0 = full, 1 = incremental, 2 = differential, 3 = auto.
+        const method = /<method>(\d+)<\/method>/.exec(xmlText);
+        if (method) methodValue = Number(method[1]);
+
+        // Descriptor: timestamp immediately after the XML, then the raw
+        // 512-byte MBR (with its GPT header/entries when present).
+        const desc = xmlStart + xmlLen;
+        const ht = footer.readUInt32LE(desc);
+        if (ht > 100000000) backupTime = ht;
+        const scanEnd = Math.min(footer.length, desc + 2048);
+        let mbr = -1;
+        for (let k = desc; k + 512 <= scanEnd; k++) {
+          if (footer[k + 510] === 0x55 && footer[k + 511] === 0xaa) {
+            mbr = k;
+            break;
+          }
+        }
+        if (mbr >= 0) {
+          diskSignature = footer.subarray(mbr + 440, mbr + 444).toString('hex');
+          const gptOff = mbr + 512;
+          const isGpt = gptOff + 92 <= footer.length && hasMagic(footer, 'EFI PART', gptOff);
+          diskFormat = isGpt ? 'gpt' : 'mbr';
+          if (isGpt) {
+            const altLba = footer.readBigUInt64LE(gptOff + 32);
+            if (altLba > 0n && altLba < 1n << 52n) diskSizeBytes = Number((altLba + 1n) << 9n);
+          } else {
+            for (let i = 0; i < 4; i++) {
+              const e = mbr + 446 + i * 16;
+              if (footer[e + 4] === 0) continue;
+              const sectors = footer.readUInt32LE(e + 12);
+              if (sectors === 0) continue;
+              const endByte = (footer.readUInt32LE(e + 8) + sectors) * 512;
+              if (endByte > diskSizeBytes) diskSizeBytes = endByte;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Filename shape: <imageid>-<increment:00=full>-<file#>.mrimg — file# > 0
+  // means this file is one part of a split set; increment > 0 means the image
+  // is a member of an incremental/differential chain. For file# 00 a sibling
+  // part on disk also proves the backup was split across volumes.
+  const nameParts = /-(\d{2})-(\d{2})\.mrimg$/i.exec(path.basename(imagePath));
+  const incrementNo = nameParts ? nameParts[1] : '00';
+  const filePartNo = nameParts ? nameParts[2] : '00';
+  let splitBySibling = false;
+  if (nameParts && filePartNo === '00') {
+    const prefix = path.basename(imagePath).replace(/-\d{2}\.mrimg$/i, '');
+    for (let f = 1; f <= 99 && !splitBySibling; f++) {
+      const sibling = `${prefix}-${String(f).padStart(2, '0')}.mrimg`;
+      if (fs.existsSync(path.join(path.dirname(imagePath), sibling))) splitBySibling = true;
+    }
+  }
+  const encryptedVariant = aesValue > 0;
+  const splitVariant = filePartNo !== '00' || splitBySibling;
+  const deltaVariant = incrementNo !== '00' || methodValue === 1 || methodValue === 2;
+
   const markers: number[] = [];
   {
     let pos = 0;
@@ -392,13 +512,32 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
   }
 
   if (sections.length === 0) {
+    // The footer XML/filename already told us which unsupported variant this
+    // is — report that instead of a generic "no index" parse failure.
+    if (encryptedVariant) {
+      throw new MacriumUnsupportedError(
+        `${imagePath}: password-protected Macrium images are not supported yet.`
+      );
+    }
+    if (splitVariant) {
+      throw new MacriumUnsupportedError(
+        `${imagePath}: split Macrium images (multi-part .mrimgx/.0001 files) are not supported yet.`
+      );
+    }
+    if (deltaVariant) {
+      throw new MacriumUnsupportedError(
+        `${imagePath}: delta-incremental Macrium chains are not supported yet; restore or merge the chain in Reflect first.`
+      );
+    }
     const isChain = /-\d{2}-\d{2}\.mrimg$/i.test(imagePath);
     if (isChain) {
-      throw new Error(
+      throw new MacriumUnsupportedError(
         `No partition block index found in ${path.basename(imagePath)}. This may be a chain segment or differential/incremental image that cannot be browsed independently.`
       );
     }
-    throw new Error(`No partition block index found in ${imagePath}. The image may be a differential/incremental backup or use an unsupported Macrium format.`);
+    throw new MacriumUnsupportedError(
+      `No partition block index found in ${imagePath}. The image may be a differential/incremental backup or use an unsupported Macrium format.`
+    );
   }
 
   const partitions: MacriumPartitionInfo[] = [];
@@ -445,7 +584,19 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
     }
     if (candidateBlocks.length >= 8) break;
   }
-  if (candidateBlocks.length === 0) throw new Error(`No stored data block in ${imagePath}.`);
+  if (candidateBlocks.length === 0) {
+    if (encryptedVariant) {
+      throw new MacriumUnsupportedError(
+        `${imagePath}: password-protected Macrium images are not supported yet.`
+      );
+    }
+    if (deltaVariant || splitVariant) {
+      throw new MacriumUnsupportedError(
+        `${imagePath}: delta-incremental or split Macrium chains are not supported yet; restore or merge the chain in Reflect first.`
+      );
+    }
+    throw new Error(`No stored data block in ${imagePath}.`);
+  }
 
   const sizeCounts = new Map<number, number>();
   let compressed = false;
@@ -497,74 +648,6 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
     }
   }
 
-  // Optional metadata from the embedded backup-definition XML and the disk
-  // descriptor (u32 timestamp + the disk's raw MBR/GPT region) that ends it.
-  // The XML is u16 length-prefixed immediately before "<?xml" (u32 when the
-  // prefix is 0xFFFF, past 64 KiB).
-  let netbiosName: string | undefined;
-  let backupFormat = 'disk';
-  let isFileBackup = false;
-  let diskFormat = '';
-  let diskSignature: string | undefined;
-  let diskSizeBytes = 0;
-  let backupTime: number | undefined;
-  {
-    const xmlStart = footer.indexOf('<?xml', 13 + pathLen);
-    if (xmlStart >= 20 && xmlStart + 7 <= footer.length) {
-      let xmlLen: number;
-      if (footer.readUInt16LE(xmlStart - 6) === 0xffff && footer[xmlStart - 7] === 0xff) {
-        xmlLen = footer.readUInt32LE(xmlStart - 4);
-      } else {
-        xmlLen = footer.readUInt16LE(xmlStart - 2);
-      }
-      if (xmlLen > 0 && xmlStart + xmlLen <= footer.length) {
-        const xmlText = footer.subarray(xmlStart, xmlStart + xmlLen).toString('latin1');
-        const netbios = /<netbios>([^<]*)<\/netbios>/.exec(xmlText);
-        if (netbios) netbiosName = netbios[1];
-        const bt = /<backup_type>(\d+)<\/backup_type>/.exec(xmlText);
-        isFileBackup = !!(bt && bt[1] === '1');
-        const dir = /<directory>([^<]*)<\/directory>/.exec(xmlText);
-        backupFormat = isFileBackup
-          ? dir
-            ? `file_and_folder (${dir[1].replace(/[\\/:]/g, '/').replace(/\/+$/, '')})`
-            : 'file_and_folder'
-          : 'disk';
-
-        // Descriptor: timestamp immediately after the XML, then the raw
-        // 512-byte MBR (with its GPT header/entries when present).
-        const desc = xmlStart + xmlLen;
-        const ht = footer.readUInt32LE(desc);
-        if (ht > 100000000) backupTime = ht;
-        const scanEnd = Math.min(footer.length, desc + 2048);
-        let mbr = -1;
-        for (let k = desc; k + 512 <= scanEnd; k++) {
-          if (footer[k + 510] === 0x55 && footer[k + 511] === 0xaa) {
-            mbr = k;
-            break;
-          }
-        }
-        if (mbr >= 0) {
-          diskSignature = footer.subarray(mbr + 440, mbr + 444).toString('hex');
-          const gptOff = mbr + 512;
-          const isGpt = gptOff + 92 <= footer.length && hasMagic(footer, 'EFI PART', gptOff);
-          diskFormat = isGpt ? 'gpt' : 'mbr';
-          if (isGpt) {
-            const altLba = footer.readBigUInt64LE(gptOff + 32);
-            if (altLba > 0n && altLba < 1n << 52n) diskSizeBytes = Number((altLba + 1n) << 9n);
-          } else {
-            for (let i = 0; i < 4; i++) {
-              const e = mbr + 446 + i * 16;
-              if (footer[e + 4] === 0) continue;
-              const sectors = footer.readUInt32LE(e + 12);
-              if (sectors === 0) continue;
-              const endByte = (footer.readUInt32LE(e + 8) + sectors) * 512;
-              if (endByte > diskSizeBytes) diskSizeBytes = endByte;
-            }
-          }
-        }
-      }
-    }
-  }
   if (!isFileBackup) backupFormat = `disk (${diskFormat || 'mbr'})`;
 
   return {
@@ -576,9 +659,9 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
     backupTime,
     fileNumber: 0,
     compression: { method: 'quicklz', level: compressed ? 'high' : 'none' },
-    encryption: { enable: false, keyIterations: 0 },
-    splitFile: false,
-    deltaIndex: false,
+    encryption: { enable: encryptedVariant, keyIterations: 0 },
+    splitFile: splitVariant,
+    deltaIndex: deltaVariant,
     disks: [
       {
         diskNumber: 0,
@@ -704,7 +787,10 @@ function readMacriumImageUncached(imagePath: string): MacriumImageInfo {
       const dataStart = lcn0Offset - fsStart;
 
       let blocks: MacriumIndexElement[] = [];
-      if (!info.splitFile) {
+      // Delta containers store a different payload shape ($INDEX count +
+      // per-record block_index) that parseIndexPayload would misread, so the
+      // walk is skipped and the reader gate refuses the image instead.
+      if (!info.splitFile && !info.deltaIndex) {
         const group = indexGroups[g] ?? [];
         const indexBlock = group.find((b) => b.name === BLOCK_INDEX);
         if (indexBlock) {

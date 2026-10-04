@@ -3,9 +3,9 @@ import * as path from 'path';
 import * as os from 'os';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createHash } from 'crypto';
-import { detectMacriumFormat, readMacriumImage, MacriumUnsupportedError, readImageFileRange } from '../../src/main/imaging/mrimg/mrimg-format';
+import { detectMacriumFormat, readMacriumImage, MacriumUnsupportedError, macriumUnsupportedReason, readImageFileRange } from '../../src/main/imaging/mrimg/mrimg-format';
 import { openMacriumPartitionReader } from '../../src/main/imaging/mrimg/mrimg-reader';
-import { openAnyBrowse } from '../../src/main/imaging/fs/file-browse';
+import { openAnyBrowse, detectPartitionFilesystem } from '../../src/main/imaging/fs/file-browse';
 
 const MAGIC_X = 'MACRIUM_FILE';
 const BLOCK_JSON = '$JSON   ';
@@ -40,7 +40,10 @@ function buildMrimgIndex(blocks: Array<{ filePosition: number; md5: Buffer; stor
   return buf;
 }
 
-function buildMrimgxImage(partitionBlocks: Buffer[]): {
+function buildMrimgxImage(
+  partitionBlocks: Buffer[],
+  tweak?: (json: any) => void
+): {
   buffer: Buffer;
   partitionSize: number;
   blockSize: number;
@@ -74,6 +77,8 @@ function buildMrimgxImage(partitionBlocks: Buffer[]): {
       }
     ]
   };
+
+  tweak?.(json);
 
   // Data blocks are stored uncompressed.
   const rawBlocks = partitionBlocks;
@@ -207,6 +212,78 @@ describe('mrimg-format', () => {
     expect(() => openMacriumPartitionReader(info, 0)).toThrow('password');
   });
 
+  it('detects encryption from image contents', () => {
+    const built = buildMrimgxImage([Buffer.alloc(8192, 1)], (json) => {
+      json._encryption = { enable: true, keyIterations: 600000 };
+    });
+    const p = path.join(fixtureDir, 'content-enc.mrimgx');
+    fs.writeFileSync(p, built.buffer);
+    const info = readMacriumImage(p);
+    expect(info.encryption.enable).toBe(true);
+    expect(macriumUnsupportedReason(info)).toMatch(/password-protected/);
+    let caught: unknown;
+    try {
+      openMacriumPartitionReader(info, 0);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(MacriumUnsupportedError);
+    expect((caught as Error).message).toMatch(/password/);
+  });
+
+  it('detects split containers from image contents', () => {
+    const built = buildMrimgxImage([Buffer.alloc(8192, 2)], (json) => {
+      json._header.split_file = true;
+    });
+    const p = path.join(fixtureDir, 'content-split.mrimgx');
+    fs.writeFileSync(p, built.buffer);
+    const info = readMacriumImage(p);
+    expect(info.splitFile).toBe(true);
+    expect(macriumUnsupportedReason(info)).toMatch(/split/);
+    expect(() => openMacriumPartitionReader(info, 0)).toThrow(MacriumUnsupportedError);
+    expect(() => openMacriumPartitionReader(info, 0)).toThrow('split');
+  });
+
+  it('refuses a delta/incremental container instead of misparsing its index', () => {
+    const built = buildMrimgxImage([Buffer.alloc(8192, 3)], (json) => {
+      json._header.delta_index = true;
+      json._header.backup_type = 'incremental';
+    });
+    const p = path.join(fixtureDir, 'content-delta.mrimgx');
+    fs.writeFileSync(p, built.buffer);
+    // The delta $INDEX payload has a different shape; parsing it as a plain
+    // index used to throw "Truncated Macrium block index." — it must parse,
+    // skip the walk, and refuse through the reader gate instead.
+    const info = readMacriumImage(p);
+    expect(info.partitions[0].blocks).toEqual([]);
+    expect(macriumUnsupportedReason(info)).toMatch(/delta-incremental/);
+    expect(() => openMacriumPartitionReader(info, 0)).toThrow(MacriumUnsupportedError);
+    expect(() => openMacriumPartitionReader(info, 0)).toThrow('delta-incremental');
+  });
+
+  it('refuses a non-delta incremental (backup_type) container', () => {
+    const built = buildMrimgxImage([Buffer.alloc(8192, 4)], (json) => {
+      json._header.backup_type = 'incremental';
+    });
+    const p = path.join(fixtureDir, 'content-incr.mrimgx');
+    fs.writeFileSync(p, built.buffer);
+    const info = readMacriumImage(p);
+    expect(macriumUnsupportedReason(info)).toMatch(/incremental/);
+    expect(() => openMacriumPartitionReader(info, 0)).toThrow(MacriumUnsupportedError);
+  });
+
+  it('surfaces the refusal reason through detectPartitionFilesystem', () => {
+    const built = buildMrimgxImage([Buffer.alloc(8192, 5)], (json) => {
+      json._encryption = { enable: true, keyIterations: 600000 };
+    });
+    const p = path.join(fixtureDir, 'probe-enc.mrimgx');
+    fs.writeFileSync(p, built.buffer);
+    const probe = detectPartitionFilesystem(p, 0);
+    expect(probe.browsable).toBe(false);
+    expect(probe.fsType).toBe('Unsupported');
+    expect(probe.reason).toMatch(/password-protected/);
+  });
+
   it('rejects unknown format', () => {
     const empty = path.join(fixtureDir, 'empty.bin');
     fs.writeFileSync(empty, Buffer.alloc(1024));
@@ -258,6 +335,61 @@ describe('mrimg-format', () => {
       // Every stored block must pass the per-block MD5 gate; a read spanning
       // several blocks therefore throws on any corruption.
       expect(() => reader.read(0, 128 * 1024)).not.toThrow();
+    });
+
+    it('a full sample is never flagged as unsupported', () => {
+      const info = readMacriumImage(v7Sample);
+      expect(info.encryption.enable).toBe(false);
+      expect(info.splitFile).toBe(false);
+      expect(info.deltaIndex).toBe(false);
+      expect(macriumUnsupportedReason(info)).toBeNull();
+    });
+
+    it('detects encryption from the footer XML', () => {
+      const src = fs.readFileSync(v7Sample);
+      const at = src.toString('latin1').indexOf('<aes>0</aes>');
+      expect(at).toBeGreaterThan(-1);
+      const buf = Buffer.from(src);
+      buf.write('<aes>3</aes>', at, 'latin1');
+      const tmp = path.join(fixtureDir, 'ENCTEST-00-00.mrimg');
+      fs.writeFileSync(tmp, buf);
+      const info = readMacriumImage(tmp);
+      expect(info.encryption.enable).toBe(true);
+      expect(macriumUnsupportedReason(info)).toMatch(/password-protected/);
+      expect(() => openMacriumPartitionReader(info, 0)).toThrow(MacriumUnsupportedError);
+      expect(() => openMacriumPartitionReader(info, 0)).toThrow(/password/);
+    });
+
+    it('detects an incremental chain from <method> and from the filename', () => {
+      const src = fs.readFileSync(v7Sample);
+      const at = src.toString('latin1').indexOf('<method>3</method>');
+      expect(at).toBeGreaterThan(-1);
+      const buf = Buffer.from(src);
+      buf.write('<method>1</method>', at, 'latin1');
+      const tmp = path.join(fixtureDir, 'METHTEST-00-00.mrimg');
+      fs.writeFileSync(tmp, buf);
+      const info = readMacriumImage(tmp);
+      expect(info.deltaIndex).toBe(true);
+      expect(macriumUnsupportedReason(info)).toMatch(/delta-incremental/);
+      expect(() => openMacriumPartitionReader(info, 0)).toThrow(MacriumUnsupportedError);
+
+      // Filename alone: increment number 01 marks a chain member.
+      const tmp2 = path.join(fixtureDir, 'INCRTEST-01-00.mrimg');
+      fs.copyFileSync(v7Sample, tmp2);
+      const info2 = readMacriumImage(tmp2);
+      expect(info2.deltaIndex).toBe(true);
+      expect(macriumUnsupportedReason(info2)).toMatch(/delta-incremental/);
+    });
+
+    it('detects split parts from a sibling file on disk', () => {
+      const tmp = path.join(fixtureDir, 'SPLITTEST-00-00.mrimg');
+      fs.copyFileSync(v7Sample, tmp);
+      fs.writeFileSync(path.join(fixtureDir, 'SPLITTEST-00-01.mrimg'), Buffer.alloc(0));
+      const info = readMacriumImage(tmp);
+      expect(info.splitFile).toBe(true);
+      expect(macriumUnsupportedReason(info)).toMatch(/split/);
+      expect(() => openMacriumPartitionReader(info, 0)).toThrow(MacriumUnsupportedError);
+      expect(() => openMacriumPartitionReader(info, 0)).toThrow('split');
     });
   });
 });

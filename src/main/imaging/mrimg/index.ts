@@ -8,6 +8,7 @@ export {
   MacriumIndexElement,
   MacriumFormat,
   MacriumUnsupportedError,
+  macriumUnsupportedReason,
   MRIMGX_MAGIC,
   MRIMG_V7_MAGIC,
   MRIMG_V7_TRAILER_SIZE,

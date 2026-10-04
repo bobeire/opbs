@@ -187,7 +187,7 @@ export function detectPartitionFilesystem(
   imagePath: string,
   partitionIndex: number,
   key?: Buffer
-): { fsType: string; browsable: boolean } {
+): { fsType: string; browsable: boolean; reason?: string } {
   try {
     const format = detectMacriumFormat(imagePath);
     let reader: PartitionReader;
@@ -211,6 +211,13 @@ export function detectPartitionFilesystem(
     if (detectExfat(bpb)) return { fsType: 'exFAT', browsable: true };
     return { fsType: oem.trim() || 'Unknown', browsable: false };
   } catch (e) {
+    if (e instanceof MacriumUnsupportedError) {
+      // A recognised-but-refused container (encrypted/split/delta): keep the
+      // exact verdict instead of collapsing it into "Unknown", so callers can
+      // explain why the partition cannot be browsed.
+      logger.info(`detectPartitionFilesystem: partition ${partitionIndex} unsupported: ${e.message}`);
+      return { fsType: 'Unsupported', browsable: false, reason: e.message };
+    }
     logger.warn(`detectPartitionFilesystem: partition ${partitionIndex} failed: ${e instanceof Error ? e.message : e}`);
     return { fsType: 'Unknown', browsable: false };
   }

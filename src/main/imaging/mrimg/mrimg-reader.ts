@@ -7,6 +7,7 @@ import {
   MacriumPartitionInfo,
   MacriumUnsupportedError,
   MR_V7_HEADER_LEN,
+  macriumUnsupportedReason,
   readImageFileRange
 } from './mrimg-format';
 
@@ -115,20 +116,9 @@ export function openMacriumPartitionReader(
   if (info.format !== 'mrimgx' && info.format !== 'mrimg-v7') {
     throw new MacriumUnsupportedError('Only Macrium image files are readable.');
   }
-  if (info.encryption.enable) {
-    throw new MacriumUnsupportedError(
-      `${info.imagePath}: password-protected Macrium images are not supported yet.`
-    );
-  }
-  if (info.splitFile) {
-    throw new MacriumUnsupportedError(
-      `${info.imagePath}: split Macrium images (multi-part .mrimgx/.0001 files) are not supported yet.`
-    );
-  }
-  if (info.deltaIndex) {
-    throw new MacriumUnsupportedError(
-      `${info.imagePath}: delta-incremental Macrium chains are not supported yet; restore or merge the chain in Reflect first.`
-    );
+  const unsupported = macriumUnsupportedReason(info);
+  if (unsupported) {
+    throw new MacriumUnsupportedError(unsupported);
   }
   const part = info.partitions[partitionIndex];
   if (!part) {

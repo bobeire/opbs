@@ -19,7 +19,7 @@ import type { RestoreJobProgress } from '../imaging/imaging-job';
 import { locateAdk, peArchForProcess } from '../utils/adk';
 import { createRecoveryMedia, resolveNodeExe, smokeMediaPayload } from '../utils/winpe-media';
 import { openAnyBrowse, listDirectory, extractPath, formatTimestamp, resolvePath } from '../imaging/fs/file-browse';
-import { detectMacriumFormat, readMacriumImage } from '../imaging/mrimg';
+import { detectMacriumFormat, readMacriumImage, macriumUnsupportedReason } from '../imaging/mrimg';
 import { S3Store, parseS3Location } from '../utils/s3';
 import { SftpStore, parseSftpLocation, resolveSftpConfig } from '../utils/sftp';
 import { FtpStore, resolveFtpConfig } from '../utils/ftp';
@@ -2019,6 +2019,10 @@ function printMrimgInfo(info: import('../imaging/mrimg').MacriumImageInfo): void
   console.log(`  encryption:  ${enc.enable ? `yes (${enc.aesType ?? '?'} variant, ${enc.keyIterations} iterations)` : 'no'}`);
   if (info.splitFile) console.log('  split-file:  yes (multi-part; browsing not yet supported)');
   if (info.deltaIndex) console.log('  delta index: yes (incremental chain; browsing not yet supported)');
+  const unsupported = macriumUnsupportedReason(info);
+  if (unsupported) {
+    console.log(`  unsupported: ${unsupported.replace(`${info.imagePath}: `, '')}`);
+  }
   console.log(`  partitions: ${info.partitions.length}`);
   for (const p of info.partitions) {
     const gb = p.blockCount > 0 ? formatBytes(p.blockCount * p.blockSize) : formatBytes(p.geometry.length);

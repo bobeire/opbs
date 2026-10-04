@@ -1360,7 +1360,7 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
         encrypted: info.encryption.enable,
         imageFormat: format === 'mrimgx' ? 'mrimgx' : 'mrimg',
         partitions: info.partitions.map((p, i) => {
-          const { fsType, browsable } = detectPartitionFilesystem(imagePath, i);
+          const { fsType, browsable, reason } = detectPartitionFilesystem(imagePath, i);
           return {
             partitionIndex: i,
             diskIndex: p.diskIndex,
@@ -1368,7 +1368,8 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
             offsetOnDisk: p.dataStart,
             blockCount: p.blockCount,
             fsType,
-            browsable
+            browsable,
+            ...(reason ? { reason } : {})
           };
         })
       };
