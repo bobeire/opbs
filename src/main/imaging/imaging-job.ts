@@ -99,6 +99,10 @@ export interface ImagingJob {
    *  partition index to its volume path and journal cursor. When present, this
    *  takes precedence over usnVolume/usnLastUsn. */
   perPartitionUsn?: Record<number, { volume: string; lastUsn: number }>;
+  /** Fraction (0..1) of a partition's blocks that USN may report as changed
+   *  before the run gives up on the journal for that partition and full-scans
+   *  (undefined = no limit; `0` = only an empty changed set is accepted). */
+  usnFullScanThreshold?: number;
   /** Only capture blocks containing allocated clusters (NTFS $Bitmap). Free
    *  space is skipped; non-NTFS partitions fall back to a full capture. */
   usedBlocksOnly?: boolean;

@@ -381,8 +381,14 @@ implemented; **Investigate** items need spike work first.
   incremental (`useUsnJournal`), falling back to a full scan whenever the
   journal is unavailable or uncertain. The journal position is recorded in a
   `.usn` sidecar after each run.
-- ⬜ **Remaining**: (optional) multi-volume chains and manual override/tuning of
-  the fallback threshold.
+- ✅ **Remaining items (0.6.55)**: per-partition USN cursors (each volume-backed
+  partition's journal position is captured pre-snapshot, stored in a v2
+  `.usn` sidecar keyed by `{partitionIndex, volume}`, and never inherited
+  across volumes; missing/foreign sidecars repair instead of disabling the
+  journal) plus a tunable `usnFullScanThreshold` (GUI percent input, CLI
+  `--usn-full-scan-threshold PCT`, scheduled-backup passthrough) that reverts
+  to a full sequential scan when the flagged-change fraction exceeds the
+  threshold.
 
 ### Delta-on-delta chain compaction
 - ✅ `runBackupJob` unions the block CRCs of the *whole* ancestor chain

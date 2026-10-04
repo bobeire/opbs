@@ -10,7 +10,7 @@ Website: https://opbs.rhitcs.com
 - **Disk & partition imaging** with per-block CRC-32 integrity checking
 - **VSS support**: back up live systems using Windows Volume Shadow Copy Service
 - **Compression**: Zstandard (zstd) with multithreaded worker-thread compression, plus classic zlib deflate for backward compatibility; multiple levels to balance speed vs. size
-- **Incremental backups**: deltas capture only changed blocks against a base image; restore chains replay base + deltas in order. Optionally the NTFS **USN journal** (`useUsnJournal`) is used to read only the blocks touched by changed files instead of scanning the whole volume (falls back to a full scan if the journal is unavailable).
+- **Incremental backups**: deltas capture only changed blocks against a base image; restore chains replay base + deltas in order. Optionally the NTFS **USN journal** (`useUsnJournal`) is used to read only the blocks touched by changed files instead of scanning the whole volume — with per-partition cursors in a `.usn` sidecar and a configurable `usnFullScanThreshold` that reverts to a full scan when too much of the volume changed (falls back to a full scan whenever the journal is unavailable or uncertain).
 - **Resumable imaging**: `resume` (CLI `--resume`) continues an interrupted local backup from the partial image already at the target path — completed partitions are kept and the run resumes at the next partition boundary instead of restarting from scratch.
 - **Used-blocks-only capture**: `usedBlocksOnly` (CLI `--used-blocks-only`) reads the NTFS `$Bitmap` and stores only blocks containing allocated clusters, dropping free space; non-NTFS partitions fall back to a full capture.
 - **Read-only mount via WinFsp**: mount a partition from a `.opbs` or Macrium image as a virtual drive letter with **zero extra disk usage** — file reads are served lazily by decompressing only the covering blocks. Requires the free WinFsp runtime (https://winfsp.dev).
@@ -241,6 +241,42 @@ blocks that are **not** in the image chain are zero-filled on the target by
 default (`clearFreeSpace`, opt-out with `false` / skip only if you need the
 faster older behaviour), so a file created on the drive after the backup cannot
 survive. CLI: `backup --used-blocks-only` / `clone --used-blocks-only`.
+
+### USN journal change tracking (`useUsnJournal`)
+
+Incremental backups can skip the whole-volume CRC scan: the helper asks the
+NTFS **USN journal** which files changed since the last backup, maps them
+through the MFT to changed block indices (`computeChangedBlockIndices`), and
+reads only those blocks. Cursor handling is **per partition**: each
+volume-backed partition's journal position is captured *before* the VSS
+snapshot is created (so changes made during snapshot creation are never lost)
+and written to a `.usn` sidecar next to the image after each run (v2 entries
+are `{partitionIndex, volume, usn}`; an old single-volume sidecar is still
+read, but is attached only to the partition whose volume it names — it is
+never inherited by other partitions).
+
+The journal path only wins when it can prove the answer is complete; anything
+uncertain falls back to reading every block:
+
+- no base image (a full backup always reads the whole source),
+- the sidecar missing or unreadable (the run re-covers from the beginning of
+  the journal — effectively a full scan — and rewrites a fresh sidecar),
+- a cursor recorded for a different volume than the partition being read
+  (e.g. after a repartition or restore), or a sidecar entry whose volume
+  identity no longer matches,
+- the journal being unavailable, changed mid-run, or unreadable for that
+  partition,
+- or more than `usnFullScanThreshold` of the partition's blocks flagged as
+  changed (a fraction 0–1: `0` accepts only an empty changed set, unset/`1`
+  never falls back). The threshold exists because for very large changes the
+  MFT walk costs more than the sequential full scan it was meant to save.
+
+GUI: the Backup Wizard's options step has a **USN journal (read only changed
+blocks for incrementals)** checkbox (on by default) with an optional **USN
+full-scan threshold (%)** input (0–100, blank = no limit) shown when checked.
+CLI: `backup <config.json> --usn [--usn-full-scan-threshold PCT]` (0–100,
+implies `--usn`). Both the in-app scheduler and `schedule install-backup`
+pass `useUsnJournal` / `usnFullScanThreshold` through to the job.
 
 ### Resumable imaging (`resume`)
 

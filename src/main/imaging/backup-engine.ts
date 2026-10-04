@@ -49,6 +49,10 @@ export interface BackupJobConfig {
   compressionThreads?: number;
   /** Use the USN journal to read only changed blocks for an incremental. */
   useUsnJournal?: boolean;
+  /** Fraction (0..1) of a partition's blocks that USN may report as changed
+   *  before that partition falls back to a full scan this run (undefined = no
+   *  limit; `0` = only an empty changed set is accepted). */
+  usnFullScanThreshold?: number;
   /** Only capture blocks containing allocated clusters (NTFS $Bitmap). Free
    *  space is skipped; non-NTFS partitions fall back to a full capture. */
   usedBlocksOnly?: boolean;
@@ -194,53 +198,49 @@ export class ImagingEngine implements BackupCoordinator {
       compressionThreads = Math.max(1, Math.min(4, os.cpus().length - 1));
     }
 
-    // USN-based changed-block tracking for incrementals. When enabled, read the
-    // base image's journal sidecar to know where to start; the helper records the
-    // new position after each run.
+    // USN-based changed-block tracking for incrementals. Every volume-backed
+    // partition gets a per-partition cursor; the base image's `.usn` sidecar
+    // overlays the recorded position(s) on top. Missing or unreadable sidecars
+    // are NOT fatal: the seeds stay at `lastUsn: 0` (this run full-scans) and
+    // the helper rewrites a fresh sidecar, repairing the chain.
     let useUsnJournal = config.useUsnJournal;
-    let usnVolume: string | undefined;
-    let usnLastUsn: number | undefined;
     let perPartitionUsn: Record<number, { volume: string; lastUsn: number }> | undefined;
     if (useUsnJournal) {
-      if (config.baseImagePath) {
-        try {
-          const raw = fs.readFileSync(`${config.baseImagePath}.usn`, 'utf-8');
-          const sidecar = JSON.parse(raw);
-          if (sidecar.version === 2 && Array.isArray(sidecar.partitions)) {
-            // Multi-volume format: { version: 2, partitions: [{ partitionIndex, volume, usn }] }
-            perPartitionUsn = {};
-            for (const entry of sidecar.partitions) {
-              perPartitionUsn[entry.partitionIndex] = {
-                volume: entry.volume,
-                lastUsn: Number(entry.usn)
-              };
-            }
-          } else if (sidecar.volume && sidecar.usn) {
-            // Legacy single-volume format: { volume, usn }
-            usnVolume = sidecar.volume;
-            usnLastUsn = Number(sidecar.usn);
-          }
-        } catch {
-          useUsnJournal = false; // no sidecar: fall back to a full scan
+      const volParts = items.filter((p) => p.readSource === 'volume' && p.volumeDevicePath);
+      if (volParts.length === 0) {
+        useUsnJournal = false; // no volume path to query
+      } else {
+        perPartitionUsn = {};
+        for (const vp of volParts) {
+          perPartitionUsn[vp.partitionIndex] = { volume: vp.volumeDevicePath!, lastUsn: 0 };
         }
-      }
-      // If no sidecar data, discover volume paths from the partition list.
-      // Build per-partition USN entries for all volume-backed partitions.
-      if (!perPartitionUsn && !usnVolume) {
-        const volParts = items.filter((p) => p.readSource === 'volume' && p.volumeDevicePath);
-        if (volParts.length > 0) {
-          // Multi-volume: build per-partition entries with no prior USN
-          // (first incremental after enabling USN — full scan, but subsequent
-          // runs will have per-partition cursors).
-          perPartitionUsn = {};
-          for (const vp of volParts) {
-            perPartitionUsn[vp.partitionIndex] = {
-              volume: vp.volumeDevicePath!,
-              lastUsn: 0 // 0 = start of journal (full scan for this run)
-            };
+        if (config.baseImagePath) {
+          try {
+            const raw = fs.readFileSync(`${config.baseImagePath}.usn`, 'utf-8');
+            const sidecar = JSON.parse(raw);
+            if (sidecar.version === 2 && Array.isArray(sidecar.partitions)) {
+              // Multi-volume format: { version: 2, partitions: [...] } — overlay
+              // each cursor, but only when the volume identity still matches
+              // (a repartitioned/renamed volume keeps its seed instead of
+              // querying a foreign journal against this partition's MFT).
+              for (const entry of sidecar.partitions) {
+                const seeded = perPartitionUsn[entry.partitionIndex];
+                if (seeded && seeded.volume === entry.volume) {
+                  seeded.lastUsn = Number(entry.usn);
+                }
+              }
+            } else if (sidecar.volume && sidecar.usn) {
+              // Legacy single-volume format: attach the cursor ONLY to the
+              // partition that actually is that volume; every other partition
+              // keeps `lastUsn: 0` and full-scans this run.
+              const match = volParts.find((vp) => vp.volumeDevicePath === sidecar.volume);
+              if (match) {
+                perPartitionUsn[match.partitionIndex].lastUsn = Number(sidecar.usn);
+              }
+            }
+          } catch {
+            // Missing/corrupt sidecar: keep the zero seeds (repairing run).
           }
-        } else {
-          useUsnJournal = false; // no volume path to query
         }
       }
     }
@@ -325,10 +325,14 @@ export class ImagingEngine implements BackupCoordinator {
       ...(resumeCheckpoint ? { resumeCheckpoint } : {}),
       ...(config.usedBlocksOnly ? { usedBlocksOnly: true } : {}),
       ...(useUsnJournal && perPartitionUsn
-        ? { useUsnJournal: true, perPartitionUsn }
-        : useUsnJournal && usnVolume
-          ? { useUsnJournal, usnVolume, usnLastUsn }
-          : {}),
+        ? {
+            useUsnJournal: true,
+            perPartitionUsn,
+            ...(config.usnFullScanThreshold !== undefined
+              ? { usnFullScanThreshold: config.usnFullScanThreshold }
+              : {})
+          }
+        : {}),
       sourceDisk: sourceDiskIdentity,
       ...(maxVolumeSize > 0 ? { maxVolumeSize } : {})
     };

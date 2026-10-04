@@ -1492,6 +1492,178 @@ describe('incremental and encrypted jobs', () => {
     expect(info.blocks.map((b) => b.blockIndex).sort((a, b) => a - b)).toEqual([32, 33]);
   });
 
+  const usnVolumeJob = (imagePath: string): ImagingJob => ({
+    type: 'backup',
+    imagePath,
+    blockSize: NTFS_CLUSTER,
+    compressionLevel: 3,
+    verificationEnabled: false,
+    partitions: [
+      {
+        diskIndex: 0,
+        partitionIndex: 2,
+        size: buildNtfsVolumeData().length,
+        offset: 0,
+        label: 'Volume',
+        readSource: 'volume',
+        volumeDevicePath: 'C:'
+      }
+    ]
+  });
+
+  const ntfsVolumes = (): { base: Buffer; changed: Buffer } => {
+    const base = buildNtfsVolumeData();
+    const changed = Buffer.from(base);
+    // Change big.bin (record 8, clusters 32..33) so an incremental sees a diff.
+    for (let i = 0; i < 2 * NTFS_CLUSTER; i++) changed[32 * NTFS_CLUSTER + i] = 0xee;
+    return { base, changed };
+  };
+
+  it('reads every block of a full backup even when USN tracking is enabled', async () => {
+    const { changed } = ntfsVolumes();
+    const totalBlocks = Math.ceil(changed.length / NTFS_CLUSTER);
+    const native: NativeImagingApi & { readBlocks: ReturnType<typeof vi.fn> } = {
+      createSnapshot: vi.fn(() => ({ id: 's', devicePath: '\\\\.\\ShadowCopy1' })),
+      deleteSnapshot: vi.fn(() => true),
+      getPhysicalDrivePath: vi.fn((i) => `\\\\.\\PhysicalDrive${i}`),
+      writeBlocks: vi.fn(() => 0),
+      readBlocks: vi.fn((_device: string, offset: bigint, length: bigint) =>
+        changed.subarray(Number(offset), Number(offset) + Number(length))
+      ),
+      // A journal claiming only big.bin changed must NOT shrink a full backup.
+      queryUsnJournal: vi.fn(() => [{ usn: 100n, fileReference: 8n, reason: 0, fileName: 'big.bin' }])
+    };
+    writeJob({
+      ...usnVolumeJob(fullPath),
+      useUsnJournal: true,
+      usnVolume: 'C:',
+      usnLastUsn: 1
+    });
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+    expect(readResult().blocksWritten).toBe(totalBlocks);
+    expect(native.readBlocks.mock.calls.length).toBe(totalBlocks);
+  });
+
+  it('records the pre-snapshot USN cursor in the sidecar', async () => {
+    const { changed } = ntfsVolumes();
+    let snapshotTaken = false;
+    const native: NativeImagingApi = {
+      createSnapshot: vi.fn(() => {
+        snapshotTaken = true;
+        return { id: 's', devicePath: '\\\\.\\ShadowCopy1' };
+      }),
+      deleteSnapshot: vi.fn(() => true),
+      getPhysicalDrivePath: vi.fn((i) => `\\\\.\\PhysicalDrive${i}`),
+      writeBlocks: vi.fn(() => 0),
+      readBlocks: vi.fn((_device: string, offset: bigint, length: bigint) =>
+        changed.subarray(Number(offset), Number(offset) + Number(length))
+      ),
+      // 4242 is the journal position at snapshot time; 999999 is a later
+      // position (post-capture) that must never reach the sidecar.
+      getUsnJournalInfo: vi.fn(() =>
+        snapshotTaken
+          ? { firstUsn: 0, nextUsn: 999999, lowestValidUsn: 0 }
+          : { firstUsn: 0, nextUsn: 4242, lowestValidUsn: 0 }
+      )
+    };
+    writeJob({
+      ...usnVolumeJob(fullPath),
+      useUsnJournal: true,
+      perPartitionUsn: { 2: { volume: 'C:', lastUsn: 1 } }
+    });
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+    expect(readResult().ok).toBe(true);
+    const sidecar = JSON.parse(fs.readFileSync(`${fullPath}.usn`, 'utf-8')) as {
+      version: number;
+      partitions: Array<{ partitionIndex: number; volume: string; usn: string }>;
+    };
+    expect(sidecar.version).toBe(2);
+    expect(sidecar.partitions).toEqual([{ partitionIndex: 2, volume: 'C:', usn: '4242' }]);
+  });
+
+  it('full-scans when the changed set exceeds usnFullScanThreshold', async () => {
+    const { base, changed } = ntfsVolumes();
+    const totalBlocks = Math.ceil(changed.length / NTFS_CLUSTER);
+    // Real base image first (separate reader, unmodified content).
+    const fullNative: NativeImagingApi = {
+      createSnapshot: vi.fn(() => ({ id: 's', devicePath: '\\\\.\\ShadowCopy1' })),
+      deleteSnapshot: vi.fn(() => true),
+      getPhysicalDrivePath: vi.fn((i) => `\\\\.\\PhysicalDrive${i}`),
+      writeBlocks: vi.fn(() => 0),
+      readBlocks: vi.fn((_device: string, offset: bigint, length: bigint) =>
+        base.subarray(Number(offset), Number(offset) + Number(length))
+      )
+    };
+    writeJob(usnVolumeJob(fullPath));
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, fullNative);
+    expect(readResult().ok).toBe(true);
+
+    const native: NativeImagingApi & { readBlocks: ReturnType<typeof vi.fn> } = {
+      createSnapshot: vi.fn(() => ({ id: 's', devicePath: '\\\\.\\ShadowCopy1' })),
+      deleteSnapshot: vi.fn(() => true),
+      getPhysicalDrivePath: vi.fn((i) => `\\\\.\\PhysicalDrive${i}`),
+      writeBlocks: vi.fn(() => 0),
+      readBlocks: vi.fn((_device: string, offset: bigint, length: bigint) =>
+        changed.subarray(Number(offset), Number(offset) + Number(length))
+      ),
+      queryUsnJournal: vi.fn(() => [{ usn: 100n, fileReference: 8n, reason: 0, fileName: 'big.bin' }])
+    };
+    writeJob({
+      ...usnVolumeJob(deltaPath),
+      baseImagePath: fullPath,
+      useUsnJournal: true,
+      usnVolume: 'C:',
+      usnLastUsn: 1,
+      usnFullScanThreshold: 0 // any changed block at all → give up on the journal
+    });
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+    // Every block was read (threshold exceeded) — the MFT walk adds its own
+    // readBlocks calls, so this is a lower bound, not an exact count.
+    expect(native.readBlocks.mock.calls.length).toBeGreaterThanOrEqual(totalBlocks);
+    // …but only the CRC-differing frames were written.
+    expect(readResult().blocksWritten).toBe(2);
+    expect(readImageInfo(deltaPath).blocks.map((b) => b.blockIndex).sort((a, b) => a - b)).toEqual([32, 33]);
+  });
+
+  it('ignores a USN cursor that belongs to a different volume', async () => {
+    const { base, changed } = ntfsVolumes();
+    const totalBlocks = Math.ceil(changed.length / NTFS_CLUSTER);
+    const fullNative: NativeImagingApi = {
+      createSnapshot: vi.fn(() => ({ id: 's', devicePath: '\\\\.\\ShadowCopy1' })),
+      deleteSnapshot: vi.fn(() => true),
+      getPhysicalDrivePath: vi.fn((i) => `\\\\.\\PhysicalDrive${i}`),
+      writeBlocks: vi.fn(() => 0),
+      readBlocks: vi.fn((_device: string, offset: bigint, length: bigint) =>
+        base.subarray(Number(offset), Number(offset) + Number(length))
+      )
+    };
+    writeJob(usnVolumeJob(fullPath));
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, fullNative);
+    expect(readResult().ok).toBe(true);
+
+    const native: NativeImagingApi & { readBlocks: ReturnType<typeof vi.fn> } = {
+      createSnapshot: vi.fn(() => ({ id: 's', devicePath: '\\\\.\\ShadowCopy1' })),
+      deleteSnapshot: vi.fn(() => true),
+      getPhysicalDrivePath: vi.fn((i) => `\\\\.\\PhysicalDrive${i}`),
+      writeBlocks: vi.fn(() => 0),
+      readBlocks: vi.fn((_device: string, offset: bigint, length: bigint) =>
+        changed.subarray(Number(offset), Number(offset) + Number(length))
+      ),
+      queryUsnJournal: vi.fn(() => [{ usn: 100n, fileReference: 8n, reason: 0, fileName: 'big.bin' }])
+    };
+    writeJob({
+      ...usnVolumeJob(deltaPath),
+      baseImagePath: fullPath,
+      useUsnJournal: true,
+      usnVolume: '\\\\?\\Volume{foreign}\\', // not this partition's volume
+      usnLastUsn: 1
+    });
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+    // Foreign cursor → treated as "no cursor" → full read, correct frames.
+    expect(native.readBlocks.mock.calls.length).toBe(totalBlocks);
+    expect(readResult().blocksWritten).toBe(2);
+  });
+
   it('restore drill validates the written NTFS filesystem when validateAfterWrite is set', async () => {
     const imagePath = path.join(dir, 'drill.opbs');
     const vol = buildCanonicalNtfsVolumeData({ totalClusters: 64 });

@@ -655,6 +655,11 @@ export class BackupScheduler {
       compressionType: config.compressionType,
       compressionThreads: config.compressionThreads,
       verificationEnabled: config.verificationEnabled,
+      ...(config.usedBlocksOnly ? { usedBlocksOnly: true } : {}),
+      ...(config.useUsnJournal ? { useUsnJournal: true } : {}),
+      ...(config.usnFullScanThreshold !== undefined
+        ? { usnFullScanThreshold: config.usnFullScanThreshold }
+        : {}),
       ...(baseImagePath ? { baseImagePath } : {}),
       ...(config.passphrase ? { passphrase: config.passphrase } : {})
     };

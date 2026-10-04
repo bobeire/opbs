@@ -31,6 +31,8 @@ interface BackupForm {
   compressionThreads: number;
   verificationEnabled: boolean;
   usedBlocksOnly: boolean;
+  useUsnJournal: boolean;
+  usnThresholdPct: string;
   resume: boolean;
   baseImagePath: string;
   passphrase: string;
@@ -105,6 +107,12 @@ const asList = (v: unknown, fallback: number[]): number[] =>
 const asScheme = (v: unknown, fallback: string): string =>
   v === 'gpt' || v === 'mbr' || v === 'auto' ? v : fallback;
 
+/** Parse a 0-100% USN threshold field into the 0..1 fraction (undefined = invalid/blank). */
+const parseUsnPctInput = (raw: string): number | undefined => {
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 && n <= 100 ? n / 100 : undefined;
+};
+
 const DEFAULT_BACKUP: BackupForm = {
   sourceDiskIndex: null,
   sourcePartitions: [],
@@ -115,6 +123,8 @@ const DEFAULT_BACKUP: BackupForm = {
   compressionThreads: 0,
   verificationEnabled: true,
   usedBlocksOnly: true,
+  useUsnJournal: true,
+  usnThresholdPct: '',
   resume: false,
   baseImagePath: '',
   passphrase: ''
@@ -341,6 +351,8 @@ function ConfigBuilder() {
             compressionThreads: backup.compressionThreads > 0 ? backup.compressionThreads : undefined,
             verificationEnabled: backup.verificationEnabled,
             usedBlocksOnly: backup.usedBlocksOnly,
+            useUsnJournal: backup.useUsnJournal ? true : undefined,
+            usnFullScanThreshold: parseUsnPctInput(backup.usnThresholdPct),
             resume: backup.resume ? true : undefined,
             imageName: backup.imageName.trim(),
             baseImagePath: backup.baseImagePath.trim(),
@@ -502,6 +514,11 @@ function ConfigBuilder() {
         compressionThreads: asNum(rest.compressionThreads, prev.compressionThreads),
         verificationEnabled: asBool(rest.verificationEnabled, prev.verificationEnabled),
         usedBlocksOnly: asBool(rest.usedBlocksOnly, prev.usedBlocksOnly),
+        useUsnJournal: asBool(rest.useUsnJournal, prev.useUsnJournal),
+        usnThresholdPct:
+          typeof rest.usnFullScanThreshold === 'number' && Number.isFinite(rest.usnFullScanThreshold)
+            ? String(Math.max(0, Math.min(100, Math.round(rest.usnFullScanThreshold * 100))))
+            : prev.usnThresholdPct,
         resume: asBool(rest.resume, prev.resume),
         baseImagePath: asStr(rest.baseImagePath, prev.baseImagePath),
         passphrase: asStr(rest.passphrase, prev.passphrase)
@@ -722,6 +739,27 @@ function ConfigBuilder() {
               />
               Used blocks only (skip free space, NTFS)
             </label>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={backup.useUsnJournal}
+                onChange={(e) => setBackup((prev) => ({ ...prev, useUsnJournal: e.target.checked }))}
+              />
+              USN journal (incremental changed-block tracking)
+            </label>
+            {backup.useUsnJournal && (
+              <div className="builder-row">
+                <label>USN full-scan threshold (%)</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  placeholder="No limit"
+                  value={backup.usnThresholdPct}
+                  onChange={(e) => setBackup((prev) => ({ ...prev, usnThresholdPct: e.target.value }))}
+                />
+              </div>
+            )}
             <label className="checkbox-label">
               <input
                 type="checkbox"

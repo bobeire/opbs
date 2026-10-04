@@ -65,6 +65,56 @@ function createFakeEnumerator(): DiskEnumerator {
   } as unknown as DiskEnumerator;
 }
 
+function createVolumeBackedEnumerator(): DiskEnumerator {  return {
+    getDisks: vi.fn(async () => [
+      { index: 0, model: 'NVMe Corp SSD 1TB', size: 1_000_000_000_000, serial: 'SN-ABCD-1234' }
+    ]),
+    getPartitions: vi.fn(async () => [
+      {
+        diskIndex: 0,
+        partitionIndex: 0,
+        offset: 1048576,
+        size: 104857600,
+        type: 7,
+        label: 'C',
+        driveLetter: 'C'
+      },
+      {
+        diskIndex: 0,
+        partitionIndex: 1,
+        offset: 105906176,
+        size: 104857600,
+        type: 7,
+        label: 'D',
+        driveLetter: 'D'
+      }
+    ]),
+    getPhysicalDrivePath: vi.fn((i: number) => `\\\\.\\PhysicalDrive${i}`),
+    getVolumePath: vi.fn(async (_diskIndex: number, offset: number) =>
+      offset === 1048576 ? '\\\\?\\Volume{c}\\' : '\\\\?\\Volume{d}\\'
+    )
+  } as unknown as DiskEnumerator;
+}
+
+/** Header-only image good enough for `buildJob`'s base-image partition check. */
+function writeBaseImage(imgPath: string, partitionCount: number): void {
+  const header: ImageHeader = {
+    version: IMAGE_VERSION,
+    timestamp: Date.now(),
+    totalBytes: 0,
+    blockSize: 1024 * 1024,
+    compressionId: COMPRESSION_DEFLATE,
+    partitionCount,
+    flags: 0,
+    blockIndexOffset: 0,
+    cipherId: CIPHER_NONE,
+    kdfIterations: 0,
+    salt: Buffer.alloc(0),
+    baseImagePath: ''
+  };
+  fs.writeFileSync(imgPath, encodeHeader(header));
+}
+
 describe('ImagingEngine', () => {
   afterEach(() => {
     try {
@@ -158,6 +208,107 @@ describe('ImagingEngine', () => {
         usedBlocksOnly: true
       });
       expect(used.usedBlocksOnly).toBe(true);
+    });
+
+    it('seeds per-partition USN cursors when the base image has no sidecar', async () => {
+      const base = path.join(dir, 'base.opbs');
+      writeBaseImage(base, 2);
+      const job = await new ImagingEngine(createVolumeBackedEnumerator()).buildJob({
+        sourceDiskIndex: 0,
+        sourcePartitions: [0, 1],
+        destinationPath: dir,
+        compressionLevel: 3,
+        verificationEnabled: false,
+        baseImagePath: base,
+        useUsnJournal: true
+      });
+      // Missing sidecar no longer disables USN for the chain: the run
+      // full-scans and rewrites a fresh sidecar (lastUsn 0 seeds).
+      expect(job.useUsnJournal).toBe(true);
+      expect(job.perPartitionUsn).toEqual({
+        0: { volume: '\\\\?\\Volume{c}\\', lastUsn: 0 },
+        1: { volume: '\\\\?\\Volume{d}\\', lastUsn: 0 }
+      });
+      expect(job.usnVolume).toBeUndefined();
+      expect(job.usnFullScanThreshold).toBeUndefined();
+    });
+
+    it('attaches a legacy sidecar cursor only to its own volume', async () => {
+      const base = path.join(dir, 'base.opbs');
+      writeBaseImage(base, 2);
+      fs.writeFileSync(
+        `${base}.usn`,
+        JSON.stringify({ volume: '\\\\?\\Volume{c}\\', usn: '777' })
+      );
+      const job = await new ImagingEngine(createVolumeBackedEnumerator()).buildJob({
+        sourceDiskIndex: 0,
+        sourcePartitions: [0, 1],
+        destinationPath: dir,
+        compressionLevel: 3,
+        verificationEnabled: false,
+        baseImagePath: base,
+        useUsnJournal: true
+      });
+      expect(job.perPartitionUsn).toEqual({
+        0: { volume: '\\\\?\\Volume{c}\\', lastUsn: 777 },
+        // Partition 1 must NOT inherit the other volume's journal cursor.
+        1: { volume: '\\\\?\\Volume{d}\\', lastUsn: 0 }
+      });
+    });
+
+    it('overlays v2 sidecar cursors by volume identity', async () => {
+      const base = path.join(dir, 'base.opbs');
+      writeBaseImage(base, 2);
+      fs.writeFileSync(
+        `${base}.usn`,
+        JSON.stringify({
+          version: 2,
+          partitions: [
+            { partitionIndex: 0, volume: '\\\\?\\Volume{c}\\', usn: '55' },
+            // Stale identity after a repartition: rejected, keeps the seed.
+            { partitionIndex: 1, volume: '\\\\?\\Volume{old}\\', usn: '99' }
+          ]
+        })
+      );
+      const job = await new ImagingEngine(createVolumeBackedEnumerator()).buildJob({
+        sourceDiskIndex: 0,
+        sourcePartitions: [0, 1],
+        destinationPath: dir,
+        compressionLevel: 3,
+        verificationEnabled: false,
+        baseImagePath: base,
+        useUsnJournal: true
+      });
+      expect(job.perPartitionUsn).toEqual({
+        0: { volume: '\\\\?\\Volume{c}\\', lastUsn: 55 },
+        1: { volume: '\\\\?\\Volume{d}\\', lastUsn: 0 }
+      });
+    });
+
+    it('forwards usnFullScanThreshold and disables USN without volume-backed partitions', async () => {
+      const thresholdJob = await new ImagingEngine(createVolumeBackedEnumerator()).buildJob({
+        sourceDiskIndex: 0,
+        sourcePartitions: [0],
+        destinationPath: dir,
+        compressionLevel: 3,
+        verificationEnabled: false,
+        useUsnJournal: true,
+        usnFullScanThreshold: 0.25
+      });
+      expect(thresholdJob.useUsnJournal).toBe(true);
+      expect(thresholdJob.usnFullScanThreshold).toBe(0.25);
+
+      // The default fixture has no volume-backed partitions (all physical).
+      const physicalJob = await engine.buildJob({
+        sourceDiskIndex: 0,
+        sourcePartitions: [0, 2],
+        destinationPath: dir,
+        compressionLevel: 3,
+        verificationEnabled: false,
+        useUsnJournal: true
+      });
+      expect(physicalJob.useUsnJournal).toBeUndefined();
+      expect(physicalJob.perPartitionUsn).toBeUndefined();
     });
 
     it('defaults compression threads for zstd and honors explicit config', async () => {

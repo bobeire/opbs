@@ -155,10 +155,13 @@ Commands:
                                          (default: backup location). Shows how many frames were
                                          already written so a later backup --resume can continue.
   backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume]
-                           [--repo <dir>] [--lock-days N]
+                           [--usn] [--usn-full-scan-threshold PCT] [--repo <dir>] [--lock-days N]
                            Run a backup job (config as JSON file). With --repo, the image is
                            written into the repository's images/ directory and journaled as
                            immutable for --lock-days days (default: the repository default).
+                           --usn reads only NTFS-journal-changed blocks for incrementals;
+                           --usn-full-scan-threshold PCT (0-100) gives up on the journal
+                           when it flags more than PCT% of a partition (implies --usn).
   restore <config.json> [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk] Run a restore job (config as JSON file).
   wizard                             Interactive restore wizard: scans the drives for .opbs
                                      images, picks a target disk and partitions, preflights,
@@ -519,7 +522,7 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   const configPath = ctx.argv[0];
   if (!configPath) {
     console.error(
-      'Usage: backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume] [--source-vhd <path>] [--repo <dir|s3://bucket/prefix>] [--lock-days N]'
+      'Usage: backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume] [--usn] [--usn-full-scan-threshold PCT] [--source-vhd <path>] [--repo <dir|s3://bucket/prefix>] [--lock-days N]'
     );
     return 1;
   }
@@ -579,6 +582,20 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   }
   if (ctx.argv.includes('--used-blocks-only')) {
     config.usedBlocksOnly = true;
+  }
+  if (ctx.argv.includes('--usn')) {
+    config.useUsnJournal = true;
+  }
+  const usnThresholdFlag = flagValue(ctx.argv, '--usn-full-scan-threshold');
+  if (usnThresholdFlag !== undefined) {
+    const pct = Number(usnThresholdFlag);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      console.error('--usn-full-scan-threshold must be a percentage between 0 and 100');
+      return 1;
+    }
+    // The knob implies the feature: a threshold without USN tracking is noise.
+    config.useUsnJournal = true;
+    config.usnFullScanThreshold = pct / 100;
   }
   if (ctx.argv.includes('--resume')) {
     config.resume = true;

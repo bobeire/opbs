@@ -45,6 +45,8 @@ interface BackupConfig {
   compressionThreads?: number;
   verificationEnabled: boolean;
   usedBlocksOnly?: boolean;
+  useUsnJournal?: boolean;
+  usnFullScanThreshold?: number;
   baseImagePath?: string;
   passphrase?: string;
   resume?: boolean;
@@ -115,6 +117,12 @@ function phaseLabel(phase?: string): string {
   }
 }
 
+/** Parse a 0-100% USN threshold field into the 0..1 fraction (undefined = invalid/blank). */
+function parseUsnPct(raw: string): number | undefined {
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 && n <= 100 ? n / 100 : undefined;
+}
+
 function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeProgress, backupRunning, onViewImage }: BackupWizardProps) {
   const [currentStep, setCurrentStep] = useState<WizardStep>(
     backupRunning && activeProgress ? 'progress' : 'select_source'
@@ -133,6 +141,8 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   );
   const [verificationEnabled, setVerificationEnabled] = useState(true);
   const [usedBlocksOnly, setUsedBlocksOnly] = useState(true);
+  const [useUsnJournal, setUseUsnJournal] = useState(true);
+  const [usnThresholdPct, setUsnThresholdPct] = useState('');
   const [incrementalEnabled, setIncrementalEnabled] = useState(false);
   const [resumeEnabled, setResumeEnabled] = useState(false);
   const [passphrase, setPassphrase] = useState('');
@@ -381,6 +391,12 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     );
     setVerificationEnabled(profile.verificationEnabled ?? true);
     setUsedBlocksOnly(profile.usedBlocksOnly ?? true);
+    setUseUsnJournal(profile.useUsnJournal ?? true);
+    setUsnThresholdPct(
+      profile.usnFullScanThreshold !== undefined
+        ? String(Math.round(profile.usnFullScanThreshold * 100))
+        : ''
+    );
     setIncrementalEnabled(profile.incremental ?? false);
     setResumeEnabled(profile.resume ?? false);
     setPassphrase(profile.passphrase ?? '');
@@ -437,7 +453,11 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       compressionThreads,
       verificationEnabled,
       usedBlocksOnly,
+      useUsnJournal,
       incremental: incrementalEnabled,
+      ...(useUsnJournal && parseUsnPct(usnThresholdPct) !== undefined
+        ? { usnFullScanThreshold: parseUsnPct(usnThresholdPct) }
+        : {}),
       ...(resumeEnabled ? { resume: true } : {}),
       ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {}),
       ...(repoDir ? { repoDir, repoLockDays } : {})
@@ -468,6 +488,10 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       compressionThreads,
       verificationEnabled,
       usedBlocksOnly,
+      useUsnJournal,
+      ...(useUsnJournal && parseUsnPct(usnThresholdPct) !== undefined
+        ? { usnFullScanThreshold: parseUsnPct(usnThresholdPct) }
+        : {}),
       ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {}),
       ...(resumeEnabled ? { resume: true } : {}),
       ...(repoDir ? { repoDir, repoLockDays } : {})
@@ -973,6 +997,40 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                 <label className="checkbox-label">
                   <input
                     type="checkbox"
+                    checked={useUsnJournal}
+                    onChange={(e) => setUseUsnJournal(e.target.checked)}
+                  />
+                  USN journal (read only changed blocks for incrementals)
+                </label>
+                <p className="field-hint">
+                  Asks NTFS which files changed since the last backup and reads only their blocks.
+                  When the journal is unavailable or uncertain the backup silently reads everything,
+                  so this is always safe — just faster when it works.
+                </p>
+              </div>
+
+              {useUsnJournal && (
+                <div className="option-group">
+                  <label>USN full-scan threshold (%):</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    placeholder="No limit"
+                    value={usnThresholdPct}
+                    onChange={(e) => setUsnThresholdPct(e.target.value)}
+                  />
+                  <p className="field-hint">
+                    When the journal flags more than this share of a partition as changed, read every
+                    block instead (0-100; blank = never fall back).
+                  </p>
+                </div>
+              )}
+
+              <div className="option-group">
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
                     checked={incrementalEnabled}
                     onChange={(e) => setIncrementalEnabled(e.target.checked)}
                   />
@@ -1057,6 +1115,14 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                 <li>Compression: Level {compressionLevel} ({compressionType}{compressionThreads > 1 ? `, ${compressionThreads} threads` : ''})</li>
                 <li>Verification: {verificationEnabled ? 'Enabled' : 'Disabled'}</li>
                 <li>Used data only: {usedBlocksOnly ? 'Enabled (skips free space)' : 'Disabled (whole partition)'}</li>
+                <li>
+                  USN journal:{' '}
+                  {useUsnJournal
+                    ? parseUsnPct(usnThresholdPct) !== undefined
+                      ? `Enabled (full scan above ${Math.round(parseUsnPct(usnThresholdPct)! * 100)}%)`
+                      : 'Enabled (no fallback limit)'
+                    : 'Disabled (incrementals read everything)'}
+                </li>
                 <li>Incremental: {incrementalEnabled && baseImagePath ? 'Enabled' : 'Full backup'}</li>
                 <li>Resume: {resumeEnabled ? 'Enabled (continues interrupted backups)' : 'Disabled'}</li>
                 <li>Encryption: {passphrase.trim() ? 'AES-256-GCM' : 'None'}</li>

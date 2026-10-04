@@ -359,6 +359,28 @@ export async function runBackupJob(
       cursor = dataOffset;
     }
 
+    // Capture each tracked volume's USN cursor BEFORE the snapshot freezes.
+    // The image reflects the snapshot moment: a cursor queried after capture +
+    // verify would exclude changes that are neither in this image nor in the
+    // next delta (stale blocks in the chain until those files change again).
+    let usnCursors: Map<string, string> | undefined;
+    if (job.useUsnJournal && native.getUsnJournalInfo) {
+      usnCursors = new Map();
+      const volumes = job.perPartitionUsn
+        ? [...new Set(Object.values(job.perPartitionUsn).map((e) => e.volume))]
+        : job.usnVolume
+          ? [job.usnVolume]
+          : [];
+      for (const volume of volumes) {
+        try {
+          usnCursors.set(volume, native.getUsnJournalInfo(volume).nextUsn.toString());
+        } catch {
+          // Cursor unreadable here — no sidecar entry for this volume (its
+          // next incremental simply full-scans).
+        }
+      }
+    }
+
     try {
       createSnapshots(job);
     } catch (error) {
@@ -433,13 +455,22 @@ export async function runBackupJob(
       // prior journal USN, only read the blocks touched by changed files. If the
       // journal cannot be used, `changedBlocks` is null and the full scan runs.
       let changedBlocks: Set<number> | null = null;
-      if (job.useUsnJournal && part.readSource === 'volume' && part.volumeDevicePath) {
-        // Per-partition USN takes precedence (multi-volume); fall back to
-        // single-volume legacy fields.
+      // Incremental-only: a full backup must read every block regardless of
+      // what the journal says. And only the partition's OWN volume cursor may
+      // be queried against its MFT — a cursor from another volume (legacy
+      // single-volume sidecar, repartition) maps file references to the wrong
+      // MFT and silently skips genuinely changed blocks.
+      if (
+        job.useUsnJournal &&
+        job.baseImagePath &&
+        part.readSource === 'volume' &&
+        part.volumeDevicePath
+      ) {
         const usnEntry = job.perPartitionUsn?.[part.partitionIndex];
         const volumePath = usnEntry?.volume ?? job.usnVolume;
         const lastUsn = usnEntry?.lastUsn ?? job.usnLastUsn;
-        if (volumePath && lastUsn !== undefined) {
+        const ownVolume = usnEntry ? usnEntry.volume === part.volumeDevicePath : volumePath === part.volumeDevicePath;
+        if (volumePath && lastUsn !== undefined && ownVolume) {
           changedBlocks = computeChangedBlockIndices({
             native,
             volumePath,
@@ -449,6 +480,20 @@ export async function runBackupJob(
             blockSize,
             lastUsn
           });
+          // Tunable give-up: when the journal flags most of the partition as
+          // changed, the MFT walk bought nothing — full scan instead. `0`
+          // disables USN except for a perfectly clean volume; unset/`1`
+          // never gives up.
+          if (changedBlocks && job.usnFullScanThreshold !== undefined) {
+            const totalBlocks = Math.ceil(part.size / blockSize);
+            if (changedBlocks.size > job.usnFullScanThreshold * totalBlocks) {
+              logger.info(
+                `${part.label}: USN reported ${changedBlocks.size}/${totalBlocks} changed blocks ` +
+                  `(threshold ${job.usnFullScanThreshold}) — full scan`
+              );
+              changedBlocks = null;
+            }
+          }
         }
       }
 
@@ -807,23 +852,20 @@ export async function runBackupJob(
     writeProgress('completed');
 
     // Record the journal position so the next incremental can use USN tracking.
-    if (job.useUsnJournal && native.getUsnJournalInfo) {
+    // The cursors were captured before the snapshot froze (see above), so the
+    // sidecar matches the state this image actually contains.
+    if (job.useUsnJournal && native.getUsnJournalInfo && usnCursors) {
       try {
         if (job.perPartitionUsn) {
-          // Multi-volume: query each partition's journal and write v2 sidecar.
+          // Multi-volume: one v2 sidecar entry per tracked partition.
           const entries: Array<{ partitionIndex: number; volume: string; usn: string }> = [];
           for (const [pi, entry] of Object.entries(job.perPartitionUsn)) {
-            try {
-              const info = native.getUsnJournalInfo(entry.volume);
-              entries.push({
-                partitionIndex: Number(pi),
-                volume: entry.volume,
-                usn: info.nextUsn.toString()
-              });
-            } catch {
-              // Journal query failed for this volume — skip it (will fall back
-              // to full scan on next incremental for this partition).
+            const usn = usnCursors.get(entry.volume);
+            if (usn !== undefined) {
+              entries.push({ partitionIndex: Number(pi), volume: entry.volume, usn });
             }
+            // Cursor unreadable for this volume — no entry (it falls back to a
+            // full scan on the next incremental instead of reusing a stale one).
           }
           if (entries.length > 0) {
             fs.writeFileSync(
@@ -832,12 +874,14 @@ export async function runBackupJob(
             );
           }
         } else if (job.usnVolume) {
-          // Legacy single-volume format.
-          const info = native.getUsnJournalInfo(job.usnVolume);
-          fs.writeFileSync(
-            `${job.imagePath}.usn`,
-            JSON.stringify({ volume: job.usnVolume, usn: info.nextUsn.toString() })
-          );
+          // Legacy single-volume format (hand-built jobs only).
+          const usn = usnCursors.get(job.usnVolume);
+          if (usn !== undefined) {
+            fs.writeFileSync(
+              `${job.imagePath}.usn`,
+              JSON.stringify({ volume: job.usnVolume, usn })
+            );
+          }
         }
       } catch {
         /* best-effort: USN tracking falls back to a full scan next time */
