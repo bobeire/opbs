@@ -6,14 +6,15 @@ export function resolveNativePath(): string {
     return process.env.OPBS_NATIVE_PATH;
   }
 
-  // Dev: ./dist/utils/native-loader.js -> ../../src/native/build/Release/opbs_native.node
-  let devPath = path.join(__dirname, '../../src/native/build/Release/opbs_native.node');
-  // Dev from helper: ./dist/helper/*.js -> ../../../src/native/build/Release/opbs_native.node
-  if (__filename.includes(path.sep + 'helper' + path.sep)) {
-    devPath = path.join(__dirname, '../../../src/native/build/Release/opbs_native.node');
-  }
-  if (fs.existsSync(devPath)) {
-    return devPath;
+  // Dev candidates (first existing wins):
+  //   ./dist/utils/native-loader.js -> ../../src/native/build/Release/...
+  //   ./dist/helper/*.js or src/main/utils (vitest/tsx) -> ../../../src/native/...
+  const devCandidates = [
+    path.join(__dirname, '../../src/native/build/Release/opbs_native.node'),
+    path.join(__dirname, '../../../src/native/build/Release/opbs_native.node')
+  ];
+  for (const candidate of devCandidates) {
+    if (fs.existsSync(candidate)) return candidate;
   }
 
   // Packaged: native module is unpacked from asar (process.resourcesPath only
@@ -39,7 +40,7 @@ export function resolveNativePath(): string {
     }
   }
 
-  return devPath;
+  return devCandidates[0];
 }
 
 export function loadNative<T = Record<string, unknown>>(): T {

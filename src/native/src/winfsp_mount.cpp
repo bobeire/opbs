@@ -25,6 +25,7 @@
 #include <condition_variable>
 #include <cwchar>
 #include <windows.h>
+#include <tlhelp32.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <dbt.h>
@@ -372,6 +373,7 @@ static uint64_t ReadU64(const Napi::Object &Obj, const char *Key, uint64_t Fallb
 }
 
 // The TSF callback. Runs on the Node main thread.
+static void HeapCheck(const char *Where);
 static void BridgeCallback(Napi::Env Env, Napi::Function JsHandler, void *RawContext)
 {
     Bridge *B = static_cast<Bridge *>(RawContext);
@@ -457,6 +459,7 @@ static void BridgeCallback(Napi::Env Env, Napi::Function JsHandler, void *RawCon
     }
 
     B->Done = true;
+    HeapCheck("BridgeCallback done");
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +526,22 @@ static LONG WINAPI OpbsExceptionFilter(PEXCEPTION_POINTERS P)
              P ? P->ExceptionRecord->ExceptionCode : 0,
              P ? P->ExceptionRecord->ExceptionAddress : nullptr,
              GetCurrentThreadId());
+    if (P && P->ExceptionRecord->ExceptionAddress)
+    {
+        HMODULE HM = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(P->ExceptionRecord->ExceptionAddress),
+                               &HM) &&
+            HM)
+        {
+            WCHAR Name[MAX_PATH] = L"?";
+            GetModuleFileNameW(HM, Name, MAX_PATH);
+            CrashLog("faultmod=%ls+0x%IX\r\n", Name,
+                     reinterpret_cast<uint8_t *>(P->ExceptionRecord->ExceptionAddress) -
+                         reinterpret_cast<uint8_t *>(HM));
+        }
+    }
     if (P && P->ContextRecord)
     {
         CrashLog("regs rip=0x%IX rsp=0x%IX rax=0x%IX rcx=0x%IX rdx=0x%IX rbx=0x%IX rbp=0x%IX rsi=0x%IX rdi=0x%IX\r\n",
@@ -596,6 +615,8 @@ static PSECURITY_DESCRIPTOR BuildDefaultSecurity(SIZE_T *POutSize)
 
 static bool EnsureSecurity(MountState *St)
 {
+    static std::mutex SecMutex;
+    std::lock_guard<std::mutex> Lock(SecMutex);
     if (St->SecurityReady)
         return St->SecurityDescriptor != nullptr;
     St->SecurityDescriptor = BuildDefaultSecurity(&St->SecurityDescriptorSize);
@@ -667,9 +688,139 @@ static void Trace(ULONG TId, const char *Fmt, ...)
     va_end(Ap);
 }
 
+// ---------------------------------------------------------------------------
+// Optional process-heap validation (OPBS_HEAPCHECK=1).
+//
+// Every NT heap in the process is validated at the bridge points. On failure
+// we log the op plus a symbolized stack to %TEMP%\opbs-heapcheck.log and
+// terminate with exit code 0xDEAD so a test run identifies the first bridge
+// point that ran after the corrupting write. When healthy, each check appends
+// an "ok <site>" line, which doubles as a progress trail if the process dies
+// with 0xC0000374 before any check fails.
+// ---------------------------------------------------------------------------
+
+static FILE *HeapLogFile()
+{
+    static std::mutex M;
+    static FILE *f = nullptr;
+    static bool tried = false;
+    std::lock_guard<std::mutex> Guard(M);
+    if (!tried)
+    {
+        tried = true;
+        if (getenv("OPBS_HEAPCHECK"))
+        {
+            WCHAR Dir[MAX_PATH];
+            WCHAR Full[MAX_PATH];
+            if (GetTempPathW(MAX_PATH, Dir) && Dir[0] &&
+                SUCCEEDED(StringCbCopyW(Full, sizeof Full, Dir)) &&
+                SUCCEEDED(StringCbCatW(Full, sizeof Full, L"opbs-heapcheck.log")))
+                f = _wfopen(Full, L"w");
+        }
+    }
+    return f;
+}
+
+static void HeapLogStack(FILE *f)
+{
+    SymInitializeW(GetCurrentProcess(), nullptr, TRUE);
+    PVOID Frames[32];
+    USHORT Cnt = CaptureStackBackTrace(1, 32, Frames, nullptr);
+    for (USHORT I = 0; I < Cnt; I++)
+    {
+        DWORD64 Addr = (DWORD64)(uintptr_t)Frames[I];
+        alignas(SYMBOL_INFO) char SymBuf[sizeof(SYMBOL_INFO) + 512];
+        auto *S = new (SymBuf) SYMBOL_INFO();
+        S->MaxNameLen = 512;
+        S->SizeOfStruct = sizeof(SYMBOL_INFO);
+        DWORD64 Disp = 0;
+        if (SymFromAddr(GetCurrentProcess(), Addr, &Disp, S))
+            fprintf(f, "  fn[%u]=0x%llX %s+0x%llX\n", I, (unsigned long long)Addr,
+                    S->Name, (unsigned long long)Disp);
+        else
+            fprintf(f, "  fn[%u]=0x%llX\n", I, (unsigned long long)Addr);
+    }
+}
+
+static void EnsureHeapWatchdog()
+{
+    static std::mutex M;
+    static bool started = false;
+    {
+        std::lock_guard<std::mutex> Guard(M);
+        if (started)
+            return;
+        started = true;
+    }
+    CreateThread(nullptr, 0,
+                 [](LPVOID) -> DWORD {
+                     for (;;)
+                     {
+                         Sleep(150);
+                         HeapCheck("watchdog");
+                     }
+                     return 0;
+                 },
+                 nullptr, 0, nullptr);
+}
+
+static void HeapCheck(const char *Where)
+{
+    FILE *f = HeapLogFile();
+    if (!f)
+        return;
+    EnsureHeapWatchdog();
+    HANDLE Snap = CreateToolhelp32Snapshot(TH32CS_SNAPHEAPLIST, GetCurrentProcessId());
+    if (Snap == INVALID_HANDLE_VALUE)
+    {
+        fprintf(f, "snap-fail at %s\n", Where);
+        fflush(f);
+        return;
+    }
+    HEAPLIST32 HL;
+    memset(&HL, 0, sizeof HL);
+    HL.dwSize = sizeof HL;
+    bool Bad = false;
+    if (Heap32ListFirst(Snap, &HL))
+    {
+        do
+        {
+            if (!HeapValidate((HANDLE)(uintptr_t)HL.th32HeapID, 0, nullptr))
+            {
+                fprintf(f, "CORRUPT heap=%p at %s tick=%lu\n", (void *)(uintptr_t)HL.th32HeapID, Where,
+                        (unsigned long)GetTickCount());
+                Bad = true;
+                break;
+            }
+        } while (Heap32ListNext(Snap, &HL));
+    }
+    CloseHandle(Snap);
+    if (Bad)
+    {
+        HeapLogStack(f);
+        fflush(f);
+        TerminateProcess(GetCurrentProcess(), 0xDEADu);
+    }
+    else
+    {
+        fprintf(f, "ok %s tick=%lu pid=%lu\n", Where, (unsigned long)GetTickCount(),
+                (unsigned long)GetCurrentProcessId());
+        fflush(f);
+    }
+}
+
+
 static int64_t CallJs(MountState *St, Bridge &B)
 {
     Trace(GetCurrentThreadId(), "CallJs op=%s path=%S", B.Op.c_str(), B.Path.c_str());
+    // OPBS_SERIAL=1: run at most one bridge call at a time. Diagnostic for the
+    // multi-dispatcher-thread race hypothesis (shared g_cv / concurrent TSF
+    // calls); no effect unless the env var is set.
+    static std::mutex SerialMutex;
+    static const bool Serialize = getenv("OPBS_SERIAL") != nullptr;
+    std::unique_lock<std::mutex> SerialGuard;
+    if (Serialize)
+        SerialGuard = std::unique_lock<std::mutex>(SerialMutex);
     std::unique_lock<std::mutex> Lock(g_cvMutex);
     B.Done = false;
     napi_status S = St->Tsf.BlockingCall(
@@ -684,6 +835,7 @@ static int64_t CallJs(MountState *St, Bridge &B)
     }
     g_cv.wait(Lock, [&B] { return B.Done; });
     Trace(GetCurrentThreadId(), "CallJs %s -> status 0x%llX done", B.Op.c_str(), (unsigned long long)B.Status);
+    HeapCheck("CallJs after wait");
     return B.Status;
 }
 
@@ -726,6 +878,7 @@ static NTSTATUS OpGetVolumeInfo(FSP_FILE_SYSTEM *Fs, FSP_FSCTL_VOLUME_INFO *Volu
     if (VolumeInfo->VolumeLabelLength > sizeof VolumeInfo->VolumeLabel)
         VolumeInfo->VolumeLabelLength = (UINT16)sizeof VolumeInfo->VolumeLabel;
     memcpy(VolumeInfo->VolumeLabel, St->Label.data(), VolumeInfo->VolumeLabelLength);
+    HeapCheck("OpGetVolumeInfo done");
     return STATUS_SUCCESS;
 }
 
@@ -750,34 +903,22 @@ static NTSTATUS OpGetSecurityByName(
     if (PFileAttributes)
         *PFileAttributes = B.Attributes;
 
+    HeapCheck("OpGetSecurityByName pre-SD");
     if (PSecurityDescriptorSize)
     {
-        if (SecurityDescriptor)
+        SIZE_T Need = EnsureSecurity(St) ? St->SecurityDescriptorSize : (SIZE_T)0;
+        if (Need > *PSecurityDescriptorSize)
         {
-            if (!EnsureSecurity(St))
-            {
-                *PSecurityDescriptorSize = 0;
-                Trace(GetCurrentThreadId(), "GetSecurityByName %S -> no SD", FileName ? FileName : L"<null>");
-                return STATUS_SUCCESS;
-            }
-            SIZE_T Size = St->SecurityDescriptorSize;
-            if (*PSecurityDescriptorSize < Size)
-            {
-                *PSecurityDescriptorSize = Size;
-                Trace(GetCurrentThreadId(), "GetSecurityByName %S -> BUFFER_OVERFLOW need=%zu", FileName ? FileName : L"<null>", Size);
-                return STATUS_BUFFER_OVERFLOW;
-            }
-            memcpy(SecurityDescriptor, St->SecurityDescriptor, Size);
-            *PSecurityDescriptorSize = Size;
-            Trace(GetCurrentThreadId(), "GetSecurityByName %S -> SD ok(%zu)", FileName ? FileName : L"<null>", Size);
+            *PSecurityDescriptorSize = Need;
+            Trace(GetCurrentThreadId(), "GetSecurityByName %S -> BUFFER_OVERFLOW need=%zu",
+                  FileName ? FileName : L"<null>", Need);
+            return (NTSTATUS)STATUS_BUFFER_OVERFLOW;
         }
-        else
-        {
-            if (EnsureSecurity(St))
-                *PSecurityDescriptorSize = St->SecurityDescriptorSize;
-            Trace(GetCurrentThreadId(), "GetSecurityByName %S -> size query %zu", FileName ? FileName : L"<null>",
-                  EnsureSecurity(St) ? St->SecurityDescriptorSize : (SIZE_T)0);
-        }
+        *PSecurityDescriptorSize = Need;
+        if (SecurityDescriptor && Need > 0)
+            memcpy(SecurityDescriptor, St->SecurityDescriptor, Need);
+        Trace(GetCurrentThreadId(), "GetSecurityByName %S -> SD ok(%zu)",
+              FileName ? FileName : L"<null>", Need);
     }
     else
     {
@@ -787,6 +928,72 @@ static NTSTATUS OpGetSecurityByName(
 }
 
 // -- Open / Create ----------------------------------------------------------
+
+// Live FileContext tracker. The real 0xC0000374 detection was `delete` of a
+// FileContext inside OpClose during FspFileSystemRemoveMountPoint, but close
+// counts alone cannot distinguish double-close / foreign pointer /
+// earlier-corrupted block. Every open records ptr+path; every close verifies
+// membership and logs the outcome to the heapcheck trail. Sets are tiny (a
+// few concurrently open handles) and run in all builds; when the diagnostic
+// env is off there is simply no log file.
+static std::mutex g_ctxMutex;
+static std::map<void *, std::wstring> g_ctxLive;
+static std::map<void *, std::wstring> g_ctxFreed;
+
+static void CtxOnOpen(void *P, const std::wstring &Path)
+{
+    {
+        std::lock_guard<std::mutex> G(g_ctxMutex);
+        g_ctxLive[P] = Path;
+    }
+    if (FILE *f = HeapLogFile())
+    {
+        fprintf(f, "open ptr=%p path=%S tick=%lu\n", P, Path.c_str(),
+                (unsigned long)GetTickCount());
+        fflush(f);
+    }
+}
+
+static bool CtxOnClose(void *P)
+{
+    std::wstring Path;
+    bool Live = false;
+    bool Stale = false;
+    {
+        std::lock_guard<std::mutex> G(g_ctxMutex);
+        auto L = g_ctxLive.find(P);
+        if (L != g_ctxLive.end())
+        {
+            Path = L->second;
+            g_ctxLive.erase(L);
+            g_ctxFreed[P] = Path;
+            Live = true;
+        }
+        else
+        {
+            auto F = g_ctxFreed.find(P);
+            if (F != g_ctxFreed.end())
+            {
+                Path = F->second;
+                Stale = true;
+            }
+        }
+    }
+    if (FILE *f = HeapLogFile())
+    {
+        if (Live)
+            fprintf(f, "close ptr=%p live path=%S tick=%lu\n", P, Path.c_str(),
+                    (unsigned long)GetTickCount());
+        else if (Stale)
+            fprintf(f, "close ptr=%p STALE-DOUBLE-CLOSE first-path=%S tick=%lu\n", P,
+                    Path.c_str(), (unsigned long)GetTickCount());
+        else
+            fprintf(f, "close ptr=%p FOREIGN-UNKNOWN skip-delete tick=%lu\n", P,
+                    (unsigned long)GetTickCount());
+        fflush(f);
+    }
+    return Live;
+}
 
 static bool FileTypeMatches(uint32_t Attributes, uint32_t CreateOptions)
 {
@@ -820,17 +1027,22 @@ static NTSTATUS OpOpenOrCreate(
 
     if (NT_SUCCESS((NTSTATUS)Status))
     {
+        // NT semantics (and the memfs sample): FILE_DIRECTORY_FILE on a file
+        // or FILE_NON_DIRECTORY_FILE on a directory is an error; opening a
+        // directory with neither bit set is perfectly legal (stat/dir/listdir
+        // all do it) and must not be rejected.
         bool IsDir = (B.Attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-        bool WantDir = (CreateOptions & FILE_DIRECTORY_FILE) != 0;
-        if (WantDir && !IsDir)
+        if ((CreateOptions & FILE_DIRECTORY_FILE) && !IsDir)
             return (NTSTATUS)STATUS_NOT_A_DIRECTORY;
-        if (!WantDir && IsDir)
+        if ((CreateOptions & FILE_NON_DIRECTORY_FILE) && IsDir)
             return (NTSTATUS)STATUS_FILE_IS_A_DIRECTORY;
         auto *Ctx = new FileContext();
         Ctx->Path = Path;
         *PFileContext = Ctx;
+        CtxOnOpen(Ctx, Path);
         if (FileInfo)
             FillFileInfo(FileInfo, B);
+        HeapCheck("OpOpenOrCreate success");
         return STATUS_SUCCESS;
     }
     if (Status == STATUS_OBJECT_NAME_NOT_FOUND && Creating)
@@ -877,7 +1089,10 @@ static void OpCleanup(FSP_FILE_SYSTEM *Fs, PVOID FCtx, PWSTR FileName, ULONG Fla
 static void OpClose(FSP_FILE_SYSTEM *Fs, PVOID FCtx)
 {
     (void)Fs;
-    delete static_cast<FileContext *>(FCtx);
+    HeapCheck("OpClose before delete");
+    if (CtxOnClose(FCtx))
+        delete static_cast<FileContext *>(FCtx);
+    HeapCheck("OpClose after delete");
 }
 
 // -- Read -------------------------------------------------------------------
@@ -904,6 +1119,7 @@ static NTSTATUS OpRead(
     if (N > 0)
         memcpy(Buffer, B.Data.data(), N);
     *PBytesTransferred = N;
+    HeapCheck("OpRead done");
     return STATUS_SUCCESS;
 }
 
@@ -947,11 +1163,16 @@ static NTSTATUS OpGetSecurity(
         return STATUS_INVALID_DEVICE_REQUEST;
     if (!EnsureSecurity(St))
         return STATUS_UNSUCCESSFUL;
-    if (SecurityDescriptor && *PSecurityDescriptorSize >= St->SecurityDescriptorSize)
+    if (St->SecurityDescriptorSize > *PSecurityDescriptorSize)
     {
-        memcpy(SecurityDescriptor, St->SecurityDescriptor, St->SecurityDescriptorSize);
+        *PSecurityDescriptorSize = St->SecurityDescriptorSize;
+        Trace(GetCurrentThreadId(), "GetSecurity -> BUFFER_OVERFLOW need=%zu",
+              St->SecurityDescriptorSize);
+        return (NTSTATUS)STATUS_BUFFER_OVERFLOW;
     }
     *PSecurityDescriptorSize = St->SecurityDescriptorSize;
+    if (SecurityDescriptor)
+        memcpy(SecurityDescriptor, St->SecurityDescriptor, St->SecurityDescriptorSize);
     return STATUS_SUCCESS;
 }
 
@@ -991,7 +1212,9 @@ static NTSTATUS OpReadDirectory(
         }
         size_t NameBytes = E.Name.size() * sizeof(WCHAR);
         size_t Total = sizeof(FSP_FSCTL_DIR_INFO) + NameBytes;
-        std::vector<uint8_t> Mem(Total, 0);
+        // +8 slack: FspFileSystemAddDirInfo may align Size up to 8 when
+        // copying; a vector sized exactly to Size would be over-read.
+        std::vector<uint8_t> Mem(Total + 8, 0);
         auto *Info = reinterpret_cast<FSP_FSCTL_DIR_INFO *>(Mem.data());
         Info->Size = (UINT16)Total;
         Info->FileInfo.FileAttributes = E.Attributes;
@@ -1015,6 +1238,7 @@ static NTSTATUS OpReadDirectory(
     // EOF marker.
     g_api.FspFileSystemAddDirInfo(nullptr, Buffer, Length, &Bytes);
     *PBytesTransferred = Bytes;
+    HeapCheck("OpReadDirectory done");
     Trace(GetCurrentThreadId(), "ReadDirectory %S -> bytes=%lu status 0x0", Ctx->Path.c_str(), (unsigned long)Bytes);
     return STATUS_SUCCESS;
 }
@@ -1213,8 +1437,7 @@ Napi::Value WinFspMount(const Napi::CallbackInfo &Info)
     Params.ReadOnlyVolume = 1;
     Params.PostCleanupWhenModifiedOnly = 0;
     Params.PassQueryDirectoryPattern = 1;
-    Params.DirInfoTimeoutValid = 1;
-    Params.DirInfoTimeout = 30000;
+    Params.FileInfoTimeout = 0xFFFFFFFF; /* INFINITE: keep metadata cached like memfs */
     wcsncpy_s(Params.FileSystemName, L"NTFS", FSP_FSCTL_VOLUME_FSNAME_SIZE / sizeof(WCHAR));
 
     wchar_t DevicePath[] = L"WinFsp.Disk";
@@ -1238,6 +1461,21 @@ Napi::Value WinFspMount(const Napi::CallbackInfo &Info)
 
     PWSTR Mount = MountPoint.empty() ? nullptr : (PWSTR)MountPoint.data();
     Status = g_api.FspFileSystemSetMountPoint(St->Fs, Mount);
+    Trace(GetCurrentThreadId(), "SetMountPoint '%S' -> status 0x%lx", Mount ? Mount : L"<null>", (unsigned long)Status);
+    if (Status == static_cast<NTSTATUS>(0xC0000022u) /* STATUS_ACCESS_DENIED */ &&
+        MountPoint.rfind(L"\\\\.\\", 0) == 0)
+    {
+        // Registering a GLOBAL drive letter needs admin (the Mount Manager).
+        // A non-admin caller falls back to the per-LUID letter form
+        // (DefineDosDevice, no privilege required); the mounting user's own
+        // Explorer still sees it. Elevated callers never reach this branch:
+        // the global form succeeds for them (and stays preferable, because an
+        // elevated per-LUID letter is invisible to non-elevated Explorer —
+        // WinFsp #194/#526).
+        std::wstring Scoped = MountPoint.substr(4);
+        Status = g_api.FspFileSystemSetMountPoint(St->Fs, (PWSTR)Scoped.data());
+        Trace(GetCurrentThreadId(), "SetMountPoint fallback '%S' -> status 0x%lx", Scoped.c_str(), (unsigned long)Status);
+    }
     if (!NT_SUCCESS(Status))
     {
         Napi::Error::New(Env, "FspFileSystemSetMountPoint failed: " + NtStatusHex(Status))
@@ -1253,7 +1491,12 @@ Napi::Value WinFspMount(const Napi::CallbackInfo &Info)
         return Env.Null();
     }
 
-    Status = g_api.FspFileSystemStartDispatcher(St->Fs, 0);
+    // OPBS_FS_THREADS: override dispatcher thread count (diagnostic; default
+    // 0 = WinFsp default, one thread per processor).
+    ULONG FsThreads = 0;
+    if (const char *EnvThreads = getenv("OPBS_FS_THREADS"))
+        FsThreads = (ULONG)strtoul(EnvThreads, nullptr, 10);
+    Status = g_api.FspFileSystemStartDispatcher(St->Fs, FsThreads);
     if (!NT_SUCCESS(Status))
     {
         Napi::Error::New(Env, "FspFileSystemStartDispatcher failed: " + NtStatusHex(Status))
@@ -1276,12 +1519,14 @@ Napi::Value WinFspMount(const Napi::CallbackInfo &Info)
     std::wstring Shown = DisplayMountPoint(Actual ? Actual : MountPoint);
     NotifyShellDriveChange(Actual ? Actual : MountPoint, true);
     Result.Set("mountPoint", Napi::String::New(Env, WideToUtf8(Shown)));
+    HeapCheck("WinFspMount done");
     return Result;
 }
 
 Napi::Value WinFspUnmount(const Napi::CallbackInfo &Info)
 {
     Napi::Env Env = Info.Env();
+    HeapCheck("WinFspUnmount entry");
     uint32_t Id = static_cast<uint32_t>(Info[0].As<Napi::Number>().Int32Value());
 
     MountState *St = nullptr;
@@ -1304,18 +1549,32 @@ Napi::Value WinFspUnmount(const Napi::CallbackInfo &Info)
 
     std::wstring MountBeforeRemove =
         St->Fs->MountPoint ? St->Fs->MountPoint : std::wstring();
+    HeapCheck("WinFspUnmount pre-stop");
     g_api.FspFileSystemStopDispatcher(St->Fs);
+    HeapCheck("WinFspUnmount post-stop");
     g_api.FspFileSystemRemoveMountPoint(St->Fs);
+    HeapCheck("WinFspUnmount post-removeMP");
     g_api.FspFileSystemDelete(St->Fs);
+    HeapCheck("WinFspUnmount post-delete");
     if (St->Tsf)
         St->Tsf.Release();
+    HeapCheck("WinFspUnmount post-release");
     if (St->SecurityDescriptor)
         LocalFree(St->SecurityDescriptor);
+    HeapCheck("WinFspUnmount before delete");
     delete St;
     if (!MountBeforeRemove.empty())
         NotifyShellDriveChange(MountBeforeRemove, false);
 
     return Napi::Boolean::New(Env, true);
+}
+
+// Explicit heap-validation checkpoint callable from JS (tests). No-op unless
+// OPBS_HEAPCHECK is set; used to bracket phases of a test run.
+Napi::Value HeapCheckNow(const Napi::CallbackInfo &Info)
+{
+    HeapCheck("JS heapCheck()");
+    return Info.Env().Undefined();
 }
 
 void Register(Napi::Env Env, Napi::Object Exports)
@@ -1334,6 +1593,7 @@ void Register(Napi::Env Env, Napi::Object Exports)
     Exports.Set("winfspLoadNote", Napi::Function::New(Env, WinFspLoadNote));
     Exports.Set("winfspMount", Napi::Function::New(Env, WinFspMount));
     Exports.Set("winfspUnmount", Napi::Function::New(Env, WinFspUnmount));
+    Exports.Set("heapCheck", Napi::Function::New(Env, HeapCheckNow));
 }
 
 } // namespace opbs_winfsp

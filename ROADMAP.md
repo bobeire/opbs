@@ -181,8 +181,15 @@ implemented; **Investigate** items need spike work first.
   [--passphrase p] [--check]`, blocks until Ctrl+C.
 - ✅ Unit tests: `mount-fs.test.ts` (bridge stat/read/readDir + export presence,
   `winfspAvailable() === false` on this machine).
-- ⬜ **Remaining**: live smoke test on a machine with the WinFsp runtime
-  installed (auto-detected; GUI shows a hint when missing).
+- ✅ Live smoke test on a machine with the WinFsp runtime installed
+  (shipped 0.6.57): `test/integration/mount-live.test.ts` mounts a generated
+  NTFS image as a real drive letter, serves a separate-process probe
+  (`opendir`/reads/`stat`/`cmd dir`), unmounts, and verifies the letter is
+  gone. Fixed a host-process heap corruption (double-close of a WinFsp file
+  context: the second `delete` in `OpClose` detected 0xC0000374 at unmount —
+  contexts are now tracked and never freed twice). Non-admin mounts use
+  WinFsp's per-LUID volume namespace (auto-detected; GUI shows a hint when
+  the runtime is missing).
 
 ### Immutable repositories (shipped 0.6.48 — Phase 1)
 - ✅ Repository format (`imaging/repository.ts`): `opbs-repo.json` header

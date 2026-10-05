@@ -41,6 +41,8 @@ interface NativeWinFsp {
     handler: (req: BridgeRequest) => BridgeReply
   ): { id: number; mountPoint: string };
   winfspUnmount(id: number): boolean;
+  /** Diagnostic: validate all process heaps (no-op unless OPBS_HEAPCHECK is set). */
+  heapCheck?(): void;
 }
 
 interface ActiveMount {
@@ -127,4 +129,13 @@ export function unmountImage(id: number): boolean {
 /** Number of currently mounted volumes (status reporting / tests). */
 export function activeMountCount(): number {
   return mounts.size;
+}
+
+/** Diagnostic heap checkpoint (no-op unless OPBS_HEAPCHECK is set). */
+export function heapCheckNow(): void {
+  try {
+    nativeApi().heapCheck?.();
+  } catch {
+    // addon too old / missing export
+  }
 }
