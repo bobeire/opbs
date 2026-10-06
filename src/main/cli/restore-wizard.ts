@@ -72,9 +72,9 @@ export interface WizardRestoreResult {
 }
 
 export interface WizardDeps {
-  /** Find .opbs files on local drives (bounded scan). */
+  /** Find backup images (.opbs/.mrimgx/.mrimg) on local drives (bounded scan). */
   scanDrives(): Promise<WizardImage[]>;
-  /** List .opbs images in one folder (throws if the folder is missing). */
+  /** List backup images (.opbs/.mrimgx/.mrimg) in one folder (throws if the folder is missing). */
   scanDir(dir: string): Promise<WizardImage[]>;
   /** Read image header details (throws when the file is not a usable image). */
   describeImage(imagePath: string): Promise<WizardImageDetails>;
@@ -96,6 +96,14 @@ class AbortWizard extends Error {
 
 function errMsg(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Image sources the restore wizard accepts: `.opbs` plus Macrium containers. */
+const IMAGE_EXTENSIONS = ['.opbs', '.mrimgx', '.mrimg'];
+
+function isImageFile(name: string): boolean {
+  const lower = name.toLowerCase();
+  return IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
 export function fmtBytes(bytes: number): string {
@@ -149,7 +157,7 @@ async function selectImage(
   io: WizardIO,
   deps: WizardDeps
 ): Promise<{ image: WizardImage; details: WizardImageDetails }> {
-  io.print('  Scanning drives for .opbs backup images (this can take a moment)...');
+  io.print('  Scanning drives for backup images (.opbs/.mrimgx/.mrimg, this can take a moment)...');
   let found: WizardImage[] = [];
   let scanned = false;
   for (;;) {
@@ -161,18 +169,18 @@ async function selectImage(
         io.print(`  Found ${found.length} image(s):`);
         printImageList(io, found);
       } else {
-        io.print('  No .opbs images found on the local drives.');
+        io.print('  No backup images found on the local drives.');
       }
     }
     io.print();
-    io.print('  Enter a number, a path to an .opbs file or a backup folder,');
+    io.print('  Enter a number, a path to an image file (.opbs/.mrimgx/.mrimg) or a backup folder,');
     io.print('  (r) rescan, (q) quit.');
     const input = (await io.ask('Image > ')).trim();
     if (input.toLowerCase() === 'q') throw new AbortWizard();
     if (input.toLowerCase() === 'r') {
       scanned = false;
       io.print();
-      io.print('  Scanning drives for .opbs backup images...');
+      io.print('  Scanning drives for backup images...');
       continue;
     }
 
@@ -191,7 +199,7 @@ async function selectImage(
     } else if (input === '') {
       io.print('  Please enter a number or a path.');
       continue;
-    } else if (input.toLowerCase().endsWith('.opbs')) {
+    } else if (isImageFile(input)) {
       candidate = { path: input, name: path.basename(input), size: 0, timestamp: Date.now() };
     } else {
       let entries: WizardImage[];
@@ -202,7 +210,7 @@ async function selectImage(
         continue;
       }
       if (entries.length === 0) {
-        io.print('  That folder contains no .opbs images.');
+        io.print('  That folder contains no backup images.');
         continue;
       }
       io.print(`  ${entries.length} image(s) in ${input}:`);
@@ -475,9 +483,10 @@ export interface DriveScanOptions {
 }
 
 /**
- * Bounded recursive scan of local drives for .opbs images. Used by the
- * wizard's first step; the budget/depth/result caps keep it responsive even
- * on multi-terabyte data disks. Returns entries sorted newest-first.
+ * Bounded recursive scan of local drives for backup images (.opbs and
+ * Macrium .mrimgx/.mrimg). Used by the wizard's first step; the
+ * budget/depth/result caps keep it responsive even on multi-terabyte data
+ * disks. Returns entries sorted newest-first.
  */
 export function scanDrivesForImages(options: DriveScanOptions = {}): WizardImage[] {
   const letters = options.drives ?? 'CDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
@@ -506,7 +515,7 @@ export function scanDrivesForImages(options: DriveScanOptions = {}): WizardImage
           if (current.depth < maxDepth && !SCAN_SKIP_DIRS.has(entry.name.toLowerCase())) {
             stack.push({ dir: full, depth: current.depth + 1 });
           }
-        } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.opbs')) {
+        } else if (entry.isFile() && isImageFile(entry.name)) {
           try {
             const stat = fs.statSync(full);
             found.push({ path: full, name: entry.name, size: stat.size, timestamp: stat.mtimeMs });

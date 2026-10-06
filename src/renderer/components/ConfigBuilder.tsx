@@ -288,6 +288,13 @@ function ConfigBuilder() {
     { name: 'OPBS images', extensions: ['opbs'] },
     { name: 'All files', extensions: ['*'] }
   ];
+  // Restore/drill sources also accept Macrium containers; the incremental
+  // base image above must stay an .opbs chain member.
+  const RESTORE_IMAGE_FILTERS = [
+    { name: 'Backup images', extensions: ['opbs'] },
+    { name: 'Macrium Reflect images', extensions: ['mrimgx', 'mrimg'] },
+    { name: 'All files', extensions: ['*'] }
+  ];
   const VHD_FILTERS = [{ name: 'Virtual disks', extensions: ['vhdx', 'vhd'] }];
 
   const pickSaveFile = async (
@@ -812,7 +819,7 @@ function ConfigBuilder() {
                 />
                 <button
                   className="btn-secondary"
-                  onClick={() => void pickFile((p) => setRestore((prev) => ({ ...prev, imagePath: p })), IMAGE_FILTERS)}
+                  onClick={() => void pickFile((p) => setRestore((prev) => ({ ...prev, imagePath: p })), RESTORE_IMAGE_FILTERS)}
                 >
                   Browse…
                 </button>
@@ -1105,7 +1112,7 @@ function ConfigBuilder() {
                 />
                 <button
                   className="btn-secondary"
-                  onClick={() => void pickFile((p) => setDrill((prev) => ({ ...prev, imagePath: p })), IMAGE_FILTERS)}
+                  onClick={() => void pickFile((p) => setDrill((prev) => ({ ...prev, imagePath: p })), RESTORE_IMAGE_FILTERS)}
                 >
                   Browse…
                 </button>

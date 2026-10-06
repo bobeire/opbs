@@ -280,6 +280,20 @@ describe('runRestoreWizard', () => {
     );
   });
 
+  it('accepts a typed Macrium .mrimgx path when the drive scan finds nothing', async () => {
+    const { io } = fakeIO(['D:\\backups\\win.mrimgx', '0', 'w', '', 'RESTORE']);
+    const deps = makeDeps({ scanDrives: vi.fn(async () => []) });
+
+    const code = await runRestoreWizard(io, deps);
+
+    expect(code).toBe(0);
+    expect(deps.scanDir).not.toHaveBeenCalled();
+    expect(deps.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ imagePath: 'D:\\backups\\win.mrimgx' }),
+      expect.any(Function)
+    );
+  });
+
   it('lists a typed folder and lets the user pick one of its images', async () => {
     const { io } = fakeIO(['D:\\backups', '2', '1', 'w', '', 'RESTORE']);
     const deps = makeDeps({ scanDrives: vi.fn(async () => []) });

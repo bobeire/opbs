@@ -9,6 +9,8 @@ export {
   MacriumFormat,
   MacriumUnsupportedError,
   macriumUnsupportedReason,
+  macriumRestoreRefusal,
+  macriumPartitionSize,
   MRIMGX_MAGIC,
   MRIMG_V7_MAGIC,
   MRIMG_V7_TRAILER_SIZE,

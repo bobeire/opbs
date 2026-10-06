@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { createHash } from 'crypto';
 import { logger } from '../utils/logger';
 import { collectAndWriteSidecar } from '../utils/bitlocker-capture';
 import { loadNative } from '../utils/native-loader';
@@ -46,6 +47,16 @@ import { computeChangedBlockIndices } from '../imaging/usn-tracking';
 import { planNtfsGrow, MAX_METADATA_BYTES } from '../imaging/fs/ntfs-resize';
 import { readUsedBlockIndexes } from '../imaging/fs/used-blocks';
 import { mountImage, winfspAvailable } from '../imaging/mount-manager';
+import { PartitionReader } from '../imaging/image-browse';
+import {
+  detectMacriumFormat,
+  readMacriumImage,
+  macriumRestoreRefusal,
+  macriumPartitionSize,
+  openMacriumPartitionReader,
+  MacriumImageInfo,
+  MacriumPartitionInfo
+} from '../imaging/mrimg';
 import {
   ImagingJob,
   JobProgress,
@@ -53,6 +64,7 @@ import {
   RestoreJob,
   RestoreJobProgress,
   RestoreJobResult,
+  RestoreTarget,
   CloneJob,
   CloneJobPhase,
   CloneJobProgress,
@@ -1047,6 +1059,14 @@ export async function runRestoreJob(
   const job = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as RestoreJob;
   const native: NativeImagingApi = nativeApi ?? loadNative<NativeImagingApi>();
 
+  // Macrium containers (.mrimgx / .mrimg) restore through their own reader
+  // path — every block is decompressed and MD5-verified by the partition
+  // reader instead of the .opbs frame/CRC machinery below.
+  if (detectMacriumFormat(job.imagePath)) {
+    await runMacriumRestoreJob(job, native, start, resultPath, progressPath, cancelPath, pipeClient);
+    return;
+  }
+
   const warnings: string[] = [];
   const fsValidation: FsValidation[] = [];
 
@@ -1638,6 +1658,425 @@ export async function runRestoreJob(
       decompPool?.stop();
     } catch {
       /* best-effort cleanup */
+    }
+  }
+}
+
+/**
+ * Restore a Macrium Reflect image (`.mrimgx` / `.mrimg`) onto a target disk.
+ *
+ * The per-partition Macrium readers decompress and MD5-verify every block, so
+ * this path streams partition bytes to the target in 4 MiB chunks instead of
+ * walking `.opbs` frames: unallocated regions arrive as zeroes from the
+ * reader, the same dismount / fresh-table / grow / drill machinery as an
+ * `.opbs` restore is reused, and an optional post-restore pass reads every
+ * block back and compares it against the MD5 stored in the image index.
+ * Runs in the elevated helper process.
+ */
+async function runMacriumRestoreJob(
+  job: RestoreJob,
+  native: NativeImagingApi,
+  start: number,
+  resultPath: string,
+  progressPath: string,
+  cancelPath: string,
+  pipeClient?: PipeClient
+): Promise<void> {
+  const warnings: string[] = [...(job.warnings ?? [])];
+  const fsValidation: FsValidation[] = [];
+
+  const writeResult = (result: RestoreJobResult): void => {
+    fs.writeFileSync(resultPath, JSON.stringify(result));
+  };
+  const failBeforeWrite = (error: string): void => {
+    writeResult({
+      ok: false,
+      error,
+      imagePath: job.imagePath,
+      totalBytes: 0,
+      bytesWritten: 0,
+      durationMs: Date.now() - start,
+      blocksWritten: 0,
+      targetsRestored: 0,
+      verifiedBeforeWrite: false,
+      warnings
+    });
+  };
+
+  // Parse and gate the container before touching any target: refusals
+  // (encrypted / split / delta / file-and-folder) and unreadable files must
+  // surface as a clean job result, not an escaped exception.
+  let info: MacriumImageInfo;
+  try {
+    info = readMacriumImage(job.imagePath);
+    const refusal = macriumRestoreRefusal(info);
+    if (refusal) {
+      failBeforeWrite(refusal);
+      return;
+    }
+  } catch (error) {
+    failBeforeWrite(`Cannot read image ${job.imagePath}: ${errorMessage(error)}`);
+    return;
+  }
+
+  interface TargetPlan {
+    target: RestoreTarget;
+    part: MacriumPartitionInfo;
+    reader: PartitionReader;
+    /** Captured partition bytes to write (data region ∩ partition extent). */
+    writeLen: number;
+    /** Partition extent on disk; grow-on-restore compares against this. */
+    capturedSize: number;
+  }
+  const plans: TargetPlan[] = [];
+  try {
+    for (const target of job.targets) {
+      const part = info.partitions[target.partitionIndex];
+      if (!part) {
+        warnings.push(`Image has no partition ${target.partitionIndex}; skipping`);
+        continue;
+      }
+      const reader = openMacriumPartitionReader(info, target.partitionIndex);
+      const capturedSize = macriumPartitionSize(part);
+      plans.push({
+        target,
+        part,
+        reader,
+        writeLen: Math.min(part.blockCount * part.blockSize, capturedSize),
+        capturedSize
+      });
+    }
+  } catch (error) {
+    failBeforeWrite(errorMessage(error));
+    return;
+  }
+
+  const clearFreeSpace = job.clearFreeSpace !== false;
+  let totalBytes = 0;
+  for (const plan of plans) {
+    const tailEnd = Math.max(plan.target.size ?? plan.capturedSize, plan.writeLen);
+    totalBytes += plan.writeLen + (clearFreeSpace ? Math.max(0, tailEnd - plan.writeLen) : 0);
+  }
+  if (totalBytes <= 0) {
+    failBeforeWrite('The images contain no blocks for the requested partitions');
+    return;
+  }
+
+  const progress: RestoreJobProgress = {
+    phase: 'writing',
+    percent: 0,
+    bytesDone: 0,
+    totalBytes,
+    speed: 0,
+    currentPartition: '',
+    createdAt: Date.now()
+  };
+  let lastProgressWrite = Date.now();
+
+  const writeProgress = (phase: RestoreJobProgress['phase']): void => {
+    progress.phase = phase;
+    progress.percent =
+      phase === 'completed'
+        ? 100
+        : progress.totalBytes > 0
+          ? Math.min(99, (progress.bytesDone / progress.totalBytes) * 100)
+          : 0;
+    progress.createdAt = Date.now();
+    lastProgressWrite = Date.now();
+    pipeClient?.send({ type: 'progress', ...progress });
+    try {
+      fs.writeFileSync(progressPath, JSON.stringify(progress));
+    } catch {
+      /* best-effort */
+    }
+  };
+  writeProgress(progress.phase);
+
+  const isCancelled = (): boolean => fs.existsSync(cancelPath);
+
+  let bytesWritten = 0;
+  let blocksWritten = 0;
+  let targetsRestored = 0;
+
+  const writeRaw = async (devicePath: string, offset: bigint, data: Buffer, what: string): Promise<void> => {
+    try {
+      await writeRawWithRetry(() => {
+        if (native.writeBlocksAsync) {
+          return native.writeBlocksAsync(devicePath, offset, data);
+        }
+        native.writeBlocks(devicePath, offset, data);
+        return undefined;
+      });
+    } catch (error) {
+      throw new Error(`${what}: ${errorMessage(error)}`, { cause: error });
+    }
+  };
+
+  const bumpProgress = (): void => {
+    const elapsedSec = (Date.now() - start) / 1000;
+    progress.speed = elapsedSec > 0 ? progress.bytesDone / elapsedSec : 0;
+    if (Date.now() - lastProgressWrite > 100) {
+      writeProgress('writing');
+    }
+  };
+
+  try {
+    // Dismount target volumes so ntfs.sys is not serving (or flushing back)
+    // pre-restore metadata while we overwrite the physical disk.
+    const dismountTargets = (phase: string): void => {
+      if (native.closeAllHandles) {
+        native.closeAllHandles();
+      }
+      if (native.lockAndDismountVolume && native.getVolumePath) {
+        for (const target of job.targets) {
+          const volumePath = native.getVolumePath(target.diskIndex, target.offset);
+          if (!volumePath) continue;
+          if (!native.lockAndDismountVolume(volumePath)) {
+            warnings.push(
+              `Could not dismount ${target.label} ${phase}; eject and reinsert the drive (or reboot) if Explorer still shows stale files.`
+            );
+          }
+        }
+      }
+    };
+    dismountTargets('before restore');
+
+    // Dissimilar-hardware restore: lay down the new partition table before
+    // writing any partition contents, same as an .opbs restore.
+    if (job.writeTable && native.buildPartitionTable) {
+      if (isCancelled()) {
+        throw new CancelledError();
+      }
+      const tableDevicePath = native.getPhysicalDrivePath(job.targets[0].diskIndex);
+      progress.currentPartition = 'Writing partition table';
+      writeProgress('writing');
+
+      const lbaCount = BigInt(Math.floor(job.writeTable.diskSize / SECTOR_SIZE));
+      const table = native.buildPartitionTable(
+        job.writeTable.scheme,
+        lbaCount,
+        job.writeTable.entries,
+        job.writeTable.diskGuid ? { diskGuid: job.writeTable.diskGuid } : undefined
+      );
+      for (const region of table.regions) {
+        if (isCancelled()) {
+          throw new CancelledError();
+        }
+        await writeRaw(
+          tableDevicePath,
+          BigInt(region.offset),
+          Buffer.from(region.data),
+          `Partition table write at ${region.offset}`
+        );
+      }
+      if (native.updateDiskProperties) {
+        native.updateDiskProperties(tableDevicePath);
+      }
+      await settleAfterFreshTable(native, job.targets[0].diskIndex, job.writeTable.entries.length);
+      dismountTargets('after partition-table write');
+    }
+
+    for (const plan of plans) {
+      const { target, part, reader, writeLen, capturedSize } = plan;
+      if (isCancelled()) {
+        throw new CancelledError();
+      }
+
+      const devicePath = native.getPhysicalDrivePath(target.diskIndex);
+      progress.currentPartition = target.label;
+      writeProgress('writing');
+
+      // Stream the captured partition data; the reader decompresses and
+      // MD5-verifies every block it hands back.
+      const CHUNK = 4 * 1024 * 1024;
+      let pos = 0;
+      while (pos < writeLen) {
+        if (isCancelled()) {
+          throw new CancelledError();
+        }
+        const buf = reader.read(pos, Math.min(CHUNK, writeLen - pos));
+        const writeOffset = BigInt(target.offset) + BigInt(pos);
+        await writeRaw(devicePath, writeOffset, buf, `Write failed for ${target.label} at ${writeOffset}`);
+        bytesWritten += buf.length;
+        blocksWritten += Math.ceil(buf.length / part.blockSize);
+        progress.bytesDone += buf.length;
+        bumpProgress();
+        pos += buf.length;
+      }
+
+      // Zero the part of the target range the image never captured (block
+      // padding, grow headroom) so data left behind on the target cannot
+      // survive. Unallocated regions inside the data block range are already
+      // written as zeroes by the reader.
+      const tailEnd = Math.max(target.size ?? capturedSize, writeLen);
+      if (clearFreeSpace && tailEnd > writeLen) {
+        progress.currentPartition = `${target.label} — clearing free space`;
+        writeProgress('writing');
+        const zeroChunk = Buffer.alloc(Math.min(CHUNK, tailEnd - writeLen));
+        let zeroPos = writeLen;
+        while (zeroPos < tailEnd) {
+          if (isCancelled()) {
+            throw new CancelledError();
+          }
+          const n = Math.min(zeroChunk.length, tailEnd - zeroPos);
+          const buf = n === zeroChunk.length ? zeroChunk : Buffer.alloc(n);
+          const writeOffset = BigInt(target.offset) + BigInt(zeroPos);
+          await writeRaw(devicePath, writeOffset, buf, `Free-space clear failed for ${target.label} at ${writeOffset}`);
+          bytesWritten += n;
+          progress.bytesDone += n;
+          bumpProgress();
+          zeroPos += n;
+        }
+        progress.currentPartition = target.label;
+      }
+
+      // Filesystem grow-on-restore: when the target is explicitly larger than
+      // the captured partition, extend the NTFS volume after the data lands.
+      // Unsupported layouts/filesystems become warnings, never failures.
+      if (target.size !== undefined && target.size > capturedSize) {
+        if (isCancelled()) {
+          throw new CancelledError();
+        }
+        try {
+          const metadata = reader.read(0, Math.min(MAX_METADATA_BYTES, writeLen));
+          const growPlan = planNtfsGrow(metadata, Math.floor(target.size / SECTOR_SIZE));
+          for (const region of growPlan.regions) {
+            if (isCancelled()) {
+              throw new CancelledError();
+            }
+            await writeRaw(
+              devicePath,
+              BigInt(target.offset + region.relativeOffset),
+              region.data,
+              `Filesystem grow write failed on ${target.label}`
+            );
+          }
+          warnings.push(
+            `Grew filesystem on ${target.label} from ${capturedSize} to ${target.size} bytes ` +
+              `(${growPlan.newTotalClusters} clusters)`
+          );
+        } catch (error) {
+          warnings.push(`Could not grow filesystem on ${target.label} to ${target.size} bytes: ${errorMessage(error)}`);
+        }
+      }
+
+      targetsRestored++;
+
+      // Post-restore MD5 verify: read every written block back from the
+      // target disk and compare it against the hash in the image index.
+      if (job.verifyAfterRestore) {
+        if (isCancelled()) {
+          throw new CancelledError();
+        }
+        writeProgress('verifying');
+        let verifyErrors = 0;
+        for (let i = 0; i < part.blockCount; i++) {
+          if (isCancelled()) {
+            throw new CancelledError();
+          }
+          const blockStart = i * part.blockSize;
+          if (blockStart >= writeLen) break;
+          const blockLen = Math.min(part.blockSize, writeLen - blockStart);
+          const el = part.blocks[i];
+          if (!el || el.storedLength === 0 || el.filePosition < 0) continue;
+          if (blockLen !== part.blockSize) break; // partial trailing block: no full-block hash to compare
+          try {
+            const readOffset = BigInt(target.offset) + BigInt(blockStart);
+            const readBack = native.readBlocksAsync
+              ? await native.readBlocksAsync(devicePath, readOffset, BigInt(blockLen))
+              : Buffer.from(native.readBlocks(devicePath, readOffset, BigInt(blockLen)));
+            const digest = createHash('md5').update(readBack).digest();
+            if (!digest.equals(el.md5)) {
+              warnings.push(`Post-restore MD5 mismatch on ${target.label} block ${i}`);
+              verifyErrors++;
+            }
+          } catch (error) {
+            warnings.push(`Post-restore read-back failed for ${target.label} block ${i}: ${errorMessage(error)}`);
+            verifyErrors++;
+          }
+        }
+        if (verifyErrors > 0) {
+          warnings.push(`Post-restore verify: ${verifyErrors} block(s) failed MD5 check on ${target.label}`);
+        }
+        writeProgress('writing');
+      }
+
+      // Restore drill: read back the written filesystem and validate the boot
+      // sector / $MFT. Failures land in the drill result, not the job result.
+      if (job.validateAfterWrite) {
+        if (isCancelled()) {
+          throw new CancelledError();
+        }
+        const check = validateRestoredFilesystem(
+          { readBlocks: native.readBlocks, getPhysicalDrivePath: native.getPhysicalDrivePath },
+          devicePath,
+          {
+            partitionIndex: target.partitionIndex,
+            label: target.label,
+            offset: target.offset,
+            capturedSize
+          }
+        );
+        fsValidation.push(check);
+        writeProgress('writing');
+      }
+    }
+
+    writeProgress('completed');
+
+    writeResult({
+      ok: true,
+      imagePath: job.imagePath,
+      totalBytes,
+      bytesWritten,
+      durationMs: Date.now() - start,
+      blocksWritten,
+      targetsRestored,
+      verifiedBeforeWrite: false,
+      warnings,
+      fsValidation: fsValidation.length > 0 ? fsValidation : undefined,
+      drill:
+        job.validateAfterWrite && fsValidation.length > 0
+          ? {
+              ok: fsValidation.every((c) => c.ok),
+              failures: fsValidation.filter((c) => !c.ok).map((c) => `${c.label}: ${c.error ?? 'validation failed'}`)
+            }
+          : undefined
+    });
+  } catch (error) {
+    const cancelled = error instanceof CancelledError;
+    writeResult({
+      ok: false,
+      error: cancelled ? 'Restore cancelled by user' : errorMessage(error),
+      cancelled,
+      imagePath: job.imagePath,
+      totalBytes,
+      bytesWritten,
+      durationMs: Date.now() - start,
+      blocksWritten,
+      targetsRestored,
+      verifiedBeforeWrite: false,
+      warnings,
+      fsValidation: fsValidation.length > 0 ? fsValidation : undefined
+    });
+  } finally {
+    try {
+      native.releaseLockedVolumes?.();
+    } catch {
+      /* best-effort unlock */
+    }
+    try {
+      if (native.updateDiskProperties && job.targets.length > 0) {
+        const devicePath = native.getPhysicalDrivePath(job.targets[0].diskIndex);
+        native.updateDiskProperties(devicePath);
+      }
+    } catch {
+      /* best-effort re-read of the partition table */
+    }
+    try {
+      native.closeAllHandles?.();
+    } catch {
+      /* best-effort handle cleanup */
     }
   }
 }

@@ -14,6 +14,7 @@ Website: https://opbs.rhitcs.com
 - **Resumable imaging**: `resume` (CLI `--resume`) continues an interrupted local backup from the partial image already at the target path — completed partitions are kept and the run resumes at the next partition boundary instead of restarting from scratch.
 - **Used-blocks-only capture**: `usedBlocksOnly` (CLI `--used-blocks-only`) reads the NTFS `$Bitmap` and stores only blocks containing allocated clusters, dropping free space; non-NTFS partitions fall back to a full capture.
 - **Read-only mount via WinFsp**: mount a partition from a `.opbs` or Macrium image as a virtual drive letter with **zero extra disk usage** — file reads are served lazily by decompressing only the covering blocks. Requires the free WinFsp runtime (https://winfsp.dev). Works for standard (non-admin) users through WinFsp's per-LUID volume namespace; a live smoke test covers mount → cross-process probe → unmount.
+- **Restore from Macrium Reflect images**: `restore` also accepts Macrium `.mrimgx` (Reflect X) and `.mrimg` (Reflect 7/8) containers — placement is read from the image's own geometry/table entries, every block is decompressed and MD5-verified before it lands on the target, and unsupported variants (password-protected, split, delta/incremental, file-and-folder backups) are refused up front instead of touching the disk. Works from the CLI, the restore wizard and the Config Builder.
 - **Disk-to-disk clone**: `clone` copies selected live partitions straight onto a different local disk (VSS snapshots, optional dissimilar layout + fresh GPT/MBR table, optional grow-on-restore), with no image file or cloud upload. The GUI **Partition Copy** screen makes this drag-and-drop: pick a target disk, drag partition chips onto it (or “Copy all partitions”), preview the auto-sequential 1 MiB-aligned layout with optional grow-to-fill, confirm the erase warning, and watch live progress.
 - **Backup from a virtual disk (VHD/VHDX)**: `sourceVirtualDisk` (CLI `--source-vhd`, or "Back up from a VHD/VHDX file…" on the backup wizard's source step) images a `.vhd`/`.vhdx` file directly — the elevated helper attaches the file **write-protected** (no drive letter), discovers the physical disk index it maps to, builds the ordinary backup job (empty partition selection = every partition on the file), runs it, then detaches. No need to mount the volume or run the backup against the host's live disks.
 - **Restore into a virtual disk (VHD/VHDX)**: `targetVirtualDisk` writes a restore into a `.vhd`/`.vhdx` file instead of a physical disk — the helper creates the file when missing (dynamic or fixed, up to 64 TiB), attaches it, re-runs every physical-disk safety gate against the attached disk, writes a fresh GPT/MBR table so the volumes are visible in Windows, then detaches the disk again. Available from the restore wizard, the Config Builder and JSON configs.
@@ -603,6 +604,33 @@ OPBS.exe --cli extract img.mrimg --partition 1 --path "Users\me\notes.txt" --out
   resident boot sector (e.g. file/data backups) report that no filesystem is
   present.
 
+## Restoring Macrium images (.mrimgx and .mrimg)
+
+Macrium containers restore through the same pipeline as `.opbs` images — the
+CLI, the restore wizard and the Config Builder all accept them (the image
+pickers list `.mrimgx`/`.mrimg` alongside `.opbs`):
+
+```bash
+# imagePath in the config may point at a Macrium image (wizard: just pick it)
+OPBS.exe --cli restore job-restore.json
+OPBS.exe --cli wizard
+```
+
+- Placement comes from the image itself: `_geometry.start` (mrimgx) and the
+  v7 footer's MBR/GPT table entries (mrimg) give each partition's captured
+  on-disk offset in bytes. Containers that record no offset are refused with a
+  `--layout P:<offsetBytes>` hint instead of guessing.
+- Every block is decompressed (zstd / QuickLZ) and **MD5-verified by the
+  reader** before it lands on the target; the uncaptured tail and block
+  padding are zero-filled (skip with `clearFreeSpace: false`),
+  `verifyAfterRestore` reads the target back for a final MD5 pass, and
+  grow-on-restore / fresh-partition-table / restore-drill behave exactly like
+  an `.opbs` restore.
+- Refused **before any target byte is written**: password-protected, split
+  and delta/incremental containers, file-and-folder backups, and
+  differential/incremental images — the reason surfaces in the wizard/GUI the
+  same way it does for browsing.
+
 ## Mounting an image partition as a read-only drive
 
 Instead of extracting, you can attach a partition from a `.opbs` or Macrium
@@ -1086,7 +1114,7 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   toast/webhook notifications, SMART/disk-health reporting, headless CLI, NTFS
   browse/extract (folder trees, sparse, LZNT1, ADS, EFS decryption), used-blocks-only capture
   via NTFS `$Bitmap`, disk-to-disk clone (live VSS copy, dissimilar layout +
-  fresh partition table), Macrium `.mrimgx`/`.mrimg` browse/extract, read-only
+  fresh partition table), Macrium `.mrimgx`/`.mrimg` browse/extract/restore, read-only
   WinFsp mount of image partitions (GUI + CLI), WinPE media with driver
   injection + headless payload smoke, `.opbs` right-click context menu verbs
   (browse/mount/restore/verify) with a Settings toggle, automated restore drills

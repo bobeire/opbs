@@ -162,9 +162,9 @@ Commands:
                            --usn reads only NTFS-journal-changed blocks for incrementals;
                            --usn-full-scan-threshold PCT (0-100) gives up on the journal
                            when it flags more than PCT% of a partition (implies --usn).
-  restore <config.json> [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk] Run a restore job (config as JSON file).
-  wizard                             Interactive restore wizard: scans the drives for .opbs
-                                     images, picks a target disk and partitions, preflights,
+  restore <config.json> [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk] Run a restore job (config as JSON file; imagePath accepts .opbs, .mrimgx, and .mrimg).
+  wizard                             Interactive restore wizard: scans the drives for backup
+                                     images (.opbs/.mrimgx/.mrimg), picks a target disk and partitions, preflights,
                                      asks for confirmation, then restores with live progress.
                                      The recovery media runs this automatically when no
                                      restore config is staged (run as administrator).
@@ -700,6 +700,7 @@ async function cmdRestore(ctx: CommandContext): Promise<number> {
   const configPath = ctx.argv[0];
   if (!configPath) {
     console.error('Usage: restore <config.json> [--preflight] [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk]');
+    console.error('imagePath accepts .opbs, .mrimgx, and .mrimg (Macrium Reflect) images.');
     return 1;
   }
   const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
@@ -852,15 +853,37 @@ async function cmdWizard(ctx: CommandContext): Promise<number> {
   try {
     return await runRestoreWizard(io, {
       scanDrives: async () => scanDrivesForImages(),
-      scanDir: async (dir) =>
-        scanBackupDirectory(dir).map((entry) => ({
+      scanDir: async (dir) => {
+        const entries = scanBackupDirectory(dir).map((entry) => ({
           path: entry.path,
           name: entry.name,
           size: entry.size,
           timestamp: entry.timestamp,
           incremental: entry.incremental,
           encrypted: entry.encrypted
-        })),
+        }));
+        // Macrium containers are not prune/chain entries, so
+        // scanBackupDirectory skips them; list them for restore selection.
+        for (const name of fs.readdirSync(dir)) {
+          const lower = name.toLowerCase();
+          if (!lower.endsWith('.mrimgx') && !lower.endsWith('.mrimg')) continue;
+          try {
+            const filePath = path.join(dir, name);
+            const stat = fs.statSync(filePath);
+            entries.push({
+              path: filePath,
+              name,
+              size: stat.size,
+              timestamp: stat.mtimeMs,
+              incremental: false,
+              encrypted: false
+            });
+          } catch {
+            /* unreadable — skip */
+          }
+        }
+        return entries.sort((a, b) => b.timestamp - a.timestamp);
+      },
       describeImage: async (imagePath) => {
         const summary = summarizeImage(imagePath);
         return {

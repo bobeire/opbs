@@ -155,6 +155,41 @@ implemented; **Investigate** items need spike work first.
   and `mrimg info` (prints an `unsupported:` line). The GUI browse view shows
   the refusal reason and hides the useless passphrase box for Macrium images.
 
+### Foreign Macrium restore (.mrimgx / .mrimg) (0.6.64)
+- ✅ `runRestoreJob` auto-detects a Macrium container (`detectMacriumFormat`)
+  and dispatches to a dedicated `runMacriumRestoreJob` (`helper/job-runner.ts`)
+  — one path for CLI, GUI and the restore-to-VHD route (all call `buildJob`
+  then `runRestoreJob`), so no `RestoreJob.sourceKind` field was needed.
+- ✅ `buildJob` source adapter (`RestoreSourceView`): placement comes from the
+  container itself — `_geometry.start` in bytes (spec-verified `length =
+  end - start + 1`) plus the v7 footer's MBR/GPT table entries, matched per
+  partition by extent size, which also tighten `geometry.length` to the true
+  partition extent (cutting block padding). Containers that record no offset
+  are refused with a `--layout P:<offsetBytes>` hint instead of guessing.
+- ✅ Streaming write: the `MacriumPartitionReader` decompresses (zstd /
+  QuickLZ) and MD5-verifies every block; 4 MiB chunks land at
+  `target.offset + pos`, the uncaptured tail/block padding is zero-filled
+  unless `clearFreeSpace:false`, grow-on-restore runs through `planNtfsGrow`
+  as best-effort (warning, never failure), and `verifyAfterRestore` MD5
+  read-back checks the target against the image index. Cancellation,
+  progress, fresh-table writes and the restore drill are shared with the
+  `.opbs` path.
+- ✅ Safety gates reuse `macriumRestoreRefusal` at both `summarizeImage`/
+  `buildJob` (throws) and in the runner (clean `ok:false` job result before
+  any target byte): encrypted/split/delta containers, `backup_format:
+  file_and_folder`, and `backup_type: diff/inc` never touch the disk.
+  `verifyBeforeWrite` stays false for Macrium (the reader's per-block MD5 is
+  the integrity check), encryption keys are never carried, and compression
+  threads default to 0.
+- ✅ Surfaces: `summarizeImage` reports the Macrium layout (sizes, offsets,
+  `fsType` probe, `backup_time` in seconds → ISO date); the `restore` CLI,
+  restore wizard, ConfigBuilder/GUI pickers and drive scans accept
+  `.mrimg`/`.mrimgx`; ESP typing works through `probeEspPartition`.
+- ✅ Tests: `buildJob` placement/refusal/grow/shrink/fit/summarize (12),
+  runner round-trips incl. tail-zero, verify match/mismatch, grow, cancel
+  and refusals (8), a real Reflect v7 `.mrimg` sample round-tripped through
+  the runner, plus a wizard typed-`.mrimgx`-path test.
+
 ### Disk-to-disk clone (selected partitions → another disk)
 - ✅ `CloneEngine` (`imaging/clone-engine.ts`): builds clone jobs exactly like
   a restore (captured offsets by default, custom `targetLayout`, fresh

@@ -236,7 +236,7 @@ export function probeEspPartition(imagePath: string, partitionIndex: number, key
     if (fsType !== 'FAT32') {
       return false;
     }
-    const session = openBrowse(imagePath, partitionIndex, key);
+    const session = openAnyBrowse(imagePath, partitionIndex, key);
     if (session.filesystem !== 'fat32') {
       return false;
     }

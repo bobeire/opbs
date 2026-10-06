@@ -3,7 +3,10 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as zlib from 'zlib';
+import { createHash } from 'crypto';
 import { runBackupJob, runRestoreJob } from '../../src/main/helper/job-runner';
+import { readMacriumImage, openMacriumPartitionReader, macriumPartitionSize } from '../../src/main/imaging/mrimg';
+import { buildMrimgxImage } from '../helpers/mrimg-image';
 import { verifyImage, readImageInfo, encodeHeader, encodeBlockFrame, encodePartitionEntry, encodeBlockIndexEntry, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, FLAG_VERIFIED, FLAGS_OFFSET, FLAG_INCREMENTAL, FLAG_RESUMED, COMPRESSION_DEFLATE, COMPRESSION_ZSTD, crc32, newImageCipher, metadataFromCipher, scanPartialImage, compressBlock, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
 import { ImagingJob, RestoreJob, NativeImagingApi, JobResult, RestoreJobResult } from '../../src/main/imaging/imaging-job';
 import { buildNtfsVolumeData, CLUSTER as NTFS_CLUSTER } from '../helpers/ntfs-fixture';
@@ -1865,5 +1868,274 @@ describe('incremental and encrypted jobs', () => {
     // But warnings should report CRC mismatches from the post-restore verify.
     const crcWarnings = result.warnings.filter((w) => w.includes('Post-restore CRC mismatch'));
     expect(crcWarnings.length).toBeGreaterThan(0);
+  });
+});
+
+describe('runRestoreJob (Macrium)', () => {
+  let dir: string;
+  let jobPath: string;
+  let resultPath: string;
+  let progressPath: string;
+  let cancelPath: string;
+  let imagePath: string;
+
+  const GEOM_OFFSET = 1048576;
+  const TARGET_OFFSET = 4096;
+  const DATA = 2 * 8192;
+  // Geometry length exceeds the captured data so every restore has an
+  // uncaptured tail to zero-fill unless the job opts out.
+  const GEOM_LENGTH = 2 * DATA;
+
+  const data0 = Buffer.alloc(8192, 0x11);
+  data0.write('NTFS    ', 3, 'ascii');
+  const data1 = Buffer.alloc(8192, 0x22);
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-restore-mrimg-'));
+    jobPath = path.join(dir, 'job.json');
+    resultPath = path.join(dir, 'result.json');
+    progressPath = path.join(dir, 'progress.json');
+    cancelPath = path.join(dir, 'cancel');
+    imagePath = path.join(dir, 'image.mrimgx');
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  function writeImage(opts?: {
+    tweak?: (json: any) => void;
+    geometry?: { start?: number; length?: number };
+  }): void {
+    const start = opts?.geometry?.start ?? GEOM_OFFSET;
+    const length = opts?.geometry?.length ?? GEOM_LENGTH;
+    const built = buildMrimgxImage([data0, data1], (json) => {
+      json.disks[0].partitions[0]._geometry = {
+        start,
+        end: start + length - 1,
+        length,
+        boot_sector_offset: 0
+      };
+      opts?.tweak?.(json);
+    });
+    fs.writeFileSync(imagePath, built.buffer);
+  }
+
+  const writeJob = (overrides: Partial<RestoreJob> & { targets: RestoreJob['targets'] }): void => {
+    fs.writeFileSync(
+      jobPath,
+      JSON.stringify({ type: 'restore', imagePath, verifyBeforeWrite: false, ...overrides } as RestoreJob)
+    );
+  };
+
+  const readResult = (): RestoreJobResult =>
+    JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as RestoreJobResult;
+
+  const callsOf = (native: NativeImagingApi): Array<[string, bigint, Buffer]> =>
+    (native.writeBlocks as ReturnType<typeof vi.fn>).mock.calls as Array<[string, bigint, Buffer]>;
+
+  /** Mock native backed by an in-memory disk so read-backs see prior writes. */
+  function createDiskNative(size = 1 << 20): NativeImagingApi {
+    const native = createMockNative();
+    const disk = Buffer.alloc(size);
+    native.writeBlocks = vi.fn((_devicePath: string, offset: bigint, data: Buffer): number => {
+      data.copy(disk, Number(offset));
+      return 0;
+    });
+    native.readBlocks = vi.fn((_devicePath: string, offset: bigint, length: bigint): Buffer =>
+      Buffer.from(disk.subarray(Number(offset), Number(offset) + Number(length)))
+    );
+    return native;
+  }
+
+  it('writes the captured data at the target offset and zeroes the uncaptured tail', async () => {
+    writeImage();
+    writeJob({ targets: [{ partitionIndex: 0, diskIndex: 3, offset: TARGET_OFFSET, label: 'P0' }] });
+    const native = createDiskNative();
+
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = readResult();
+    expect(result.ok).toBe(true);
+    expect(result.targetsRestored).toBe(1);
+    expect(result.blocksWritten).toBe(2);
+    expect(result.verifiedBeforeWrite).toBe(false);
+    expect(result.warnings).toEqual([]);
+
+    const calls = callsOf(native);
+    expect(calls).toHaveLength(2);
+    expect(calls[0][0]).toBe('\\\\.\\PhysicalDrive3');
+    expect(calls[0][1]).toBe(BigInt(TARGET_OFFSET));
+    expect(calls[0][2].equals(Buffer.concat([data0, data1]))).toBe(true);
+    // The geometry extent (32768) is twice the captured data: the tail is
+    // zero-filled so stale target bytes cannot survive.
+    expect(calls[1][1]).toBe(BigInt(TARGET_OFFSET + DATA));
+    expect(calls[1][2].length).toBe(DATA);
+    expect(calls[1][2].every((b) => b === 0)).toBe(true);
+    expect(result.bytesWritten).toBe(GEOM_LENGTH);
+    expect(result.totalBytes).toBe(GEOM_LENGTH);
+  });
+
+  it('skips the tail zero-fill when clearFreeSpace is false', async () => {
+    writeImage();
+    writeJob({ clearFreeSpace: false, targets: [{ partitionIndex: 0, diskIndex: 3, offset: TARGET_OFFSET, label: 'P0' }] });
+    const native = createDiskNative();
+
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = readResult();
+    expect(result.ok).toBe(true);
+    expect(callsOf(native)).toHaveLength(1);
+    expect(result.bytesWritten).toBe(DATA);
+    expect(result.totalBytes).toBe(DATA);
+  });
+
+  it('verifies restored blocks against the image index MD5s when asked', async () => {
+    writeImage();
+    writeJob({
+      verifyAfterRestore: true,
+      targets: [{ partitionIndex: 0, diskIndex: 3, offset: TARGET_OFFSET, label: 'P0' }]
+    });
+    const native = createDiskNative();
+
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = readResult();
+    expect(result.ok).toBe(true);
+    expect(result.warnings).toEqual([]);
+    expect(native.readBlocks).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports post-restore MD5 mismatches as warnings without failing the job', async () => {
+    writeImage();
+    writeJob({
+      verifyAfterRestore: true,
+      targets: [{ partitionIndex: 0, diskIndex: 3, offset: TARGET_OFFSET, label: 'P0' }]
+    });
+    // Plain mock: reads return an unrelated pattern, so every block mismatches.
+    const native = createMockNative();
+
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = readResult();
+    expect(result.ok).toBe(true);
+    const warnings = result.warnings.join(' ');
+    expect(warnings).toMatch(/Post-restore MD5 mismatch on P0 block 0/);
+    expect(warnings).toMatch(/Post-restore verify: 2 block\(s\) failed MD5 check/);
+  });
+
+  it('treats a grow beyond the captured extent as best-effort (warning, never failure)', async () => {
+    writeImage({ geometry: { length: DATA } });
+    writeJob({
+      targets: [{ partitionIndex: 0, diskIndex: 3, offset: TARGET_OFFSET, size: DATA * 2, label: 'P0' }]
+    });
+    const native = createDiskNative();
+
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = readResult();
+    expect(result.ok).toBe(true);
+    expect(result.warnings.join(' ')).toMatch(/Grew filesystem|Could not grow filesystem/);
+  });
+
+  it('fails cleanly before any write when the container is password-protected', async () => {
+    writeImage({
+      tweak: (json) => {
+        json._encryption = { enable: true, keyIterations: 600000 };
+      }
+    });
+    writeJob({ targets: [{ partitionIndex: 0, diskIndex: 3, offset: TARGET_OFFSET, label: 'P0' }] });
+    const native = createMockNative();
+
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = readResult();
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/password/);
+    expect(result.blocksWritten).toBe(0);
+    expect(native.writeBlocks).not.toHaveBeenCalled();
+  });
+
+  it('fails cleanly before any write for a file-and-folder backup', async () => {
+    writeImage({
+      tweak: (json) => {
+        json._header.backup_format = 'file_and_folder';
+      }
+    });
+    writeJob({ targets: [{ partitionIndex: 0, diskIndex: 3, offset: TARGET_OFFSET, label: 'P0' }] });
+    const native = createMockNative();
+
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = readResult();
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/file and folder/);
+    expect(native.writeBlocks).not.toHaveBeenCalled();
+  });
+
+  it('cancels cleanly before writing when the cancel file exists', async () => {
+    writeImage();
+    writeJob({ targets: [{ partitionIndex: 0, diskIndex: 3, offset: TARGET_OFFSET, label: 'P0' }] });
+    fs.writeFileSync(cancelPath, '');
+    const native = createMockNative();
+
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = readResult();
+    expect(result.ok).toBe(false);
+    expect(result.cancelled).toBe(true);
+    expect(result.error).toBe('Restore cancelled by user');
+    expect(native.writeBlocks).not.toHaveBeenCalled();
+  });
+});
+
+const V7_SAMPLE =
+  process.env.OPBS_V7_SAMPLE ?? path.join(__dirname, '..', '..', '14CC07500E727036-00-00.mrimg');
+
+describe.skipIf(!fs.existsSync(V7_SAMPLE))('runRestoreJob with a real Reflect v7 .mrimg image', () => {
+  it('round-trips every captured block through the runner', async () => {
+    const info = readMacriumImage(V7_SAMPLE);
+    const part = info.partitions[0];
+    const writeLen = Math.min(part.blockCount * part.blockSize, macriumPartitionSize(part));
+    const expected = openMacriumPartitionReader(info, 0).read(0, writeLen);
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-v7-restore-'));
+    const jobPath = path.join(dir, 'job.json');
+    const resultPath = path.join(dir, 'result.json');
+    const progressPath = path.join(dir, 'progress.json');
+    const cancelPath = path.join(dir, 'cancel');
+    const written: Buffer[] = [];
+    try {
+      fs.writeFileSync(
+        jobPath,
+        JSON.stringify({
+          type: 'restore',
+          imagePath: V7_SAMPLE,
+          verifyBeforeWrite: false,
+          clearFreeSpace: false,
+          targets: [{ partitionIndex: 0, diskIndex: 3, offset: 4096, label: 'P0' }]
+        } as RestoreJob)
+      );
+      const native = createMockNative();
+      native.writeBlocks = vi.fn((_p: string, _o: bigint, data: Buffer): number => {
+        written.push(Buffer.from(data));
+        return 0;
+      });
+
+      await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+      const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as RestoreJobResult;
+      expect(result.ok).toBe(true);
+      expect(result.targetsRestored).toBe(1);
+      expect(result.warnings).toEqual([]);
+
+      const got = Buffer.concat(written);
+      expect(got.length).toBe(writeLen);
+      expect(createHash('md5').update(got).digest('hex')).toBe(
+        createHash('md5').update(expected).digest('hex')
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

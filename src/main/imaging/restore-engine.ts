@@ -13,6 +13,12 @@ import {
   CIPHER_NONE
 } from './image-format';
 import { detectPartitionFilesystem, inferMbrTypes, inferTableTypeGuids } from './fs/file-browse';
+import {
+  detectMacriumFormat,
+  readMacriumImage,
+  macriumRestoreRefusal,
+  macriumPartitionSize
+} from './mrimg';
 import { RestoreJob, RestoreJobProgress, RestoreJobResult, RestoreTarget, JobEncryption } from './imaging-job';
 import { buildRestoreTablePlan, RestoreTableOptions, RestoreTablePlan } from './partition-table';
 import { launchElevatedJob } from '../helper/launcher';
@@ -106,6 +112,32 @@ export interface ImageSummary {
 }
 
 export function summarizeImage(imagePath: string): ImageSummary {
+  if (detectMacriumFormat(imagePath)) {
+    const info = readMacriumImage(imagePath);
+    const refusal = macriumRestoreRefusal(info);
+    if (refusal) throw new Error(refusal);
+    const partitions = info.partitions.map((p, index) => ({
+      index,
+      size: macriumPartitionSize(p),
+      fsType: detectPartitionFilesystem(imagePath, index).fsType,
+      offsetOnDisk: p.offsetOnDisk ?? 0,
+      blockCount: p.blockCount
+    }));
+    return {
+      totalSize: partitions.reduce((sum, p) => sum + p.size, 0),
+      partitions,
+      backupDate: info.backupTime
+        ? new Date(info.backupTime * 1000).toISOString()
+        : fs.statSync(imagePath).mtime.toISOString(),
+      compressionId: 0,
+      flags: 0,
+      blockSize: info.partitions[0]?.blockSize ?? 0,
+      blocks: info.partitions.reduce((sum, p) => sum + p.blockCount, 0),
+      // Container refusals above guarantee a full, unencrypted image.
+      encrypted: false,
+      incremental: false
+    };
+  }
   const info = readImageInfo(imagePath);
   return {
     totalSize: info.header.totalBytes,
@@ -134,6 +166,66 @@ export function summarizeImage(imagePath: string): ImageSummary {
 type LaunchedRestoreJob = ReturnType<typeof launchElevatedJob<RestoreJob, RestoreJobProgress, RestoreJobResult>>;
 
 /**
+ * Normalized view of a restore source — an `.opbs` chain or a Macrium
+ * container — so `buildJob` can place partitions, guard the same disk and
+ * plan a fresh table without caring which container it is reading.
+ */
+interface RestoreSourceView {
+  partitions: Array<{ partitionIndex: number; size: number; offsetOnDisk: number; blockCount: number }>;
+  sourceDiskModel: string;
+  sourceDiskSerial: string;
+  /** Key for an encrypted `.opbs` source (Macrium containers refuse encryption). */
+  detectKey?: Buffer;
+  chain: string[];
+  /** Decompression id used only to default the thread count (Macrium: none). */
+  compressionId: number;
+  isMacrium: boolean;
+}
+
+function opbsRestoreSource(config: RestoreJobConfig, chain: string[]): RestoreSourceView {
+  const info = readImageInfo(config.imagePath);
+  return {
+    partitions: info.partitions.map((p) => ({
+      partitionIndex: p.partitionIndex,
+      size: p.size,
+      offsetOnDisk: p.offsetOnDisk,
+      blockCount: p.blockCount
+    })),
+    sourceDiskModel: info.header.sourceDiskModel ?? '',
+    sourceDiskSerial: info.header.sourceDiskSerial ?? '',
+    detectKey:
+      config.passphrase && info.header.cipherId !== CIPHER_NONE
+        ? deriveImageKey(config.passphrase, info.header.salt, info.header.kdfIterations)
+        : undefined,
+    chain,
+    compressionId: info.header.compressionId,
+    isMacrium: false
+  };
+}
+
+function macriumRestoreSource(config: RestoreJobConfig): RestoreSourceView {
+  const info = readMacriumImage(config.imagePath);
+  const refusal = macriumRestoreRefusal(info);
+  if (refusal) throw new Error(refusal);
+  return {
+    // Partition index is the position in `info.partitions` — the same key the
+    // Macrium partition reader consumes.
+    partitions: info.partitions.map((p, index) => ({
+      partitionIndex: index,
+      size: macriumPartitionSize(p),
+      offsetOnDisk: p.offsetOnDisk ?? 0,
+      blockCount: p.blockCount
+    })),
+    sourceDiskModel: '',
+    sourceDiskSerial: '',
+    detectKey: undefined,
+    chain: [config.imagePath],
+    compressionId: COMPRESSION_NONE,
+    isMacrium: true
+  };
+}
+
+/**
  * Elevated payload for a restore into a .vhd/.vhdx file. The helper creates
  * the file when missing, attaches it, discovers the disk index, injects it
  * into the config and then runs the ordinary restore job.
@@ -153,8 +245,14 @@ export class RestoreEngine implements RestoreCoordinator {
       throw new Error(`Image file does not exist: ${config.imagePath}`);
     }
 
+    const isMacrium = detectMacriumFormat(config.imagePath) !== null;
     let chain: string[];
-    if (Array.isArray(config.applyDeltas)) {
+    if (isMacrium) {
+      if (Array.isArray(config.applyDeltas) && config.applyDeltas.length > 0) {
+        throw new Error('Macrium restore takes a single image file; delta chains are not supported.');
+      }
+      chain = [config.imagePath];
+    } else if (Array.isArray(config.applyDeltas)) {
       chain = [config.imagePath, ...config.applyDeltas];
     } else if (config.applyDeltas === false) {
       chain = [config.imagePath];
@@ -162,7 +260,7 @@ export class RestoreEngine implements RestoreCoordinator {
       chain = resolveImageChain(config.imagePath);
     }
 
-    const info = readImageInfo(config.imagePath);
+    const source = isMacrium ? macriumRestoreSource(config) : opbsRestoreSource(config, chain);
     const targets: RestoreTarget[] = [];
 
     const layoutByPartition = new Map<number, { offset: number; size?: number }>();
@@ -172,8 +270,24 @@ export class RestoreEngine implements RestoreCoordinator {
       }
     }
 
+    // Macrium containers do not always record where a partition lived on the
+    // source disk (partial images, logical MBR partitions). Without a captured
+    // offset — and no explicit override — the restore cannot place it.
+    if (source.isMacrium) {
+      for (const partitionIndex of config.targetPartitions) {
+        if (layoutByPartition.has(partitionIndex)) continue;
+        const part = source.partitions.find((p) => p.partitionIndex === partitionIndex);
+        if (part && !(part.offsetOnDisk > 0)) {
+          throw new Error(
+            `Cannot determine the source on-disk offset of partition ${partitionIndex} in this Macrium image. ` +
+              `Provide explicit placement (CLI: --layout ${partitionIndex}:<offsetBytes>).`
+          );
+        }
+      }
+    }
+
     for (const partitionIndex of config.targetPartitions) {
-      const partition = info.partitions.find((p) => p.partitionIndex === partitionIndex);
+      const partition = source.partitions.find((p) => p.partitionIndex === partitionIndex);
       if (!partition) {
         throw new Error(`Image does not contain partition ${partitionIndex}`);
       }
@@ -214,7 +328,7 @@ export class RestoreEngine implements RestoreCoordinator {
     const targetDiskSize = targetDisk ? targetDisk.size : resolveVirtualDiskSize(vhd!);
     const targetLabel = targetDisk ? `target disk ${config.targetDiskIndex}` : `virtual disk ${vhd!.path}`;
     for (const target of targets) {
-      const partition = info.partitions.find((p) => p.partitionIndex === target.partitionIndex)!;
+      const partition = source.partitions.find((p) => p.partitionIndex === target.partitionIndex)!;
       const size = target.size ?? partition.size;
       if (BigInt(target.offset) + BigInt(size) > BigInt(targetDiskSize)) {
         throw new Error(
@@ -228,7 +342,7 @@ export class RestoreEngine implements RestoreCoordinator {
     // the target disk's existing layout, so it must be explicitly acknowledged.
     const deviatesFromCaptured = config.targetLayout
       ? targets.some((t) => {
-          const captured = info.partitions.find((p) => p.partitionIndex === t.partitionIndex)!;
+          const captured = source.partitions.find((p) => p.partitionIndex === t.partitionIndex)!;
           return t.offset !== captured.offsetOnDisk || (t.size !== undefined && t.size !== captured.size);
         })
       : false;
@@ -237,8 +351,8 @@ export class RestoreEngine implements RestoreCoordinator {
     // image came from (matched by serial) with a deviating layout overwrites
     // the source layout in place and cannot be undone, so it needs its own
     // explicit acknowledgement beyond the generic layout one.
-    const sourceModel = info.header.sourceDiskModel ?? '';
-    const sourceSerial = info.header.sourceDiskSerial ?? '';
+    const sourceModel = source.sourceDiskModel;
+    const sourceSerial = source.sourceDiskSerial;
     const targetModel = targetDisk?.model ?? '';
     const targetSerial = targetDisk?.serial ?? '';
     const warnings: string[] = [];
@@ -285,10 +399,7 @@ export class RestoreEngine implements RestoreCoordinator {
       }
     }
 
-    const detectKey =
-      config.passphrase && info.header.cipherId !== CIPHER_NONE
-        ? deriveImageKey(config.passphrase, info.header.salt, info.header.kdfIterations)
-        : undefined;
+    const detectKey = source.detectKey;
 
     // Table-type inference: probe the image contents for EFI System
     // Partitions (FAT32 with the spec-required \EFI directory) so a freshly
@@ -315,7 +426,7 @@ export class RestoreEngine implements RestoreCoordinator {
     // back to plain auto (MBR when representable) only when GPT cannot fit.
     const buildFreshTablePlan = (): RestoreTablePlan => {
       const placements = targets.map((t) => {
-        const partition = info.partitions.find((p) => p.partitionIndex === t.partitionIndex)!;
+        const partition = source.partitions.find((p) => p.partitionIndex === t.partitionIndex)!;
         return { partitionIndex: t.partitionIndex, offset: t.offset, size: t.size ?? partition.size };
       });
       const requested = config.tableScheme || 'auto';
@@ -375,14 +486,14 @@ export class RestoreEngine implements RestoreCoordinator {
       logger.warn(warnings.join(' '));
     }
 
-    const encryption: JobEncryption | undefined = config.passphrase
-      ? metadataFromCipher(newImageCipher(config.passphrase))
-      : undefined;
+    const encryption: JobEncryption | undefined =
+      config.passphrase && !source.isMacrium ? metadataFromCipher(newImageCipher(config.passphrase)) : undefined;
 
     // Default to a few worker threads for decompression when the image is
-    // compressed; 0/synchronous preserves the simplest path.
+    // compressed; 0/synchronous preserves the simplest path. Macrium readers
+    // decompress synchronously per block, so the default stays 0 there.
     const compressionThreads =
-      config.compressionThreads ?? (info.header.compressionId !== COMPRESSION_NONE
+      config.compressionThreads ?? (source.compressionId !== COMPRESSION_NONE
         ? Math.max(1, Math.min(4, os.cpus().length - 1))
         : 0);
 
@@ -391,7 +502,9 @@ export class RestoreEngine implements RestoreCoordinator {
     return {
       type: 'restore',
       imagePath: config.imagePath,
-      verifyBeforeWrite: config.verifyBeforeWrite !== false,
+      // `.opbs` images carry per-block CRCs for a pre-write pass; Macrium
+      // containers are MD5-verified per block by the reader instead.
+      verifyBeforeWrite: source.isMacrium ? false : config.verifyBeforeWrite !== false,
       targets,
       applyDeltas: chain.slice(1),
       encryption,

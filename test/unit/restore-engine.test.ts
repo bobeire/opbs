@@ -8,6 +8,7 @@ import { inferMbrTypes, inferTableTypeGuids } from '../../src/main/imaging/fs/fi
 import { DiskEnumerator } from '../../src/main/utils/disk-enumerator';
 import { launchElevatedJob } from '../../src/main/helper/launcher';
 import { encodeHeader, encodePartitionEntry, encodeBlockIndexEntry, encodeBlockFrame, compressBlock, crc32, newImageCipher, ImageCipher, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
+import { buildMrimgxImage } from '../helpers/mrimg-image';
 
 vi.mock('../../src/main/helper/launcher', () => ({
   launchElevatedJob: vi.fn(() => ({
@@ -725,5 +726,223 @@ describe('inferMbrTypes', () => {
     expect(inferMbrTypes(imagePath, [0])).toEqual({ 0: 0x0c });
     writeImage(imagePath, undefined);
     expect(inferMbrTypes(imagePath, [0])).toEqual({ 0: 0x07 });
+  });
+});
+
+describe('RestoreEngine Macrium images', () => {
+  let dir: string;
+  let imagePath: string;
+
+  const GEOM_OFFSET = 1048576;
+  const PART_SIZE = 2 * 8192;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-restore-mrimg-'));
+    imagePath = path.join(dir, 'image.mrimgx');
+    vi.mocked(launchElevatedJob).mockClear();
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  function ntfsBlock(seed: number): Buffer {
+    const b = Buffer.alloc(8192, seed);
+    b.write('NTFS    ', 3, 'ascii');
+    return b;
+  }
+
+  function writeMacrium(tweak?: (json: any) => void, opts?: { start?: number; length?: number }): void {
+    const start = opts?.start ?? GEOM_OFFSET;
+    const length = opts?.length ?? PART_SIZE;
+    const built = buildMrimgxImage([ntfsBlock(0x11), ntfsBlock(0x22)], (json) => {
+      json.disks[0].partitions[0]._geometry = {
+        start,
+        end: start + length - 1,
+        length,
+        boot_sector_offset: 0
+      };
+      tweak?.(json);
+    });
+    fs.writeFileSync(imagePath, built.buffer);
+  }
+
+  it('places the partition at the captured on-disk offset from the geometry (bytes)', async () => {
+    writeMacrium();
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const job = await engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] });
+    expect(job.targets).toHaveLength(1);
+    expect(job.targets[0].offset).toBe(GEOM_OFFSET);
+    expect(job.targets[0].size).toBeUndefined();
+    expect(job.writeTable).toBeUndefined();
+    expect(job.verifyBeforeWrite).toBe(false);
+    expect(job.applyDeltas).toEqual([]);
+    expect(job.compressionThreads).toBe(0);
+    expect(job.warnings).toBeUndefined();
+  });
+
+  it('never carries an encryption key for a Macrium source', async () => {
+    writeMacrium();
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const job = await engine.buildJob({
+      imagePath,
+      targetDiskIndex: 1,
+      targetPartitions: [0],
+      passphrase: 'hunter2'
+    });
+    expect(job.encryption).toBeUndefined();
+  });
+
+  it('grows a partition when targetLayout requests a larger size (fresh table planned)', async () => {
+    writeMacrium();
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const targetLayout = [{ partitionIndex: 0, offset: GEOM_OFFSET, size: PART_SIZE * 2 }];
+    await expect(
+      engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0], targetLayout })
+    ).rejects.toThrow(/acknowledgeLayout/i);
+    const job = await engine.buildJob({
+      imagePath,
+      targetDiskIndex: 1,
+      targetPartitions: [0],
+      targetLayout,
+      acknowledgeLayout: true
+    });
+    expect(job.targets[0].size).toBe(PART_SIZE * 2);
+    expect(job.writeTable).toBeDefined();
+    expect(job.writeTable!.scheme).toBe('mbr');
+    expect(job.writeTable!.entries[0].size).toBe(PART_SIZE * 2);
+    expect(job.writeTable!.entries[0].mbrType).toBe(0x07); // NTFS
+  });
+
+  it('refuses to shrink below the captured partition size', async () => {
+    writeMacrium();
+    const engine = new RestoreEngine(createFakeEnumerator());
+    await expect(
+      engine.buildJob({
+        imagePath,
+        targetDiskIndex: 1,
+        targetPartitions: [0],
+        targetLayout: [{ partitionIndex: 0, offset: GEOM_OFFSET, size: 4096 }],
+        acknowledgeLayout: true
+      })
+    ).rejects.toThrow(/shrink/i);
+  });
+
+  it('requires explicit placement when the image records no source offset', async () => {
+    writeMacrium(undefined, { start: 0 });
+    const engine = new RestoreEngine(createFakeEnumerator());
+    await expect(engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] })).rejects.toThrow(
+      /Cannot determine the source on-disk offset/
+    );
+    await expect(engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] })).rejects.toThrow(
+      /--layout 0:/
+    );
+    // A layout override against a captured offset of 0 still deviates, so the
+    // generic acknowledgement gate applies.
+    await expect(
+      engine.buildJob({
+        imagePath,
+        targetDiskIndex: 1,
+        targetPartitions: [0],
+        targetLayout: [{ partitionIndex: 0, offset: GEOM_OFFSET }]
+      })
+    ).rejects.toThrow(/acknowledgeLayout/i);
+    const job = await engine.buildJob({
+      imagePath,
+      targetDiskIndex: 1,
+      targetPartitions: [0],
+      targetLayout: [{ partitionIndex: 0, offset: GEOM_OFFSET }],
+      acknowledgeLayout: true
+    });
+    expect(job.targets[0].offset).toBe(GEOM_OFFSET);
+  });
+
+  it('rejects a placement that does not fit on the target disk', async () => {
+    writeMacrium();
+    const engine = new RestoreEngine(createFakeEnumerator());
+    await expect(
+      engine.buildJob({
+        imagePath,
+        targetDiskIndex: 1,
+        targetPartitions: [0],
+        targetLayout: [{ partitionIndex: 0, offset: 999_999_999 }],
+        acknowledgeLayout: true
+      })
+    ).rejects.toThrow(/does not fit/i);
+  });
+
+  it('refuses a file-and-folder backup instead of restoring it as a disk image', async () => {
+    writeMacrium((json) => {
+      json._header.backup_format = 'file_and_folder';
+    });
+    const engine = new RestoreEngine(createFakeEnumerator());
+    await expect(engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] })).rejects.toThrow(
+      /file and folder/
+    );
+    expect(() => summarizeImage(imagePath)).toThrow(/file and folder/);
+  });
+
+  it('refuses a differential image that cannot be restored independently', async () => {
+    writeMacrium((json) => {
+      json._header.backup_type = 'diff';
+    });
+    const engine = new RestoreEngine(createFakeEnumerator());
+    await expect(engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] })).rejects.toThrow(
+      /differential/
+    );
+    expect(() => summarizeImage(imagePath)).toThrow(/differential/);
+  });
+
+  it('rejects a delta chain for a Macrium source', async () => {
+    writeMacrium();
+    const engine = new RestoreEngine(createFakeEnumerator());
+    await expect(
+      engine.buildJob({
+        imagePath,
+        targetDiskIndex: 1,
+        targetPartitions: [0],
+        applyDeltas: ['more.mrimgx']
+      })
+    ).rejects.toThrow(/delta chains are not supported/);
+  });
+
+  it('summarizes the Macrium layout (size, offset, filesystem, backup time)', () => {
+    writeMacrium();
+    const summary = summarizeImage(imagePath);
+    expect(summary.totalSize).toBe(PART_SIZE);
+    expect(summary.partitions).toEqual([
+      { index: 0, size: PART_SIZE, fsType: 'NTFS', offsetOnDisk: GEOM_OFFSET, blockCount: 2 }
+    ]);
+    expect(summary.blockSize).toBe(8192);
+    expect(summary.blocks).toBe(2);
+    expect(summary.compressionId).toBe(0);
+    expect(summary.backupDate).toBe(new Date(1600000000 * 1000).toISOString());
+    expect(summary.encrypted).toBe(false);
+    expect(summary.incremental).toBe(false);
+  });
+
+  it('applies no same-disk gate (the container records no source identity)', async () => {
+    writeMacrium();
+    const engine = new RestoreEngine(createTargetEnumerator({ serial: 'SRC123' }));
+    const job = await engine.buildJob({
+      imagePath,
+      targetDiskIndex: 1,
+      targetPartitions: [0],
+      targetLayout: [{ partitionIndex: 0, offset: 2097152 }],
+      acknowledgeLayout: true
+    });
+    expect(job.targets[0].offset).toBe(2097152);
+    expect(job.warnings).toBeUndefined();
+  });
+
+  it('runs the full engine pipeline (build + launch) for a Macrium source', async () => {
+    writeMacrium();
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const result = await engine.runRestore(
+      { imagePath, targetDiskIndex: 1, targetPartitions: [0] },
+      () => undefined
+    );
+    expect(result).toEqual({ ok: true });
+    expect(launchElevatedJob).toHaveBeenCalledWith(expect.objectContaining({ type: 'restore' }));
   });
 });

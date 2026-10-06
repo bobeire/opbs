@@ -91,6 +91,14 @@ export interface MacriumPartitionInfo {
   volumeLabel: string;
   geometry: { start: number; end: number; length: number; bootSectorOffset: number };
   partitionTableType?: number;
+  /**
+   * Absolute byte offset of this partition on the source disk when the
+   * container records one: the mrimgx `$JSON` geometry (bytes per the
+   * published spec) or the v7 footer's MBR/GPT table matched by extent.
+   * 0/undefined = unknown; a restore then needs an explicit targetLayout
+   * offset for this partition.
+   */
+  offsetOnDisk?: number;
   blocks: MacriumIndexElement[];
 }
 
@@ -136,6 +144,25 @@ export function macriumUnsupportedReason(info: MacriumImageInfo): string | null 
   return null;
 }
 
+/**
+ * First reason this Macrium image cannot be RESTORED onto a disk, or null when
+ * the container is restorable. Extends the read-side verdict with refusals
+ * that browsing tolerates but a restore must not (file-and-folder backups,
+ * differential/incremental members).
+ */
+export function macriumRestoreRefusal(info: MacriumImageInfo): string | null {
+  const unsupported = macriumUnsupportedReason(info);
+  if (unsupported) return unsupported;
+  if (info.backupFormat === 'file_and_folder' || info.backupType === 'file backup') {
+    return `${info.imagePath}: file and folder backups cannot be restored as a disk image.`;
+  }
+  if (/^(diff|inc)$/i.test(info.backupType ?? '')) {
+    const kind = /^diff$/i.test(info.backupType) ? 'differential' : 'incremental';
+    return `${info.imagePath}: ${kind} Macrium images cannot be restored independently; restore or merge the chain in Reflect first.`;
+  }
+  return null;
+}
+
 function readFileRange(imagePath: string, offset: number, length: number): Buffer {
   const fd = getCachedFd(imagePath);
   const buf = Buffer.allocUnsafe(length);
@@ -173,6 +200,16 @@ export function detectMacriumFormat(imagePath: string): MacriumFormat | null {
     if (hasMagic(tail, MRIMG_V7_MAGIC, 14) && tail[35] === 0) return 'mrimg-v7';
   }
   return null;
+}
+
+/**
+ * On-disk byte extent of an imaged partition: the recorded partition-table
+ * size when known (mrimgx `$JSON` geometry, matched v7 MBR/GPT entry) or the
+ * covered data bytes otherwise (may round the true partition size up to the
+ * block size).
+ */
+export function macriumPartitionSize(part: MacriumPartitionInfo): number {
+  return part.geometry.length > 0 ? part.geometry.length : part.blockCount * part.blockSize;
 }
 
 /** A metadata block occurrence: name, on-disk position and payload location. */
@@ -331,6 +368,9 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
   let diskFormat = '';
   let diskSignature: string | undefined;
   let diskSizeBytes = 0;
+  // Source-disk partition-table entries from the footer's MBR/GPT copy, used
+  // to pair each imaged partition with its on-disk offset for restores.
+  const tableEntries: Array<{ offset: number; size: number }> = [];
   let backupTime: number | undefined;
   let aesValue = 0;
   let methodValue = -1;
@@ -383,14 +423,42 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
           if (isGpt) {
             const altLba = footer.readBigUInt64LE(gptOff + 32);
             if (altLba > 0n && altLba < 1n << 52n) diskSizeBytes = Number((altLba + 1n) << 9n);
+            // Entry array position is header-defined (normally LBA 2).
+            const entriesLba = footer.readBigUInt64LE(gptOff + 72);
+            const entrySize = footer.readUInt32LE(gptOff + 84) || 128;
+            if (entriesLba >= 1n && entriesLba < 4096n && entrySize >= 128 && entrySize <= 4096) {
+              const base = mbr + Number(entriesLba) * 512;
+              for (let i = 0; i < 256 && base + (i + 1) * entrySize <= footer.length; i++) {
+                const e = base + i * entrySize;
+                let empty = true;
+                for (let b = 0; b < 16; b++) {
+                  if (footer[e + b] !== 0) {
+                    empty = false;
+                    break;
+                  }
+                }
+                if (empty) continue;
+                const firstLba = footer.readBigUInt64LE(e + 32);
+                const lastLba = footer.readBigUInt64LE(e + 40);
+                if (lastLba < firstLba || lastLba >= 1n << 32n) continue;
+                tableEntries.push({ offset: Number(firstLba) * 512, size: Number(lastLba - firstLba + 1n) * 512 });
+              }
+            }
           } else {
             for (let i = 0; i < 4; i++) {
               const e = mbr + 446 + i * 16;
-              if (footer[e + 4] === 0) continue;
+              const type = footer[e + 4];
+              if (type === 0) continue;
               const sectors = footer.readUInt32LE(e + 12);
-              if (sectors === 0) continue;
-              const endByte = (footer.readUInt32LE(e + 8) + sectors) * 512;
+              if (sectors === 0 || sectors === 0xffffffff) continue;
+              const startLba = footer.readUInt32LE(e + 8);
+              const endByte = (startLba + sectors) * 512;
               if (endByte > diskSizeBytes) diskSizeBytes = endByte;
+              // Extended containers (0x05/0x0F/0x85) do not map 1:1 onto
+              // imaged partitions — logical drives live in EBR chains — so
+              // they are excluded from extent matching below.
+              if (type === 0x05 || type === 0x0f || type === 0x85) continue;
+              tableEntries.push({ offset: startLba * 512, size: sectors * 512 });
             }
           }
         }
@@ -626,6 +694,25 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
     p.geometry.length = p.blockCount * blockSize;
   }
 
+  // Pair each imaged partition with its source-disk table entry by extent so
+  // a restore knows where the partition belongs on the target. Matching by
+  // size (within one block of rounding) rather than by position keeps partial
+  // images correct: unimaged partitions simply leave their entry unused.
+  const usedEntries = new Set<number>();
+  for (const p of partitions) {
+    const dataBytes = p.blockCount * blockSize;
+    const j = tableEntries.findIndex(
+      (entry, idx) => !usedEntries.has(idx) && Math.abs(entry.size - dataBytes) <= blockSize
+    );
+    if (j >= 0) {
+      usedEntries.add(j);
+      p.offsetOnDisk = tableEntries[j].offset;
+      // The entry's sector span is the true partition extent; the data-block
+      // extent rounds it up to the block size.
+      p.geometry.length = tableEntries[j].size;
+    }
+  }
+
   // Light filesystem sniff from each partition's first stored block (usually
   // the boot sector), purely to decorate `mrimg info`.
   for (const p of partitions) {
@@ -819,6 +906,10 @@ function readMacriumImageUncached(imagePath: string): MacriumImageInfo {
           bootSectorOffset: num(partGeometry.boot_sector_offset, 0)
         },
         partitionTableType: numOpt(partTable.type),
+        // Partition geometry and file-system start are absolute bytes on the
+        // source disk (published mrimgx spec), either of which places the
+        // partition on a restore target.
+        offsetOnDisk: num(partGeometry.start, 0) || num(partFs.start, 0),
         blocks
       });
     });
