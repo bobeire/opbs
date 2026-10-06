@@ -131,7 +131,7 @@ implemented; **Investigate** items need spike work first.
   `compressBlock`/`decompressBlock` lazily, falling back to zstdify/fzstd.
   ~4.5× faster compression and reliably encodes content that triggers
   zstdify's FSE encoder bug.
-- ⬜ **Remaining**: none — zstd is fully native.
+- ✅ **Remaining**: none — zstd is fully native.
 
 ### Foreign Macrium browse (.mrimgx / .mrimg)
 - ✅ `.mrimgx` (Reflect X) reader validated against the official Macrium demo
@@ -369,7 +369,7 @@ implemented; **Investigate** items need spike work first.
   over either backend (shared `CloudStore` interface). ssh2 works without its
   install script (pure-JS fallback), so the `allow-scripts` guard is not a
   blocker.
-- ⬜ **Remaining**: none for SFTP.
+- ✅ **Remaining**: none for SFTP.
 - ✅ FTP/FTPS backend: `utils/ftp.ts` (`parseFtpLocation`, `resolveFtpConfig`
   with `FTP_USER`/`FTP_PASSWORD`/`FTP_SECURE` env fallbacks, `FtpStore` — an
   `SftpStore`-compatible object store over the `basic-ftp` client, streamed
@@ -495,5 +495,15 @@ implemented; **Investigate** items need spike work first.
   native code.
 - ✅ PBKDF2 + AES-256-GCM already run through Node's OpenSSL-backed `crypto`
   (hardware-accelerated via CPU AES-NI), so no addon move is required for those.
-- ⬜ **Remaining**: (optional) port PBKDF2/GCM to the addon for marginal gains
-  on very large encrypted volumes.
+- ✅ **Declined (2026-10-06, measured)**: porting PBKDF2/GCM into the addon.
+  Benchmarks on the reference machine: PBKDF2-SHA256 @ 210k = 82 ms (run once
+  per backup/restore/verify), AES-256-GCM = 850 us per 1 MiB block
+  (~1.18 GB/s; only ~43 us of that is JS↔OpenSSL call overhead) versus
+  ~20 ms of deflate for the same block. A perfect native port would therefore
+  save at most ~40 ms once per job and roughly 5% CPU on a 100 GiB encrypted
+  backup — while adding a second hand-maintained crypto implementation to the
+  addon (audit + memory-safety surface and a duplicate OpenSSL-vs-BCrypt test
+  matrix). Encryption stays on Node's OpenSSL-backed `crypto`; if it ever
+  shows up in a profile, prefer overlapping it with the compression workers,
+  larger blocks for encrypted images, or fewer frame Buffer copies over
+  porting.
