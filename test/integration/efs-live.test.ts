@@ -11,6 +11,9 @@ import {
   parseFek,
   unwrapFek
 } from '../../src/main/imaging/fs/efs';
+import { parseBootSector, readFileRecords, buildTree, readFileRange } from '../../src/main/imaging/fs/ntfs';
+import { listDirectory, readPath, extractPath, NtfsBrowseSession } from '../../src/main/imaging/fs/file-browse';
+import { buildNtfsVolume } from '../helpers/ntfs-fixture';
 
 /**
  * End-to-end check against a real Windows EFS encryption: encrypt a probe file
@@ -166,6 +169,77 @@ describe.skipIf(process.platform !== 'win32')('EFS live round-trip against ciphe
         GOLDEN_PATH,
         `${JSON.stringify({ generatedFrom: 'cipher /e on this machine', vectors }, null, 2)}\n`
       );
+    }
+  });
+
+  it('decrypts through readPath/extractPath on a real ciphertext volume', (ctx) => {
+    let native: NativeWithEfs;
+    try {
+      native = loadNative<NativeWithEfs>();
+    } catch {
+      ctx.skip();
+      return;
+    }
+    if (typeof native.readEncryptedRaw !== 'function' || typeof native.unwrapEfsFek !== 'function') {
+      ctx.skip();
+      return;
+    }
+
+    const plain = deterministicBytes(5000, 0x5eed + 5000);
+    const probe = encryptProbe(native, plain);
+    if (!probe) {
+      ctx.skip();
+      return;
+    }
+    const attr = parseEfsAttribute(probe.attr);
+    try {
+      unwrapFek(attr.entries[0].thumbprint, attr.entries[0].efek);
+    } catch {
+      ctx.skip();
+      return;
+    }
+
+    // Rebuild Windows' ciphertext into a synthetic NTFS volume whose file
+    // carries the real $EFS attribute, then read it back through the product
+    // browse path (MFT parse -> FEK unwrap -> sector decrypt).
+    const reader = buildNtfsVolume({
+      efsFile: { name: 'secret.txt', efsValue: probe.attr, data: probe.cipher, plainSize: plain.length }
+    });
+    const layout = parseBootSector(reader);
+    const records = readFileRecords(reader, layout);
+    const session: NtfsBrowseSession = {
+      filesystem: 'ntfs',
+      imagePath: 'mem',
+      chain: ['mem'],
+      partitionIndex: 0,
+      reader,
+      layout,
+      records: new Map(records.map((r) => [r.recordNumber, r])),
+      children: buildTree(records),
+      rootId: 5
+    };
+
+    const node = listDirectory(session, '').find((n) => n.name === 'secret.txt');
+    expect(node?.isEncrypted).toBe(true);
+
+    expect(readPath(session, 'secret.txt').equals(plain)).toBe(true);
+
+    const rec = session.records.get(10);
+    expect(rec).toBeDefined();
+    expect(rec!.isEncrypted).toBe(true);
+    const ranged = readFileRange(reader, layout, rec!, 4096, 512);
+    expect(ranged.equals(plain.subarray(4096, 4608))).toBe(true);
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-efs-extract-'));
+    try {
+      expect(extractPath(session, 'secret.txt', path.join(dir, 'single.bin'))).toBe(1);
+      expect(fs.readFileSync(path.join(dir, 'single.bin')).equals(plain)).toBe(true);
+
+      const count = extractPath(session, '', path.join(dir, 'folder'));
+      expect(count).toBeGreaterThanOrEqual(3);
+      expect(fs.readFileSync(path.join(dir, 'folder', 'secret.txt')).equals(plain)).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });

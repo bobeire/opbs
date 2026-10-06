@@ -13,6 +13,10 @@ interface AttrDef {
   resident?: Buffer;
   runs?: DataRun[];
   realSize?: number;
+  /** allocated_size (defaults to realSize). */
+  allocatedSize?: number;
+  /** initialized_size (defaults to 0). */
+  initializedSize?: number;
   vcn?: number;
   compressionUnit?: number;
   parentRecord?: number;
@@ -117,8 +121,9 @@ export function buildFileRecord(recordNumber: number, opts: { inUse?: boolean; d
       const runlistOffset = 0x40 + nameBuf.length;
       buf.writeUInt16LE(runlistOffset, pos + 0x20);
       buf.writeUInt16LE(a.compressionUnit ?? 0, pos + 0x22);
-      buf.writeBigUInt64LE(BigInt(a.realSize ?? 0), pos + 0x28);
+      buf.writeBigUInt64LE(BigInt(a.allocatedSize ?? a.realSize ?? 0), pos + 0x28);
       buf.writeBigUInt64LE(BigInt(a.realSize ?? 0), pos + 0x30);
+      buf.writeBigUInt64LE(BigInt(a.initializedSize ?? 0), pos + 0x38);
       if (nameBuf.length > 0) nameBuf.copy(buf, pos + headerLen);
       runlist.copy(buf, pos + headerLen + nameBuf.length);
       pos += total;
@@ -281,7 +286,17 @@ export function indexRootValue(entries: Array<{ fileReference: number; name: str
   return value;
 }
 
-export function buildNtfsVolume(opts?: { includeEfsFile?: boolean }): PartitionReader {  const totalClusters = 64;
+export interface NtfsEfsFileFixture {
+  name: string;
+  /** Real $EFS attribute value (as Windows wrote it). */
+  efsValue: Buffer;
+  /** Ciphertext written to the data runs. */
+  data: Buffer;
+  /** data_size: the plaintext length. */
+  plainSize: number;
+}
+
+export function buildNtfsVolume(opts?: { includeEfsFile?: boolean; efsFile?: NtfsEfsFileFixture }): PartitionReader {  const totalClusters = 64;
   const data = Buffer.alloc(totalClusters * CLUSTER);
 
   data.write('NTFS    ', 3, 'ascii');
@@ -370,6 +385,29 @@ export function buildNtfsVolume(opts?: { includeEfsFile?: boolean }): PartitionR
       ]
     });
     rec9.copy(data, mftBase + 9 * FILE_RECORD);
+  }
+
+  if (opts?.efsFile) {
+    const efs = opts.efsFile;
+    const runLength = Math.max(1, Math.ceil(efs.data.length / CLUSTER));
+    const rec10 = buildFileRecord(10, {
+      inUse: true,
+      attrs: [
+        { type: 0x10, nonResident: false, resident: standardInfo(7000) },
+        { type: 0x30, nonResident: false, resident: fileNameAttr(5, efs.name, 1) },
+        {
+          type: 0x80,
+          nonResident: true,
+          runs: [{ startLcn: 40, runLength }],
+          realSize: efs.plainSize,
+          allocatedSize: runLength * CLUSTER,
+          initializedSize: efs.data.length
+        },
+        { type: 0x100, nonResident: false, resident: efs.efsValue }
+      ]
+    });
+    rec10.copy(data, mftBase + 10 * FILE_RECORD);
+    efs.data.copy(data, 40 * CLUSTER);
   }
 
   for (let c = 32; c < 34; c++) {

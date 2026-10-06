@@ -54,7 +54,10 @@ implemented; **Investigate** items need spike work first.
   stands: `EFS_ENCRYPTED` for single-file reads, skip for folder extraction.
   Validated live against `cipher /e` (26 B and 5 KB round trips through the
   native unwrap + product decryptor); golden vectors are pinned in
-  `test/fixtures/efs-golden.json` so the offline suite covers them too.
+  `test/fixtures/efs-golden.json` so the offline suite covers them too. The
+  browse path itself is exercised live as well: Windows' ciphertext and `$EFS`
+  attribute are rebuilt into a synthetic NTFS volume and read back through
+  `listDirectory`/`readPath`/`extractPath` and ranged reads.
 
 ### WinPE / bare-metal restore
 - ✅ `media check` / `media create`; `winpe-media.ts` locates the ADK
