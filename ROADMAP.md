@@ -90,17 +90,23 @@ implemented; **Investigate** items need spike work first.
   CLI graph, and ESM-only `zstdify` (bundled to `dist/zstdify.cjs` for the
   desktop app; the app now starts cleanly in Electron).
 - ✅ **Real boot smoke test on physical hardware**: the USB media (label
-  `WINPE`) boots through `startnet.cmd` into WinPE and `OPBS\test-vhd.cmd`
-  reports `ALL PASS` (disks / `backup --source-vhd` / restore into a fresh
-  GPT VHD), with `judge.js` confirming byte-exact partitions on the dev
-  machine (`JUDGE ALL PASS`). Evidence lives on the media as
-  `test/winpe-test-log.txt` + `test/judge-log.txt` (2026-10-03). The harness
-  is now versioned at `tools/winpe-live-test/` and gained a network probe
-  (IPv4 + TCP, WARN by default, `--require-net` makes it hard), and the
-  media payload tracks the release — refreshed to 0.6.59 with
-  `smoke-selfcheck` green (addon + codecs load from the payload).
-- ⬜ **Remaining**: read the `net:` probe line from the next physical boot
-  (NIC drivers vary per machine).
+  `WINPE`) boots through `startnet.cmd` (which runs `wpeinit`) into WinPE and
+  `OPBS\test-vhd.cmd` reports `ALL PASS` (disks / network probe /
+  `backup --source-vhd` / restore into a fresh GPT VHD), with `judge.js`
+  confirming byte-exact partitions on the dev machine (`JUDGE ALL PASS`).
+  Evidence: `test/winpe-test-log.txt` + `test/judge-log.txt` on the media for
+  2026-10-03 and again 2026-10-06 on the refreshed 0.6.60 payload
+  (byte-identical to the release build, `smoke-selfcheck` green). The harness
+  is versioned at `tools/winpe-live-test/` and includes the network probe
+  (IPv4 + TCP, WARN by default, `--require-net` makes it hard).
+- ✅ Network drivers: the first probe run reported `ipv4=none` (the stock
+  WinPE image carries no driver for the host NIC), so the host's Intel
+  Ethernet packages (`e1d.inf` 12.19.2.60/62) were injected into the media's
+  `boot.wim` with DISM (`oem0.inf`/`oem1.inf` now in the image); the
+  product's supported path for this is `media create --driver <dir,...>`.
+- ⬜ **Remaining**: one boot with an Ethernet cable plugged in to confirm
+  `net: ipv4=<addr> tcp=true` in `test/winpe-test-log.txt` (Wi-Fi cannot
+  associate in WinPE — there is no WLAN service — so use the wired NIC).
 
 ### zstd compression + multithreaded compression
 - ✅ `COMPRESSION_ZSTD = 2` added; `compressBlock`/`decompressBlock` handle
