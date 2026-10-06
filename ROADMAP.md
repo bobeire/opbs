@@ -89,9 +89,18 @@ implemented; **Investigate** items need spike work first.
   payload's `--cli` prefix, eager `ssh2`/`node-cron`/`electron` requires in the
   CLI graph, and ESM-only `zstdify` (bundled to `dist/zstdify.cjs` for the
   desktop app; the app now starts cleanly in Electron).
-- ⬜ **Remaining**: a real boot smoke test on physical hardware/VM (network
-  drivers, `startnet.cmd` boot path), which still needs a machine and
-  elevated ADK tooling.
+- ✅ **Real boot smoke test on physical hardware**: the USB media (label
+  `WINPE`) boots through `startnet.cmd` into WinPE and `OPBS\test-vhd.cmd`
+  reports `ALL PASS` (disks / `backup --source-vhd` / restore into a fresh
+  GPT VHD), with `judge.js` confirming byte-exact partitions on the dev
+  machine (`JUDGE ALL PASS`). Evidence lives on the media as
+  `test/winpe-test-log.txt` + `test/judge-log.txt` (2026-10-03). The harness
+  is now versioned at `tools/winpe-live-test/` and gained a network probe
+  (IPv4 + TCP, WARN by default, `--require-net` makes it hard), and the
+  media payload tracks the release — refreshed to 0.6.59 with
+  `smoke-selfcheck` green (addon + codecs load from the payload).
+- ⬜ **Remaining**: read the `net:` probe line from the next physical boot
+  (NIC drivers vary per machine).
 
 ### zstd compression + multithreaded compression
 - ✅ `COMPRESSION_ZSTD = 2` added; `compressBlock`/`decompressBlock` handle

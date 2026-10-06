@@ -453,14 +453,16 @@ destinationPath: dir,
 
     it('does not resume when the resume flag is off, even with a partial image present', async () => {
       // A partial image at the target path exists, but resume is not requested:
-      // buildJob must NOT attach a resumeCheckpoint.
-      const path = await buildPartialImageAtDefaultName(engine, dir);
+      // buildJob must NOT attach a resumeCheckpoint. The image name is pinned
+      // so the assertion cannot race the timestamp in the default name.
+      const path = await buildPartialImageAtDefaultName(engine, dir, 'no-resume-partial');
       const job = await engine.buildJob({
         sourceDiskIndex: 0,
         sourcePartitions: [0],
         destinationPath: dir,
         compressionLevel: 3,
-        verificationEnabled: false
+        verificationEnabled: false,
+        imageName: 'no-resume-partial'
       });
       expect(job.imagePath).toBe(path);
       expect(job.resumeCheckpoint).toBeUndefined();
@@ -468,13 +470,17 @@ destinationPath: dir,
     });
 
     it('attaches a resume checkpoint when resume is enabled and a compatible partial exists', async () => {
-      const path = await buildPartialImageAtDefaultName(engine, dir);
+      // Pinned image name: the default name carries a second-resolution
+      // timestamp, so the two buildJob calls could otherwise land in
+      // different seconds and miss each other's partial image.
+      const path = await buildPartialImageAtDefaultName(engine, dir, 'resume-partial');
       const job = await engine.buildJob({
         sourceDiskIndex: 0,
         sourcePartitions: [0],
         destinationPath: dir,
         compressionLevel: 3,
         verificationEnabled: false,
+        imageName: 'resume-partial',
         resume: true
       });
       expect(job.imagePath).toBe(path);
@@ -489,14 +495,23 @@ destinationPath: dir,
   });
 });
 
-/** Writes a valid partial (unfinished) image to the default target name. */
-async function buildPartialImageAtDefaultName(eng: ImagingEngine, destDir: string): Promise<string> {
+/**
+ * Writes a valid partial (unfinished) image at <destDir>/<imageName>.opbs, or
+ * at the timestamped default name when imageName is omitted (tests that assert
+ * the returned path must pin a name - the default ticks with wall-clock time).
+ */
+async function buildPartialImageAtDefaultName(
+  eng: ImagingEngine,
+  destDir: string,
+  imageName?: string
+): Promise<string> {
   const job = await eng.buildJob({
     sourceDiskIndex: 0,
     sourcePartitions: [0],
     destinationPath: destDir,
     compressionLevel: 3,
-    verificationEnabled: false
+    verificationEnabled: false,
+    ...(imageName ? { imageName } : {})
   });
   const defaultPath = job.imagePath;
 

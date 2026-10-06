@@ -1,0 +1,73 @@
+OPBS WinPE VHD Live Test - Instructions (any x64 machine)
+=========================================================
+
+What this test does
+-------------------
+Runs two headless OPBS CLI jobs against scratch VHDX files that live on
+this USB stick only, after a network probe:
+
+  0. network probe: list IPv4 addresses and try a TCP connect (records
+     whether NIC drivers loaded in WinPE; WARN only - pass --require-net
+     to the script to make it a hard failure).
+  1. backup --source-vhd : attach test\src.vhdx read-only and back it up
+     (the 0.6.44 feature - the riskiest path in WinPE, where VDS/VSS are
+     absent).
+  2. restore into a fresh VHD: restore that image into a brand new
+     test\restored.vhdx with a fresh GPT table (exercises the 0.6.45
+     early-rescan path).
+
+The source of truth for this harness is the OPBS repo (tools/winpe-live-test/);
+after editing it there, copy the files back onto the media root next to
+node.exe and winpe-entry.js.
+
+Safety: no step writes to a physical disk. Everything (image files,
+vhdx files, logs) stays inside <this stick>\OPBS\test\. The interactive
+recovery wizard that may open at boot can restore to physical disks -
+close it, do not use it for this test.
+
+Requirements
+------------
+- x64 machine, >= 2 GB RAM, UEFI or legacy BIOS boot
+- Boot from this USB stick (label WINPE)
+- Nothing on the machine's internal disk is needed or touched
+
+How to run
+----------
+1. Insert the stick, power on, open the boot menu
+   (common keys: F12 / F10 / F8 / F2 / Del / Esc - consult the machine),
+   select the USB device. If Secure Boot blocks the boot, disable Secure
+   Boot in firmware setup and retry.
+2. Windows PE loads (this can take a minute). An "OPBS recovery wizard"
+   window may open automatically - CLOSE it (or ignore it). This test
+   does not use the wizard.
+3. Run the test, either:
+   a) Easy: open File Explorer (WinPE: "This PC"), find the drive with
+      label WINPE, open the OPBS folder, double-click test-vhd.cmd.
+   b) Console: press Shift+F10, then run:
+        D:\OPBS\test-vhd.cmd
+      (the drive letter may differ - check with:  wmic logicaldisk
+       get caption,volumename   and use the WINPE drive)
+4. Watch the console. Expected ending line: "ALL PASS".
+   The run takes roughly 1-5 minutes (backup + restore of a 200 MB
+   FAT32 partition).
+5. Press any key at the final "pause", then shut down
+   (Start menu -> power -> shutdown, or:  wpeutil shutdown).
+
+After the test
+--------------
+Bring the stick back to the dev machine. Evidence to review:
+  OPBS\test\winpe-test-log.txt   - full console log with PASS/FAIL lines,
+                                   including the "net:" network probe result
+  OPBS\test\img-winpe\*.opbs     - image taken from src.vhdx in WinPE
+  OPBS\test\restored.vhdx        - image restored into a fresh VHD
+
+These are byte-compared on the dev machine (image vs a fresh backup of
+restored.vhdx) to prove the WinPE run was byte-exact:
+
+  node.exe D:\OPBS\judge.js     (run from an ADMIN console; writes
+  OPBS\test\judge-log.txt - expect "JUDGE ALL PASS")
+
+Re-running
+----------
+test-vhd.cmd can be run any number of times; it clears previous
+artifacts in OPBS\test\ first (it never deletes src.vhdx).
