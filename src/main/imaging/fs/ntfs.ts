@@ -1,6 +1,17 @@
 import { PartitionReader } from '../image-browse';
 import { decompressLznt1 } from './lznt1';
 import { logger } from '../../utils/logger';
+import {
+  decryptEfsStream,
+  efsStreamSizes,
+  EfsEncryptedError,
+  obtainFileKey,
+  parseEfsAttribute
+} from './efs';
+import type { EfsInfo } from './efs';
+
+export { EfsEncryptedError, parseEfsAttribute };
+export type { EfsInfo, EfsKeyEntry } from './efs';
 
 /** Stop reading the MFT after this many consecutive record-read failures. */
 const MAX_CONSECUTIVE_MFT_READ_FAILURES = 16;
@@ -10,10 +21,11 @@ const MAX_CONSECUTIVE_MFT_READ_FAILURES = 16;
  * from a `PartitionReader` (which decompresses the covering .opbs blocks on
  * demand) and parses the boot sector, the $MFT, and file records directly.
  *
- * Supported: directory tree traversal and reading the unnamed $DATA stream of
- * regular files (resident + non-resident with data runlists). Not supported:
- * compression, encryption, EFS, sparse attributes, $ATTRIBUTE_LIST continuation
- * across records, alternate data streams, or reparse points.
+ * Supported: directory tree traversal, reading the unnamed $DATA stream of
+ * regular files (resident + non-resident with data runlists), LZNT1
+ * compression, and EFS decryption when the machine holds a matching private
+ * key (see ./efs.ts). Not supported: sparse attributes, $ATTRIBUTE_LIST
+ * continuation across records, reparse points.
  */
 
 export interface NtfsLayout {
@@ -44,6 +56,8 @@ export interface NtfsFile {
   name?: { name: string; parentRecord: number; namespace: number };
   size: number;
   allocatedSize: number;
+  /** $DATA initialized_size (valid data length) for non-resident streams. */
+  initializedSize?: number;
   modified?: number;
   created?: number;
   /** Non-resident $DATA runlist (empty if resident / no data). */
@@ -77,108 +91,6 @@ export interface NtfsStream {
   dataRuns: DataRun[];
   residentData: Buffer;
   dataVcn: number;
-}
-
-/**
- * A single EFS user / recovery-agent entry extracted from the $EFS attribute.
- * `containerGuid` identifies the certificate (or key-context) whose public key
- * wraps the file's FEK. Key info is parsed best-effort: type 0 = legacy CAPI
- * key, 1 = CNG key; `algId` is the CALG identifier for the data cipher.
- */
-export interface EfsKeyEntry {
-  name: string;
-  containerGuid: string;
-  keyType: number;
-  algId: number;
-  fekBits: number;
-  keyInfoOffset: number;
-}
-
-/** Decoded $EFS attribute metadata (detection + key ownership, not the FEK). */
-export interface EfsInfo {
-  version: number;
-  entries: EfsKeyEntry[];
-}
-
-/**
- * Raised when reading the $DATA stream of an EFS-encrypted file. Offline
- * decryption requires the owning user's private key (DPAPI-protected), which
- * is not available from the image itself, so the ciphertext must never be
- * handed to the caller as if it were plaintext.
- */
-export class EfsEncryptedError extends Error {
-  readonly code = 'EFS_ENCRYPTED';
-}
-
-function formatGuid(bytes: Buffer): string {
-  const h = (b: Buffer, o: number, n: number) => b.subarray(o, o + n).toString('hex');
-  return `${h(bytes, 0, 4)}-${h(bytes, 4, 2)}-${h(bytes, 6, 2)}-${h(bytes, 8, 2)}-${h(bytes, 10, 6)}`;
-}
-
-/**
- * Parse the value of an $EFS attribute (type 0x100). The blob is a version/
- * end-of-blob header followed by one entry per principal (file owner +
- * recovery agents). Parsing is intentionally defensive: the presence of the
- * attribute alone marks the file as encrypted, so malformed metadata must not
- * abort the read of an otherwise-valid volume.
- */
-export function parseEfsAttribute(value: Buffer): EfsInfo {
-  const entries: EfsKeyEntry[] = [];
-  if (value.length < 0x18) {
-    return { version: 0, entries };
-  }
-  const version = value.readUInt32LE(0x00);
-  let end = value.length;
-  const blobEnd = value.readUInt32LE(0x04);
-  if (blobEnd >= 0x18 && blobEnd <= value.length) {
-    end = blobEnd;
-  }
-  let pos = 0x18;
-  while (pos + 0x18 <= end) {
-    const entryLen = value.readUInt32LE(pos);
-    const keyInfoOffset = value.readUInt32LE(pos + 4);
-    if (entryLen < 0x18 || pos + entryLen > end) break;
-
-    const nameStart = pos + 0x18;
-    const nameEnd = pos + entryLen;
-    let charsEnd = nameEnd;
-    while (charsEnd - nameStart >= 2 && value.readUInt16LE(charsEnd - 2) === 0) charsEnd -= 2;
-    let name = '';
-    if (charsEnd > nameStart) {
-      // Trim trailing UTF-16 NUL; strip a trailing length word if present.
-      let candidate = value.toString('utf16le', nameStart, charsEnd);
-      if (candidate.length > 0 && candidate.charCodeAt(candidate.length - 1) === 0) {
-        candidate = candidate.slice(0, -1);
-      }
-      name = candidate;
-    }
-    // The key info usually lives at an absolute offset; fall back to treating
-    // the offset as relative to this entry.
-    let keyType = 0;
-    let algId = 0;
-    let fekBits = 0;
-    const keyInfoPos =
-      keyInfoOffset >= 0x18 && keyInfoOffset + 0x10 <= end
-        ? keyInfoOffset
-        : pos + keyInfoOffset + 0x10 <= end
-          ? pos + keyInfoOffset
-          : -1;
-    if (keyInfoPos >= 0) {
-      keyType = value.readUInt32LE(keyInfoPos);
-      algId = value.readUInt32LE(keyInfoPos + 4);
-      fekBits = value.readUInt32LE(keyInfoPos + 8);
-    }
-    entries.push({
-      name,
-      containerGuid: formatGuid(value.subarray(pos + 8, pos + 24)),
-      keyType,
-      algId,
-      fekBits,
-      keyInfoOffset: keyInfoPos
-    });
-    pos += entryLen;
-  }
-  return { version, entries };
 }
 
 /** A single $I30 index entry (a directory child). */
@@ -482,6 +394,9 @@ export function parseFileRecord(raw: Buffer, recordNumber: number): NtfsFile {
           file.dataRuns = parseRunlist(buf, pos + runlistOffset);
           file.size = realSize;
           file.allocatedSize = allocatedSize;
+          if (pos + 0x40 <= buf.length) {
+            file.initializedSize = Number(buf.readBigUInt64LE(pos + 0x38));
+          }
           file.dataVcn = Number(buf.readBigUInt64LE(pos + 0x10));
           file.compressionUnit = buf.readUInt16LE(pos + 0x22);
         } else {
@@ -720,13 +635,52 @@ export function buildTree(records: NtfsFile[]): Map<number, NtfsNode[]> {
   return children;
 }
 
+/**
+ * Decrypted plaintext per record. A mounted view issues many small reads, so
+ * the result is kept (for reasonably sized files) rather than re-unwrapping
+ * the FEK and re-decrypting the whole stream on every request.
+ */
+const efsPlainCache = new WeakMap<NtfsFile, Buffer>();
+const EFS_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Read and decrypt an EFS file's unnamed $DATA stream. The ciphertext extent
+ * is read first, its plaintext length resolved, and each 512-byte sector
+ * decrypted with the unwrapped file encryption key. Throws
+ * `EfsEncryptedError` when no local private key can unwrap the key.
+ */
+function readEfsFileData(reader: PartitionReader, layout: NtfsLayout, file: NtfsFile): Buffer {
+  const cached = efsPlainCache.get(file);
+  if (cached) return cached;
+
+  const label = file.name?.name ?? `record ${file.recordNumber}`;
+  if (!file.efs) {
+    throw new EfsEncryptedError(
+      `"${label}" is EFS-encrypted but the $EFS attribute is missing from its file record`
+    );
+  }
+  const fek = obtainFileKey(file.efs, label);
+
+  const want = Math.max(file.size, Math.ceil((file.size + 2) / 512) * 512);
+  let raw: Buffer;
+  if (file.residentData.length > 0) {
+    raw = Buffer.from(file.residentData);
+  } else {
+    // Read the whole ciphertext extent: the pad field (when present) lives
+    // just past data_size and the last sector always has to be complete.
+    const length = file.allocatedSize > 0 ? Math.min(want, Math.max(file.allocatedSize, file.size)) : want;
+    raw = readRuns(reader, layout.clusterSize, file.dataRuns, 0, length);
+  }
+  const { plain, cipher } = efsStreamSizes(raw, file.size, file.initializedSize);
+  const out = decryptEfsStream(raw, cipher, plain, fek);
+  if (out.length <= EFS_CACHE_MAX_BYTES) efsPlainCache.set(file, out);
+  return out;
+}
+
 /** Read the unnamed $DATA stream of a file record (cluster-based). */
 export function readFileData(reader: PartitionReader, layout: NtfsLayout, file: NtfsFile): Buffer {
   if (file.isEncrypted) {
-    throw new EfsEncryptedError(
-      `"${file.name?.name ?? `record ${file.recordNumber}`}" is EFS-encrypted; its bytes are ciphertext ` +
-        'and cannot be decrypted offline from the image without the owner\'s private key'
-    );
+    return readEfsFileData(reader, layout, file);
   }
   if (file.residentData.length > 0) {
     return Buffer.from(file.residentData);
@@ -753,10 +707,10 @@ export function readFileRange(
   length: number
 ): Buffer {
   if (file.isEncrypted) {
-    throw new EfsEncryptedError(
-      `"${file.name?.name ?? `record ${file.recordNumber}`}" is EFS-encrypted; its bytes are ciphertext ` +
-        'and cannot be decrypted offline from the image without the owner\'s private key'
-    );
+    const plain = readEfsFileData(reader, layout, file);
+    if (length <= 0 || offset >= plain.length) return Buffer.alloc(0);
+    const start = offset < 0 ? 0 : offset;
+    return Buffer.from(plain.subarray(start, Math.min(start + length, plain.length)));
   }
   if (length <= 0 || offset >= file.size) return Buffer.alloc(0);
   const start = offset < 0 ? 0 : offset;

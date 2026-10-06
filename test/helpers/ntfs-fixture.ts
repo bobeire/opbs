@@ -170,48 +170,85 @@ export function attributeListValue(entries: Array<{ type: number; lowestVcn: num
   return Buffer.concat(chunks);
 }
 
+/** SHA-1 thumbprint (40 hex chars) whose private key would unwrap the EFEK. */
+export const EFS_TEST_THUMBPRINT = 'aabbccddeeff00112233445566778899aabbccdd';
+
+export interface EfsAttrEntry {
+  name: string;
+  /** Certificate thumbprint as lowercase hex (defaults to EFS_TEST_THUMBPRINT). */
+  thumbprint?: string;
+  /** RSA-wrapped file encryption key (defaults to a 128-byte placeholder). */
+  efek?: Buffer;
+}
+
+/** One data decryption / recovery field in the canonical on-disk layout. */
+function efsDfField(entry: EfsAttrEntry): Buffer {
+  const thumbprint = Buffer.from(entry.thumbprint ?? EFS_TEST_THUMBPRINT, 'hex');
+  const userName = Buffer.from(`${entry.name}\0`, 'utf16le');
+  const efek = entry.efek ?? Buffer.alloc(128, 0x5a);
+
+  const credHeaderOffset = 0x14; // DF header, then the credential header
+  const certHeaderOffset = 0x14; // credential header, then the certificate header
+  const thumbprintOffset = 0x14; // certificate header, then the thumbprint
+  const userNameOffset = thumbprintOffset + thumbprint.length;
+  const credLength = certHeaderOffset + thumbprintOffset + thumbprint.length + userName.length;
+  const efekOffset = credHeaderOffset + credLength;
+
+  const field = Buffer.alloc(efekOffset + efek.length);
+  field.writeUInt32LE(field.length, 0); // df_length
+  field.writeUInt32LE(credHeaderOffset, 4);
+  field.writeUInt32LE(efek.length, 8);
+  field.writeUInt32LE(efekOffset, 12);
+  field.writeUInt32LE(0, 16); // unknown1
+
+  field.writeUInt32LE(credLength, credHeaderOffset); // cred_length
+  field.writeUInt32LE(0, credHeaderOffset + 4); // no SID
+  field.writeUInt32LE(3, credHeaderOffset + 8); // certificate thumbprint
+  field.writeUInt32LE(0, credHeaderOffset + 12);
+  field.writeUInt32LE(certHeaderOffset, credHeaderOffset + 16);
+
+  const cert = credHeaderOffset + certHeaderOffset;
+  field.writeUInt32LE(thumbprintOffset, cert);
+  field.writeUInt32LE(thumbprint.length, cert + 4);
+  field.writeUInt32LE(0, cert + 8); // no container name
+  field.writeUInt32LE(0, cert + 12); // no provider name
+  field.writeUInt32LE(userNameOffset, cert + 16);
+  thumbprint.copy(field, cert + thumbprintOffset);
+  userName.copy(field, cert + userNameOffset);
+  efek.copy(field, efekOffset);
+  return field;
+}
+
 /**
- * Build the value of an $EFS attribute (type 0x100): a 0x18 header followed by
- * one entry per principal, then the key-info blobs. Follows the canonical blob
- * layout so `parseEfsAttribute` can decode it.
+ * Build the value of an `$EFS` attribute (type 0x100) in the layout Windows
+ * writes: a 76-byte header, then a data decryption field (DDF) array and
+ * optionally a recovery field (DRF) array, each an entry count followed by
+ * chained fields. Follows the structure `parseEfsAttribute` decodes.
  */
-export function efsAttrValue(entries: Array<{ name: string; guid?: number[]; algId?: number; fekBits?: number }>): Buffer {
-  const GUID = (idx: number) => {
-    const g = Buffer.alloc(16);
-    for (let i = 0; i < 16; i++) g[i] = (entries[idx].guid?.[i] ?? i + 1 + idx * 16) & 0xff;
-    return g;
-  };
-  const entryOffsets: number[] = [];
-  const entryLens: number[] = [];
-  let pos = 0x18;
-  for (let i = 0; i < entries.length; i++) {
-    entryOffsets.push(pos);
-    const nameBytes = entries[i].name.length * 2 + 2; // include a UTF-16 NUL
-    const entryLen = 0x18 + nameBytes;
-    entryLens.push(entryLen);
-    pos += entryLen;
-  }
-  const keyOffsets: number[] = [];
-  for (let i = 0; i < entries.length; i++) {
-    keyOffsets.push(pos);
-    pos += 0x10;
-  }
-  const blob = Buffer.alloc(pos);
-  blob.writeUInt32LE(0, 0x00); // version
-  blob.writeUInt32LE(blob.length, 0x04); // end of blob
-  // header GUID (foEfsCheck) at 0x08 left zeroed.
-  for (let i = 0; i < entries.length; i++) {
-    const off = entryOffsets[i];
-    blob.writeUInt32LE(entryLens[i], off);
-    blob.writeUInt32LE(keyOffsets[i], off + 4);
-    GUID(i).copy(blob, off + 8);
-    blob.write(entries[i].name, off + 0x18, 'utf16le');
-    const ko = keyOffsets[i];
-    blob.writeUInt32LE(0, ko); // key type (CAPI)
-    blob.writeUInt32LE(entries[i].algId ?? 0x6610, ko + 4); // CALG_AES_256
-    blob.writeUInt32LE(entries[i].fekBits ?? 256, ko + 8);
-    blob.writeUInt32LE(0, ko + 12); // encrypted-FEK length (placeholder)
-  }
+export function efsAttrValue(entries: EfsAttrEntry[], recovery: EfsAttrEntry[] = []): Buffer {
+  const HEADER_SIZE = 0x4c;
+  const block = (fields: Buffer[]): Buffer =>
+    fields.length === 0
+      ? Buffer.alloc(0)
+      : Buffer.concat([(() => {
+          const count = Buffer.alloc(4);
+          count.writeUInt32LE(fields.length, 0);
+          return count;
+        })(), ...fields]);
+
+  const ddf = block(entries.map(efsDfField));
+  const drf = block(recovery.map(efsDfField));
+  const blob = Buffer.alloc(HEADER_SIZE + ddf.length + drf.length);
+  blob.writeUInt32LE(blob.length, 0x00); // length of the attribute value
+  blob.writeUInt32LE(0, 0x04); // state
+  blob.writeUInt32LE(2, 0x08); // version
+  blob.writeUInt32LE(0, 0x0c); // crypto_api_version
+  // unknown4/unknown5/unknown6 (three 16-byte GUID-ish fields) stay zero.
+  blob.writeUInt32LE(ddf.length > 0 ? HEADER_SIZE : 0, 0x40); // offset_to_ddf_array
+  blob.writeUInt32LE(drf.length > 0 ? HEADER_SIZE + ddf.length : 0, 0x44); // offset_to_drf_array
+  blob.writeUInt32LE(0, 0x48); // reserved
+  ddf.copy(blob, HEADER_SIZE);
+  drf.copy(blob, HEADER_SIZE + ddf.length);
   return blob;
 }
 

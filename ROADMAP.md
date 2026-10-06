@@ -38,11 +38,23 @@ implemented; **Investigate** items need spike work first.
   the live NTFS tree (breadcrumbs, `$I30` listing), and extract files/folders
   through a save dialog. Backed by IPC `browse-partitions/list/extract` with
   cached MFT sessions and optional passphrase for encrypted images.
-- ✅ EFS: `$EFS` (attribute 0x100) records are parsed per file; encrypted files
-  are flagged in the browse tree (🔒) with Extract disabled, and
-  `readPath`/`extractPath` refuse with `EFS_ENCRYPTED` instead of producing a
-  plaintext stream. ⬜ **Remaining**: live EFS *decryption* (needs the owning
-  user's DPAPI-protected private key and a real EFS volume to validate).
+- ✅ EFS: `$EFS` (attribute 0x100) records are parsed per file in the real
+  on-disk layout (header + chained DDF/DRF fields, certificate-thumbprint
+  credentials) and encrypted files are flagged in the browse tree (🔒).
+  Live EFS **decryption** ships in 0.6.58: the file encryption key is unwrapped
+  with the owning user's private key through Windows CryptoAPI
+  (`src/native/src/efs.cpp`: `CryptAcquireCertificatePrivateKey` +
+  `CryptDecrypt`/`NCrypt`), then every 512-byte sector is decrypted in
+  `src/main/imaging/fs/efs.ts` (AES-256-CBC, 3DES-CBC, DES-CBC and the DESX
+  variant, with the offset-derived IVs and the trailing zero-padding dropped),
+  so `readPath`, `extractPath`, folder extraction and the GUI Extract button
+  return plaintext. Both observed on-disk size conventions are handled
+  (`data_size` spanning ciphertext + pad field, or `data_size` as plaintext
+  with `initialized_size` as the extent). With no local key the safe behaviour
+  stands: `EFS_ENCRYPTED` for single-file reads, skip for folder extraction.
+  Validated live against `cipher /e` (26 B and 5 KB round trips through the
+  native unwrap + product decryptor); golden vectors are pinned in
+  `test/fixtures/efs-golden.json` so the offline suite covers them too.
 
 ### WinPE / bare-metal restore
 - ✅ `media check` / `media create`; `winpe-media.ts` locates the ADK

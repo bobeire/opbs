@@ -10,6 +10,7 @@
         "src/disk_reader.cpp",
         "src/backup_format.cpp",
         "src/winfsp_mount.cpp",
+        "src/efs.cpp",
         "src/virtual_disk.cpp",
         "vendor/zstd/common/entropy_common.c",
         "vendor/zstd/common/error_private.c",
@@ -47,7 +48,9 @@
         "-lole32",
         "-loleaut32",
         "-luuid",
-        "-ladvapi32"
+        "-ladvapi32",
+        "-lcrypt32",
+        "-lncrypt"
       ],
       "msvs_settings": {
         "VCCLCompilerTool": {
@@ -68,6 +71,8 @@
                   "-loleaut32",
                   "-luuid",
                   "-ladvapi32",
+                  "-lcrypt32",
+                  "-lncrypt",
                   "-lBcrypt",
                   "-lrpcrt4",
                   "-lsetupapi",

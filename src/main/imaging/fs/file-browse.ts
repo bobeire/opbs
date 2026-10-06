@@ -4,7 +4,7 @@ import { PartitionReader, partitionReaderForChain } from '../image-browse';
 import { baseVolumePath, resolveImageChain } from '../image-format';
 import { GPT_EFI_SYSTEM_GUID } from '../partition-table';
 import { logger } from '../../utils/logger';
-import { parseBootSector, readFileRecords, buildTree, readFileData, readStreamData, readDirectoryIndex, NtfsFile, NtfsLayout, NtfsNode } from './ntfs';
+import { parseBootSector, readFileRecords, buildTree, readFileData, readStreamData, readDirectoryIndex, EfsEncryptedError, NtfsFile, NtfsLayout, NtfsNode } from './ntfs';
 import { parseFat32BootSector, listFat32Directory, readFileData as readFat32FileData, Fat32Layout, Fat32Entry, detectFatType } from './fat32';
 import { parseExfatBootSector, listExfatDirectory, readExfatFileData, detectExfat, ExfatLayout, ExfatEntry } from './exfat';
 import { detectMacriumFormat, readMacriumImage, openMacriumPartitionReader, MacriumUnsupportedError } from '../mrimg';
@@ -27,7 +27,7 @@ export interface BrowseNode {
   id: number;
   /** Parent's internal identifier. */
   parentId: number;
-  /** True for EFS-encrypted files (NTFS only); the renderer locks extraction. */
+  /** True for EFS-encrypted files (NTFS only); extraction then needs a local key. */
   isEncrypted?: boolean;
 }
 
@@ -618,6 +618,9 @@ export function readPath(session: BrowseSession, relPath: string): Buffer {
 
 /** Write a file's alternate data streams (ADS) as `file:stream` on NTFS. */
 function writeAlternateStreams(session: NtfsBrowseSession, rec: NtfsFile, dest: string): void {
+  // Alternate streams of an encrypted file are ciphertext as well, and $EFS
+  // metadata exists only for the unnamed stream.
+  if (rec.isEncrypted) return;
   for (const stream of rec.streams.values()) {
     if (stream.name === '$DATA' || stream.name === '') continue;
     try {
@@ -668,10 +671,17 @@ function extractNtfsDir(session: NtfsBrowseSession, recordNumber: number, outDir
     if (rec.isDirectory) {
       fs.mkdirSync(dest, { recursive: true });
       count += extractNtfsDir(session, rec.recordNumber, dest);
-    } else if (rec.isEncrypted) {
-      continue;
     } else {
-      fs.writeFileSync(dest, readFileData(session.reader, session.layout, rec));
+      let data: Buffer;
+      try {
+        data = readFileData(session.reader, session.layout, rec);
+      } catch (err) {
+        // An EFS file whose key cannot be unwrapped locally is skipped rather
+        // than aborting the extraction of everything around it.
+        if (err instanceof EfsEncryptedError) continue;
+        throw err;
+      }
+      fs.writeFileSync(dest, data);
       writeAlternateStreams(session, rec, dest);
       count++;
     }

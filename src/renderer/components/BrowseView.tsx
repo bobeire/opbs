@@ -484,7 +484,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
                       node.isDirectory
                         ? 'Double-click to open'
                         : node.isEncrypted
-                          ? `${node.name} — EFS-encrypted (cannot be extracted from the image)`
+                          ? `${node.name} — EFS-encrypted (extraction needs a matching private key on this machine)`
                           : node.name
                     }
                   >
@@ -513,15 +513,19 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
                     ) : (
                       <button
                         className="btn-primary btn-small"
-                        disabled={node.isEncrypted || extracting !== null}
+                        disabled={extracting !== null}
                         onClick={() => handleExtract(node)}
                         title={
                           node.isEncrypted
-                            ? 'EFS-encrypted files cannot be extracted from the image'
+                            ? 'EFS-encrypted: extraction decrypts it only if this machine holds a matching private key'
                             : undefined
                         }
                       >
-                        {node.isEncrypted ? 'Encrypted' : extracting === joinPath(cwd, node.name) ? 'Extracting…' : 'Extract'}
+                        {extracting === joinPath(cwd, node.name)
+                          ? 'Extracting…'
+                          : node.isEncrypted
+                            ? 'Extract EFS'
+                            : 'Extract'}
                       </button>
                     )}
                   </span>

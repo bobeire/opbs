@@ -143,6 +143,8 @@ Website: https://opbs.rhitcs.com
 - **Node zlib (deflate)**: compression, custom CRC-32 integrity checking
 - **zstdify + fzstd (pure JS)**: Zstandard compression/decompression fallback when the native addon is unavailable
 - **Node crypto (AES-256-GCM, PBKDF2)**: per-block encryption
+- **Windows CryptoAPI (`CryptAcquireCertificatePrivateKey`, `CryptDecrypt`, NCrypt)**: EFS
+  file-encryption-key unwrapping, so encrypted files in an image decrypt offline
 - **worker_threads**: multithreaded zstd/deflate block compression in the backup loop
 - **WinFsp** (runtime + a subset of the SDK headers vendored under
   `src/native/vendor/winfsp`, GPLv3): the read-only in-memory filesystem that
@@ -553,10 +555,13 @@ OPBS.exe --cli extract img.opbs --partition 2 --path "Users\me" --out D:\restore
 
 For encrypted images pass `--passphrase p`. The NTFS reader supports directory
 trees, resident and non-resident files (via data runlists), chains of
-full + delta images, sparse runs, LZNT1-compressed files, and alternate data
-streams. EFS-encrypted files are detected and skipped (browse shows a 🔒,
-single-file extract refuses, folder extraction skips them) — decryption is
-not implemented.
+full + delta images, sparse runs, LZNT1-compressed files, alternate data
+streams, and EFS. EFS-encrypted files are flagged with a 🔒 and are decrypted
+when this machine holds a private key matching one of the file's certificate
+thumbprints (unwrapped through Windows CryptoAPI in the native addon, then
+AES-256/3DES/DES/DESX sector decryption in `src/main/imaging/fs/efs.ts`).
+Without a matching key, single-file reads refuse with `EFS_ENCRYPTED` and
+folder extraction skips that file instead of aborting.
 
 The GUI's Browse page exposes the same actions: every row has an **Extract**
 button — for a folder this extracts the whole subtree recursively into a
@@ -1079,7 +1084,7 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   per-block CRC-32 verification, encrypted images (AES-256-GCM), incremental
   backups + chain restore, retention/GFS pruning + manifest, cron scheduling +
   toast/webhook notifications, SMART/disk-health reporting, headless CLI, NTFS
-  browse/extract (folder trees, sparse, LZNT1, ADS, EFS detection), used-blocks-only capture
+  browse/extract (folder trees, sparse, LZNT1, ADS, EFS decryption), used-blocks-only capture
   via NTFS `$Bitmap`, disk-to-disk clone (live VSS copy, dissimilar layout +
   fresh partition table), Macrium `.mrimgx`/`.mrimg` browse/extract, read-only
   WinFsp mount of image partitions (GUI + CLI), WinPE media with driver
