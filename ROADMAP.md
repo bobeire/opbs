@@ -155,7 +155,8 @@ implemented; **Investigate** items need spike work first.
   the refusal reason and hides the useless passphrase box for Macrium images.
   v7 chain members whose base image is present are browsable (see
   **v7 differential/incremental chains** below); mrimgx delta containers and
-  chain members missing their base stay refused with a merge-in-Reflect hint.
+  chain members missing their base stay refused with a merge-in-Reflect hint
+  (superseded by **mrimgx delta chains** below, 0.6.66).
 
 ### Foreign Macrium restore (.mrimgx / .mrimg) (0.6.64)
 - ✅ `runRestoreJob` auto-detects a Macrium container (`detectMacriumFormat`)
@@ -180,7 +181,8 @@ implemented; **Investigate** items need spike work first.
   `buildJob` (throws) and in the runner (clean `ok:false` job result before
   any target byte): encrypted/split containers, mrimgx delta containers,
   v7 chain members missing their base, `backup_format: file_and_folder`, and
-  `backup_type: diff/inc` never touch the disk. `verifyBeforeWrite` stays
+  `backup_type: diff/inc` never touch the disk (mrimgx chains now restore
+  when their set is on disk — **mrimgx delta chains** below). `verifyBeforeWrite` stays
   false for Macrium (the reader's per-block MD5 is the integrity check),
   encryption keys are never carried, and compression threads default to 0.
 - ✅ Surfaces: `summarizeImage` reports the Macrium layout (sizes, offsets,
@@ -228,6 +230,37 @@ implemented; **Investigate** items need spike work first.
   unchanged-block equality across all three members, all 54 differential
   locals and all 55 incremental deltas verified through the reader, and the
   missing-base refusal.
+
+### mrimgx (Reflect X) delta chains (0.6.66)
+- ✅ Delta `$INDEX` parsing: 34-byte `DeltaDataBlock` records (`{i64 pos,
+  md5[16], u32 length, u16 file_number, u32 block_index}` behind the standard
+  reserved-count prefix) into `part.deltaBlocks`; the group cursor advances
+  for delta containers too, fixing multi-partition alignment. The composed
+  full-extent view lands in `part.blocks` once the set resolves.
+- ✅ Backup-set discovery mirroring the reference `createBackupSet`: scan the
+  image's folder for the same extension + `imageid` +
+  `increment_number <= target` (header-only phase first, so foreign backup
+  sets cost one $JSON parse each); map `file_number` (plus `merged_files`
+  consolidation aliases) → file for cross-file block routing.
+- ✅ Delta composition (`buildIndex`/`mapDeltaToFullIndex`): seed each
+  partition from the newest non-delta image's full-extent index, then overlay
+  every delta's changed blocks walking seed→newest so the most recent value
+  wins; composed elements keep the `file_number` of the file storing their
+  bytes. Missing increments below the target are recorded (a pruned middle
+  member would silently compose a stale volume).
+- ✅ Reader: cross-file elements resolve through `backupSet.files` (per-file
+  compression honored); refusals report the missing base
+  (`base image … not found`), a missing member file, a pruned increment, or —
+  when no set exists at all — the standard delta/incremental set-not-found
+  message. Non-delta incrementals/differentials are readable once their set
+  is present; lone ones stay refused.
+- ✅ `mrimg info` prints the mrimgx chain (role, increment, base file,
+  changed-block count, set size); exports carry `MacriumBackupSet*`.
+- ✅ Tests (`mrimgx-delta-chain.test.ts`): set composition (routed file
+  numbers, delta md5s), full composed-volume reads through the reader,
+  hash-failure on base corruption, foreign-set isolation, base-disappears
+  refusal, pruned-increment refusal, non-delta incremental with set present;
+  fixture builder grew a `delta` option + `buildMrimgxDeltaIndex`.
 
 ### Disk-to-disk clone (selected partitions → another disk)
 - ✅ `CloneEngine` (`imaging/clone-engine.ts`): builds clone jobs exactly like

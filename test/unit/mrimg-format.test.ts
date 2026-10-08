@@ -109,18 +109,24 @@ describe('mrimg-format', () => {
     expect(() => openMacriumPartitionReader(info, 0)).toThrow('split');
   });
 
-  it('refuses a delta/incremental container instead of misparsing its index', () => {
-    const built = buildMrimgxImage([Buffer.alloc(8192, 3)], (json) => {
-      json._header.delta_index = true;
-      json._header.backup_type = 'incremental';
-    });
+  it('refuses a delta/incremental container with no backup set on disk', () => {
+    const built = buildMrimgxImage(
+      [Buffer.alloc(8192, 3)],
+      (json) => {
+        // Unique image ID: no sibling full exists, so the set cannot resolve.
+        json._header.imageid = 'DE17A00000000001';
+        json._header.backup_type = 'incremental';
+      },
+      { delta: [0] }
+    );
     const p = path.join(fixtureDir, 'content-delta.mrimgx');
     fs.writeFileSync(p, built.buffer);
-    // The delta $INDEX payload has a different shape; parsing it as a plain
-    // index used to throw "Truncated Macrium block index." — it must parse,
-    // skip the walk, and refuse through the reader gate instead.
+    // The delta $INDEX payload has a 34-byte record shape; it must parse into
+    // deltaBlocks (not misread as a plain index), compose nothing without a
+    // base image, and refuse through the reader gate.
     const info = readMacriumImage(p);
     expect(info.partitions[0].blocks).toEqual([]);
+    expect(info.partitions[0].deltaBlocks).toHaveLength(1);
     expect(macriumUnsupportedReason(info)).toMatch(/delta-incremental/);
     expect(() => openMacriumPartitionReader(info, 0)).toThrow(MacriumUnsupportedError);
     expect(() => openMacriumPartitionReader(info, 0)).toThrow('delta-incremental');
@@ -128,6 +134,8 @@ describe('mrimg-format', () => {
 
   it('refuses a non-delta incremental (backup_type) container', () => {
     const built = buildMrimgxImage([Buffer.alloc(8192, 4)], (json) => {
+      // Unique image ID: no sibling set member exists to back the claim.
+      json._header.imageid = 'DE17B00000000001';
       json._header.backup_type = 'incremental';
     });
     const p = path.join(fixtureDir, 'content-incr.mrimgx');

@@ -135,6 +135,28 @@ export class MacriumPartitionReader implements PartitionReader {
     return out;
   }
 
+  /**
+   * Where an mrimgx index element's bytes live: this image for its own file
+   * number (no set needed), otherwise the backup-set member the composed
+   * index routed it to.
+   */
+  private resolveBlockSource(fileNumber: number): { path: string; compressed: boolean } {
+    const set = this.info.backupSet;
+    if (set) {
+      const src = set.files[fileNumber];
+      if (src) return src;
+      throw new MacriumUnsupportedError(
+        `${this.info.imagePath}: block references chain member file #${fileNumber}, which was not found in its folder.`
+      );
+    }
+    if (fileNumber !== this.info.fileNumber) {
+      throw new MacriumUnsupportedError(
+        `${this.info.imagePath}: split/volume images (blocks in .0000/.0001 files) are not supported for browsing yet.`
+      );
+    }
+    return { path: this.info.imagePath, compressed: this.compressed };
+  }
+
   private loadBlock(idx: number): Buffer {
     const totalBlocks = this.size / this.part.blockSize;
     if (idx >= totalBlocks) {
@@ -187,17 +209,16 @@ export class MacriumPartitionReader implements PartitionReader {
           return Buffer.alloc(expected);
         }
       } else {
-        if (el.fileNumber !== 0) {
-          throw new MacriumUnsupportedError(
-            `${this.info.imagePath}: split/volume images (blocks in .0000/.0001 files) are not supported for browsing yet.`
-          );
-        }
         expectedMd5 = el.md5;
         if (this.info.format === 'mrimg-v7') {
           raw = readQuickLzBlock(this.info.imagePath, el.filePosition, this.compressed);
         } else {
-          const stored = readImageFileRange(this.info.imagePath, el.filePosition, el.storedLength);
-          raw = this.compressed ? decompressBlock(stored, COMPRESSION_ZSTD) : stored;
+          // An mrimgx index element names the file that stores its bytes:
+          // this image on a full container, or the chain member the composed
+          // backup-set index routed it to.
+          const src = this.resolveBlockSource(el.fileNumber);
+          const stored = readImageFileRange(src.path, el.filePosition, el.storedLength);
+          raw = src.compressed ? decompressBlock(stored, COMPRESSION_ZSTD) : stored;
         }
       }
     }

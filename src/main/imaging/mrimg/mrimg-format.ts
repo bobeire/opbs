@@ -47,6 +47,9 @@ export const MRIMGX_FOOTER_SIZE = 20; // u64 metadata offset + 12 byte magic
 export const MRIMG_V7_TRAILER_SIZE = 54; // 14-byte offset pointer + 40-byte trailer
 export const MR_BLOCK_HEADER_SIZE = 32;
 export const MR_INDEX_ELEMENT_SIZE = 30;
+// mrimgx delta $INDEX record: the 30-byte element plus the u32 logical block
+// slot it overlays during chain composition (reference `DeltaDataBlock`).
+export const MRIMGX_DELTA_RECORD_SIZE = 34;
 
 // .mrimg (Reflect 7/8) index layout.
 export const MR_V7_RECORD_SIZE = 30; // {6 bytes pad, u64 file offset, 16 bytes md5}
@@ -113,6 +116,48 @@ export interface MacriumV7ChainMember {
   base?: MacriumV7ChainMember;
 }
 
+/** One discovered file of an mrimgx backup set (chain folder member). */
+export interface MacriumBackupSetMember {
+  fileNumber: number;
+  incrementNumber: number;
+  deltaIndex: boolean;
+  splitFile: boolean;
+  /** Whether this member's blocks are zstd-compressed (its own $JSON). */
+  compressed: boolean;
+  path: string;
+}
+
+/** A file the set's indexes can route blocks to: where it lives and how to read it. */
+export interface MacriumBackupSetFile {
+  path: string;
+  compressed: boolean;
+}
+
+/**
+ * A resolved mrimgx backup set (Reflect X chain). Mirrors the reference
+ * `createBackupSet`: siblings in the same folder with the same extension and
+ * image ID whose increment number is not greater than this image's. A delta
+ * target's partition indexes are composed at parse time — the newest
+ * non-delta image seeds each partition's full-extent index and every delta's
+ * changed blocks overlay it (newest wins) — so each composed element names its
+ * source file through `fileNumber`, and `files` routes reads to it.
+ */
+export interface MacriumBackupSet {
+  role: 'full' | 'incremental' | 'differential';
+  incrementNumber: number;
+  /** Newest non-delta image seeding a delta target's composed index. */
+  basePath?: string;
+  members: MacriumBackupSetMember[];
+  /** fileNumber -> file routing, covering every number the indexes reference. */
+  files: Record<number, MacriumBackupSetFile>;
+  /** Referenced file numbers absent from the folder. */
+  missing: number[];
+  /** Increment numbers absent below this image's (a pruned middle member). */
+  missingIncrements: number[];
+  /** True when every file the indexes need is present (composition done). */
+  resolved: boolean;
+}
+
 export interface MacriumPartitionInfo {
   /** Index within the image's `disks[]` array. */
   diskIndex: number;
@@ -140,6 +185,13 @@ export interface MacriumPartitionInfo {
   offsetOnDisk?: number;
   blocks: MacriumIndexElement[];
   /**
+   * mrimgx delta $INDEX records: the blocks this file stores locally, each
+   * with the logical block slot it overlays during chain composition. Present
+   * only on delta-incremental containers; `blocks` holds the composed
+   * full-extent view once the backup set resolves.
+   */
+  deltaBlocks?: Array<MacriumIndexElement & { blockIndex: number }>;
+  /**
    * v7 chain members only (differential and incremental). Set on the member
    * being parsed, carrying its role, resolved base path, base member and —
    * for an incremental — its delta index. `blocks` for a differential is its
@@ -158,6 +210,10 @@ export interface MacriumImageInfo {
   backupTime?: number;
   netbiosName?: string;
   fileNumber: number;
+  /** $JSON increment number (mrimgx; 0 for a full image, absent on v7). */
+  incrementNumber?: number;
+  /** $JSON merged_files: older set file numbers consolidated into this file. */
+  mergedFiles?: number[];
   compression: { method?: string; level?: string };
   encryption: { enable: boolean; keyIterations: number; aesType?: number; hmac?: string };
   splitFile: boolean;
@@ -168,6 +224,11 @@ export interface MacriumImageInfo {
    * an incremental stores only the changed blocks (its delta index).
    */
   chain?: MacriumV7ChainMember;
+  /**
+   * mrimgx only: the resolved backup set (chain folder) when delta composition
+   * or cross-file block routing was needed. Present only on Reflect X images.
+   */
+  backupSet?: MacriumBackupSet;
   disks: Array<{ diskNumber?: number; diskSignature?: string; diskFormat?: string; size?: number }>;
   partitions: MacriumPartitionInfo[];
 }
@@ -195,6 +256,30 @@ export function macriumUnsupportedReason(info: MacriumImageInfo): string | null 
   if (chain?.basePath) {
     if (!fs.existsSync(chain.basePath)) {
       return `${info.imagePath}: base image ${path.basename(chain.basePath)} not found; restore or merge the chain in Reflect first.`;
+    }
+    return null;
+  }
+  // mrimgx: chain membership resolves at parse time against the folder. A
+  // delta target's indexes are composed from its backup set; a non-delta
+  // incremental/differential stands only when its set is present, and any
+  // cross-file block must name a file that exists.
+  if (info.format === 'mrimgx') {
+    const set = info.backupSet;
+    if (set?.basePath && !fs.existsSync(set.basePath)) {
+      return `${info.imagePath}: base image ${path.basename(set.basePath)} not found; restore or merge the chain in Reflect first.`;
+    }
+    if (set?.missing.length) {
+      return `${info.imagePath}: chain member file #${set.missing[0]} of this backup set was not found in its folder; restore or merge the chain in Reflect first.`;
+    }
+    if (set?.missingIncrements.length) {
+      return `${info.imagePath}: backup set is missing increment ${set.missingIncrements[0]}; restore or merge the chain in Reflect first.`;
+    }
+    if (set?.resolved) return null;
+    if (info.deltaIndex) {
+      return `${info.imagePath}: delta-incremental Macrium chains need their base image in the same folder; restore or merge the chain in Reflect first.`;
+    }
+    if (/incremental|differential/i.test(info.backupType ?? '')) {
+      return `${info.imagePath}: ${info.backupType} Macrium images need the rest of their backup set in the same folder; restore or merge the chain in Reflect first.`;
     }
     return null;
   }
@@ -357,8 +442,21 @@ function parseIndexElements(buf: Buffer, offset: number, count: number): Macrium
   return out;
 }
 
-/** Parse the $INDEX binary payload: reserved-sector elements then data blocks. */
-export function parseIndexPayload(buf: Buffer): { reserved: MacriumIndexElement[]; blocks: MacriumIndexElement[] } {
+/**
+ * Parse the $INDEX binary payload: reserved-sector elements then data blocks.
+ * For a delta container (`delta`) the data-block run is a sequence of 34-byte
+ * `DeltaDataBlock` records (the 30-byte element plus its logical block slot)
+ * instead of plain 30-byte elements; the composed full-extent view is built
+ * from them during backup-set resolution.
+ */
+export function parseIndexPayload(
+  buf: Buffer,
+  delta = false
+): {
+  reserved: MacriumIndexElement[];
+  blocks: MacriumIndexElement[];
+  deltaBlocks?: Array<MacriumIndexElement & { blockIndex: number }>;
+} {
   let off = 0;
   const reservedCount = buf.readUInt32LE(off);
   off += 4;
@@ -366,8 +464,24 @@ export function parseIndexPayload(buf: Buffer): { reserved: MacriumIndexElement[
   off += reservedCount * MR_INDEX_ELEMENT_SIZE;
   const dataCount = buf.readUInt32LE(off);
   off += 4;
-  const blocks = parseIndexElements(buf, off, dataCount);
-  return { reserved, blocks };
+  if (!delta) {
+    return { reserved, blocks: parseIndexElements(buf, off, dataCount) };
+  }
+  const deltaBlocks: Array<MacriumIndexElement & { blockIndex: number }> = [];
+  for (let i = 0; i < dataCount; i++) {
+    if (off + MRIMGX_DELTA_RECORD_SIZE > buf.length) {
+      throw new Error('Truncated Macrium delta block index.');
+    }
+    deltaBlocks.push({
+      filePosition: Number(buf.readBigInt64LE(off)),
+      md5: Buffer.from(buf.subarray(off + 8, off + 24)),
+      storedLength: buf.readUInt32LE(off + 24),
+      fileNumber: buf.readUInt16LE(off + 28),
+      blockIndex: buf.readUInt32LE(off + 30)
+    });
+    off += MRIMGX_DELTA_RECORD_SIZE;
+  }
+  return { reserved, blocks: [], deltaBlocks };
 }
 
 function num(value: unknown, fallback: number): number {
@@ -1057,10 +1171,18 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
  * metadata chain, $JSON navigation data, and per-partition block indexes.
  */
 const macriumInfoCache = new Map<string, MacriumImageInfo>();
+/**
+ * Raw parses of sibling chain files (header + index, no set resolution of
+ * their own), used while resolving a backup set. Kept separate from
+ * `macriumInfoCache` so a member's raw delta records are never confused with
+ * the composed view returned when that file is opened as a target.
+ */
+const backupSetMemberCache = new Map<string, MacriumImageInfo>();
 
 /** Clear the cached Macrium image parses (call when browsing ends). */
 export function clearMacriumInfoCache(): void {
   macriumInfoCache.clear();
+  backupSetMemberCache.clear();
 }
 
 export function readMacriumImage(imagePath: string): MacriumImageInfo {
@@ -1071,7 +1193,37 @@ export function readMacriumImage(imagePath: string): MacriumImageInfo {
   return info;
 }
 
-function readMacriumImageUncached(imagePath: string): MacriumImageInfo {
+/**
+ * Parse a sibling backup-set member: its own header and (when indexed) raw
+ * block index, without resolving a set of its own. Unreadable siblings are
+ * skipped rather than failing the whole set (as the reference reader does).
+ */
+function readBackupSetMember(imagePath: string, index: boolean): MacriumImageInfo | undefined {
+  try {
+    return readMacriumImageUncached(imagePath, { index, chain: false });
+  } catch {
+    return undefined;
+  }
+}
+
+function readBackupSetMemberCached(imagePath: string): MacriumImageInfo | undefined {
+  const cached = backupSetMemberCache.get(imagePath);
+  if (cached) return cached;
+  const info = readBackupSetMember(imagePath, true);
+  if (info) backupSetMemberCache.set(imagePath, info);
+  return info;
+}
+
+interface MrimgxParseOptions {
+  /** Walk the per-partition $INDEX sections (false = header-only, cheap). */
+  index?: boolean;
+  /** Resolve the backup set after parsing (false for set members). */
+  chain?: boolean;
+}
+
+function readMacriumImageUncached(imagePath: string, opts: MrimgxParseOptions = {}): MacriumImageInfo {
+  const withIndex = opts.index !== false;
+  const withChain = opts.chain !== false;
   const format = detectMacriumFormat(imagePath);
   if (format === 'mrimg-v7') {
     return readMacriumV7Image(imagePath);
@@ -1113,6 +1265,8 @@ function readMacriumImageUncached(imagePath: string): MacriumImageInfo {
     backupTime: numOpt(header.backup_time),
     netbiosName: str(header.netbios_name),
     fileNumber: num(header.file_number, 0),
+    incrementNumber: num(header.increment_number, 0),
+    mergedFiles: arr(header.merged_files).map((n) => num(n, -1)).filter((n) => n >= 0),
     compression: {
       method: str(compression.compression_method),
       level: str(compression.compression_level)
@@ -1135,7 +1289,9 @@ function readMacriumImageUncached(imagePath: string): MacriumImageInfo {
     const disk = rec(d);
     return n + arr(disk.partitions).length;
   }, 0);
-  const indexGroups = walkMetaGroups(imagePath, indexFilePosition, Math.max(groupCount, 1), fileSize);
+  const indexGroups = withIndex
+    ? walkMetaGroups(imagePath, indexFilePosition, Math.max(groupCount, 1), fileSize)
+    : [];
 
   let g = 0;
   disksJson.forEach((diskRaw, diskIndex) => {
@@ -1164,15 +1320,19 @@ function readMacriumImageUncached(imagePath: string): MacriumImageInfo {
       const dataStart = lcn0Offset - fsStart;
 
       let blocks: MacriumIndexElement[] = [];
-      // Delta containers store a different payload shape ($INDEX count +
-      // per-record block_index) that parseIndexPayload would misread, so the
-      // walk is skipped and the reader gate refuses the image instead.
-      if (!info.splitFile && !info.deltaIndex) {
+      let deltaBlocks: Array<MacriumIndexElement & { blockIndex: number }> | undefined;
+      // Split containers carry no $INDEX sections. Delta containers store a
+      // 34-byte record shape, parsed into `deltaBlocks` (the composed
+      // full-extent view is built from them during set resolution). The group
+      // cursor advances either way so later partitions stay aligned.
+      if (withIndex && !info.splitFile) {
         const group = indexGroups[g] ?? [];
         const indexBlock = group.find((b) => b.name === BLOCK_INDEX);
         if (indexBlock) {
           const payload = readMetaBlockBody(imagePath, indexBlock);
-          blocks = parseIndexPayload(payload).blocks;
+          const parsedIndex = parseIndexPayload(payload, info.deltaIndex);
+          blocks = parsedIndex.blocks;
+          deltaBlocks = parsedIndex.deltaBlocks;
         }
         g++;
       }
@@ -1200,10 +1360,180 @@ function readMacriumImageUncached(imagePath: string): MacriumImageInfo {
         // source disk (published mrimgx spec), either of which places the
         // partition on a restore target.
         offsetOnDisk: num(partGeometry.start, 0) || num(partFs.start, 0),
-        blocks
+        blocks,
+        ...(deltaBlocks ? { deltaBlocks } : {})
       });
     });
   });
 
+  if (withChain && !info.encryption.enable && !info.splitFile && wantsBackupSet(info)) {
+    resolveBackupSet(info);
+  }
   return info;
+}
+
+/**
+ * Whether this image needs its backup set discovered: a delta target must
+ * compose its indexes against the chain, an incremental/differential is only
+ * trustworthy with its set present, and any index element naming another file
+ * needs that file routed.
+ */
+function wantsBackupSet(info: MacriumImageInfo): boolean {
+  if (info.deltaIndex) return true;
+  if (/incremental|differential/i.test(info.backupType ?? '')) return true;
+  const self = info.fileNumber;
+  const merged = new Set(info.mergedFiles ?? []);
+  return info.partitions.some((p) =>
+    p.blocks.some((el) => el.fileNumber !== self && !merged.has(el.fileNumber))
+  );
+}
+
+function isCompressionEnabled(info: MacriumImageInfo): boolean {
+  return !!info.compression.level && info.compression.level !== 'none';
+}
+
+/**
+ * Discover the backup set containing `info` and prepare cross-file reads,
+ * mirroring the reference `createBackupSet`/`buildIndex`:
+ *
+ *  1. Scan the image's folder for files with the same extension, image ID and
+ *     an increment number not greater than this image's (headers only first,
+ *     so a folder full of other backup sets costs one $JSON parse each).
+ *  2. Map every member's `file_number` (plus `merged_files` consolidation
+ *     aliases) to its file so any index element can be routed.
+ *  3. For a delta target, compose each partition's index: seed from the newest
+ *     non-delta image's full-extent index, then overlay each delta's changed
+ *     blocks in ascending order so the most recent value wins (reference
+ *     `mapDeltaToFullIndex`).
+ *
+ * Missing chain members are recorded rather than thrown: `macriumUnsupportedReason`
+ * turns them into the standard refusal.
+ */
+function resolveBackupSet(info: MacriumImageInfo): void {
+  const dir = path.dirname(info.imagePath);
+  const ext = path.extname(info.imagePath).toLowerCase();
+  const selfPath = path.resolve(info.imagePath);
+  const targetIncrement = info.incrementNumber ?? 0;
+  const parsed: MacriumImageInfo[] = [info];
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    names = [];
+  }
+  for (const name of names) {
+    if (path.extname(name).toLowerCase() !== ext) continue;
+    const candidate = path.join(dir, name);
+    if (path.resolve(candidate) === selfPath) continue;
+    // Phase 1: header-only, image-ID/increment filter (cheap for folders that
+    // hold unrelated backup sets).
+    const header = readBackupSetMember(candidate, false);
+    if (!header) continue;
+    if (header.imageId !== info.imageId || (header.incrementNumber ?? 0) > targetIncrement) continue;
+    // Phase 2: indexed parse for actual members (delta records / seed blocks).
+    // An unreadable index drops the file from the set entirely, like the
+    // reference reader's per-file exception handling.
+    const member = readBackupSetMemberCached(candidate);
+    if (!member) continue;
+    parsed.push(member);
+  }
+  // Newest first, like the reference sort by file_number descending.
+  parsed.sort((a, b) => b.fileNumber - a.fileNumber);
+
+  const files: Record<number, MacriumBackupSetFile> = {};
+  for (const m of parsed) {
+    files[m.fileNumber] = { path: m.imagePath, compressed: isCompressionEnabled(m) };
+    for (const n of m.mergedFiles ?? []) {
+      files[n] = { path: m.imagePath, compressed: isCompressionEnabled(m) };
+    }
+  }
+  files[info.fileNumber] = { path: info.imagePath, compressed: isCompressionEnabled(info) };
+
+  // A pruned middle member would silently compose a stale volume: every
+  // increment below this image's must be present.
+  const missingIncrements: number[] = [];
+  for (let inc = 1; inc < targetIncrement; inc++) {
+    if (!parsed.some((m) => (m.incrementNumber ?? 0) === inc)) missingIncrements.push(inc);
+  }
+
+  const backupType = info.backupType ?? '';
+  const role: MacriumBackupSet['role'] = info.deltaIndex
+    ? 'incremental'
+    : /diff/i.test(backupType)
+      ? 'differential'
+      : /inc/i.test(backupType)
+        ? 'incremental'
+        : 'full';
+
+  let basePath: string | undefined;
+  if (info.deltaIndex) {
+    const seedIdx = parsed.findIndex((m) => !m.deltaIndex && !m.splitFile);
+    if (seedIdx >= 0) {
+      basePath = parsed[seedIdx].imagePath;
+      composeDeltaIndexes(info, parsed, seedIdx);
+    }
+  }
+
+  // Every file number the indexes reference must be routable (checked after
+  // composition, when seed elements are part of the view).
+  const referenced = new Set<number>();
+  for (const p of info.partitions) {
+    for (const el of p.blocks) referenced.add(el.fileNumber);
+    for (const el of p.deltaBlocks ?? []) referenced.add(el.fileNumber);
+  }
+  const missing = [...referenced].filter((n) => files[n] === undefined);
+
+  const needsChain =
+    info.deltaIndex || /incremental|differential/i.test(backupType);
+  const chainOk = info.deltaIndex
+    ? basePath !== undefined
+    : parsed.some((m) => path.resolve(m.imagePath) !== selfPath);
+  info.backupSet = {
+    role,
+    incrementNumber: info.incrementNumber ?? 0,
+    basePath,
+    members: parsed.map((m) => ({
+      fileNumber: m.fileNumber,
+      incrementNumber: m.incrementNumber ?? 0,
+      deltaIndex: m.deltaIndex,
+      splitFile: m.splitFile,
+      compressed: isCompressionEnabled(m),
+      path: m.imagePath
+    })),
+    files,
+    missing,
+    missingIncrements,
+    resolved: (!needsChain || chainOk) && missing.length === 0 && missingIncrements.length === 0
+  };
+}
+
+/**
+ * Compose a delta target's partition indexes (reference `buildIndex`): each
+ * partition is seeded from the newest non-delta image's full-extent index,
+ * then every delta's changed blocks overlay it walking from the seed toward
+ * the newest member, so later deltas overwrite earlier ones. Elements keep
+ * the `fileNumber` of the file that stores their bytes.
+ */
+function composeDeltaIndexes(
+  info: MacriumImageInfo,
+  parsed: MacriumImageInfo[],
+  seedIdx: number
+): void {
+  const seed = parsed[seedIdx];
+  info.partitions.forEach((part, k) => {
+    const seedPart = seed.partitions[k];
+    if (!seedPart) return;
+    const composed = seedPart.blocks.slice();
+    for (let i = seedIdx; i >= 0; i--) {
+      const member = parsed[i];
+      if (member.splitFile) continue;
+      const mp = member.partitions[k];
+      for (const d of mp?.deltaBlocks ?? []) {
+        if (d.blockIndex >= composed.length) composed.length = d.blockIndex + 1;
+        composed[d.blockIndex] = d;
+      }
+    }
+    part.blocks = composed;
+    if (seedPart.blockCount > part.blockCount) part.blockCount = seedPart.blockCount;
+  });
 }

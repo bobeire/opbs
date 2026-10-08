@@ -2046,6 +2046,13 @@ function printMrimgInfo(info: import('../imaging/mrimg').MacriumImageInfo): void
     const base = chain.basePath ? `, base ${chain.basePath.split(/[\\/]/).pop()}` : '';
     const extra = chain.role === 'incremental' && chain.delta ? `, ${chain.delta.length} changed blocks` : '';
     console.log(`  chain:        ${chain.role} (increment ${chain.incrementNo}${base}${extra})`);
+  } else if (info.backupSet) {
+    const set = info.backupSet;
+    const base = set.basePath ? `, base ${set.basePath.split(/[\\/]/).pop()}` : '';
+    const changed = info.partitions.reduce((n, p) => n + (p.deltaBlocks?.length ?? 0), 0);
+    const extra = changed ? `, ${changed} changed blocks` : '';
+    const files = set.members.length > 1 ? `, ${set.members.length} files` : '';
+    console.log(`  chain:        ${set.role} (increment ${set.incrementNumber}${base}${extra}${files})`);
   } else if (info.deltaIndex) {
     console.log('  delta index: yes (unsupported container)');
   }

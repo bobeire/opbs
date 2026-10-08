@@ -25,7 +25,8 @@ export function buildBlock(name: string, body: Buffer, last = true): { header: B
 }
 
 export function buildMrimgIndex(
-  blocks: Array<{ filePosition: number; md5: Buffer; storedLength: number }>
+  blocks: Array<{ filePosition: number; md5: Buffer; storedLength: number }>,
+  fileNumber = 0
 ): Buffer {
   const buf = Buffer.alloc(4 + 4 + blocks.length * 30);
   buf.writeUInt32LE(0, 0);
@@ -35,15 +36,47 @@ export function buildMrimgIndex(
     buf.writeBigInt64LE(BigInt(b.filePosition), off);
     b.md5.copy(buf, off + 8);
     buf.writeUInt32LE(b.storedLength, off + 24);
-    buf.writeUInt16LE(0, off + 28);
+    buf.writeUInt16LE(fileNumber, off + 28);
     off += 30;
+  }
+  return buf;
+}
+
+/**
+ * $INDEX payload for a delta-incremental: u32 reserved count (0), u32 record
+ * count, then 34-byte DeltaDataBlock records — the 30-byte element (position,
+ * md5, length, file number) plus the u32 logical block slot it overlays.
+ */
+export function buildMrimgxDeltaIndex(
+  records: Array<{ filePosition: number; md5: Buffer; storedLength: number; fileNumber: number; blockIndex: number }>
+): Buffer {
+  const buf = Buffer.alloc(4 + 4 + records.length * 34);
+  buf.writeUInt32LE(0, 0);
+  buf.writeUInt32LE(records.length, 4);
+  let off = 8;
+  for (const r of records) {
+    buf.writeBigInt64LE(BigInt(r.filePosition), off);
+    r.md5.copy(buf, off + 8);
+    buf.writeUInt32LE(r.storedLength, off + 24);
+    buf.writeUInt16LE(r.fileNumber, off + 28);
+    buf.writeUInt32LE(r.blockIndex, off + 30);
+    off += 34;
   }
   return buf;
 }
 
 export function buildMrimgxImage(
   partitionBlocks: Buffer[],
-  tweak?: (json: any) => void
+  tweak?: (json: any) => void,
+  opts?: {
+    /**
+     * Logical block indices stored locally: turns the container into a
+     * delta-incremental. Only those blocks land in the data region, the
+     * $INDEX becomes 34-byte delta records, and `delta_index` is forced on —
+     * `partitionBlocks` remains the full logical volume (block_count).
+     */
+    delta?: number[];
+  }
 ): {
   buffer: Buffer;
   partitionSize: number;
@@ -59,7 +92,9 @@ export function buildMrimgxImage(
       index_file_position: 0, // placeholder, will patch
       split_file: false,
       delta_index: false,
-      file_number: 0
+      file_number: 0,
+      increment_number: 0,
+      merged_files: []
     },
     _compression: { compression_method: 'zstd', compression_level: 'none' },
     _encryption: { enable: false },
@@ -80,10 +115,12 @@ export function buildMrimgxImage(
   };
 
   tweak?.(json);
+  if (opts?.delta) json._header.delta_index = true;
 
-  // Data blocks are stored uncompressed.
-  const rawBlocks = partitionBlocks;
-  const totalDataLen = rawBlocks.reduce((s, b) => s + b.length, 0);
+  // Data blocks are stored uncompressed. A delta member stores only the
+  // selected logical blocks; positions below walk the stored run.
+  const storedBlocks = opts?.delta ? opts.delta.map((i) => partitionBlocks[i]) : partitionBlocks;
+  const totalDataLen = storedBlocks.reduce((s, b) => s + b.length, 0);
   let jsonBody = Buffer.from(JSON.stringify(json), 'utf8');
 
   // Layout: [data blocks] [root $JSON meta] [index metadata]:
@@ -107,24 +144,44 @@ export function buildMrimgxImage(
   const rootMetaOff = totalDataLen;
 
   // Index with real data positions and hashes.
-  const indexBlocks: Array<{ filePosition: number; md5: Buffer; storedLength: number }> = [];
-  let dataPos = 0;
-  for (const raw of rawBlocks) {
-    indexBlocks.push({ filePosition: dataPos, md5: md5(raw), storedLength: raw.length });
-    dataPos += raw.length;
+  let partIndexBody: Buffer;
+  if (opts?.delta) {
+    const fileNumber = typeof json._header.file_number === 'number' ? json._header.file_number : 0;
+    let pos = 0;
+    const records = opts.delta.map((blockIndex) => {
+      const raw = partitionBlocks[blockIndex];
+      const record = {
+        filePosition: pos,
+        md5: md5(raw),
+        storedLength: raw.length,
+        fileNumber,
+        blockIndex
+      };
+      pos += raw.length;
+      return record;
+    });
+    partIndexBody = buildMrimgxDeltaIndex(records);
+  } else {
+    const indexBlocks: Array<{ filePosition: number; md5: Buffer; storedLength: number }> = [];
+    let dataPos = 0;
+    for (const raw of storedBlocks) {
+      indexBlocks.push({ filePosition: dataPos, md5: md5(raw), storedLength: raw.length });
+      dataPos += raw.length;
+    }
+    const fileNumber = typeof json._header.file_number === 'number' ? json._header.file_number : 0;
+    partIndexBody = buildMrimgIndex(indexBlocks, fileNumber);
   }
-  const partIndexBody = buildMrimgIndex(indexBlocks);
   const partMetaHeader = buildBlock(BLOCK_INDEX, partIndexBody, true).header;
 
   const fileSize =
-    rawBlocks.reduce((s, b) => s + b.length, 0) +
+    totalDataLen +
     32 + jsonBody.length +
     32 + diskMetaBody.length +
     32 + partIndexBody.length +
     20;
   const fileBuf = Buffer.alloc(fileSize);
   let off = 0;
-  for (const raw of rawBlocks) {
+  for (const raw of storedBlocks) {
     raw.copy(fileBuf, off);
     off += raw.length;
   }
@@ -140,5 +197,5 @@ export function buildMrimgxImage(
   fileBuf.writeBigUInt64LE(BigInt(rootMetaOff), footerOff);
   Buffer.from(MAGIC_X, 'latin1').copy(fileBuf, footerOff + 8);
 
-  return { buffer: fileBuf, partitionSize: rawBlocks.length * blockSize, blockSize };
+  return { buffer: fileBuf, partitionSize: partitionBlocks.length * blockSize, blockSize };
 }
