@@ -14,7 +14,7 @@ Website: https://opbs.rhitcs.com
 - **Resumable imaging**: `resume` (CLI `--resume`) continues an interrupted local backup from the partial image already at the target path — completed partitions are kept and the run resumes at the next partition boundary instead of restarting from scratch.
 - **Used-blocks-only capture**: `usedBlocksOnly` (CLI `--used-blocks-only`) reads the NTFS `$Bitmap` and stores only blocks containing allocated clusters, dropping free space; non-NTFS partitions fall back to a full capture.
 - **Read-only mount via WinFsp**: mount a partition from a `.opbs` or Macrium image as a virtual drive letter with **zero extra disk usage** — file reads are served lazily by decompressing only the covering blocks. Requires the free WinFsp runtime (https://winfsp.dev). Works for standard (non-admin) users through WinFsp's per-LUID volume namespace; a live smoke test covers mount → cross-process probe → unmount.
-- **Restore from Macrium Reflect images**: `restore` also accepts Macrium `.mrimgx` (Reflect X) and `.mrimg` (Reflect 7/8) containers — placement is read from the image's own geometry/table entries, every block is decompressed and MD5-verified before it lands on the target, and unsupported variants (password-protected, split, delta/incremental, file-and-folder backups) are refused up front instead of touching the disk. Works from the CLI, the restore wizard and the Config Builder.
+- **Restore from Macrium Reflect images**: `restore` also accepts Macrium `.mrimgx` (Reflect X) and `.mrimg` (Reflect 7/8) containers — placement is read from the image's own geometry/table entries, every block is decompressed and MD5-verified before it lands on the target, and unsupported variants (password-protected, split, mrimgx delta, file-and-folder backups) are refused up front instead of touching the disk. v7 (`.mrimg`) differential/incremental chains browse and restore when the base images are on disk — the member is resolved against its base chain so you always see/restore the full logical volume state. Works from the CLI, the restore wizard and the Config Builder.
 - **Disk-to-disk clone**: `clone` copies selected live partitions straight onto a different local disk (VSS snapshots, optional dissimilar layout + fresh GPT/MBR table, optional grow-on-restore), with no image file or cloud upload. The GUI **Partition Copy** screen makes this drag-and-drop: pick a target disk, drag partition chips onto it (or “Copy all partitions”), preview the auto-sequential 1 MiB-aligned layout with optional grow-to-fill, confirm the erase warning, and watch live progress.
 - **Backup from a virtual disk (VHD/VHDX)**: `sourceVirtualDisk` (CLI `--source-vhd`, or "Back up from a VHD/VHDX file…" on the backup wizard's source step) images a `.vhd`/`.vhdx` file directly — the elevated helper attaches the file **write-protected** (no drive letter), discovers the physical disk index it maps to, builds the ordinary backup job (empty partition selection = every partition on the file), runs it, then detaches. No need to mount the volume or run the backup against the host's live disks.
 - **Restore into a virtual disk (VHD/VHDX)**: `targetVirtualDisk` writes a restore into a `.vhd`/`.vhdx` file instead of a physical disk — the helper creates the file when missing (dynamic or fixed, up to 64 TiB), attaches it, re-runs every physical-disk safety gate against the attached disk, writes a fresh GPT/MBR table so the volumes are visible in Windows, then detaches the disk again. Available from the restore wizard, the Config Builder and JSON configs.
@@ -593,12 +593,20 @@ OPBS.exe --cli extract img.mrimg --partition 1 --path "Users\me\notes.txt" --out
   `MacriumUnsupportedError`** instead of failing mid-browse with a confusing
   parse error: password-protected images (mrimgx `$JSON` encryption / v7
   footer `<aes>`), split multi-part sets (mrimgx `split_file` / a v7 sibling
-  part next to a `-00-00` filename), and delta/incremental chains (mrimgx
-  `delta_index`/`backup_type` / v7 `<method>` and `-01-00` filenames).
-  Detection is shared across every path — `mrimg info` prints an
-  `unsupported:` line with the same verdict, browse/extract/mount throw the
-  refusal, and the GUI browse view shows the exact reason instead of the
-  generic "no browsable partitions" hint.
+  part next to a `-00-00` filename), mrimgx delta containers, and v7 chain
+  members whose base image is missing from disk. Detection is shared across
+  every path — `mrimg info` prints an `unsupported:` line with the same
+  verdict, browse/extract/mount throw the refusal, and the GUI browse view
+  shows the exact reason instead of the generic "no browsable partitions"
+  hint.
+- **v7 differential/incremental chains browse in place**: a
+  `<id>-01-01.mrimg` (differential) or `<id>-02-02.mrimg` (incremental)
+  resolves against its base (`<id>-00-00.mrimg`, `<id>-01-01.mrimg`, …)
+  automatically — unchanged blocks come from the base, changed blocks from
+  the member's own data, each MD5-verified. Restoring or browsing the latest
+  member sees the full logical volume state; only a missing base is refused
+  (with a merge-in-Reflect hint). `mrimg info` prints the chain role, base
+  file and changed-block count.
 - Whether a partition can be listed depends on the volume: partition images of
   NTFS/FAT volumes browse and extract normally; block streams without a
   resident boot sector (e.g. file/data backups) report that no filesystem is
@@ -626,10 +634,15 @@ OPBS.exe --cli wizard
   `verifyAfterRestore` reads the target back for a final MD5 pass, and
   grow-on-restore / fresh-partition-table / restore-drill behave exactly like
   an `.opbs` restore.
-- Refused **before any target byte is written**: password-protected, split
-  and delta/incremental containers, file-and-folder backups, and
-  differential/incremental images — the reason surfaces in the wizard/GUI the
-  same way it does for browsing.
+- Refused **before any target byte is written**: password-protected and split
+  containers, mrimgx delta containers, v7 chain members missing their base
+  image, file-and-folder backups, and mrimgx `diff`/`inc` backup types — the
+  reason surfaces in the wizard/GUI the same way it does for browsing.
+- A v7 chain member restores the **full composed volume state**: the reader
+  resolves carried-forward and delta blocks against the base chain (every
+  block MD5-verified) before anything is written, so restoring the newest
+  incremental is equivalent to restoring a merged full image. Keep the whole
+  chain (`-00-00`, `-01-01`, …) in the same directory.
 
 ## Mounting an image partition as a read-only drive
 

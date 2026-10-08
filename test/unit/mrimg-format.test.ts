@@ -238,12 +238,13 @@ describe('mrimg-format', () => {
       expect(macriumUnsupportedReason(info)).toMatch(/delta-incremental/);
       expect(() => openMacriumPartitionReader(info, 0)).toThrow(MacriumUnsupportedError);
 
-      // Filename alone: increment number 01 marks a chain member.
+      // Filename alone: increment number 01 marks a chain member; with no
+      // -00-00 base next to it the refusal names the missing base.
       const tmp2 = path.join(fixtureDir, 'INCRTEST-01-00.mrimg');
       fs.copyFileSync(v7Sample, tmp2);
       const info2 = readMacriumImage(tmp2);
       expect(info2.deltaIndex).toBe(true);
-      expect(macriumUnsupportedReason(info2)).toMatch(/delta-incremental/);
+      expect(macriumUnsupportedReason(info2)).toMatch(/base image INCRTEST-00-00\.mrimg not found/);
     });
 
     it('detects split parts from a sibling file on disk', () => {

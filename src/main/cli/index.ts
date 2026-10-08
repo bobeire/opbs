@@ -2041,7 +2041,14 @@ function printMrimgInfo(info: import('../imaging/mrimg').MacriumImageInfo): void
   console.log(`  compression: ${info.compression.level && info.compression.level !== 'none' ? `${info.compression.method || 'zstd'} @ ${info.compression.level}` : 'none'}`);
   console.log(`  encryption:  ${enc.enable ? `yes (${enc.aesType ?? '?'} variant, ${enc.keyIterations} iterations)` : 'no'}`);
   if (info.splitFile) console.log('  split-file:  yes (multi-part; browsing not yet supported)');
-  if (info.deltaIndex) console.log('  delta index: yes (incremental chain; browsing not yet supported)');
+  const chain = info.chain ?? info.partitions.find((p) => p.chain)?.chain;
+  if (chain) {
+    const base = chain.basePath ? `, base ${chain.basePath.split(/[\\/]/).pop()}` : '';
+    const extra = chain.role === 'incremental' && chain.delta ? `, ${chain.delta.length} changed blocks` : '';
+    console.log(`  chain:        ${chain.role} (increment ${chain.incrementNo}${base}${extra})`);
+  } else if (info.deltaIndex) {
+    console.log('  delta index: yes (unsupported container)');
+  }
   const unsupported = macriumUnsupportedReason(info);
   if (unsupported) {
     console.log(`  unsupported: ${unsupported.replace(`${info.imagePath}: `, '')}`);

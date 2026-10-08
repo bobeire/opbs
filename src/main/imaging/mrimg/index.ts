@@ -6,6 +6,7 @@ export {
   MacriumImageInfo,
   MacriumPartitionInfo,
   MacriumIndexElement,
+  MacriumV7ChainMember,
   MacriumFormat,
   MacriumUnsupportedError,
   macriumUnsupportedReason,
@@ -17,6 +18,8 @@ export {
   MR_V7_RECORD_SIZE,
   MR_V7_PART_REC_TAIL,
   MR_V7_HEADER_LEN,
+  MR_V7_DELTA_RECORD_SIZE,
+  MR_V7_DELTA_FLAGS,
   closeImageFds,
   clearMacriumInfoCache
 } from './mrimg-format';

@@ -133,7 +133,9 @@ export function summarizeImage(imagePath: string): ImageSummary {
       flags: 0,
       blockSize: info.partitions[0]?.blockSize ?? 0,
       blocks: info.partitions.reduce((sum, p) => sum + p.blockCount, 0),
-      // Container refusals above guarantee a full, unencrypted image.
+      // Container refusals above guarantee an unencrypted image; `incremental`
+      // stays false because a Macrium chain member resolves to a full logical
+      // volume on its own (the flag drives the .opbs delta-chain UI).
       encrypted: false,
       incremental: false
     };

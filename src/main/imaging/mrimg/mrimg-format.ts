@@ -52,6 +52,14 @@ export const MR_INDEX_ELEMENT_SIZE = 30;
 export const MR_V7_RECORD_SIZE = 30; // {6 bytes pad, u64 file offset, 16 bytes md5}
 export const MR_V7_PART_REC_TAIL = 36; // gap between the path end and record 0
 export const MR_V7_HEADER_LEN = 9; // QuickLZ frame header (flag + u32 csize + u32 dsize)
+// Delta-incremental (.mrimg) index: a chain member stores only blocks that
+// changed since its base. Each delta record is the 30-byte base record plus a
+// 4-byte logical-block index inserted after the 6-byte prefix, and a 4-byte
+// flag word (0x00020100) in place of the base record's count/flags word.
+// Records are terminated by a sentinel whose file offset is the metadata
+// offset and whose "md5" is the v7 magic ASCII.
+export const MR_V7_DELTA_RECORD_SIZE = 34;
+export const MR_V7_DELTA_FLAGS = 0x00020100;
 
 export const BLOCK_JSON = '$JSON   ';
 export const BLOCK_AUXDATA = '$AUXDATA';
@@ -72,6 +80,37 @@ export interface MacriumIndexElement {
   md5: Buffer;
   storedLength: number;
   fileNumber: number;
+  /**
+   * v7 chain members only, on a differential's full-extent index: this block
+   * is unchanged since the base image, so its content resolves from the base's
+   * block at the same index. Absent on a full image and on an incremental,
+   * whose delta index names the changed blocks directly.
+   */
+  carry?: boolean;
+}
+
+/**
+ * A single parsed v7 chain member. The full image's full-extent index is the
+ * root; each later member resolves against its base (the previous member):
+ *  - a differential carries the full image forward, marking unchanged blocks
+ *    `carry` and storing only the changed ones.
+ *  - an incremental stores only the blocks that changed since its base (its
+ *    delta index); every other block resolves from the base.
+ */
+export interface MacriumV7ChainMember {
+  role: 'full' | 'differential' | 'incremental';
+  /** Filename increment number (`00` for a full image). */
+  incrementNo: number;
+  /** Path of the base image, resolved from the filename pattern. */
+  basePath?: string;
+  /**
+   * Incremental only: the delta records, keyed by the logical block index they
+   * address in the BASE's block array. Absent for a full/differential, whose
+   * full-extent index already covers every block.
+   */
+  delta?: Array<{ logicalIndex: number; filePosition: number; md5: Buffer }>;
+  /** Parsed base member, filled in when the base image is present on disk. */
+  base?: MacriumV7ChainMember;
 }
 
 export interface MacriumPartitionInfo {
@@ -100,6 +139,14 @@ export interface MacriumPartitionInfo {
    */
   offsetOnDisk?: number;
   blocks: MacriumIndexElement[];
+  /**
+   * v7 chain members only (differential and incremental). Set on the member
+   * being parsed, carrying its role, resolved base path, base member and —
+   * for an incremental — its delta index. `blocks` for a differential is its
+   * full-extent index with `carry` markers; an incremental has empty `blocks`
+   * and is described entirely by `chain.delta`.
+   */
+  chain?: MacriumV7ChainMember;
 }
 
 export interface MacriumImageInfo {
@@ -115,6 +162,12 @@ export interface MacriumImageInfo {
   encryption: { enable: boolean; keyIterations: number; aesType?: number; hmac?: string };
   splitFile: boolean;
   deltaIndex: boolean;
+  /**
+   * v7 chain members only: this file's role and the resolved base path. A
+   * differential carries a full-extent index with per-block `carry` markers;
+   * an incremental stores only the changed blocks (its delta index).
+   */
+  chain?: MacriumV7ChainMember;
   disks: Array<{ diskNumber?: number; diskSignature?: string; diskFormat?: string; size?: number }>;
   partitions: MacriumPartitionInfo[];
 }
@@ -134,6 +187,16 @@ export function macriumUnsupportedReason(info: MacriumImageInfo): string | null 
   }
   if (info.splitFile) {
     return `${info.imagePath}: split Macrium images (multi-part .mrimgx/.0001 files) are not supported yet.`;
+  }
+  // A v7 chain member (differential/incremental) browses and restores once
+  // its base image is on disk: the reader resolves carried-forward and delta
+  // blocks against it. Without the base the member cannot stand alone.
+  const chain = info.chain ?? info.partitions.find((p) => p.chain)?.chain;
+  if (chain?.basePath) {
+    if (!fs.existsSync(chain.basePath)) {
+      return `${info.imagePath}: base image ${path.basename(chain.basePath)} not found; restore or merge the chain in Reflect first.`;
+    }
+    return null;
   }
   if (info.deltaIndex) {
     return `${info.imagePath}: delta-incremental Macrium chains are not supported yet; restore or merge the chain in Reflect first.`;
@@ -332,6 +395,135 @@ function arr(value: unknown): unknown[] {
 
 const ZERO_HASH = Buffer.alloc(16);
 
+/** Role and filename increment number for a v7 chain member. */
+function v7ChainRole(
+  incrementNo: number,
+  methodValue: number
+): MacriumV7ChainMember['role'] {
+  if (incrementNo > 0) {
+    // A differential is the first non-full member of a set (it carries the
+    // full image forward); every later member is incremental.
+    return incrementNo === 1 || methodValue === 2 ? 'differential' : 'incremental';
+  }
+  return 'full';
+}
+
+/**
+ * Resolve the base image for a v7 chain member from its filename. Reflect
+ * names members `<imageid>-<increment:00=full>-<file#>.mrimg` with the file#
+ * repeating the increment, so the base of member N is the file whose two
+ * numbers are both N-1 in the same directory.
+ */
+function v7ChainBasePath(imagePath: string, incrementNo: number): string | undefined {
+  if (incrementNo <= 0) return undefined;
+  const base = String(incrementNo - 1).padStart(2, '0');
+  const dir = path.dirname(imagePath);
+  const imageId = /^([^.]+)/.exec(path.basename(imagePath))?.[1] ?? '';
+  // imageId itself carries the full `<id>-<NN>-<NN>` stem; replace trailing
+  // `-NN-NN` with the base's pair.
+  const stem = imageId.replace(/-\d{2}-\d{2}$/, '');
+  const candidate = path.join(dir, `${stem}-${base}-${base}.mrimg`);
+  return fs.existsSync(candidate) ? candidate : candidate;
+}
+
+/**
+ * Load the base image's per-block md5s so a differential can tell which of its
+ * blocks are carried forward (md5 unchanged from the base) versus freshly
+ * stored. Returns undefined when the base image is missing or unreadable —
+ * the differential then resolves only what it stores locally.
+ */
+function loadChainBaseBlocks(
+  basePath: string | undefined
+): Array<{ md5: Buffer }> | undefined {
+  if (!basePath || !fs.existsSync(basePath)) return undefined;
+  try {
+    const base = readMacriumImage(basePath);
+    // The base's first partition is what a chain member's index describes.
+    const p = base.partitions[0];
+    return p ? p.blocks : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A detected v7 index section: full-extent records or an incremental delta. */
+interface V7Section {
+  rec0: number;
+  count: number;
+  delta: boolean;
+}
+
+/**
+ * Detect a chain member's index section in the footer.
+ *
+ * Full images and differentials use the standard 30-byte record layout and are
+ * found by the existing marker/fallback scans. Incrementals replace that with
+ * 34-byte delta records (MR_V7_DELTA_FLAGS at rec+2) whose first record starts
+ * 30 bytes after a `{u16 pad, u32 count, pad[8], md5[16]}` header. Candidates
+ * are located with a native search for the flag word (a differential's footer
+ * can be tens of megabytes), then validated structurally.
+ */
+function detectV7DeltaSection(
+  imagePath: string,
+  footer: Buffer,
+  bound: number,
+  metaOff: number
+): V7Section | undefined {
+  const flagNeedle = Buffer.alloc(4);
+  flagNeedle.writeUInt32LE(MR_V7_DELTA_FLAGS, 0);
+  let search = 0;
+  while (search + 4 <= bound) {
+    const at = footer.indexOf(flagNeedle, search);
+    if (at === -1) break;
+    search = at + 1;
+    const rec0 = at - 2; // the flag word lives at rec+2
+    if (rec0 < MR_V7_DELTA_RECORD_SIZE - 4) continue;
+    const headerStart = rec0 - (MR_V7_DELTA_RECORD_SIZE - 4);
+    const count = footer.readUInt32LE(headerStart + 2);
+    if (count === 0 || count > 100_000) continue;
+    const need = rec0 + count * MR_V7_DELTA_RECORD_SIZE;
+    if (need > bound + MR_V7_DELTA_RECORD_SIZE) continue;
+    // Every record must carry the delta flag word at rec+2.
+    let flagsOk = true;
+    for (let r = 0; r < count; r++) {
+      if (footer.readUInt32LE(rec0 + r * MR_V7_DELTA_RECORD_SIZE + 2) !== MR_V7_DELTA_FLAGS) {
+        flagsOk = false;
+        break;
+      }
+    }
+    if (!flagsOk) continue;
+    // Real delta records: stored positions strictly inside the data region and
+    // monotonically increasing. The terminating sentinel is exempt — its
+    // "position" is the metadata offset itself and its md5 is the v7 magic.
+    let prevPos = -1;
+    let posOk = true;
+    for (let r = 0; r < count; r++) {
+      const rec = rec0 + r * MR_V7_DELTA_RECORD_SIZE;
+      const pos = Number(footer.readBigUInt64LE(rec + 10));
+      if (r === count - 1) break; // sentinel
+      if (pos <= 0 || pos >= metaOff || pos <= prevPos) {
+        posOk = false;
+        break;
+      }
+      prevPos = pos;
+    }
+    if (!posOk) continue;
+    // Definitive check: the first stored block must be a readable QuickLZ frame.
+    const firstOff = Number(footer.readBigUInt64LE(rec0 + 10));
+    if (!(firstOff > 0 && firstOff < metaOff)) continue;
+    try {
+      const hdr = readFileRange(imagePath, firstOff, MR_V7_HEADER_LEN);
+      const frame = parseQuickLzFrame(hdr);
+      const stored = readFileRange(imagePath, firstOff, frame.compressedSize);
+      decompressQuickLz(stored);
+    } catch {
+      continue;
+    }
+    return { rec0, count, delta: true };
+  }
+  return undefined;
+}
+
 /**
  * Open a `.mrimg` (Reflect 7/8) image and parse its footer and per-partition
  * block indexes. Blocks are QuickLZ 1.31 frames: each index record stores the
@@ -466,15 +658,19 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
     }
   }
 
-  // Filename shape: <imageid>-<increment:00=full>-<file#>.mrimg — file# > 0
-  // means this file is one part of a split set; increment > 0 means the image
-  // is a member of an incremental/differential chain. For file# 00 a sibling
-  // part on disk also proves the backup was split across volumes.
+  // Filename shape: <imageid>-<increment>-<file#>.mrimg.
+  //   increment 00          -> full image.
+  //   increment > 0, matching file# (e.g. -01-01, -02-02) -> chain member:
+  //     a differential (carries the full image forward) or an incremental
+  //     (carries the previous member forward).
+  //   file# > 0 with increment 00 (e.g. -00-01) -> one part of a split set.
+  // The old heuristic (`file# !== '00'` => split) misclassified every chain
+  // member, since real chain names repeat the increment as the file#.
   const nameParts = /-(\d{2})-(\d{2})\.mrimg$/i.exec(path.basename(imagePath));
-  const incrementNo = nameParts ? nameParts[1] : '00';
-  const filePartNo = nameParts ? nameParts[2] : '00';
+  const incrementNo = nameParts ? Number(nameParts[1]) : 0;
+  const filePartNo = nameParts ? Number(nameParts[2]) : 0;
   let splitBySibling = false;
-  if (nameParts && filePartNo === '00') {
+  if (nameParts && filePartNo === 0 && incrementNo === 0) {
     const prefix = path.basename(imagePath).replace(/-\d{2}\.mrimg$/i, '');
     for (let f = 1; f <= 99 && !splitBySibling; f++) {
       const sibling = `${prefix}-${String(f).padStart(2, '0')}.mrimg`;
@@ -482,8 +678,10 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
     }
   }
   const encryptedVariant = aesValue > 0;
-  const splitVariant = filePartNo !== '00' || splitBySibling;
-  const deltaVariant = incrementNo !== '00' || methodValue === 1 || methodValue === 2;
+  const isChainMember = nameParts !== null && incrementNo > 0 && filePartNo === incrementNo;
+  const splitVariant = !isChainMember && (filePartNo !== 0 || splitBySibling);
+  const deltaVariant =
+    isChainMember || incrementNo > 0 || methodValue === 1 || methodValue === 2;
 
   const markers: number[] = [];
   {
@@ -496,7 +694,7 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
     }
   }
 
-  const sections: Array<{ rec0: number; count: number }> = [];
+  const sections: V7Section[] = [];
   for (let k = 0; k < markers.length; k++) {
     const rec0 = markers[k] + pathLen + MR_V7_PART_REC_TAIL;
     const sectionEnd = k + 1 < markers.length ? markers[k + 1] - 1 : bound;
@@ -504,7 +702,7 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
     const count = footer.readUInt32LE(rec0 + 2);
     const need = rec0 + count * MR_V7_RECORD_SIZE;
     if (count === 0 || need > sectionEnd || sectionEnd - need > 4096) continue;
-    sections.push({ rec0, count });
+    sections.push({ rec0, count, delta: false });
   }
 
   // Fallback for chain segments and differential/incremental images: if the
@@ -530,7 +728,7 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
         const maxOffset = fileSize - MRIMG_V7_TRAILER_SIZE;
         const firstOffset = Number(footer.readBigUInt64LE(rec0 + 4 + 6));
         if (firstOffset <= 0 || firstOffset >= maxOffset) continue;
-        sections.push({ rec0: rec0 + 4, count });
+        sections.push({ rec0: rec0 + 4, count, delta: false });
         break;
       }
       if (sections.length > 0) break;
@@ -572,11 +770,22 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
           // First block failed to decompress — not a real block index.
           continue;
         }
-        sections.push({ rec0, count });
+        sections.push({ rec0, count, delta: false });
         break;
       }
       if (sections.length > 0) break;
     }
+  }
+
+  // Chain members (differential/incremental): the incremental's 34-byte delta
+  // index uses a different header, so the scans above miss it. Try the delta
+  // layout first for a chain member (the generic fallback below can latch onto
+  // a coincidental 30-byte run of decompressible footer bytes), else as a
+  // last resort.
+  let deltaSection: V7Section | undefined;
+  if (sections.length === 0 || deltaVariant) {
+    deltaSection = detectV7DeltaSection(imagePath, footer, bound, metaOff);
+    if (deltaSection) sections.unshift(deltaSection);
   }
 
   if (sections.length === 0) {
@@ -608,20 +817,69 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
     );
   }
 
+  // A chain member resolves against its base (the previous member): a full
+  // image is the chain root, a differential carries the full image forward,
+  // and an incremental carries its base forward. Resolving needs the base's
+  // own index, so record the role and base path here; the reader walks the
+  // chain when a block is not stored locally.
+  const chainRole = v7ChainRole(incrementNo, methodValue);
+  const basePath = v7ChainBasePath(imagePath, incrementNo);
+
+  // Incremental members keep their changed-block list (the delta index) in
+  // the chain record instead of a full-extent `blocks` array.
+  const chainDelta: MacriumV7ChainMember['delta'] = [];
+  for (const { rec0, count, delta } of sections) {
+    if (!delta) continue;
+    // Each 34-byte record names one logical block of the BASE that changed
+    // and where its compressed frame lives in this file. The last record is a
+    // sentinel whose position is the metadata offset — skip it.
+    for (let i = 0; i < count; i++) {
+      const rec = rec0 + i * MR_V7_DELTA_RECORD_SIZE;
+      const logicalIndex = footer.readUInt32LE(rec + 6);
+      const filePosition = Number(footer.readBigUInt64LE(rec + 10));
+      const md5 = Buffer.from(footer.subarray(rec + 18, rec + 34));
+      if (filePosition >= metaOff) continue;
+      chainDelta.push({ logicalIndex, filePosition, md5 });
+    }
+  }
+  const chain: MacriumV7ChainMember | undefined =
+    chainRole === 'full'
+      ? undefined
+      : { role: chainRole, incrementNo, basePath, delta: chainDelta };
+
   const partitions: MacriumPartitionInfo[] = [];
   for (let k = 0; k < sections.length; k++) {
-    const { rec0, count } = sections[k];
+    const { rec0, count, delta } = sections[k];
     const blocks: MacriumIndexElement[] = [];
-    for (let i = 0; i < count; i++) {
-      const rec = rec0 + i * MR_V7_RECORD_SIZE;
-      const md5 = Buffer.from(footer.subarray(rec + 14, rec + 30));
-      const filePosition = Number(footer.readBigUInt64LE(rec + 6));
-      if (md5.equals(ZERO_HASH) || filePosition >= metaOff) {
-        // Unallocated region: covered by zeroes. storedLength 0 = zeros.
-        blocks.push({ filePosition: -1, md5, storedLength: 0, fileNumber: 0 });
-      } else {
-        // storedLength -1 means "resolve from the block's QuickLZ header".
-        blocks.push({ filePosition, md5, storedLength: -1, fileNumber: 0 });
+    if (!delta) {
+      // A differential stores only its CHANGED blocks in its own data region;
+      // every other record is a copy of the base's full-extent record, so its
+      // file position names a location in the BASE file, not this one (the
+      // two files' data regions are independent). The discriminator is the
+      // md5: equal to the base's block md5 -> unchanged, resolve from the
+      // base; different -> changed, stored in THIS file. Zero md5 is always
+      // unallocated zeroes.
+      const baseBlocks = chainRole === 'differential' ? loadChainBaseBlocks(basePath) : undefined;
+      for (let i = 0; i < count; i++) {
+        const rec = rec0 + i * MR_V7_RECORD_SIZE;
+        const md5 = Buffer.from(footer.subarray(rec + 14, rec + 30));
+        const filePosition = Number(footer.readBigUInt64LE(rec + 6));
+        const base = baseBlocks?.[i];
+        if (md5.equals(ZERO_HASH)) {
+          blocks.push({ filePosition: -1, md5, storedLength: 0, fileNumber: 0 });
+        } else if (base && base.md5.equals(md5)) {
+          // Unchanged since the base: `carry` makes the reader resolve the
+          // block from the base image at the same logical index.
+          blocks.push({ filePosition: -1, md5, storedLength: 0, fileNumber: 0, carry: true });
+        } else if (base && (filePosition < 0 || filePosition >= metaOff)) {
+          // Changed but not stored in this file — unusable record; zeroes
+          // rather than a wild read.
+          blocks.push({ filePosition: -1, md5, storedLength: 0, fileNumber: 0 });
+        } else {
+          // Changed (or no base to compare against): stored in THIS file.
+          // storedLength -1 means "resolve from the block's QuickLZ header".
+          blocks.push({ filePosition, md5, storedLength: -1, fileNumber: 0 });
+        }
       }
     }
     partitions.push({
@@ -629,7 +887,9 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
       partitionIndex: k,
       partitionNumber: k + 1,
       blockSize: 1 << 16,
-      blockCount: count,
+      // An incremental has no full-extent index of its own: its extent is the
+      // base's, resolved below from the base image on disk.
+      blockCount: delta ? 0 : count,
       dataStart: 0,
       fsType: '',
       fsStart: 0,
@@ -637,8 +897,29 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
       sectorsPerCluster: 0,
       volumeLabel: '',
       geometry: { start: 0, end: 0, length: count * (1 << 16), bootSectorOffset: 0 },
-      blocks
+      blocks,
+      chain
     });
+  }
+
+  // A chain member inherits facts its own index cannot state: an incremental
+  // has no full-extent index (its extent is the base's), and a boot sector
+  // that is carried forward leaves `fsType` blank until the base fills it.
+  // The base may itself be a chain member; readMacriumImage resolves it
+  // recursively and caches the result.
+  if (chainRole !== 'full' && basePath && fs.existsSync(basePath)) {
+    try {
+      const bp = readMacriumImage(basePath).partitions[0];
+      if (bp) {
+        for (const p of partitions) {
+          if (chainRole === 'incremental') p.blockCount = bp.blockCount;
+          if (!p.fsType && bp.fsType) p.fsType = bp.fsType;
+        }
+      }
+    } catch {
+      // Missing/unreadable base: keep the zero extent; the reader and
+      // openMacriumPartitionReader refuse the image with a clear message.
+    }
   }
 
   // Detect compression and block size from stored block frames. Scan several
@@ -651,6 +932,14 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
       if (candidateBlocks.length >= 8) break;
     }
     if (candidateBlocks.length >= 8) break;
+  }
+  // An incremental has no full-extent index: its only stored frames are the
+  // delta records, which still carry real QuickLZ blocks of the base's size.
+  if (candidateBlocks.length === 0) {
+    for (const d of chain?.delta ?? []) {
+      candidateBlocks.push({ filePosition: d.filePosition, md5: d.md5, storedLength: -1, fileNumber: 0 });
+      if (candidateBlocks.length >= 8) break;
+    }
   }
   if (candidateBlocks.length === 0) {
     if (encryptedVariant) {
@@ -749,6 +1038,7 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
     encryption: { enable: encryptedVariant, keyIterations: 0 },
     splitFile: splitVariant,
     deltaIndex: deltaVariant,
+    chain,
     disks: [
       {
         diskNumber: 0,

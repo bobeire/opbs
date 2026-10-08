@@ -144,16 +144,18 @@ implemented; **Investigate** items need spike work first.
   compression. Browsing works for partition images whose volume carries a
   resident boot sector; block streams without one (e.g. data-only backups)
   report a clear error instead of a listing.
-- ✅ **Unsupported-variant detection (0.6.56)**: encrypted, split and
-  delta/incremental images are detected from file contents — mrimgx
-  `_encryption`/`split_file`/`delta_index`/`backup_type` plus a skipped
-  (never misparsed) delta `$INDEX` walk, and v7 footer XML `<aes>`/`<method>`
+- ✅ **Unsupported-variant detection (0.6.56)**: encrypted and split images are
+  detected from file contents — mrimgx `_encryption`/`split_file` plus a
+  skipped (never misparsed) delta `$INDEX` walk, and v7 footer XML `<aes>`
   plus the `-<inc>-<file>.mrimg` filename (sibling parts prove a split) — and
   refused with `MacriumUnsupportedError` from a single shared predicate
   (`macriumUnsupportedReason`) used by the partition reader, the filesystem
   probe (which now surfaces the reason instead of collapsing to "Unknown"),
   and `mrimg info` (prints an `unsupported:` line). The GUI browse view shows
   the refusal reason and hides the useless passphrase box for Macrium images.
+  v7 chain members whose base image is present are browsable (see
+  **v7 differential/incremental chains** below); mrimgx delta containers and
+  chain members missing their base stay refused with a merge-in-Reflect hint.
 
 ### Foreign Macrium restore (.mrimgx / .mrimg) (0.6.64)
 - ✅ `runRestoreJob` auto-detects a Macrium container (`detectMacriumFormat`)
@@ -176,11 +178,11 @@ implemented; **Investigate** items need spike work first.
   `.opbs` path.
 - ✅ Safety gates reuse `macriumRestoreRefusal` at both `summarizeImage`/
   `buildJob` (throws) and in the runner (clean `ok:false` job result before
-  any target byte): encrypted/split/delta containers, `backup_format:
-  file_and_folder`, and `backup_type: diff/inc` never touch the disk.
-  `verifyBeforeWrite` stays false for Macrium (the reader's per-block MD5 is
-  the integrity check), encryption keys are never carried, and compression
-  threads default to 0.
+  any target byte): encrypted/split containers, mrimgx delta containers,
+  v7 chain members missing their base, `backup_format: file_and_folder`, and
+  `backup_type: diff/inc` never touch the disk. `verifyBeforeWrite` stays
+  false for Macrium (the reader's per-block MD5 is the integrity check),
+  encryption keys are never carried, and compression threads default to 0.
 - ✅ Surfaces: `summarizeImage` reports the Macrium layout (sizes, offsets,
   `fsType` probe, `backup_time` in seconds → ISO date); the `restore` CLI,
   restore wizard, ConfigBuilder/GUI pickers and drive scans accept
@@ -189,6 +191,43 @@ implemented; **Investigate** items need spike work first.
   runner round-trips incl. tail-zero, verify match/mismatch, grow, cancel
   and refusals (8), a real Reflect v7 `.mrimg` sample round-tripped through
   the runner, plus a wizard typed-`.mrimgx`-path test.
+
+### v7 differential/incremental chains (.mrimg) (0.6.65)
+- ✅ Chain linkage from the filename `<id>-<inc>-<inc>.mrimg` (base of member
+  N is `<id>-<N-1>-<N-1>.mrimg` in the same directory) plus the footer XML
+  `<method>`: increment 0 is full, increment 1 (or method 2) is differential,
+  later members are incremental. Split detection now only fires for real
+  `-00-<n>` part numbers, so chain members are no longer misclassified.
+- ✅ Differential: a full-extent 30-byte index whose records for unchanged
+  blocks are copies of the base's records (keeping BASE file positions —
+  the two files' data regions are independent). The discriminator is the
+  per-block md5 vs the base's: equal → `carry`, resolved from the base image
+  at the same logical index; different → the changed block is stored in this
+  file. Real-sample ground truth: 54 local frames + 5,672 carries + zeros.
+- ✅ Incremental: a 34-byte delta index (`{u16, u32 0x00020100, u32
+  logicalIndex, u64 filePos, md5[16]}`, header `{u16, u32 count, pad[8],
+  md5}` + sentinel) located by a native search for the flag word (a
+  differential's footer can be tens of MB); every delta block QuickLZ-
+  decompresses and MD5-matches (55/55 on the real sample). Unlisted blocks
+  inherit the base's resolution; extent (`blockCount`) and `fsType` are
+  inherited at parse time so size reporting, restore planning and the
+  reader agree.
+- ✅ Reader chain resolution (`mrimg-reader.ts`): `MacriumPartitionReader`
+  serves logical blocks through the chain — delta hit → local frame,
+  carry/unlisted → recursive base resolution down to the full image —
+  with per-block MD5 verification against the record that supplied the
+  block. `openMacriumPartitionReader` refuses a member whose base is missing
+  (`base image … not found; restore or merge the chain in Reflect first.`).
+- ✅ Restore: a restored chain member writes the full logical volume state
+  (base + deltas composed by the reader); the refusal gates allow it only
+  when the whole chain is on disk. `mrimg info` prints the chain role, base
+  and changed-block count; exports carry `MacriumV7ChainMember` and the
+  delta constants.
+- ✅ Tests (`mrimg-v7-chain.test.ts`, gated on the real
+  `imagefilesamples/` chain): role/extent/delta parsing, boot-sector and
+  unchanged-block equality across all three members, all 54 differential
+  locals and all 55 incremental deltas verified through the reader, and the
+  missing-base refusal.
 
 ### Disk-to-disk clone (selected partitions → another disk)
 - ✅ `CloneEngine` (`imaging/clone-engine.ts`): builds clone jobs exactly like
