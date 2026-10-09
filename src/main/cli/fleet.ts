@@ -4,10 +4,11 @@ import * as path from 'path';
 import { flagValue, flagValues } from './flags';
 import type { CommandContext } from './index';
 import { buildFleetReport } from '../fleet/report';
-import { deriveMachineStatus, FleetCheckin, lastBackupAt } from '../fleet/schema';
-import { sendCheckin, fetchFleet, pullPolicies, pushPolicy } from '../fleet/client';
+import { deriveMachineStatus, FleetCheckin, lastBackupAt, FLEET_ACTION_NAMES, validateActionRequest } from '../fleet/schema';
+import { sendCheckin, fetchFleet, pullPolicies, pushPolicy, enqueueAction, fetchActionQueue, claimActions } from '../fleet/client';
 import { startFleetServer, DEFAULT_BACKUP_STALE_DAYS, isValidPolicyName } from '../fleet/server';
 import { applyPolicies, defaultPolicyDir } from '../fleet/policy';
+import { runQueuedActions } from '../fleet/action';
 
 function fmtBytes(bytes: number | null): string {
   if (bytes == null) return '?';
@@ -54,6 +55,8 @@ export interface CheckinSettings {
   autoApply?: boolean;
   /** Where applied policy configs + state live (default APPDATA/opbs/fleet-policies). */
   policyDir?: string;
+  /** Claim and run queued remote actions on every check-in (Tier 4). */
+  runActions?: boolean;
 }
 
 /** Loads and type-checks a `fleet checkin --settings` JSON file. Throws with a precise message. */
@@ -107,6 +110,9 @@ export function loadCheckinSettings(filePath: string): CheckinSettings {
   if (value.policyDir !== undefined) {
     settings.policyDir = typeof value.policyDir === 'string' ? value.policyDir : bad('policyDir', 'a string');
   }
+  if (value.runActions !== undefined) {
+    settings.runActions = typeof value.runActions === 'boolean' ? value.runActions : bad('runActions', 'a boolean');
+  }
   return settings;
 }
 
@@ -133,6 +139,7 @@ export function resolveCheckinInvocation(
   dryRun: boolean;
   autoApply: boolean;
   policyDir?: string;
+  runActions: boolean;
 } {
   const server = flagValue(argv, '--server') ?? settings.server;
   const inlineToken = flagValue(argv, '--token');
@@ -158,7 +165,8 @@ export function resolveCheckinInvocation(
     machineId: flagValue(argv, '--machine-id') ?? settings.machineId,
     dryRun: argv.includes('--dry-run'),
     autoApply: argv.includes('--auto-apply') || settings.autoApply === true,
-    policyDir: flagValue(argv, '--policy-dir') ?? settings.policyDir
+    policyDir: flagValue(argv, '--policy-dir') ?? settings.policyDir,
+    runActions: argv.includes('--run-actions') || settings.runActions === true
   };
 }
 
@@ -257,7 +265,7 @@ async function cmdFleetCheckin(ctx: CommandContext): Promise<number> {
   if (!server) {
     console.error(
       'Usage: fleet checkin --server <url> [--settings <file>] [--token T|--token-file F] ' +
-        '[--dir <dir>]... [--no-media] [--auto-apply] [--policy-dir <dir>] [--dry-run] [--json]'
+        '[--dir <dir>]... [--no-media] [--auto-apply] [--policy-dir <dir>] [--run-actions] [--dry-run] [--json]'
     );
     return 1;
   }
@@ -276,6 +284,24 @@ async function cmdFleetCheckin(ctx: CommandContext): Promise<number> {
     machineId: invocation.machineId,
     includeMedia: invocation.includeMedia
   });
+
+  // Tier 4: drain the server's action queue (read-only diagnostics), run each
+  // one, and carry the results back inside this check-in. Dry-run stays pure
+  // JSON — it never executes claimed actions.
+  if (invocation.runActions && !invocation.dryRun && server && token) {
+    try {
+      const queued = await claimActions({ server, token }, checkin.machineId);
+      if (queued.length > 0) {
+        const results = await runQueuedActions(queued);
+        checkin.actions = results;
+        for (const result of results) {
+          console.log(`action ${result.action}: ${result.ok ? 'ok' : 'FAILED'} — ${result.summary}`);
+        }
+      }
+    } catch (error) {
+      console.error(`action claim failed: ${error instanceof Error ? error.message : error}`);
+    }
+  }
 
   // Tier 2: reconcile local scheduled backups against the server's policies
   // before the report goes out, so the check-in carries the apply result.
@@ -553,6 +579,58 @@ async function cmdFleetPolicy(ctx: CommandContext): Promise<number> {
   }
 }
 
+async function cmdFleetAction(ctx: CommandContext): Promise<number> {
+  const sub = ctx.argv[0];
+  const rest = ctx.argv.slice(1);
+  const server = flagValue(rest, '--server');
+  if (!server) {
+    console.error(
+      `Usage: fleet action <${FLEET_ACTION_NAMES.join('|')}> --server <url> --machine <id|*> --dir <dir> [--scope newest|all]\n` +
+        '       fleet action queue --server <url>'
+    );
+    return 1;
+  }
+  const token = resolveToken(rest);
+  if (!token) {
+    console.error('No token: pass --token/--token-file or set OPBS_FLEET_TOKEN.');
+    return 1;
+  }
+
+  if (sub === 'queue') {
+    const { queue } = await fetchActionQueue({ server, token });
+    if (ctx.opts.json) {
+      console.log(JSON.stringify({ queue }, null, 2));
+    } else {
+      for (const entry of queue) {
+        console.log(
+          `  ${entry.action} → ${entry.machineId} (${entry.dir})` +
+            (entry.scope ? ` scope=${entry.scope}` : '') +
+            ` [${entry.id}]`
+        );
+      }
+      console.log(`${queue.length} queued action(s)`);
+    }
+    return 0;
+  }
+
+  const validation = validateActionRequest({
+    action: sub,
+    machineId: flagValue(rest, '--machine'),
+    dir: flagValue(rest, '--dir'),
+    scope: flagValue(rest, '--scope') ?? undefined
+  });
+  if (!validation.ok) {
+    console.error(validation.error);
+    return 1;
+  }
+  const result = await enqueueAction({ server, token }, validation.request);
+  console.log(
+    `queued ${result.action} for ${result.queued.map((q) => q.machineId).join(', ')} ` +
+      `(${result.queued.length} machine(s)); it runs at the machine's next check-in`
+  );
+  return 0;
+}
+
 export async function cmdFleet(ctx: CommandContext): Promise<number> {
   const action = ctx.argv[0];
   const rest: CommandContext = { argv: ctx.argv.slice(1), opts: ctx.opts };
@@ -568,8 +646,10 @@ export async function cmdFleet(ctx: CommandContext): Promise<number> {
       return cmdFleetStatus(rest);
     case 'policy':
       return cmdFleetPolicy(rest);
+    case 'action':
+      return cmdFleetAction(rest);
     default:
-      console.error('Usage: fleet report|checkin|serve|status|policy [options]  (see "fleet" in the main help)');
+      console.error('Usage: fleet report|checkin|serve|status|policy|action [options]  (see "fleet" in the main help)');
       return 1;
   }
 }

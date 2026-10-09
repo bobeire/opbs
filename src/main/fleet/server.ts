@@ -13,7 +13,15 @@ import * as path from 'path';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { AddressInfo } from 'net';
 import { FLEET_DASHBOARD_HTML } from './dashboard';
-import { deriveMachineStatus, isValidPolicyName, FleetCheckin, FleetStatus, validateCheckin } from './schema';
+import {
+  deriveMachineStatus,
+  isValidPolicyName,
+  validateActionRequest,
+  FleetActionRequest,
+  FleetCheckin,
+  FleetStatus,
+  validateCheckin
+} from './schema';
 import { evaluateAlerts, postWebhook } from './alerts';
 
 export { isValidPolicyName } from './schema';
@@ -277,6 +285,36 @@ export function listPolicies(dataDir: string): FleetPolicyList {
   return result;
 }
 
+interface ActionStore {
+  schema: number;
+  queue: FleetActionRequest[];
+}
+
+function actionsPath(dataDir: string): string {
+  return path.join(dataDir, 'actions.json');
+}
+
+export function loadActionStore(dataDir: string): ActionStore {
+  try {
+    const raw = fs.readFileSync(actionsPath(dataDir), 'utf-8');
+    const parsed = JSON.parse(raw) as ActionStore;
+    if (parsed && typeof parsed === 'object' && Array.isArray(parsed.queue)) {
+      return { schema: 1, queue: parsed.queue };
+    }
+  } catch {
+    /* no queue yet */
+  }
+  return { schema: 1, queue: [] };
+}
+
+function saveActionStore(dataDir: string, actionStore: ActionStore): void {
+  const target = actionsPath(dataDir);
+  const tmp = `${target}.tmp`;
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(tmp, JSON.stringify(actionStore, null, 2), 'utf-8');
+  fs.renameSync(tmp, target);
+}
+
 export async function startFleetServer(opts: FleetServerOptions): Promise<FleetServer> {
   const host = opts.host ?? '127.0.0.1';
   const port = opts.port ?? 8787;
@@ -405,6 +443,75 @@ export async function startFleetServer(opts: FleetServerOptions): Promise<FleetS
       return;
     }
 
+    if (route === 'POST /api/action') {
+      if (!requireToken(req, res, token)) return;
+      const body = await readJsonBody(req, MAX_CHECKIN_BYTES);
+      if (!body.ok) {
+        sendJson(res, body.status, { error: body.error });
+        return;
+      }
+      const validation = validateActionRequest(body.value);
+      if (!validation.ok) {
+        sendJson(res, 400, { error: validation.error });
+        return;
+      }
+      const { request } = validation;
+      let targets: string[];
+      if (request.machineId === '*') {
+        targets = Object.keys(store.machines);
+        if (targets.length === 0) {
+          sendJson(res, 400, { error: 'cannot broadcast: no machines have checked in yet' });
+          return;
+        }
+      } else {
+        targets = [request.machineId];
+      }
+      const actionStore = loadActionStore(opts.dataDir);
+      const id = randomBytes(8).toString('hex');
+      const issuedAt = Date.now();
+      const queued = targets.map((machineId) => {
+        const entry: FleetActionRequest = { id, machineId, action: request.action, dir: request.dir, issuedAt };
+        if (request.scope) entry.scope = request.scope;
+        actionStore.queue.push(entry);
+        return { id, machineId };
+      });
+      saveActionStore(opts.dataDir, actionStore);
+      log(`action queued: ${request.action} → ${targets.join(', ')}`);
+      sendJson(res, 200, { action: request.action, queued });
+      return;
+    }
+
+    if (route === 'GET /api/action') {
+      if (!requireToken(req, res, token)) return;
+      sendJson(res, 200, { queue: loadActionStore(opts.dataDir).queue });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname.startsWith('/api/actions/') && url.pathname.endsWith('/claim')) {
+      if (!requireToken(req, res, token)) return;
+      let machineId: string;
+      try {
+        machineId = decodeURIComponent(url.pathname.slice('/api/actions/'.length, -'/claim'.length));
+      } catch {
+        sendJson(res, 400, { error: 'malformed machineId' });
+        return;
+      }
+      if (!machineId) {
+        sendJson(res, 400, { error: 'machineId is missing' });
+        return;
+      }
+      // Read-pop-save with no awaits in between: a machine never double-claims.
+      const actionStore = loadActionStore(opts.dataDir);
+      const actions = actionStore.queue.filter((a) => a.machineId === machineId);
+      if (actions.length > 0) {
+        actionStore.queue = actionStore.queue.filter((a) => a.machineId !== machineId);
+        saveActionStore(opts.dataDir, actionStore);
+        log(`action claimed by ${machineId}: ${actions.map((a) => a.action).join(', ')}`);
+      }
+      sendJson(res, 200, { actions });
+      return;
+    }
+
     if (route === 'GET /' || route === 'GET /index.html') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(FLEET_DASHBOARD_HTML);
@@ -422,6 +529,8 @@ export async function startFleetServer(opts: FleetServerOptions): Promise<FleetS
       url.pathname === '/api/fleet' ||
       url.pathname === '/api/policy' ||
       url.pathname.startsWith('/api/policy/') ||
+      url.pathname === '/api/action' ||
+      url.pathname.startsWith('/api/actions/') ||
       url.pathname === '/health' ||
       url.pathname === '/' ||
       url.pathname === '/index.html';

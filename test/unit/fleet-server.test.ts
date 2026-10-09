@@ -16,7 +16,7 @@ import {
   FleetStore,
   MAX_CHECKIN_BYTES
 } from '../../src/main/fleet/server';
-import { sendCheckin, fetchFleet, pullPolicies, pushPolicy } from '../../src/main/fleet/client';
+import { sendCheckin, fetchFleet, pullPolicies, pushPolicy, enqueueAction, fetchActionQueue, claimActions } from '../../src/main/fleet/client';
 import { FLEET_SCHEMA_VERSION, fleetMachineId, FleetCheckin, FleetDestinationReport } from '../../src/main/fleet/schema';
 import { FLEET_DASHBOARD_HTML } from '../../src/main/fleet/dashboard';
 
@@ -429,6 +429,129 @@ describe('fleet policy API', () => {
     const fleet = await fetchFleet({ server: server.url });
     expect(fleet.backupStaleDays).toBe(5);
     expect(fleet.staleDays).toBe(7);
+  });
+});
+
+describe('fleet remote actions', () => {
+  const dataDirs: string[] = [];
+  const servers: FleetServer[] = [];
+  const dataDirOf = new Map<FleetServer, string>();
+
+  async function start(overrides: Partial<Parameters<typeof startFleetServer>[0]> = {}): Promise<FleetServer> {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-fleet-actions-'));
+    dataDirs.push(dataDir);
+    const server = await startFleetServer({ dataDir, port: 0, ...overrides });
+    servers.push(server);
+    dataDirOf.set(server, dataDir);
+    return server;
+  }
+
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((s) => s.close()));
+    dataDirOf.clear();
+    for (const dir of dataDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  const post = (server: FleetServer, body: unknown, withToken = true) =>
+    fetch(`${server.url}/api/action`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(withToken ? { authorization: `Bearer ${server.token}` } : {})
+      },
+      body: JSON.stringify(body)
+    });
+
+  it('requires the token for enqueue, list and claim', async () => {
+    const server = await start();
+    expect((await post(server, { action: 'verify', machineId: 'm', dir: 'D:\\OPBS' }, false)).status).toBe(401);
+    expect((await fetch(`${server.url}/api/action`)).status).toBe(401);
+    expect(
+      (await fetch(`${server.url}/api/actions/m/claim`, { method: 'POST' })).status
+    ).toBe(401);
+  });
+
+  it('rejects unknown, dangerous and malformed requests with 400s', async () => {
+    const server = await start();
+    expect((await post(server, { action: 'restore', machineId: 'm', dir: 'D:\\OPBS' })).status).toBe(400);
+    expect((await post(server, { action: 'backup', machineId: 'm', dir: 'D:\\OPBS' })).status).toBe(400);
+    expect((await post(server, { action: 'verify', machineId: 'm', dir: 'D:\\OPBS', scope: 'everything' })).status).toBe(400);
+    expect((await post(server, { action: 'verify', dir: 'D:\\OPBS' })).status).toBe(400);
+    expect((await post(server, { action: 'verify', machineId: 'm' })).status).toBe(400);
+    const queue = await fetchActionQueue({ server: server.url, token: server.token });
+    expect(queue.queue).toEqual([]);
+  });
+
+  it('hands a queued action to exactly one machine and drains it', async () => {
+    const server = await start();
+    const target = { server: server.url, token: server.token };
+    const enqueued = await enqueueAction(target, { action: 'chain', machineId: 'M1', dir: 'D:\\OPBS', scope: 'all' });
+    expect(enqueued.action).toBe('chain');
+    expect(enqueued.queued).toHaveLength(1);
+    expect(enqueued.queued[0].id).toMatch(/^[0-9a-f]{16}$/);
+
+    const listed = await fetchActionQueue(target);
+    expect(listed.queue).toHaveLength(1);
+    expect(listed.queue[0]).toMatchObject({ machineId: 'M1', action: 'chain', dir: 'D:\\OPBS', scope: 'all' });
+    expect(typeof listed.queue[0].issuedAt).toBe('number');
+
+    const claimed = await claimActions(target, 'M1');
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0].id).toBe(enqueued.queued[0].id);
+    expect(await claimActions(target, 'M1')).toEqual([]);
+    expect(await claimActions(target, 'M2')).toEqual([]);
+    expect((await fetchActionQueue(target)).queue).toEqual([]);
+  });
+
+  it('broadcasts * to every checked-in machine with a shared id', async () => {
+    const server = await start();
+    const target = { server: server.url, token: server.token };
+    expect((await postCheckin(server, JSON.stringify(makeCheckin({ machineId: 'machine-a' })), server.token)).status).toBe(200);
+    expect((await postCheckin(server, JSON.stringify(makeCheckin({ machineId: 'machine-b', hostname: 'PC-B' })), server.token)).status).toBe(200);
+
+    const enqueued = await enqueueAction(target, { action: 'verify', machineId: '*', dir: 'D:\\OPBS' });
+    expect(enqueued.queued.map((q) => q.machineId).sort()).toEqual(['machine-a', 'machine-b']);
+    expect(new Set(enqueued.queued.map((q) => q.id)).size).toBe(1);
+
+    const a = await claimActions(target, 'machine-a');
+    const b = await claimActions(target, 'machine-b');
+    expect(a).toHaveLength(1);
+    expect(b).toHaveLength(1);
+    expect(a[0].id).toBe(b[0].id);
+    expect(a[0]).not.toEqual(b[0]); // machineId differs
+    expect((await fetchActionQueue(target)).queue).toEqual([]);
+  });
+
+  it('refuses broadcast before any machine has checked in', async () => {
+    const server = await start();
+    const response = await post(server, { action: 'verify', machineId: '*', dir: 'D:\\OPBS' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'cannot broadcast: no machines have checked in yet' });
+  });
+
+  it('persists the queue across a server restart', async () => {
+    const server = await start();
+    const target = { server: server.url, token: server.token };
+    await enqueueAction(target, { action: 'storage-health', machineId: 'M1', dir: 'D:\\OPBS' });
+    const dataDir = dataDirOf.get(server)!;
+    await server.close();
+    servers.splice(servers.indexOf(server), 1);
+
+    const restarted = await startFleetServer({ dataDir, port: 0 });
+    servers.push(restarted);
+    dataDirOf.set(restarted, dataDir);
+    const claimed = await claimActions({ server: restarted.url, token: restarted.token }, 'M1');
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0].action).toBe('storage-health');
+  });
+
+  it('answers 404 for a bare collection and 405 for wrong methods', async () => {
+    const server = await start();
+    expect((await fetch(`${server.url}/api/actions`, { method: 'DELETE' })).status).toBe(404);
+    expect((await fetch(`${server.url}/api/action`, { method: 'PUT' })).status).toBe(405);
+    expect((await fetch(`${server.url}/api/actions/m1/claim`, { method: 'GET' })).status).toBe(405);
   });
 });
 

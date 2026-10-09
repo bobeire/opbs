@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   FLEET_SCHEMA_VERSION,
+  FLEET_ACTION_NAMES,
   fleetMachineId,
   validateCheckin,
+  validateActionRequest,
   validateBackupPolicy,
   deriveMachineStatus,
   lastBackupAt,
@@ -443,6 +445,137 @@ describe('validateBackupPolicy', () => {
       error: 'fleetSchedule.onLogin must be a boolean'
     });
     expect(validateBackupPolicy({ ...minimal, fleetSchedule: { time: '00:00', onLogin: true } }).ok).toBe(true);
+  });
+});
+
+describe('validateActionRequest', () => {
+  const base = { action: 'verify', machineId: 'abc123def456', dir: 'D:\\OPBS' };
+
+  it('accepts every whitelisted read-only action', () => {
+    for (const action of FLEET_ACTION_NAMES) {
+      const result = validateActionRequest({ ...base, action });
+      expect(result.ok, action).toBe(true);
+      if (result.ok) expect(result.request.action).toBe(action);
+    }
+  });
+
+  it('accepts broadcast target and optional scope', () => {
+    const result = validateActionRequest({ ...base, machineId: '*', scope: 'all' });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.request).toEqual({ ...base, machineId: '*', scope: 'all' });
+  });
+
+  it('refuses non-objects and unknown or dangerous actions', () => {
+    expect(validateActionRequest(null)).toEqual({ ok: false, error: 'action request is not a JSON object' });
+    expect(validateActionRequest('verify')).toEqual({ ok: false, error: 'action request is not a JSON object' });
+    for (const action of ['restore', 'clone', 'drill', 'prune', 'backup', 'rm', '']) {
+      const result = validateActionRequest({ ...base, action });
+      expect(result.ok, action).toBe(false);
+      if (!result.ok) expect(result.error).toContain('read-only diagnostics only');
+    }
+  });
+
+  it('requires machineId and dir', () => {
+    expect(validateActionRequest({ ...base, machineId: undefined })).toEqual({
+      ok: false,
+      error: 'machineId must be a non-empty string (use * to broadcast to every known machine)'
+    });
+    expect(validateActionRequest({ ...base, machineId: '' }).ok).toBe(false);
+    expect(validateActionRequest({ ...base, dir: undefined })).toEqual({
+      ok: false,
+      error: 'dir must be a non-empty string (max 1024 chars)'
+    });
+    expect(validateActionRequest({ ...base, dir: '' }).ok).toBe(false);
+  });
+
+  it('validates the scope enum', () => {
+    expect(validateActionRequest({ ...base, scope: 'newest' }).ok).toBe(true);
+    expect(validateActionRequest({ ...base, scope: 'all' }).ok).toBe(true);
+    expect(validateActionRequest({ ...base, scope: 'everything' })).toEqual({
+      ok: false,
+      error: 'scope must be newest or all'
+    });
+  });
+});
+
+describe('validateCheckin actions', () => {
+  const result = (overrides: Record<string, unknown> = {}) => ({
+    id: 'a1b2c3d4',
+    action: 'verify',
+    ok: true,
+    startedAt: 1_700_000_000_000,
+    finishedAt: 1_700_000_060_000,
+    summary: '4096 block(s) verified',
+    ...overrides
+  });
+
+  it('accepts a well-formed actions array and tolerates detail', () => {
+    const doc = checkin({ actions: [result(), result({ id: 'x', ok: false, detail: { blocksVerified: 10 } })] });
+    expect(validateCheckin(doc).ok).toBe(true);
+  });
+
+  it('rejects malformed results with a path-precise message', () => {
+    expect(validateCheckin(checkin({ actions: 'nope' } as never))).toEqual({
+      ok: false,
+      error: 'actions is not an array'
+    });
+    expect(validateCheckin(checkin({ actions: [result({ id: '' })] }))).toEqual({
+      ok: false,
+      error: 'actions[0].id is missing'
+    });
+    expect(validateCheckin(checkin({ actions: [result({ action: '' })] } as never))).toEqual({
+      ok: false,
+      error: 'actions[0].action must be a non-empty string'
+    });
+    expect(validateCheckin(checkin({ actions: [result({ ok: 'yes' })] } as never))).toEqual({
+      ok: false,
+      error: 'actions[0].ok is not a boolean'
+    });
+    expect(validateCheckin(checkin({ actions: [result({ summary: 42 })] } as never))).toEqual({
+      ok: false,
+      error: 'actions[0].summary is not a string'
+    });
+  });
+
+  it('carries an unsupported-action failure through so the check-in still validates', () => {
+    const doc = checkin({
+      actions: [
+        { id: 'r', action: 'restore', ok: false, startedAt: 1, finishedAt: 2, summary: 'unsupported action "restore"' }
+      ]
+    });
+    expect(validateCheckin(doc).ok).toBe(true);
+  });
+});
+
+describe('action results in deriveMachineStatus', () => {
+  const now = 1_700_000_000_000;
+
+  it('warns on a failed action with the summary inline', () => {
+    const doc = checkin({
+      actions: [
+        { id: 'a', action: 'verify', ok: true, startedAt: now, finishedAt: now, summary: 'ok' },
+        { id: 'b', action: 'scrub', ok: false, startedAt: now, finishedAt: now, summary: 'read error at 0x1000' }
+      ]
+    });
+    const result = deriveMachineStatus(doc, { receivedAt: now, now });
+    expect(result.status).toBe('warning');
+    expect(result.reasons).toContain('action scrub failed: read error at 0x1000');
+  });
+
+  it('stays quiet for successful actions and lets critical outrank failures', () => {
+    const ok = checkin({
+      actions: [{ id: 'a', action: 'verify', ok: true, startedAt: now, finishedAt: now, summary: 'ok' }]
+    });
+    expect(deriveMachineStatus(ok, { receivedAt: now, now }).status).toBe('ok');
+
+    const critical = checkin({
+      destinations: [destination({ brokenChains: 1 })],
+      actions: [{ id: 'a', action: 'verify', ok: false, startedAt: now, finishedAt: now, summary: 'bad frame' }]
+    });
+    const result = deriveMachineStatus(critical, { receivedAt: now, now });
+    expect(result.status).toBe('critical');
+    expect(result.reasons.some((r) => r.includes('broken restore chain'))).toBe(true);
+    expect(result.reasons.some((r) => r.includes('action verify failed'))).toBe(true);
   });
 });
 

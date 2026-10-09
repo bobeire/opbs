@@ -72,6 +72,41 @@ export interface FleetCheckin {
   media: FleetMediaEntry[];
   /** Policy sync result — present only when the machine auto-applies policies. */
   policies?: FleetPolicyApplied[];
+  /** Results of actions drained from the server's queue this check-in. */
+  actions?: FleetActionResult[];
+}
+
+/**
+ * Remote actions (Tier 4): read-only diagnostics an admin can queue for a
+ * machine to run at its next check-in. The whitelist is a hard safety line —
+ * nothing that writes (restore, clone, drill, prune, backup) can ever be
+ * queued or executed.
+ */
+export const FLEET_ACTION_NAMES = ['verify', 'scrub', 'chain', 'analytics', 'anomalies', 'storage-health'] as const;
+
+export type FleetActionName = (typeof FLEET_ACTION_NAMES)[number];
+
+/** A queued action as stored by the server until a machine claims it. */
+export interface FleetActionRequest {
+  id: string;
+  machineId: string;
+  action: FleetActionName;
+  dir?: string;
+  scope?: 'newest' | 'all';
+  issuedAt: number;
+}
+
+/** A completed action as reported back inside the check-in. */
+export interface FleetActionResult {
+  id: string;
+  action: FleetActionName;
+  ok: boolean;
+  startedAt: number;
+  finishedAt: number;
+  /** One-line outcome (first/last output line or the failure reason). */
+  summary: string;
+  /** Parsed `--json` output when it was small enough to carry back. */
+  detail?: unknown;
 }
 
 export type FleetStatus = 'ok' | 'warning' | 'critical' | 'stale';
@@ -161,6 +196,55 @@ export function isValidPolicyName(name: string): boolean {
 }
 
 const FLEET_POLICY_STATUSES: FleetPolicyStatus[] = ['applied', 'unchanged', 'removed', 'invalid', 'failed'];
+
+function isActionName(value: unknown): value is FleetActionName {
+  return isString(value) && (FLEET_ACTION_NAMES as readonly string[]).includes(value);
+}
+
+/**
+ * Validate an action enqueue request (server body and CLI pre-check). Only
+ * whitelisted read-only diagnostics with a real target directory pass.
+ */
+export function validateActionRequest(
+  value: unknown
+): { ok: true; request: { action: FleetActionName; machineId: string; dir: string; scope?: 'newest' | 'all' } } | { ok: false; error: string } {
+  if (!isRecord(value)) return { ok: false, error: 'action request is not a JSON object' };
+  if (!isActionName(value.action)) {
+    return {
+      ok: false,
+      error: `action must be one of ${FLEET_ACTION_NAMES.join('|')} (read-only diagnostics only)`
+    };
+  }
+  if (!isString(value.machineId) || value.machineId.length === 0 || value.machineId.length > 256) {
+    return { ok: false, error: 'machineId must be a non-empty string (use * to broadcast to every known machine)' };
+  }
+  if (!isString(value.dir) || value.dir.length === 0 || value.dir.length > 1024) {
+    return { ok: false, error: 'dir must be a non-empty string (max 1024 chars)' };
+  }
+  if (value.scope !== undefined && value.scope !== 'newest' && value.scope !== 'all') {
+    return { ok: false, error: 'scope must be newest or all' };
+  }
+  const request: { action: FleetActionName; machineId: string; dir: string; scope?: 'newest' | 'all' } = {
+    action: value.action,
+    machineId: value.machineId,
+    dir: value.dir
+  };
+  if (value.scope !== undefined) request.scope = value.scope;
+  return { ok: true, request };
+}
+
+function validateActionResult(value: unknown, index: number): string | null {
+  if (!isRecord(value)) return `actions[${index}] is not an object`;
+  if (!isString(value.id) || value.id.length === 0) return `actions[${index}].id is missing`;
+  // The enqueue gate whitelists actions; results are informational, so an
+  // "unsupported action" failure can still be reported back verbatim.
+  if (!isString(value.action) || value.action.length === 0) return `actions[${index}].action must be a non-empty string`;
+  if (typeof value.ok !== 'boolean') return `actions[${index}].ok is not a boolean`;
+  if (!isNumber(value.startedAt)) return `actions[${index}].startedAt is not a number`;
+  if (!isNumber(value.finishedAt)) return `actions[${index}].finishedAt is not a number`;
+  if (!isString(value.summary)) return `actions[${index}].summary is not a string`;
+  return null;
+}
 
 function validatePolicyApplied(value: unknown, index: number): string | null {
   if (!isRecord(value)) return `policies[${index}] is not an object`;
@@ -266,6 +350,13 @@ export function validateCheckin(value: unknown): { ok: true; checkin: FleetCheck
       if (err) return { ok: false, error: err };
     }
   }
+  if (value.actions !== undefined) {
+    if (!Array.isArray(value.actions)) return { ok: false, error: 'actions is not an array' };
+    for (let i = 0; i < value.actions.length; i++) {
+      const err = validateActionResult(value.actions[i], i);
+      if (err) return { ok: false, error: err };
+    }
+  }
   return { ok: true, checkin: value as unknown as FleetCheckin };
 }
 
@@ -358,6 +449,13 @@ export function deriveMachineStatus(checkin: FleetCheckin, opts: FleetStatusOpti
       warning = true;
     } else if (policy.status === 'failed') {
       reasons.push(`policy ${policy.name} failed: ${policy.reason ?? 'could not apply'}`);
+      warning = true;
+    }
+  }
+
+  for (const action of checkin.actions ?? []) {
+    if (!action.ok) {
+      reasons.push(`action ${action.action} failed: ${action.summary}`);
       warning = true;
     }
   }

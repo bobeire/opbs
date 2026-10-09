@@ -285,15 +285,17 @@ Commands:
                                           drills) plus a SMART disk inventory. Exits 1 when the
                                           derived machine status is critical. Without --dir the
                                           recent backup destinations are scanned.
-  fleet checkin --server <url> [--settings <file>] [--token-file F|--token T] [--dir <dir>]... [--no-media] [--auto-apply] [--policy-dir <dir>] [--dry-run] [--json]
+  fleet checkin --server <url> [--settings <file>] [--token-file F|--token T] [--dir <dir>]... [--no-media] [--auto-apply] [--policy-dir <dir>] [--run-actions] [--dry-run] [--json]
                                           Send the check-in to a fleet server (token also from --settings or
                                           OPBS_FLEET_TOKEN). --settings <file> reads a JSON object
                                           {server, token?, tokenFile?, dirs?, noMedia?, machineId?,
-                                          autoApply?, policyDir?} — flags override the file. --dry-run
-                                          prints the JSON instead of sending it. With --auto-apply the
-                                          machine pulls the server's policies first, applies them
-                                          (validate → config file → scheduled backup task) and reports
-                                          the result inside the check-in.
+                                          autoApply?, policyDir?, runActions?} — flags override the file.
+                                          --dry-run prints the JSON instead of sending it. With --auto-apply
+                                          the machine pulls the server's policies first, applies them
+                                          (validate → config file → scheduled backup task) and reports the
+                                          result inside the check-in. With --run-actions it first claims any
+                                          queued remote actions, runs them (read-only diagnostics, each in a
+                                          child process with a timeout) and carries the results back.
   fleet serve [--host H] [--port N] [--data <dir>] [--token T] [--stale-days N] [--backup-stale-days N] [--webhook <url>] [--alert-sweep-minutes N]
                                           Run the fleet control server (default http://127.0.0.1:8787):
                                           accepts token-authenticated check-ins, stores them in
@@ -321,6 +323,13 @@ Commands:
   fleet policy push <config.json> --server <url> [--name <name.json>]
                                           Upload a backup job config as a server-side policy. Drop files
                                           into <dataDir>/policies/ on the server to publish them.
+  fleet action <verify|scrub|chain|analytics|anomalies|storage-health> --server <url> --machine <id|*> --dir <dir> [--scope newest|all]
+                                          Queue a read-only diagnostic for a machine (or * for every
+                                          known machine). It runs at that machine's next check-in — when
+                                          it has --run-actions — and the result arrives in the check-in
+                                          (failures show up as warning reasons on the dashboard/status).
+                                          Only whitelisted read-only commands can ever be queued.
+  fleet action queue --server <url>      List the pending action queue.
   health <diskIndex>                     Report SMART/reliability health (no elevation needed).
   media smart [--json]                   SMART health inventory of every physical disk:
                                          temperature, SSD wear, unreliable sectors, read errors.

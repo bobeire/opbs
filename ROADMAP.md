@@ -402,6 +402,49 @@ implemented; **Investigate** items need spike work first.
   writing an old receivedAt).
 
 
+### Fleet Tier 4 — remote actions (0.6.71)
+- ✅ Bidirectional control plane: the fleet server's queue turns "run a
+  diagnostic on that machine" into a one-liner (`fleet action ...`), and the
+  machine runs it at its next check-in when enrolled with `--run-actions`
+  (`"runActions": true` in the settings file) — results ride back inside the
+  check-in, failures surface as warning reasons on the dashboard/status.
+- ✅ Whitelist by construction (`FLEET_ACTION_NAMES`): only the six read-only
+  diagnostics — `verify`, `scrub` (never `--repair`), `chain`, `analytics`,
+  `anomalies`, `storage-health` — can be queued; the enqueue gate
+  (`validateActionRequest`) refuses anything else, and the machine's runner
+  re-checks the whitelist before spawning (defense in depth against a
+  confused or malicious server). Every action requires a target `dir`; an
+  optional `scope` (`newest`/`all`) applies where the command has one.
+- ✅ Queue (`actions.json` in the server's dataDir, schema 1, atomic writes):
+  `POST /api/action` enqueues (400 with a helpful message when `*` is
+  broadcast before any machine has checked in), `GET /api/action` lists the
+  pending queue for admins, and `POST /api/actions/<machineId>/claim` pops a
+  machine's entries read-modify-write with no awaits in between — a machine
+  never double-claims. Broadcast `*` expands to every known machine at
+  enqueue time, sharing one action id across the batch.
+- ✅ Machine side: `fleet checkin --run-actions` claims, runs each action
+  sequentially in a child process (`OPBS --cli <action...> --json`, hard
+  15-minute timeout per action, output capped), and attaches the results to
+  the outgoing check-in; a claim failure only logs and never blocks the
+  check-in itself, and `--dry-run` stays pure JSON (no actions run).
+- ✅ Results (`actions: [{id, action, ok, startedAt, finishedAt, summary,
+  detail?}]`) replace the previous run's list each check-in, pass the same
+  schema validation as everything else (informational — an "unsupported
+  action" failure is still reportable), and turn into
+  `action <name> failed: <summary>` warning reasons that `critical` still
+  outranks.
+- ✅ CLI: `fleet action <name> --server <url> --machine <id|*> --dir <dir>
+  [--scope newest|all]` queues, `fleet action queue --server <url>` lists.
+- ✅ Tests (+28, 144 fleet tests): request validation matrix (dangerous
+  actions refused, machineId/dir/scope rules), result validation +
+  unsupported-action round-trip, arg mapping for all six commands (never
+  emits `--repair`), runner behavior with an injected executor (JSON detail,
+  stderr summaries, timeouts, oversized-output clipping, no-spawn on invalid
+  requests), server routes (token gates, 400s, one-shot drain, broadcast
+  sharing an id, restart persistence, 404/405 dispatch), settings
+  (`runActions` load + flag/settings precedence).
+
+
 ### Disk-to-disk clone (selected partitions → another disk)
 - ✅ `CloneEngine` (`imaging/clone-engine.ts`): builds clone jobs exactly like
   a restore (captured offsets by default, custom `targetLayout`, fresh

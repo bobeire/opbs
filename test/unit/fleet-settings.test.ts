@@ -31,7 +31,8 @@ describe('loadCheckinSettings', () => {
         noMedia: true,
         machineId: 'fixed-id',
         autoApply: true,
-        policyDir: 'C:\\policies'
+        policyDir: 'C:\\policies',
+        runActions: true
       })
     );
     expect(loadCheckinSettings(file)).toEqual({
@@ -42,7 +43,8 @@ describe('loadCheckinSettings', () => {
       noMedia: true,
       machineId: 'fixed-id',
       autoApply: true,
-      policyDir: 'C:\\policies'
+      policyDir: 'C:\\policies',
+      runActions: true
     });
   });
 
@@ -70,6 +72,9 @@ describe('loadCheckinSettings', () => {
     expect(() => loadCheckinSettings(writeSettings(JSON.stringify({ policyDir: 7 })))).toThrow(
       /policyDir must be a string/
     );
+    expect(() => loadCheckinSettings(writeSettings(JSON.stringify({ runActions: 'yes' })))).toThrow(
+      /runActions must be a boolean/
+    );
   });
 });
 
@@ -92,7 +97,8 @@ describe('resolveCheckinInvocation', () => {
       noMedia: true,
       machineId: 'm1',
       autoApply: true,
-      policyDir: 'C:\\policies'
+      policyDir: 'C:\\policies',
+      runActions: true
     };
     const inv = resolveCheckinInvocation([], settings);
     expect(inv).toEqual({
@@ -103,7 +109,8 @@ describe('resolveCheckinInvocation', () => {
       machineId: 'm1',
       dryRun: false,
       autoApply: true,
-      policyDir: 'C:\\policies'
+      policyDir: 'C:\\policies',
+      runActions: true
     });
   });
 
@@ -139,6 +146,14 @@ describe('resolveCheckinInvocation', () => {
     expect(resolveCheckinInvocation(['--policy-dir', 'C:\\flag'], { policyDir: 'C:\\from-file' }).policyDir).toBe(
       'C:\\flag'
     );
+  });
+
+  it('enables run-actions from the flag or the settings file, flag winning', () => {
+    expect(resolveCheckinInvocation([], {}).runActions).toBe(false);
+    expect(resolveCheckinInvocation([], { runActions: true }).runActions).toBe(true);
+    expect(resolveCheckinInvocation(['--run-actions'], {}).runActions).toBe(true);
+    // The flag can turn it on, never off — a settings file is a mandate.
+    expect(resolveCheckinInvocation(['--run-actions'], { runActions: false }).runActions).toBe(true);
   });
 
   it('prefers --token, then --token-file, then settings token, then settings tokenFile, then the env var', () => {

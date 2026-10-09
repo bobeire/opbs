@@ -3,7 +3,7 @@
  * HTTP with a bearer token. Uses global fetch (Node 18+/Electron 28) so no
  * extra dependency is added.
  */
-import { FleetCheckin, validateCheckin } from './schema';
+import { FleetCheckin, FleetActionName, FleetActionRequest, validateCheckin } from './schema';
 
 export interface CheckinTarget {
   /** Base URL of the fleet server, e.g. http://backup-host:8787 */
@@ -142,4 +142,39 @@ export async function pushPolicy(
 ): Promise<{ name: string }> {
   const response = await policyFetch(target, `/api/policy/${name}`, { method: 'PUT', body: JSON.stringify(config) });
   return (await response.json()) as { name: string };
+}
+
+// ---------------------------------------------------------------------------
+// Remote actions (Tier 4): queue a read-only diagnostic, claim it later.
+// ---------------------------------------------------------------------------
+
+/** Queue an action for one machine, or for every known machine with `machineId: '*'`. */
+export async function enqueueAction(
+  target: { server: string; token: string; timeoutMs?: number },
+  request: { action: FleetActionName; machineId: string; dir: string; scope?: 'newest' | 'all' }
+): Promise<{ action: string; queued: Array<{ id: string; machineId: string }> }> {
+  const response = await policyFetch(target, '/api/action', { method: 'POST', body: JSON.stringify(request) });
+  return (await response.json()) as { action: string; queued: Array<{ id: string; machineId: string }> };
+}
+
+/** List the pending action queue (admin view). */
+export async function fetchActionQueue(
+  target: { server: string; token: string; timeoutMs?: number }
+): Promise<{ queue: FleetActionRequest[] }> {
+  const response = await policyFetch(target, '/api/action');
+  return (await response.json()) as { queue: FleetActionRequest[] };
+}
+
+/**
+ * Atomically take every action queued for this machine. The server pops the
+ * entries as it answers, so a machine never runs the same action twice —
+ * but a crash before reporting loses the results (they are diagnostics).
+ */
+export async function claimActions(
+  target: { server: string; token: string; timeoutMs?: number },
+  machineId: string
+): Promise<FleetActionRequest[]> {
+  const response = await policyFetch(target, `/api/actions/${encodeURIComponent(machineId)}/claim`, { method: 'POST' });
+  const body = (await response.json()) as { actions?: FleetActionRequest[] };
+  return Array.isArray(body.actions) ? body.actions : [];
 }
