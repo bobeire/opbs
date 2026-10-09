@@ -14,6 +14,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { AddressInfo } from 'net';
 import { FLEET_DASHBOARD_HTML } from './dashboard';
 import { deriveMachineStatus, isValidPolicyName, FleetCheckin, FleetStatus, validateCheckin } from './schema';
+import { evaluateAlerts, postWebhook } from './alerts';
 
 export { isValidPolicyName } from './schema';
 
@@ -22,10 +23,12 @@ export const MAX_CHECKIN_BYTES = 256 * 1024;
 export const MAX_POLICY_BYTES = MAX_CHECKIN_BYTES;
 /** Default days without a backup before a machine reads as stale. */
 export const DEFAULT_BACKUP_STALE_DAYS = 14;
+/** Default interval for re-evaluating machines that stopped checking in. */
+export const DEFAULT_ALERT_SWEEP_MS = 5 * 60_000;
 
 export interface FleetStore {
   schema: number;
-  machines: Record<string, { receivedAt: number; checkin: FleetCheckin }>;
+  machines: Record<string, { receivedAt: number; checkin: FleetCheckin; lastAlertedStatus?: FleetStatus }>;
 }
 
 export interface FleetServerOptions {
@@ -37,6 +40,15 @@ export interface FleetServerOptions {
   staleDays?: number;
   /** Days without a backup before a machine reads as stale (0 disables, default 14). */
   backupStaleDays?: number;
+  /**
+   * Generic webhook (Slack/Discord/ntfy-style JSON POST) that receives an
+   * alert whenever a machine becomes critical or stale — or recovers.
+   */
+  webhook?: string;
+  /** How often machines are re-evaluated without a fresh check-in (default 5 min, 0 disables). */
+  alertSweepMs?: number;
+  /** Per-delivery webhook timeout (default 5 s). */
+  webhookTimeoutMs?: number;
   log?: (line: string) => void;
 }
 
@@ -45,6 +57,8 @@ export interface FleetServer {
   host: string;
   port: number;
   token: string;
+  /** Evaluate alert transitions now (also runs on every check-in and the sweep timer). */
+  runAlerts(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -268,9 +282,52 @@ export async function startFleetServer(opts: FleetServerOptions): Promise<FleetS
   const port = opts.port ?? 8787;
   const staleDays = opts.staleDays ?? 7;
   const backupStaleDays = opts.backupStaleDays ?? DEFAULT_BACKUP_STALE_DAYS;
+  const webhookTimeoutMs = opts.webhookTimeoutMs ?? 5_000;
   const log = opts.log ?? (() => undefined);
   const token = loadOrCreateToken(opts.dataDir, opts.token);
   const store = loadFleetStore(opts.dataDir);
+  let fleetUrl = '';
+  let alerting = false;
+
+  /**
+   * Evaluate alert transitions for every machine and deliver them. Reads the
+   * store fresh from disk so time-based staleness and external edits count,
+   * and only advances `lastAlertedStatus` after a successful POST so failed
+   * deliveries retry on the next cycle. Re-entrancy is guarded: the sweep and
+   * a burst of check-ins never run two deliveries at once.
+   */
+  async function runAlerts(): Promise<void> {
+    if (!opts.webhook || alerting) return;
+    alerting = true;
+    try {
+      const fresh = loadFleetStore(opts.dataDir);
+      const candidates = evaluateAlerts(fresh, { staleDays, backupStaleDays, fleetUrl });
+      for (const alert of candidates) {
+        const delivered = await postWebhook(opts.webhook, alert.payload, { timeoutMs: webhookTimeoutMs });
+        if (delivered) {
+          // Synchronous read-modify-write: no other request can interleave
+          // between load and save, so a concurrent check-in cannot be lost.
+          const current = loadFleetStore(opts.dataDir);
+          const entry = current.machines[alert.machineId];
+          if (entry) {
+            entry.lastAlertedStatus = alert.status;
+            saveFleetStore(opts.dataDir, current);
+          }
+          const live = store.machines[alert.machineId];
+          if (live) live.lastAlertedStatus = alert.status;
+          log(`alert ${alert.kind}: ${alert.hostname} (${alert.machineId})`);
+        } else {
+          log(`alert delivery failed (${alert.kind}: ${alert.hostname}) — will retry`);
+        }
+      }
+    } finally {
+      alerting = false;
+    }
+  }
+
+  const sweepMs = opts.alertSweepMs ?? DEFAULT_ALERT_SWEEP_MS;
+  const sweep = opts.webhook && sweepMs > 0 ? setInterval(() => void runAlerts(), sweepMs) : undefined;
+  sweep?.unref();
 
   const server = http.createServer((req, res) => {
     void handle(req, res).catch((error) => {
@@ -299,12 +356,20 @@ export async function startFleetServer(opts: FleetServerOptions): Promise<FleetS
         return;
       }
       const receivedAt = Date.now();
-      store.machines[validation.checkin.machineId] = { receivedAt, checkin: validation.checkin };
+      const previous = store.machines[validation.checkin.machineId];
+      store.machines[validation.checkin.machineId] = {
+        receivedAt,
+        checkin: validation.checkin,
+        // Carry the alert marker across the overwrite so an unchanged bad
+        // status does not re-alert on every check-in.
+        ...(previous?.lastAlertedStatus ? { lastAlertedStatus: previous.lastAlertedStatus } : {})
+      };
       saveFleetStore(opts.dataDir, store);
       log(
         `check-in: ${validation.checkin.hostname} (${validation.checkin.machineId}) — ` +
           `${validation.checkin.destinations.length} destination(s), ${validation.checkin.media.length} disk(s)`
       );
+      await runAlerts();
       sendJson(res, 200, { ok: true, receivedAt });
       return;
     }
@@ -374,14 +439,17 @@ export async function startFleetServer(opts: FleetServerOptions): Promise<FleetS
   const address = server.address() as AddressInfo;
   const displayHost = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host;
   const url = `http://${displayHost}:${address.port}`;
+  fleetUrl = url;
 
   return {
     url,
     host,
     port: address.port,
     token,
+    runAlerts,
     close: () =>
       new Promise<void>((resolve) => {
+        if (sweep) clearInterval(sweep);
         server.closeAllConnections();
         server.close(() => resolve());
       })

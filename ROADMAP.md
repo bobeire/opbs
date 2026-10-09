@@ -369,6 +369,38 @@ implemented; **Investigate** items need spike work first.
   reasons, aggregate surfacing, and settings/flag merge for
   `autoApply`/`policyDir`.
 
+### Fleet Tier 3 — webhook alerting (0.6.70)
+- ✅ Alert engine (`fleet/alerts.ts`): transition-based, not status-based —
+  a machine is messaged when it *becomes* `critical` or `stale` and again when
+  it *recovers* from one of those states; repeats of the same state, `warning`
+  and `ok` never fire. `evaluateAlerts` is a pure store→candidates function
+  (same status derivation as the dashboard), and `postWebhook` is a timeout-
+  bounded JSON POST that reports success/failure without throwing.
+- ✅ Two evaluation paths in `fleet serve`: after every accepted check-in
+  (fast reaction) and a sweep timer (default every 5 min, `--alert-sweep-minutes`,
+  0 disables) — the sweep is what catches machines that *stopped* checking in
+  or whose backups aged past the threshold, since a dead machine sends nothing.
+  The store is re-read from disk on every cycle so time passes and hand edits
+  count.
+- ✅ Delivery semantics: `lastAlertedStatus` per machine is persisted in
+  checkins.json and only advanced on a successful POST — failed deliveries
+  (bad URL, timeout, receiver down) retry on the next cycle; check-in
+  overwrites carry the marker across so an unchanged bad status never
+  re-alerts. Re-entrancy guard keeps sweep + check-in bursts from double-
+  sending.
+- ✅ Payload: plain JSON `{event, kind, status, previousStatus, hostname,
+  machineId, appVersion, reasons, fleetUrl, at, text, content}` — `text` for
+  Slack-compatible receivers, `content` for Discord, everything else is there
+  for relays/collectors (ntfy, Grafana, self-hosted). `fleet serve --webhook
+  <url>` enables it; delivery is logged, the dashboard is unchanged.
+- ✅ Tests (+16, 116 fleet tests): transition matrix (enter/hold/recover,
+  warning never alerts), candidate building with reasons + payload shape +
+  no mutation, time-based and backup-based staleness, recovery text, webhook
+  POST success/5xx/timeout/refused, server integration (critical → quiet →
+  recovery round-trip with persisted markers, unreachable webhook leaves the
+  marker unset for retry, sweep catching a machine that went silent by
+  writing an old receivedAt).
+
 
 ### Disk-to-disk clone (selected partitions → another disk)
 - ✅ `CloneEngine` (`imaging/clone-engine.ts`): builds clone jobs exactly like

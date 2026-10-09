@@ -326,6 +326,9 @@ async function cmdFleetServe(ctx: CommandContext): Promise<number> {
   const port = Number(flagValue(ctx.argv, '--port') ?? '8787');
   const staleDays = Number(flagValue(ctx.argv, '--stale-days') ?? '7');
   const backupStaleDays = Number(flagValue(ctx.argv, '--backup-stale-days') ?? String(DEFAULT_BACKUP_STALE_DAYS));
+  const webhook = flagValue(ctx.argv, '--webhook');
+  const sweepFlag = flagValue(ctx.argv, '--alert-sweep-minutes');
+  const alertSweepMinutes = sweepFlag !== undefined ? Number(sweepFlag) : undefined;
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     console.error(`invalid --port`);
     return 1;
@@ -338,6 +341,14 @@ async function cmdFleetServe(ctx: CommandContext): Promise<number> {
     console.error(`invalid --backup-stale-days`);
     return 1;
   }
+  if (webhook !== undefined && !/^https?:\/\//i.test(webhook)) {
+    console.error('invalid --webhook (must start with http:// or https://)');
+    return 1;
+  }
+  if (alertSweepMinutes !== undefined && (!Number.isFinite(alertSweepMinutes) || alertSweepMinutes < 0)) {
+    console.error('invalid --alert-sweep-minutes (0 disables the sweep)');
+    return 1;
+  }
 
   const server = await startFleetServer({
     dataDir,
@@ -346,6 +357,8 @@ async function cmdFleetServe(ctx: CommandContext): Promise<number> {
     token: resolveToken(ctx.argv),
     staleDays,
     backupStaleDays,
+    webhook,
+    alertSweepMs: alertSweepMinutes !== undefined ? alertSweepMinutes * 60_000 : undefined,
     log: (line) => console.log(line)
   });
 
@@ -358,6 +371,15 @@ async function cmdFleetServe(ctx: CommandContext): Promise<number> {
     `  stale:     no check-in for ${staleDays} day(s)` +
       (backupStaleDays > 0 ? `, no backup for ${backupStaleDays} day(s)` : ', backup-staleness off')
   );
+  if (webhook) {
+    console.log(`  webhook:   ${webhook}`);
+    console.log(
+      `             alerts on critical/stale transitions + recovery` +
+        (alertSweepMinutes !== undefined && alertSweepMinutes === 0
+          ? ' (sweep disabled — evaluated on check-ins only)'
+          : ` (sweep every ${alertSweepMinutes ?? 5} min)`)
+    );
+  }
   if (host === '127.0.0.1') {
     console.log('  (bound to localhost — pass --host 0.0.0.0 to accept check-ins from other machines)');
   }

@@ -1,7 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import * as fs from 'fs';
+import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
+import { AddressInfo } from 'net';
 import {
   startFleetServer,
   loadFleetStore,
@@ -427,6 +429,137 @@ describe('fleet policy API', () => {
     const fleet = await fetchFleet({ server: server.url });
     expect(fleet.backupStaleDays).toBe(5);
     expect(fleet.staleDays).toBe(7);
+  });
+});
+
+describe('fleet webhook alerts', () => {
+  const dataDirs: string[] = [];
+  const servers: FleetServer[] = [];
+  const collectors: http.Server[] = [];
+
+  interface Collector {
+    url: string;
+    payloads: Array<Record<string, unknown>>;
+  }
+
+  async function collector(): Promise<Collector> {
+    const payloads: Array<Record<string, unknown>> = [];
+    const srv = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        try {
+          payloads.push(JSON.parse(Buffer.concat(chunks).toString('utf-8')));
+        } catch {
+          /* ignore malformed probes */
+        }
+        res.writeHead(204);
+        res.end();
+      });
+    });
+    collectors.push(srv);
+    await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => resolve()));
+    return { url: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, payloads };
+  }
+
+  async function start(overrides: Partial<Parameters<typeof startFleetServer>[0]> = {}): Promise<{
+    server: FleetServer;
+    dataDir: string;
+  }> {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-fleet-alerts-'));
+    dataDirs.push(dataDir);
+    const server = await startFleetServer({ dataDir, port: 0, ...overrides });
+    servers.push(server);
+    return { server, dataDir };
+  }
+
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((s) => s.close()));
+    for (const srv of collectors.splice(0)) {
+      srv.closeAllConnections?.();
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+    for (const dir of dataDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('alerts on a critical check-in, stays quiet while unchanged, then recovers', async () => {
+    const hook = await collector();
+    const { server, dataDir } = await start({ webhook: hook.url, alertSweepMs: 0 });
+    const machineId = fleetMachineId('ALERT-PC', 'x64');
+
+    const broken = makeCheckin({
+      machineId,
+      hostname: 'ALERT-PC',
+      destinations: [destination({ brokenChains: 1 })]
+    });
+    expect((await sendCheckin(broken, { server: server.url, token: server.token })).ok).toBe(true);
+    expect(hook.payloads).toHaveLength(1);
+    expect(hook.payloads[0]).toMatchObject({
+      event: 'status-change',
+      kind: 'critical',
+      status: 'critical',
+      hostname: 'ALERT-PC',
+      machineId
+    });
+    expect(String(hook.payloads[0].text)).toContain('broken restore chain');
+    expect(loadFleetStore(dataDir).machines[machineId].lastAlertedStatus).toBe('critical');
+
+    // Same bad state again → no repeat alert.
+    expect((await sendCheckin(broken, { server: server.url, token: server.token })).ok).toBe(true);
+    expect(hook.payloads).toHaveLength(1);
+
+    // Fixed and healthy → recovery event, marker advanced.
+    const healthy = makeCheckin({ machineId, hostname: 'ALERT-PC' });
+    expect((await sendCheckin(healthy, { server: server.url, token: server.token })).ok).toBe(true);
+    expect(hook.payloads).toHaveLength(2);
+    expect(hook.payloads[1]).toMatchObject({ kind: 'recovery', status: 'ok', previousStatus: 'critical' });
+    expect(loadFleetStore(dataDir).machines[machineId].lastAlertedStatus).toBe('ok');
+  });
+
+  it('does not mark delivery when the webhook is unreachable (retries later)', async () => {
+    const hook = await collector();
+    // Shut the collector down so its port refuses connections.
+    const srv = collectors.pop()!;
+    srv.closeAllConnections?.();
+    await new Promise<void>((resolve) => srv.close(() => resolve()));
+    const { server, dataDir } = await start({ webhook: hook.url, alertSweepMs: 0 });
+    const machineId = fleetMachineId('DEAD-HOOK', 'x64');
+
+    const broken = makeCheckin({ machineId, hostname: 'DEAD-HOOK', destinations: [destination({ brokenChains: 1 })] });
+    expect((await sendCheckin(broken, { server: server.url, token: server.token })).ok).toBe(true);
+    // The check-in is accepted, but the failed webhook leaves the marker unset
+    // so the next cycle retries the alert.
+    expect(loadFleetStore(dataDir).machines[machineId].lastAlertedStatus).toBeUndefined();
+  });
+
+  it('sweep catches a machine that silently stopped checking in', async () => {
+    const hook = await collector();
+    const { server, dataDir } = await start({ webhook: hook.url, alertSweepMs: 50 });
+    const machineId = fleetMachineId('SILENT-PC', 'x64');
+
+    // Simulate ten days of silence: write the store directly with an old
+    // receivedAt — the sweep re-reads the store, exactly like production time
+    // passing would.
+    fs.writeFileSync(
+      path.join(dataDir, 'checkins.json'),
+      JSON.stringify(
+        { schema: 1, machines: { [machineId]: { receivedAt: Date.now() - 10 * 24 * 60 * 60 * 1000, checkin: makeCheckin({ machineId, hostname: 'SILENT-PC' }) } } },
+        null,
+        2
+      ),
+      'utf-8'
+    );
+
+    const deadline = Date.now() + 4000;
+    while (hook.payloads.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(hook.payloads).toHaveLength(1);
+    expect(hook.payloads[0]).toMatchObject({ kind: 'stale', status: 'stale', hostname: 'SILENT-PC' });
+    expect(String(hook.payloads[0].text)).toContain('no check-in');
+    expect(loadFleetStore(dataDir).machines[machineId].lastAlertedStatus).toBe('stale');
   });
 });
 

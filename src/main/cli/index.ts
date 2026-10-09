@@ -294,7 +294,7 @@ Commands:
                                           machine pulls the server's policies first, applies them
                                           (validate → config file → scheduled backup task) and reports
                                           the result inside the check-in.
-  fleet serve [--host H] [--port N] [--data <dir>] [--token T] [--stale-days N] [--backup-stale-days N]
+  fleet serve [--host H] [--port N] [--data <dir>] [--token T] [--stale-days N] [--backup-stale-days N] [--webhook <url>] [--alert-sweep-minutes N]
                                           Run the fleet control server (default http://127.0.0.1:8787):
                                           accepts token-authenticated check-ins, stores them in
                                           checkins.json and serves the fleet dashboard plus /api/fleet.
@@ -302,6 +302,11 @@ Commands:
                                           bearer token is generated into the data directory on first start.
                                           Machines go stale after --stale-days (7) without a check-in or
                                           --backup-stale-days (14, 0 disables) without a backup.
+                                          --webhook <url> POSTs a JSON alert ({text, content, kind, status,
+                                          reasons, hostname, ...} — Slack/Discord-compatible) whenever a
+                                          machine becomes critical/stale or recovers; machines that stopped
+                                          checking in are caught by a sweep every --alert-sweep-minutes
+                                          (default 5, 0 = check-ins only). Failed deliveries retry.
   fleet status --server <url> [--json]    Summarize the fleet from the server: exits 1 when any machine
                                           is critical or has stopped checking in (or backing up).
   fleet policy list --server <url> [--json]
