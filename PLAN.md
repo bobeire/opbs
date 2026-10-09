@@ -270,7 +270,7 @@ opbs/
 
 - License: GPL-3.0 or MIT
 - No proprietary dependencies
-- Clearly document that user runs at own risk
+- User runs at own risk
 - Backup is not guaranteed - always test restores
 
 ## Testing Strategy
