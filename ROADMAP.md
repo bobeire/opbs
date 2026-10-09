@@ -262,6 +262,45 @@ implemented; **Investigate** items need spike work first.
   refusal, pruned-increment refusal, non-delta incremental with set present;
   fixture builder grew a `delta` option + `buildMrimgxDeltaIndex`.
 
+### Multi-machine fleet control — Tier 0 (0.6.67)
+- ✅ Check-in contract (`src/main/fleet/schema.ts`): versioned, flat
+  `FleetCheckin` JSON — machine identity (hostname+arch hash, `--machine-id`
+  override), per-destination backup health (chain integrity, last run from the
+  analytics sidecar, anomaly counts, restore-drill history) and the SMART disk
+  inventory; `validateCheckin` accepts unknown fields (forward tolerance) and
+  names the exact offending path on reject. Machine status derives from the
+  data alone: `critical` (broken chains, critical anomalies, failed latest
+  drill, measured SMART problems) > `stale` (no check-in for `stale-days`,
+  default 7) > `warning` (warning anomalies, never backed up, unreachable
+  destination, unparseable images) > `ok`, each with human reasons.
+- ✅ Data producer (`fleet report` / `fleet checkin`, `fleet/report.ts`):
+  scans the recent backup destinations (or repeated `--dir`) through the
+  existing chain-health/analytics/anomaly/drill readers — best-effort, so a
+  dead USB or missing SMART never blocks a check-in; `--no-media` skips the
+  PowerShell inventory, `--dry-run` prints the JSON instead of sending.
+- ✅ Fleet server (`fleet/server.ts`) — dependency-free `node:http`, no cloud
+  services: `fleet serve` holds the CLI process, accepts bearer-token
+  (or `X-OPBS-Token`, timing-safe compare) `POST /api/checkin` with a 256 KiB
+  cap, keeps the newest document per machine in one atomic `checkins.json`,
+  and serves `GET /api/fleet` (aggregate with derived statuses + summary) and
+  the read-only HTML dashboard at `/`. Token is generated into the data dir on
+  first start (`server-token.txt`); default bind is localhost, `--host
+  0.0.0.0` opts into LAN check-ins.
+- ✅ Client (`fleet/client.ts`): `fetch`-based `sendCheckin`/`fetchFleet` with
+  timeouts and clean failure messages; `fleet status --server <url>` prints the
+  fleet summary (exits 1 on any critical/stale machine — cron-friendly).
+- ✅ Dashboard (`fleet/dashboard.ts`): single self-contained page — status
+  chips, one row per machine sorted worst-first (status, last check-in age,
+  last backup age, chains, anomalies, drills, media), reasons inline, auto
+  refresh every 60 s. No external assets, no build step.
+- ✅ Tests (43): schema validation/status precedence, the report builder
+  against real fixture images + fabricated sidecars (incl. critical size
+  anomaly, failed drill, unreachable dir, failing SMART inventory), server
+  integration (401/400/413/404/405 paths, aggregation, per-machine replace,
+  persistence + token reuse across restarts, dashboard/health), client
+  round-trip/dead-server/bad-URL, and the store helpers.
+
+
 ### Disk-to-disk clone (selected partitions → another disk)
 - ✅ `CloneEngine` (`imaging/clone-engine.ts`): builds clone jobs exactly like
   a restore (captured offsets by default, custom `targetLayout`, fresh

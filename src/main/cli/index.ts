@@ -36,6 +36,7 @@ import { runDiskPerfTest, assessWriteSpeed } from '../utils/disk-perf';
 import { queryVssServiceState, normalizeVolumeRoot, VssJob, VssJobResult } from '../utils/vss';
 import { flagValue } from './flags';
 import { cmdRepo, finalizeBackupRepo, parseLockDays } from './repo';
+import { cmdFleet } from './fleet';
 import { isRepository } from '../imaging/repository';
 import { openRepoSession, type RepoSession } from '../imaging/repo-s3';
 
@@ -110,6 +111,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdPrune(ctx);
       case 'repo':
         return await cmdRepo(ctx);
+      case 'fleet':
+        return await cmdFleet(ctx);
       case 'health':
         return await cmdHealth(ctx);
       case 'media':
@@ -270,6 +273,25 @@ Commands:
   repo unlock <dir> <image|--all>        Audited escape hatch: append an unlock record and drop
                                          the OS protection so the image can be pruned or
                                          deleted manually. Afterwards run 'repo prune'.
+  fleet report [--dir <dir>]... [--no-media] [--json]
+                                          Build this machine's fleet check-in: per-destination
+                                          backup health (chains, last run, anomalies, restore
+                                          drills) plus a SMART disk inventory. Exits 1 when the
+                                          derived machine status is critical. Without --dir the
+                                          recent backup destinations are scanned.
+  fleet checkin --server <url> [--token-file F|--token T] [--dir <dir>]... [--no-media] [--dry-run] [--json]
+                                          Send the check-in to a fleet server (the token is also
+                                          read from the OPBS_FLEET_TOKEN environment variable).
+                                          --dry-run prints the JSON instead of sending it.
+  fleet serve [--host H] [--port N] [--data <dir>] [--token T] [--stale-days N]
+                                          Run the fleet control server (default http://127.0.0.1:8787):
+                                          accepts token-authenticated check-ins, stores them in
+                                          checkins.json and serves the fleet dashboard plus
+                                          /api/fleet. Pass --host 0.0.0.0 to accept check-ins from
+                                          other machines; the bearer token is generated into the
+                                          data directory on first start.
+  fleet status --server <url> [--json]    Summarize the fleet from the server: exits 1 when any
+                                          machine is critical or has stopped checking in.
   health <diskIndex>                     Report SMART/reliability health (no elevation needed).
   media smart [--json]                   SMART health inventory of every physical disk:
                                          temperature, SSD wear, unreliable sectors, read errors.

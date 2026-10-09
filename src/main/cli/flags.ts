@@ -18,6 +18,22 @@ export function flagValue(argv: string[], name: string): string | undefined {
   return undefined;
 }
 
+/** Reads every occurrence of a value flag (`--flag a --flag b` or `--flag=a --flag=b`). */
+export function flagValues(argv: string[], name: string): string[] {
+  const out: string[] = [];
+  const prefix = `${name}=`;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === name) {
+      if (i + 1 < argv.length) out.push(argv[i + 1]);
+      i++;
+    } else if (arg.startsWith(prefix)) {
+      out.push(arg.slice(prefix.length));
+    }
+  }
+  return out;
+}
+
 /** Flags that consume the following token as their value. */
 export const VALUE_FLAGS = [
   '--lock-days',
