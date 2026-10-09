@@ -7,11 +7,14 @@ import {
   loadFleetStore,
   loadOrCreateToken,
   aggregateFleet,
+  isValidPolicyName,
+  listPolicies,
+  policiesDir,
   FleetServer,
   FleetStore,
   MAX_CHECKIN_BYTES
 } from '../../src/main/fleet/server';
-import { sendCheckin, fetchFleet } from '../../src/main/fleet/client';
+import { sendCheckin, fetchFleet, pullPolicies, pushPolicy } from '../../src/main/fleet/client';
 import { FLEET_SCHEMA_VERSION, fleetMachineId, FleetCheckin, FleetDestinationReport } from '../../src/main/fleet/schema';
 import { FLEET_DASHBOARD_HTML } from '../../src/main/fleet/dashboard';
 
@@ -271,12 +274,136 @@ describe('aggregateFleet', () => {
     expect(fleet.machines[0].status).toBe('critical');
     expect(fleet.machines[1].status).toBe('stale');
     expect(fleet.machines[2].status).toBe('ok');
+    expect(fleet.backupStaleDays).toBeNull();
+  });
+
+  it('stales machines whose backups stopped, with the reason', () => {
+    const now = 1_700_000_000_000;
+    const fleetStore: FleetStore = {
+      schema: 1,
+      machines: {
+        staleBackup: {
+          receivedAt: now - 1000,
+          checkin: makeCheckin({
+            machineId: 'staleBackup',
+            hostname: 'staleBackup',
+            destinations: [destination({ lastBackupAt: now - 30 * 24 * 60 * 60 * 1000 })]
+          })
+        }
+      }
+    };
+    const fleet = aggregateFleet(fleetStore, { staleDays: 7, backupStaleDays: 14, now });
+    expect(fleet.backupStaleDays).toBe(14);
+    expect(fleet.machines[0].status).toBe('stale');
+    expect(fleet.machines[0].reasons.some((r) => /last backup 30 day/.test(r))).toBe(true);
   });
 
   it('returns an empty aggregate for a fresh store', () => {
     const fleet = aggregateFleet({ schema: 1, machines: {} }, { staleDays: 7 });
     expect(fleet.machineCount).toBe(0);
     expect(fleet.summary).toEqual({ ok: 0, warning: 0, critical: 0, stale: 0 });
+    expect(fleet.backupStaleDays).toBeNull();
+  });
+});
+
+describe('fleet policy API', () => {
+  const dataDirs: string[] = [];
+  const servers: FleetServer[] = [];
+  const dataDirOf = new Map<FleetServer, string>();
+
+  async function start(overrides: Partial<Parameters<typeof startFleetServer>[0]> = {}): Promise<FleetServer> {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-fleet-policy-'));
+    dataDirs.push(dataDir);
+    const server = await startFleetServer({ dataDir, port: 0, ...overrides });
+    servers.push(server);
+    dataDirOf.set(server, dataDir);
+    return server;
+  }
+
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((s) => s.close()));
+    dataDirOf.clear();
+    for (const dir of dataDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts only boring <name>.json policy names', () => {
+    expect(isValidPolicyName('nightly-backup.json')).toBe(true);
+    expect(isValidPolicyName('a.b_c-2.json')).toBe(true);
+    expect(isValidPolicyName('../evil.json')).toBe(false);
+    expect(isValidPolicyName('a/b.json')).toBe(false);
+    expect(isValidPolicyName('.hidden.json')).toBe(false);
+    expect(isValidPolicyName('evil.exe')).toBe(false);
+    expect(isValidPolicyName('no-extension')).toBe(false);
+    expect(isValidPolicyName('%2e%2e/x.json')).toBe(false);
+    expect(isValidPolicyName(`${'x'.repeat(80)}.json`)).toBe(false);
+  });
+
+  it('requires the token for list and push', async () => {
+    const server = await start();
+    expect((await fetch(`${server.url}/api/policy`)).status).toBe(401);
+    expect(
+      (
+        await fetch(`${server.url}/api/policy/x.json`, {
+          method: 'PUT',
+          body: JSON.stringify({ name: 'x' })
+        })
+      ).status
+    ).toBe(401);
+  });
+
+  it('round-trips a policy push through to the pull', async () => {
+    const server = await start();
+    const config = { name: 'nightly', partitions: ['0'], destination: 'D:\\\\backups' };
+    const pushed = await pushPolicy({ server: server.url, token: server.token }, 'nightly.json', config);
+    expect(pushed).toEqual({ ok: true, name: 'nightly.json' });
+
+    const listed = await pullPolicies({ server: server.url, token: server.token });
+    expect(listed.invalid).toEqual([]);
+    expect(listed.policies).toHaveLength(1);
+    expect(listed.policies[0]).toEqual({ name: 'nightly.json', config });
+
+    // Stored as a plain file on disk, readable without the server.
+    const onDisk = JSON.parse(
+      fs.readFileSync(path.join(policiesDir(dataDirOf.get(server)!), 'nightly.json'), 'utf-8')
+    );
+    expect(onDisk).toEqual(config);
+  });
+
+  it('rejects traversal names, wrong extensions and non-JSON bodies', async () => {
+    const server = await start();
+    const put = (name: string, body: string) =>
+      fetch(`${server.url}/api/policy/${name}`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${server.token}` },
+        body
+      });
+    expect((await put('../evil.json', JSON.stringify({}))).status).toBe(404); // URL-normalized away
+    expect((await put('..%2Fevil.json', JSON.stringify({}))).status).toBe(400); // reaches the handler
+    expect((await put('evil.exe', JSON.stringify({}))).status).toBe(400);
+    expect((await put('ok.json', 'not json')).status).toBe(400);
+    const real = await put('ok.json', JSON.stringify({ a: 1 }));
+    expect(real.status).toBe(200);
+  });
+
+  it('lists unreadable policy files as invalid instead of failing', async () => {
+    const server = await start();
+    const dataDir = dataDirOf.get(server)!;
+    fs.mkdirSync(policiesDir(dataDir), { recursive: true });
+    fs.writeFileSync(path.join(policiesDir(dataDir), 'broken.json'), '{ nope');
+    const listed = await pullPolicies({ server: server.url, token: server.token });
+    expect(listed.policies).toEqual([]);
+    expect(listed.invalid).toHaveLength(1);
+    expect(listed.invalid[0].name).toBe('broken.json');
+    expect(listPolicies(dataDir).invalid).toHaveLength(1);
+  });
+
+  it('exposes the backup-staleness threshold on /api/fleet', async () => {
+    const server = await start({ backupStaleDays: 5 });
+    const fleet = await fetchFleet({ server: server.url });
+    expect(fleet.backupStaleDays).toBe(5);
+    expect(fleet.staleDays).toBe(7);
   });
 });
 

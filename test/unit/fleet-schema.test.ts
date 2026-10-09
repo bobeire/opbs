@@ -225,6 +225,59 @@ describe('deriveMachineStatus', () => {
   });
 });
 
+describe('backup-staleness (backupStaleDays)', () => {
+  const now = 1_700_000_000_000;
+  const old = now - 10 * 24 * 60 * 60 * 1000;
+
+  it('marks a machine stale when its last backup is past the threshold', () => {
+    const doc = checkin({ destinations: [destination({ lastBackupAt: old })] });
+    const result = deriveMachineStatus(doc, { receivedAt: now, now, backupStaleDays: 7 });
+    expect(result.status).toBe('stale');
+    expect(result.reasons.some((r) => /last backup 10 day\(s\) ago \(threshold 7\)/.test(r))).toBe(true);
+    // The check-in itself is fresh — no check-in reason should appear.
+    expect(result.reasons.some((r) => /no check-in/.test(r))).toBe(false);
+  });
+
+  it('stays ok while the backup is inside the threshold', () => {
+    const doc = checkin({ destinations: [destination({ lastBackupAt: now - 2 * 60 * 60 * 1000 })] });
+    const result = deriveMachineStatus(doc, { receivedAt: now, now, backupStaleDays: 7 });
+    expect(result.status).toBe('ok');
+    expect(result.reasons).toEqual([]);
+  });
+
+  it('is disabled when backupStaleDays is absent or zero', () => {
+    const doc = checkin({ destinations: [destination({ lastBackupAt: old })] });
+    expect(deriveMachineStatus(doc, { receivedAt: now, now }).status).toBe('ok');
+    expect(deriveMachineStatus(doc, { receivedAt: now, now, backupStaleDays: 0 }).status).toBe('ok');
+  });
+
+  it('leaves never-backed-up machines in warning territory, not stale', () => {
+    const doc = checkin({ destinations: [destination({ lastBackupAt: null, imageCount: 0 })] });
+    const result = deriveMachineStatus(doc, { receivedAt: now, now, backupStaleDays: 7 });
+    expect(result.status).toBe('warning');
+    expect(result.reasons.some((r) => /no backups yet/.test(r))).toBe(true);
+    expect(result.reasons.some((r) => /last backup/.test(r))).toBe(false);
+  });
+
+  it('ignores unreachable destinations for backup age (already reported separately)', () => {
+    const doc = checkin({ destinations: [destination({ exists: false, lastBackupAt: old })] });
+    const result = deriveMachineStatus(doc, { receivedAt: now, now, backupStaleDays: 7 });
+    expect(result.status).toBe('warning');
+    expect(result.reasons.some((r) => /unreachable/.test(r))).toBe(true);
+    expect(result.reasons.some((r) => /last backup/.test(r))).toBe(false);
+  });
+
+  it('lets critical outrank backup-staleness', () => {
+    const doc = checkin({
+      destinations: [destination({ lastBackupAt: old, brokenChains: 1 })]
+    });
+    const result = deriveMachineStatus(doc, { receivedAt: now, now, backupStaleDays: 7 });
+    expect(result.status).toBe('critical');
+    expect(result.reasons.some((r) => /broken restore chain/.test(r))).toBe(true);
+    expect(result.reasons.some((r) => /last backup/.test(r))).toBe(true);
+  });
+});
+
 describe('lastBackupAt', () => {
   it('is the newest across destinations', () => {
     const doc = checkin({

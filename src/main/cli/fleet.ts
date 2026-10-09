@@ -5,8 +5,8 @@ import { flagValue, flagValues } from './flags';
 import type { CommandContext } from './index';
 import { buildFleetReport } from '../fleet/report';
 import { deriveMachineStatus, FleetCheckin, lastBackupAt } from '../fleet/schema';
-import { sendCheckin, fetchFleet } from '../fleet/client';
-import { startFleetServer } from '../fleet/server';
+import { sendCheckin, fetchFleet, pullPolicies, pushPolicy } from '../fleet/client';
+import { startFleetServer, DEFAULT_BACKUP_STALE_DAYS, isValidPolicyName } from '../fleet/server';
 
 function fmtBytes(bytes: number | null): string {
   if (bytes == null) return '?';
@@ -41,9 +41,106 @@ async function resolveAppVersion(): Promise<string> {
   return 'unknown';
 }
 
-async function resolveDirectories(argv: string[]): Promise<string[]> {
-  const explicit = flagValues(argv, '--dir');
-  if (explicit.length > 0) return explicit;
+/** Long-lived check-in settings, usually written once and referenced by a scheduled task. */
+export interface CheckinSettings {
+  server?: string;
+  token?: string;
+  tokenFile?: string;
+  dirs?: string[];
+  noMedia?: boolean;
+  machineId?: string;
+}
+
+/** Loads and type-checks a `fleet checkin --settings` JSON file. Throws with a precise message. */
+export function loadCheckinSettings(filePath: string): CheckinSettings {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(filePath, 'utf-8');
+  } catch (error) {
+    throw new Error(`cannot read --settings ${filePath}: ${error instanceof Error ? error.message : error}`, {
+      cause: error
+    });
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`--settings ${filePath} is not valid JSON`, { cause: error });
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`--settings ${filePath} must be a JSON object`);
+  }
+  const value = parsed as Record<string, unknown>;
+  const settings: CheckinSettings = {};
+  const bad = (key: string, expected: string): never => {
+    throw new Error(`--settings ${filePath}: ${key} must be ${expected}`);
+  };
+  if (value.server !== undefined) {
+    settings.server = typeof value.server === 'string' ? value.server : bad('server', 'a string');
+  }
+  if (value.token !== undefined) {
+    settings.token = typeof value.token === 'string' ? value.token : bad('token', 'a string');
+  }
+  if (value.tokenFile !== undefined) {
+    settings.tokenFile = typeof value.tokenFile === 'string' ? value.tokenFile : bad('tokenFile', 'a string');
+  }
+  if (value.dirs !== undefined) {
+    if (!Array.isArray(value.dirs) || !value.dirs.every((d) => typeof d === 'string')) {
+      bad('dirs', 'an array of strings');
+    }
+    settings.dirs = value.dirs as string[];
+  }
+  if (value.noMedia !== undefined) {
+    settings.noMedia = typeof value.noMedia === 'boolean' ? value.noMedia : bad('noMedia', 'a boolean');
+  }
+  if (value.machineId !== undefined) {
+    settings.machineId = typeof value.machineId === 'string' ? value.machineId : bad('machineId', 'a string');
+  }
+  return settings;
+}
+
+function readTokenFile(filePath: string): string {
+  try {
+    return fs.readFileSync(filePath, 'utf-8').trim();
+  } catch (error) {
+    throw new Error(`cannot read token file ${filePath}: ${error instanceof Error ? error.message : error}`, {
+      cause: error
+    });
+  }
+}
+
+/** Flags + settings + env for `fleet checkin`, flags winning over the settings file. */
+export function resolveCheckinInvocation(
+  argv: string[],
+  settings: CheckinSettings
+): { server?: string; token?: string; dirs?: string[]; includeMedia: boolean; machineId?: string; dryRun: boolean } {
+  const server = flagValue(argv, '--server') ?? settings.server;
+  const inlineToken = flagValue(argv, '--token');
+  const inlineTokenFile = flagValue(argv, '--token-file');
+  let token: string | undefined;
+  if (inlineToken) {
+    token = inlineToken;
+  } else if (inlineTokenFile) {
+    token = readTokenFile(inlineTokenFile);
+  } else if (settings.token) {
+    token = settings.token;
+  } else if (settings.tokenFile) {
+    token = readTokenFile(settings.tokenFile);
+  } else if (process.env.OPBS_FLEET_TOKEN) {
+    token = process.env.OPBS_FLEET_TOKEN.trim();
+  }
+  const explicitDirs = flagValues(argv, '--dir');
+  return {
+    server,
+    token,
+    dirs: explicitDirs.length > 0 ? explicitDirs : settings.dirs,
+    includeMedia: !(argv.includes('--no-media') || settings.noMedia === true),
+    machineId: flagValue(argv, '--machine-id') ?? settings.machineId,
+    dryRun: argv.includes('--dry-run')
+  };
+}
+
+async function recentDestinations(): Promise<string[]> {
   try {
     const { getRecentDestinations } = await import('../utils/recent');
     return getRecentDestinations();
@@ -52,15 +149,15 @@ async function resolveDirectories(argv: string[]): Promise<string[]> {
   }
 }
 
-async function buildFromArgs(argv: string[]): Promise<FleetCheckin> {
-  const directories = await resolveDirectories(argv);
-  const machineId = flagValue(argv, '--machine-id');
-  const includeMedia = !argv.includes('--no-media');
+async function buildFromArgs(
+  directories: string[],
+  opts: { machineId?: string; includeMedia: boolean }
+): Promise<FleetCheckin> {
   return buildFleetReport({
     directories,
     appVersion: await resolveAppVersion(),
-    machineId: machineId || undefined,
-    includeMedia
+    machineId: opts.machineId || undefined,
+    includeMedia: opts.includeMedia
   });
 }
 
@@ -104,7 +201,11 @@ function printReportSummary(checkin: FleetCheckin): void {
 }
 
 async function cmdFleetReport(ctx: CommandContext): Promise<number> {
-  const checkin = await buildFromArgs(ctx.argv);
+  const explicitDirs = flagValues(ctx.argv, '--dir');
+  const checkin = await buildFromArgs(explicitDirs.length > 0 ? explicitDirs : await recentDestinations(), {
+    machineId: flagValue(ctx.argv, '--machine-id'),
+    includeMedia: !ctx.argv.includes('--no-media')
+  });
   if (ctx.opts.json) {
     console.log(JSON.stringify(checkin, null, 2));
   } else {
@@ -121,35 +222,38 @@ function resolveToken(argv: string[]): string | undefined {
   const inline = flagValue(argv, '--token');
   if (inline) return inline;
   const file = flagValue(argv, '--token-file');
-  if (file) {
-    try {
-      return fs.readFileSync(file, 'utf-8').trim();
-    } catch (error) {
-      throw new Error(`cannot read --token-file ${file}: ${error instanceof Error ? error.message : error}`, {
-        cause: error
-      });
-    }
-  }
+  if (file) return readTokenFile(file);
   const env = process.env.OPBS_FLEET_TOKEN;
   return env ? env.trim() : undefined;
 }
 
 async function cmdFleetCheckin(ctx: CommandContext): Promise<number> {
-  const server = flagValue(ctx.argv, '--server');
+  const settingsFile = flagValue(ctx.argv, '--settings');
+  const settings = settingsFile ? loadCheckinSettings(settingsFile) : {};
+  const invocation = resolveCheckinInvocation(ctx.argv, settings);
+  const server = invocation.server;
   if (!server) {
-    console.error('Usage: fleet checkin --server <url> [--token T|--token-file F] [--dir <dir>]... [--no-media] [--dry-run] [--json]');
+    console.error(
+      'Usage: fleet checkin --server <url> [--settings <file>] [--token T|--token-file F] ' +
+        '[--dir <dir>]... [--no-media] [--dry-run] [--json]'
+    );
     return 1;
   }
-  const checkin = await buildFromArgs(ctx.argv);
 
-  if (ctx.argv.includes('--dry-run')) {
+  const directories = invocation.dirs ?? (await recentDestinations());
+  const checkin = await buildFromArgs(directories, {
+    machineId: invocation.machineId,
+    includeMedia: invocation.includeMedia
+  });
+
+  if (invocation.dryRun) {
     console.log(JSON.stringify(checkin, null, 2));
     return 0;
   }
 
-  const token = resolveToken(ctx.argv);
+  const token = invocation.token;
   if (!token) {
-    console.error('No token: pass --token/--token-file or set OPBS_FLEET_TOKEN.');
+    console.error('No token: pass --token/--token-file, put "token" in --settings, or set OPBS_FLEET_TOKEN.');
     return 1;
   }
   const result = await sendCheckin(checkin, { server, token });
@@ -180,12 +284,17 @@ async function cmdFleetServe(ctx: CommandContext): Promise<number> {
   const host = flagValue(ctx.argv, '--host') ?? '127.0.0.1';
   const port = Number(flagValue(ctx.argv, '--port') ?? '8787');
   const staleDays = Number(flagValue(ctx.argv, '--stale-days') ?? '7');
+  const backupStaleDays = Number(flagValue(ctx.argv, '--backup-stale-days') ?? String(DEFAULT_BACKUP_STALE_DAYS));
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     console.error(`invalid --port`);
     return 1;
   }
   if (!Number.isFinite(staleDays) || staleDays <= 0) {
     console.error(`invalid --stale-days`);
+    return 1;
+  }
+  if (!Number.isInteger(backupStaleDays) || backupStaleDays < 0) {
+    console.error(`invalid --backup-stale-days`);
     return 1;
   }
 
@@ -195,13 +304,19 @@ async function cmdFleetServe(ctx: CommandContext): Promise<number> {
     port,
     token: resolveToken(ctx.argv),
     staleDays,
+    backupStaleDays,
     log: (line) => console.log(line)
   });
 
   console.log(`fleet server listening on ${server.url}`);
   console.log(`  dashboard: ${server.url}/`);
   console.log(`  data:      ${path.join(dataDir, 'checkins.json')}`);
+  console.log(`  policies:  ${path.join(dataDir, 'policies')}`);
   console.log(`  token:     ${server.token}`);
+  console.log(
+    `  stale:     no check-in for ${staleDays} day(s)` +
+      (backupStaleDays > 0 ? `, no backup for ${backupStaleDays} day(s)` : ', backup-staleness off')
+  );
   if (host === '127.0.0.1') {
     console.log('  (bound to localhost — pass --host 0.0.0.0 to accept check-ins from other machines)');
   }
@@ -250,6 +365,106 @@ async function cmdFleetStatus(ctx: CommandContext): Promise<number> {
   return fleet.summary.critical > 0 || fleet.summary.stale > 0 ? 1 : 0;
 }
 
+async function cmdFleetPolicy(ctx: CommandContext): Promise<number> {
+  const sub = ctx.argv[0];
+  const rest = ctx.argv.slice(1);
+  const server = flagValue(rest, '--server');
+  if (!server) {
+    console.error('Usage: fleet policy list|pull|push --server <url> [--token T|--token-file F] ...');
+    return 1;
+  }
+  const token = resolveToken(rest);
+  if (!token) {
+    console.error('No token: pass --token/--token-file or set OPBS_FLEET_TOKEN.');
+    return 1;
+  }
+
+  switch (sub) {
+    case 'list': {
+      const result = await pullPolicies({ server, token });
+      if (ctx.opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        for (const policy of result.policies) {
+          const label = typeof policy.config === 'object' && policy.config !== null && 'name' in policy.config
+            ? String((policy.config as { name?: unknown }).name)
+            : '';
+          console.log(`  ${policy.name}${label ? ` — ${label}` : ''}`);
+        }
+        for (const bad of result.invalid) {
+          console.log(`  ! ${bad.name}: ${bad.error}`);
+        }
+        console.log(`${result.policies.length} policy file(s), ${result.invalid.length} unreadable`);
+      }
+      return result.invalid.length > 0 ? 1 : 0;
+    }
+
+    case 'pull': {
+      const out = flagValue(rest, '--out') ?? 'fleet-policies';
+      const overwrite = rest.includes('--overwrite');
+      const result = await pullPolicies({ server, token });
+      fs.mkdirSync(out, { recursive: true });
+      let written = 0;
+      let skipped = 0;
+      for (const policy of result.policies) {
+        const target = path.join(out, path.basename(policy.name));
+        if (fs.existsSync(target) && !overwrite) {
+          skipped++;
+          continue;
+        }
+        fs.writeFileSync(target, `${JSON.stringify(policy.config, null, 2)}\n`, 'utf-8');
+        written++;
+      }
+      if (ctx.opts.json) {
+        console.log(JSON.stringify({ out, written, skipped, invalid: result.invalid }, null, 2));
+      } else {
+        console.log(`${out}: wrote ${written} policy file(s)${skipped ? `, kept ${skipped} existing` : ''}`);
+        for (const bad of result.invalid) {
+          console.log(`  ! ${bad.name}: ${bad.error}`);
+        }
+      }
+      return 0;
+    }
+
+    case 'push': {
+      const valueFlags = new Set(['--server', '--name', '--token', '--token-file']);
+      let file: string | undefined;
+      for (let i = 0; i < rest.length; i++) {
+        const arg = rest[i];
+        if (arg.startsWith('-')) {
+          if (valueFlags.has(arg)) i++;
+          continue;
+        }
+        file = arg;
+        break;
+      }
+      if (!file) {
+        console.error('Usage: fleet policy push <config.json> --server <url> [--name <name.json>]');
+        return 1;
+      }
+      let config: unknown;
+      try {
+        config = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      } catch (error) {
+        console.error(`cannot read ${file}: ${error instanceof Error ? error.message : error}`);
+        return 1;
+      }
+      const name = flagValue(rest, '--name') ?? path.basename(file);
+      if (!isValidPolicyName(name)) {
+        console.error(`invalid policy name "${name}" — use a plain <name>.json (letters, digits, . _ -)`);
+        return 1;
+      }
+      await pushPolicy({ server, token }, name, config);
+      console.log(`pushed ${name} → ${server}`);
+      return 0;
+    }
+
+    default:
+      console.error('Usage: fleet policy list|pull|push --server <url> ...');
+      return 1;
+  }
+}
+
 export async function cmdFleet(ctx: CommandContext): Promise<number> {
   const action = ctx.argv[0];
   const rest: CommandContext = { argv: ctx.argv.slice(1), opts: ctx.opts };
@@ -263,8 +478,10 @@ export async function cmdFleet(ctx: CommandContext): Promise<number> {
       return cmdFleetServe(rest);
     case 'status':
       return cmdFleetStatus(rest);
+    case 'policy':
+      return cmdFleetPolicy(rest);
     default:
-      console.error('Usage: fleet report|checkin|serve|status [options]  (see "fleet" in the main help)');
+      console.error('Usage: fleet report|checkin|serve|status|policy [options]  (see "fleet" in the main help)');
       return 1;
   }
 }

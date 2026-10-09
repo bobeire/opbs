@@ -67,6 +67,7 @@ export async function sendCheckin(checkin: FleetCheckin, target: CheckinTarget):
 export interface FleetSummary {
   generatedAt: number;
   staleDays: number;
+  backupStaleDays: number | null;
   machineCount: number;
   summary: { ok: number; warning: number; critical: number; stale: number };
   machines: Array<{
@@ -92,4 +93,53 @@ export async function fetchFleet(target: { server: string; timeoutMs?: number })
   } finally {
     clearTimeout(timer);
   }
+}
+
+export interface PolicyList {
+  policies: Array<{ name: string; config: unknown }>;
+  invalid: Array<{ name: string; error: string }>;
+}
+
+async function policyFetch(
+  target: { server: string; token?: string; timeoutMs?: number },
+  pathname: string,
+  init: RequestInit = {}
+): Promise<Response> {
+  const base = normalizeBaseUrl(target.server);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), target.timeoutMs ?? 15_000);
+  try {
+    const response = await fetch(`${base}${pathname}`, {
+      ...init,
+      headers: {
+        ...(init.body !== undefined ? { 'content-type': 'application/json' } : {}),
+        ...(target.token ? { authorization: `Bearer ${target.token}` } : {}),
+        ...init.headers
+      },
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      const detail = (await response.text().catch(() => '')).slice(0, 300);
+      throw new Error(`server replied ${response.status}${detail ? ` ${detail}` : ''}`);
+    }
+    return response;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Download every policy the server offers (invalid files are listed, not thrown). */
+export async function pullPolicies(target: { server: string; token: string; timeoutMs?: number }): Promise<PolicyList> {
+  const response = await policyFetch(target, '/api/policy');
+  return (await response.json()) as PolicyList;
+}
+
+/** Upload a job-config JSON file under a server-side policy name. */
+export async function pushPolicy(
+  target: { server: string; token: string; timeoutMs?: number },
+  name: string,
+  config: unknown
+): Promise<{ name: string }> {
+  const response = await policyFetch(target, `/api/policy/${name}`, { method: 'PUT', body: JSON.stringify(config) });
+  return (await response.json()) as { name: string };
 }

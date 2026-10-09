@@ -171,7 +171,9 @@ export const FLEET_DASHBOARD_HTML = `<!DOCTYPE html>
       '<th>Chains</th><th>Anomalies</th><th>Drills</th><th>Media</th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table>';
     document.getElementById('foot').textContent =
-      'Stale threshold: ' + data.staleDays + ' day(s) without a check-in. Auto-refreshes every 60 s.';
+      'Stale: no check-in for ' + data.staleDays + ' day(s)' +
+      (data.backupStaleDays ? ' or no backup for ' + data.backupStaleDays + ' day(s)' : '') +
+      '. Auto-refreshes every 60 s.';
   }
   function load() {
     fetch('/api/fleet')

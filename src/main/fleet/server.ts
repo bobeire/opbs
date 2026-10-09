@@ -16,6 +16,15 @@ import { FLEET_DASHBOARD_HTML } from './dashboard';
 import { deriveMachineStatus, FleetCheckin, FleetStatus, validateCheckin } from './schema';
 
 export const MAX_CHECKIN_BYTES = 256 * 1024;
+/** Policy configs use the same cap as check-ins. */
+export const MAX_POLICY_BYTES = MAX_CHECKIN_BYTES;
+/** Default days without a backup before a machine reads as stale. */
+export const DEFAULT_BACKUP_STALE_DAYS = 14;
+
+/** Policy file names are deliberately boring: no traversal, no surprises. */
+export function isValidPolicyName(name: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.json$/.test(name);
+}
 
 export interface FleetStore {
   schema: number;
@@ -29,6 +38,8 @@ export interface FleetServerOptions {
   /** Bearer token for POST /api/checkin. Generated into the data dir when absent. */
   token?: string;
   staleDays?: number;
+  /** Days without a backup before a machine reads as stale (0 disables, default 14). */
+  backupStaleDays?: number;
   log?: (line: string) => void;
 }
 
@@ -46,6 +57,10 @@ function storePath(dataDir: string): string {
 
 function tokenPath(dataDir: string): string {
   return path.join(dataDir, 'server-token.txt');
+}
+
+export function policiesDir(dataDir: string): string {
+  return path.join(dataDir, 'policies');
 }
 
 export function loadFleetStore(dataDir: string): FleetStore {
@@ -89,6 +104,35 @@ function tokenMatches(expected: string, presented: string | undefined): boolean 
   const a = createHash('sha256').update(expected).digest();
   const b = createHash('sha256').update(presented).digest();
   return timingSafeEqual(a, b);
+}
+
+/** Returns true when the request carries the valid bearer token; replies 401 otherwise. */
+function requireToken(req: http.IncomingMessage, res: http.ServerResponse, expected: string): boolean {
+  if (tokenMatches(expected, bearerToken(req))) return true;
+  sendJson(res, 401, { error: 'missing or invalid bearer token' });
+  return false;
+}
+
+type JsonBodyResult = { ok: true; value: unknown } | { ok: false; status: number; error: string };
+
+async function readJsonBody(req: http.IncomingMessage, maxBytes: number): Promise<JsonBodyResult> {
+  let body: { overflow: boolean; buffer: Buffer | null };
+  try {
+    body = await readBody(req, maxBytes);
+  } catch (error) {
+    return { ok: false, status: 413, error: error instanceof Error ? error.message : 'body too large' };
+  }
+  if (body.overflow) {
+    return { ok: false, status: 413, error: `body exceeds ${maxBytes} bytes` };
+  }
+  if (!body.buffer || body.buffer.length === 0) {
+    return { ok: false, status: 400, error: 'empty body' };
+  }
+  try {
+    return { ok: true, value: JSON.parse(body.buffer.toString('utf-8')) };
+  } catch {
+    return { ok: false, status: 400, error: 'body is not valid JSON' };
+  }
 }
 
 function bearerToken(req: http.IncomingMessage): string | undefined {
@@ -153,12 +197,17 @@ export interface FleetMachineView {
 export interface FleetAggregate {
   generatedAt: number;
   staleDays: number;
+  /** null when backup staleness checking is disabled. */
+  backupStaleDays: number | null;
   machineCount: number;
   summary: { ok: number; warning: number; critical: number; stale: number };
   machines: FleetMachineView[];
 }
 
-export function aggregateFleet(store: FleetStore, opts: { staleDays: number; now?: number }): FleetAggregate {
+export function aggregateFleet(
+  store: FleetStore,
+  opts: { staleDays: number; backupStaleDays?: number; now?: number }
+): FleetAggregate {
   const now = opts.now ?? Date.now();
   const summary = { ok: 0, warning: 0, critical: 0, stale: 0 };
   const machines: FleetMachineView[] = [];
@@ -166,7 +215,8 @@ export function aggregateFleet(store: FleetStore, opts: { staleDays: number; now
     const { status, reasons } = deriveMachineStatus(entry.checkin, {
       receivedAt: entry.receivedAt,
       now,
-      staleDays: opts.staleDays
+      staleDays: opts.staleDays,
+      backupStaleDays: opts.backupStaleDays
     });
     summary[status]++;
     machines.push({
@@ -180,13 +230,47 @@ export function aggregateFleet(store: FleetStore, opts: { staleDays: number; now
   }
   const order: Record<FleetStatus, number> = { critical: 0, stale: 1, warning: 2, ok: 3 };
   machines.sort((a, b) => order[a.status] - order[b.status] || a.hostname.localeCompare(b.hostname));
-  return { generatedAt: now, staleDays: opts.staleDays, machineCount: machines.length, summary, machines };
+  return {
+    generatedAt: now,
+    staleDays: opts.staleDays,
+    backupStaleDays: opts.backupStaleDays && opts.backupStaleDays > 0 ? opts.backupStaleDays : null,
+    machineCount: machines.length,
+    summary,
+    machines
+  };
+}
+
+export interface FleetPolicyList {
+  policies: Array<{ name: string; config: unknown }>;
+  invalid: Array<{ name: string; error: string }>;
+}
+
+/** Policies are plain job-config JSON files dropped into <dataDir>/policies/. */
+export function listPolicies(dataDir: string): FleetPolicyList {
+  const result: FleetPolicyList = { policies: [], invalid: [] };
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(policiesDir(dataDir));
+  } catch {
+    return result;
+  }
+  for (const name of entries.sort()) {
+    if (!name.endsWith('.json') || !isValidPolicyName(name)) continue;
+    try {
+      const config = JSON.parse(fs.readFileSync(path.join(policiesDir(dataDir), name), 'utf-8'));
+      result.policies.push({ name, config });
+    } catch (error) {
+      result.invalid.push({ name, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return result;
 }
 
 export async function startFleetServer(opts: FleetServerOptions): Promise<FleetServer> {
   const host = opts.host ?? '127.0.0.1';
   const port = opts.port ?? 8787;
   const staleDays = opts.staleDays ?? 7;
+  const backupStaleDays = opts.backupStaleDays ?? DEFAULT_BACKUP_STALE_DAYS;
   const log = opts.log ?? (() => undefined);
   const token = loadOrCreateToken(opts.dataDir, opts.token);
   const store = loadFleetStore(opts.dataDir);
@@ -206,33 +290,13 @@ export async function startFleetServer(opts: FleetServerOptions): Promise<FleetS
     const route = `${req.method ?? 'GET'} ${url.pathname}`;
 
     if (route === 'POST /api/checkin') {
-      if (!tokenMatches(token, bearerToken(req))) {
-        sendJson(res, 401, { error: 'missing or invalid bearer token' });
+      if (!requireToken(req, res, token)) return;
+      const body = await readJsonBody(req, MAX_CHECKIN_BYTES);
+      if (!body.ok) {
+        sendJson(res, body.status, { error: body.error });
         return;
       }
-      let body: { overflow: boolean; buffer: Buffer | null };
-      try {
-        body = await readBody(req, MAX_CHECKIN_BYTES);
-      } catch (error) {
-        sendJson(res, 413, { error: error instanceof Error ? error.message : 'body too large' });
-        return;
-      }
-      if (body.overflow) {
-        sendJson(res, 413, { error: `body exceeds ${MAX_CHECKIN_BYTES} bytes` });
-        return;
-      }
-      if (!body.buffer || body.buffer.length === 0) {
-        sendJson(res, 400, { error: 'empty body' });
-        return;
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(body.buffer.toString('utf-8'));
-      } catch {
-        sendJson(res, 400, { error: 'body is not valid JSON' });
-        return;
-      }
-      const validation = validateCheckin(parsed);
+      const validation = validateCheckin(body.value);
       if (!validation.ok) {
         sendJson(res, 400, { error: validation.error });
         return;
@@ -249,7 +313,33 @@ export async function startFleetServer(opts: FleetServerOptions): Promise<FleetS
     }
 
     if (route === 'GET /api/fleet') {
-      sendJson(res, 200, aggregateFleet(store, { staleDays }));
+      sendJson(res, 200, aggregateFleet(store, { staleDays, backupStaleDays }));
+      return;
+    }
+
+    if (route === 'GET /api/policy') {
+      if (!requireToken(req, res, token)) return;
+      sendJson(res, 200, listPolicies(opts.dataDir));
+      return;
+    }
+
+    if ((req.method === 'PUT' || req.method === 'POST') && url.pathname.startsWith('/api/policy/')) {
+      if (!requireToken(req, res, token)) return;
+      const name = url.pathname.slice('/api/policy/'.length);
+      if (!isValidPolicyName(name)) {
+        sendJson(res, 400, { error: `invalid policy name "${name}" (expected <name>.json)` });
+        return;
+      }
+      const body = await readJsonBody(req, MAX_POLICY_BYTES);
+      if (!body.ok) {
+        sendJson(res, body.status, { error: body.error });
+        return;
+      }
+      const dir = policiesDir(opts.dataDir);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, name), `${JSON.stringify(body.value, null, 2)}\n`, 'utf-8');
+      log(`policy stored: ${name}`);
+      sendJson(res, 200, { ok: true, name });
       return;
     }
 
@@ -265,8 +355,15 @@ export async function startFleetServer(opts: FleetServerOptions): Promise<FleetS
       return;
     }
 
-    const allowed = ['GET', 'POST'].includes(req.method ?? '');
-    sendJson(res, allowed ? 404 : 405, { error: allowed ? 'not found' : 'method not allowed' });
+    const knownPath =
+      url.pathname === '/api/checkin' ||
+      url.pathname === '/api/fleet' ||
+      url.pathname === '/api/policy' ||
+      url.pathname.startsWith('/api/policy/') ||
+      url.pathname === '/health' ||
+      url.pathname === '/' ||
+      url.pathname === '/index.html';
+    sendJson(res, knownPath ? 405 : 404, { error: knownPath ? 'method not allowed' : 'not found' });
   }
 
   await new Promise<void>((resolve, reject) => {

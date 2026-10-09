@@ -300,6 +300,41 @@ implemented; **Investigate** items need spike work first.
   persistence + token reuse across restarts, dashboard/health), client
   round-trip/dead-server/bad-URL, and the store helpers.
 
+### Fleet Tier 1 — scheduled check-ins, staleness, policy distribution (0.6.68)
+- ✅ Scheduled check-ins (`schedule install-checkin <name> --server <url>`):
+  registers a daily Windows task (default 02:00, `--time HH:MM` or
+  `--on-login`, same `--run-as-user`/`--as-system`/`--elevated` knobs as
+  `install-drill`) that runs `--cli fleet checkin`. Inline mode embeds
+  `--server`/`--token-file`/`--token`/repeatable `--dir`/`--no-media` and
+  warns about cleartext tokens or command lines near the schtasks 261-char
+  cap; `--settings <file>` mode keeps the task short and the token off it
+  entirely — the task just references a JSON settings file.
+- ✅ Check-in settings file (`fleet checkin --settings <file>`): JSON object
+  `{server, token?, tokenFile?, dirs?, noMedia?, machineId?}` with precise
+  type errors; precedence is CLI flags > settings file > `OPBS_FLEET_TOKEN`
+  env, so a machine can be configured once and driven from a task forever.
+- ✅ Backup-staleness alerts: `fleet serve --backup-stale-days N` (default 14,
+  `0` disables) flags machines whose newest backup is older than N days —
+  the machine goes `stale` with a `last backup X day(s) ago (threshold Y)`
+  reason alongside the existing no-check-in staleness; never-backed-up
+  machines stay `warning`, unreachable destinations are already reported
+  separately, and `critical` still outranks both. The threshold is exposed
+  on `GET /api/fleet` and shown in the dashboard footer.
+- ✅ Policy distribution (backup job configs): `fleet policy push <config>
+  --server <url> [--name n.json]` uploads to the server, `fleet policy pull`
+  downloads every policy (refuses to overwrite existing files unless
+  `--overwrite`), `fleet policy list` shows what's published. Server side:
+  token-gated `GET /api/policy` + `PUT|POST /api/policy/<name>` with a
+  boring `<name>.json` regex (traversal/extension rejected), a 256 KiB cap,
+  plain files under `<dataDir>/policies/` (drop files there by hand to
+  publish), and unreadable files listed as `invalid` instead of failing.
+  No auto-apply yet — machines pull, application lands in Tier 2.
+- ✅ Tests (+22, 65 fleet tests): backup-staleness derivation (threshold
+  crossed/inside/disabled, never-backed-up, unreachable, critical outranks),
+  aggregate with `backupStaleDays`, policy name validation, 401/400/404/405
+  policy routes, push→pull round-trip + on-disk store, invalid-file listing,
+  and settings load/merge precedence (flags > file > env).
+
 
 ### Disk-to-disk clone (selected partitions → another disk)
 - ✅ `CloneEngine` (`imaging/clone-engine.ts`): builds clone jobs exactly like

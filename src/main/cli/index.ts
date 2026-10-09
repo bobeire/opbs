@@ -34,7 +34,7 @@ import { detectTamper } from '../utils/tamper';
 import { buildStorageHealthReport } from '../utils/storage-health';
 import { runDiskPerfTest, assessWriteSpeed } from '../utils/disk-perf';
 import { queryVssServiceState, normalizeVolumeRoot, VssJob, VssJobResult } from '../utils/vss';
-import { flagValue } from './flags';
+import { flagValue, flagValues } from './flags';
 import { cmdRepo, finalizeBackupRepo, parseLockDays } from './repo';
 import { cmdFleet } from './fleet';
 import { isRepository } from '../imaging/repository';
@@ -240,6 +240,11 @@ Commands:
   schedule install-backup <name> --config <config.json> [--time HH:MM|--on-login] [--as-system] [--run-as-user]
   schedule install-verify <name> --dir <dir> [--scope newest|all] [--time HH:MM|--on-login] [--run-as-user]
   schedule install-drill <name> --dir <dir> --disk <targetDiskIndex> [--verify] [--time HH:MM|--on-login] [--run-as-user]
+  schedule install-checkin <name> --server <url> [--settings <file>] [--token-file <f>|--token <t>] [--dir <dir>]... [--no-media]
+                                          Register a scheduled fleet check-in (daily --time HH:MM, default
+                                          02:00, or --on-login). With --settings the task just references a
+                                          JSON settings file (short command line, token stays off the task);
+                                          inline mode embeds --server/--token-file/--dir instead.
   schedule list                          List Windows scheduled tasks.
   schedule remove <name>                 Delete a scheduled task.
   prune <directory> [options]            Apply retention/GFS policy. Never runs inside a
@@ -279,19 +284,29 @@ Commands:
                                           drills) plus a SMART disk inventory. Exits 1 when the
                                           derived machine status is critical. Without --dir the
                                           recent backup destinations are scanned.
-  fleet checkin --server <url> [--token-file F|--token T] [--dir <dir>]... [--no-media] [--dry-run] [--json]
-                                          Send the check-in to a fleet server (the token is also
-                                          read from the OPBS_FLEET_TOKEN environment variable).
-                                          --dry-run prints the JSON instead of sending it.
-  fleet serve [--host H] [--port N] [--data <dir>] [--token T] [--stale-days N]
+  fleet checkin --server <url> [--settings <file>] [--token-file F|--token T] [--dir <dir>]... [--no-media] [--dry-run] [--json]
+                                          Send the check-in to a fleet server (token also from --settings or
+                                          OPBS_FLEET_TOKEN). --settings <file> reads a JSON object
+                                          {server, token?, tokenFile?, dirs?, noMedia?, machineId?} — flags
+                                          override the file. --dry-run prints the JSON instead of sending.
+  fleet serve [--host H] [--port N] [--data <dir>] [--token T] [--stale-days N] [--backup-stale-days N]
                                           Run the fleet control server (default http://127.0.0.1:8787):
                                           accepts token-authenticated check-ins, stores them in
-                                          checkins.json and serves the fleet dashboard plus
-                                          /api/fleet. Pass --host 0.0.0.0 to accept check-ins from
-                                          other machines; the bearer token is generated into the
-                                          data directory on first start.
-  fleet status --server <url> [--json]    Summarize the fleet from the server: exits 1 when any
-                                          machine is critical or has stopped checking in.
+                                          checkins.json and serves the fleet dashboard plus /api/fleet.
+                                          Pass --host 0.0.0.0 to accept check-ins from other machines; the
+                                          bearer token is generated into the data directory on first start.
+                                          Machines go stale after --stale-days (7) without a check-in or
+                                          --backup-stale-days (14, 0 disables) without a backup.
+  fleet status --server <url> [--json]    Summarize the fleet from the server: exits 1 when any machine
+                                          is critical or has stopped checking in (or backing up).
+  fleet policy list --server <url> [--json]
+                                          List policy files (backup job configs) the server offers.
+  fleet policy pull --server <url> [--out DIR] [--overwrite] [--json]
+                                          Download every policy into DIR (default ./fleet-policies);
+                                          existing files are kept unless --overwrite.
+  fleet policy push <config.json> --server <url> [--name <name.json>]
+                                          Upload a backup job config as a server-side policy. Drop files
+                                          into <dataDir>/policies/ on the server to publish them.
   health <diskIndex>                     Report SMART/reliability health (no elevation needed).
   media smart [--json]                   SMART health inventory of every physical disk:
                                          temperature, SSD wear, unreliable sectors, read errors.
@@ -1753,6 +1768,8 @@ async function cmdSchedule(ctx: CommandContext): Promise<number> {
       return cmdScheduleInstallVerify(ctx);
     case 'install-drill':
       return cmdScheduleInstallDrill(ctx);
+    case 'install-checkin':
+      return cmdScheduleInstallCheckin(ctx);
     case 'remove': {
       const name = ctx.argv[1];
       if (!name) {
@@ -1776,7 +1793,7 @@ async function cmdSchedule(ctx: CommandContext): Promise<number> {
       return 0;
     }
     default:
-      console.error('Usage: schedule install-backup|install-verify|list|remove <name>');
+      console.error('Usage: schedule install-backup|install-verify|install-drill|install-checkin|list|remove <name>');
       return 1;
   }
 }
@@ -1839,6 +1856,54 @@ async function cmdScheduleInstallDrill(ctx: CommandContext): Promise<number> {
   const opts = scheduleOptionsOf(ctx);
   const verify = ctx.argv.includes('--verify') ? ' --verify' : '';
   const commandLine = `"${process.execPath}" --cli drill --dir "${dir}" --disk ${disk}${verify} --elevated --json`;
+  await registerScheduledTask(name, commandLine, opts);
+  console.log(`Registered task "${name}": ${commandLine}`);
+  return 0;
+}
+
+async function cmdScheduleInstallCheckin(ctx: CommandContext): Promise<number> {
+  const name = ctx.argv[1];
+  const settingsFile = flagValue(ctx.argv, '--settings');
+  const server = flagValue(ctx.argv, '--server');
+  if (!name || (!settingsFile && !server)) {
+    console.error(
+      'Usage: schedule install-checkin <name> --server <url> [--settings <file>] ' +
+        '[--token-file <f>|--token <t>] [--dir <dir>]... [--no-media] [--time HH:MM|--on-login] [--run-as-user] [--as-system]'
+    );
+    return 1;
+  }
+  if (settingsFile && !fs.existsSync(settingsFile)) {
+    console.error(`--settings file not found: ${settingsFile}`);
+    return 1;
+  }
+
+  const opts = scheduleOptionsOf(ctx);
+  let commandLine: string;
+  if (settingsFile) {
+    commandLine = `"${process.execPath}" --cli fleet checkin --settings "${settingsFile}"`;
+  } else {
+    const parts = [`"${process.execPath}" --cli fleet checkin --server "${server}"`];
+    const tokenFile = flagValue(ctx.argv, '--token-file');
+    const token = flagValue(ctx.argv, '--token');
+    if (tokenFile) parts.push(`--token-file "${tokenFile}"`);
+    if (token) {
+      parts.push(`--token "${token}"`);
+      console.log('note: --token is stored in cleartext inside the task definition; --token-file is safer');
+    }
+    for (const dir of flagValues(ctx.argv, '--dir')) parts.push(`--dir "${dir}"`);
+    if (ctx.argv.includes('--no-media')) parts.push('--no-media');
+    commandLine = parts.join(' ');
+    if (!tokenFile && !token) {
+      console.log(
+        'note: no token given — the task needs --token-file, --token, or OPBS_FLEET_TOKEN in its environment; ' +
+          '--token-file (or a --settings file) is recommended for scheduled runs'
+      );
+    }
+    if (commandLine.length > 250) {
+      console.log('note: long command line — schtasks caps /TR at 261 chars; prefer a --settings file');
+    }
+  }
+
   await registerScheduledTask(name, commandLine, opts);
   console.log(`Registered task "${name}": ${commandLine}`);
   return 0;

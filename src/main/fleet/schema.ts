@@ -175,6 +175,12 @@ export interface FleetStatusOptions {
   now?: number;
   /** Days without a check-in before a machine counts as stale (default 7). */
   staleDays?: number;
+  /**
+   * Days without a backup before the machine counts as stale (0/undefined
+   * disables). Machines with images but no recorded run yet are unaffected —
+   * they are already covered by the "never backed up" warning.
+   */
+  backupStaleDays?: number;
 }
 
 /**
@@ -188,7 +194,10 @@ export function deriveMachineStatus(checkin: FleetCheckin, opts: FleetStatusOpti
   const reasons: string[] = [];
 
   let critical = false;
-  const stale = now - opts.receivedAt > staleDays * DAY_MS;
+  let stale = now - opts.receivedAt > staleDays * DAY_MS;
+  if (stale) {
+    reasons.push(`no check-in for more than ${staleDays} day(s)`);
+  }
   let warning = false;
 
   for (const dest of checkin.destinations) {
@@ -196,6 +205,13 @@ export function deriveMachineStatus(checkin: FleetCheckin, opts: FleetStatusOpti
       reasons.push(`${dest.directory}: destination unreachable`);
       warning = true;
       continue;
+    }
+    if (opts.backupStaleDays && opts.backupStaleDays > 0 && dest.lastBackupAt != null) {
+      const backupAgeDays = Math.floor((now - dest.lastBackupAt) / DAY_MS);
+      if (backupAgeDays >= opts.backupStaleDays) {
+        reasons.push(`${dest.directory}: last backup ${backupAgeDays} day(s) ago (threshold ${opts.backupStaleDays})`);
+        stale = true;
+      }
     }
     if (dest.brokenChains > 0) {
       reasons.push(`${dest.directory}: ${dest.brokenChains} broken restore chain(s)`);
@@ -232,10 +248,6 @@ export function deriveMachineStatus(checkin: FleetCheckin, opts: FleetStatusOpti
       reasons.push(`disk ${media.diskIndex} (${media.model || 'unknown'}): SMART reports problems`);
       critical = true;
     }
-  }
-
-  if (stale) {
-    reasons.push(`no check-in for more than ${staleDays} day(s)`);
   }
 
   const status: FleetStatus = critical ? 'critical' : stale ? 'stale' : warning ? 'warning' : 'ok';
