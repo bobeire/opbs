@@ -29,7 +29,9 @@ describe('loadCheckinSettings', () => {
         tokenFile: 'C:\\cfg\\token.txt',
         dirs: ['D:\\backups'],
         noMedia: true,
-        machineId: 'fixed-id'
+        machineId: 'fixed-id',
+        autoApply: true,
+        policyDir: 'C:\\policies'
       })
     );
     expect(loadCheckinSettings(file)).toEqual({
@@ -38,7 +40,9 @@ describe('loadCheckinSettings', () => {
       tokenFile: 'C:\\cfg\\token.txt',
       dirs: ['D:\\backups'],
       noMedia: true,
-      machineId: 'fixed-id'
+      machineId: 'fixed-id',
+      autoApply: true,
+      policyDir: 'C:\\policies'
     });
   });
 
@@ -60,6 +64,12 @@ describe('loadCheckinSettings', () => {
     expect(() => loadCheckinSettings(writeSettings(JSON.stringify({ dirs: [1] })))).toThrow(/dirs must be an array/);
     expect(() => loadCheckinSettings(writeSettings(JSON.stringify({ noMedia: 'yes' })))).toThrow(/noMedia must be a boolean/);
     expect(() => loadCheckinSettings(writeSettings(JSON.stringify({ token: 9 })))).toThrow(/token must be a string/);
+    expect(() => loadCheckinSettings(writeSettings(JSON.stringify({ autoApply: 'yes' })))).toThrow(
+      /autoApply must be a boolean/
+    );
+    expect(() => loadCheckinSettings(writeSettings(JSON.stringify({ policyDir: 7 })))).toThrow(
+      /policyDir must be a string/
+    );
   });
 });
 
@@ -76,7 +86,14 @@ describe('resolveCheckinInvocation', () => {
   });
 
   it('takes server/dirs/media from settings when no flags are present', () => {
-    const settings: CheckinSettings = { server: 'http://s:1', dirs: ['D:\\b'], noMedia: true, machineId: 'm1' };
+    const settings: CheckinSettings = {
+      server: 'http://s:1',
+      dirs: ['D:\\b'],
+      noMedia: true,
+      machineId: 'm1',
+      autoApply: true,
+      policyDir: 'C:\\policies'
+    };
     const inv = resolveCheckinInvocation([], settings);
     expect(inv).toEqual({
       server: 'http://s:1',
@@ -84,7 +101,9 @@ describe('resolveCheckinInvocation', () => {
       dirs: ['D:\\b'],
       includeMedia: false,
       machineId: 'm1',
-      dryRun: false
+      dryRun: false,
+      autoApply: true,
+      policyDir: 'C:\\policies'
     });
   });
 
@@ -103,6 +122,23 @@ describe('resolveCheckinInvocation', () => {
 
   it('reports no dirs (not an empty list) when neither source pins them', () => {
     expect(resolveCheckinInvocation([], {}).dirs).toBeUndefined();
+  });
+
+  it('enables auto-apply from the flag or the settings file, flag winning', () => {
+    expect(resolveCheckinInvocation([], {}).autoApply).toBe(false);
+    expect(resolveCheckinInvocation([], { autoApply: true }).autoApply).toBe(true);
+    expect(resolveCheckinInvocation(['--auto-apply'], {}).autoApply).toBe(true);
+    // No way to turn a settings-file opt-in off from the command line — auto-
+    // apply is only ever *added*, never silently disabled.
+    expect(resolveCheckinInvocation(['--auto-apply'], { autoApply: false }).autoApply).toBe(true);
+  });
+
+  it('prefers --policy-dir over the settings file', () => {
+    expect(resolveCheckinInvocation([], {}).policyDir).toBeUndefined();
+    expect(resolveCheckinInvocation([], { policyDir: 'C:\\from-file' }).policyDir).toBe('C:\\from-file');
+    expect(resolveCheckinInvocation(['--policy-dir', 'C:\\flag'], { policyDir: 'C:\\from-file' }).policyDir).toBe(
+      'C:\\flag'
+    );
   });
 
   it('prefers --token, then --token-file, then settings token, then settings tokenFile, then the env var', () => {

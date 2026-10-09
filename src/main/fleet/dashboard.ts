@@ -126,6 +126,16 @@ export const FLEET_DASHBOARD_HTML = `<!DOCTYPE html>
     if (bad > 0) return '<span class="bad">' + bad + ' of ' + checkin.media.length + ' disks</span>';
     return checkin.media.length + ' disk(s) ok';
   }
+  function policies(checkin) {
+    if (!checkin.policies || checkin.policies.length === 0) return '&mdash;';
+    var ok = 0, failed = 0;
+    checkin.policies.forEach(function (p) {
+      if (p.status === 'applied' || p.status === 'unchanged') ok++;
+      else if (p.status === 'invalid' || p.status === 'failed') failed++;
+    });
+    if (failed > 0) return '<span class="bad">' + failed + ' failed</span> ' + ok + '/' + checkin.policies.length;
+    return ok + '/' + checkin.policies.length + ' ok';
+  }
   function render(data) {
     var chips = { ok: 0, warning: 0, critical: 0, stale: 0 };
     data.machines.forEach(function (m) { chips[m.status]++; });
@@ -164,11 +174,12 @@ export const FLEET_DASHBOARD_HTML = `<!DOCTYPE html>
         '<td>' + anomalies(c) + '</td>' +
         '<td>' + drills(c) + '</td>' +
         '<td>' + media(c) + '</td>' +
+        '<td>' + policies(c) + '</td>' +
         '</tr>';
     }).join('');
     main.innerHTML = '<table><thead><tr>' +
       '<th>Status</th><th>Machine</th><th>Last check-in</th><th>Last backup</th>' +
-      '<th>Chains</th><th>Anomalies</th><th>Drills</th><th>Media</th>' +
+      '<th>Chains</th><th>Anomalies</th><th>Drills</th><th>Media</th><th>Policies</th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table>';
     document.getElementById('foot').textContent =
       'Stale: no check-in for ' + data.staleDays + ' day(s)' +

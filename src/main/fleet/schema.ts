@@ -47,6 +47,20 @@ export interface FleetMediaEntry {
   warnings: string[];
 }
 
+export type FleetPolicyStatus = 'applied' | 'unchanged' | 'removed' | 'invalid' | 'failed';
+
+/** One server policy as this machine applied it (Tier 2 auto-apply). */
+export interface FleetPolicyApplied {
+  name: string;
+  status: FleetPolicyStatus;
+  /** Windows scheduled task the policy was applied as (applied/unchanged). */
+  task?: string;
+  /** Why the policy is invalid or failed to apply. */
+  reason?: string;
+  /** When the policy was last applied (epoch ms). */
+  appliedAt?: number;
+}
+
 export interface FleetCheckin {
   schema: number;
   machineId: string;
@@ -56,6 +70,8 @@ export interface FleetCheckin {
   sentAt: number;
   destinations: FleetDestinationReport[];
   media: FleetMediaEntry[];
+  /** Policy sync result — present only when the machine auto-applies policies. */
+  policies?: FleetPolicyApplied[];
 }
 
 export type FleetStatus = 'ok' | 'warning' | 'critical' | 'stale';
@@ -139,6 +155,85 @@ function validateMedia(value: unknown, index: number): string | null {
   return null;
 }
 
+/** Server-side policy file names: boring `<name>.json`, no directories, no tricks. */
+export function isValidPolicyName(name: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.json$/.test(name);
+}
+
+const FLEET_POLICY_STATUSES: FleetPolicyStatus[] = ['applied', 'unchanged', 'removed', 'invalid', 'failed'];
+
+function validatePolicyApplied(value: unknown, index: number): string | null {
+  if (!isRecord(value)) return `policies[${index}] is not an object`;
+  if (!isString(value.name) || value.name.length === 0) return `policies[${index}].name is missing`;
+  if (!isString(value.status) || !FLEET_POLICY_STATUSES.includes(value.status as FleetPolicyStatus)) {
+    return `policies[${index}].status must be applied|unchanged|removed|invalid|failed`;
+  }
+  if (value.task !== undefined && !isString(value.task)) return `policies[${index}].task is not a string`;
+  if (value.reason !== undefined && !isString(value.reason)) return `policies[${index}].reason is not a string`;
+  if (value.appliedAt !== undefined && !isNumber(value.appliedAt)) return `policies[${index}].appliedAt is not a number`;
+  return null;
+}
+
+function isInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value);
+}
+
+const HH_MM = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/**
+ * Validate a server policy before it is applied locally. Policies are ordinary
+ * `backup <config.json>` job configs — with two hard safety rules: the job must
+ * be a backup (never a restore/clone/drill) and the fleet schedule, when
+ * present, must be well-formed. Unknown fields pass through untouched.
+ */
+export function validateBackupPolicy(
+  value: unknown
+): { ok: true; config: Record<string, unknown> } | { ok: false; error: string } {
+  if (!isRecord(value)) return { ok: false, error: 'policy config is not a JSON object' };
+  if (value.kind !== undefined && value.kind !== 'backup') {
+    return {
+      ok: false,
+      error: `only backup jobs can be auto-applied (kind must be "backup" or absent, got ${JSON.stringify(value.kind)})`
+    };
+  }
+  if (!isInteger(value.sourceDiskIndex) || value.sourceDiskIndex < 0) {
+    return { ok: false, error: 'sourceDiskIndex must be a non-negative integer' };
+  }
+  if (
+    !Array.isArray(value.sourcePartitions) ||
+    value.sourcePartitions.length === 0 ||
+    !value.sourcePartitions.every((p) => isInteger(p) && p >= 0)
+  ) {
+    return { ok: false, error: 'sourcePartitions must be a non-empty array of non-negative integers' };
+  }
+  if (!isString(value.destinationPath) || value.destinationPath.length === 0) {
+    return { ok: false, error: 'destinationPath must be a non-empty string' };
+  }
+  if (value.compressionLevel !== undefined && !isNumber(value.compressionLevel)) {
+    return { ok: false, error: 'compressionLevel must be a number' };
+  }
+  if (value.compressionType !== undefined && !isString(value.compressionType)) {
+    return { ok: false, error: 'compressionType must be a string' };
+  }
+  if (value.compressionThreads !== undefined && !isNumber(value.compressionThreads)) {
+    return { ok: false, error: 'compressionThreads must be a number' };
+  }
+  if (value.verificationEnabled !== undefined && typeof value.verificationEnabled !== 'boolean') {
+    return { ok: false, error: 'verificationEnabled must be a boolean' };
+  }
+  if (value.fleetSchedule !== undefined) {
+    if (!isRecord(value.fleetSchedule)) return { ok: false, error: 'fleetSchedule must be an object' };
+    const schedule = value.fleetSchedule;
+    if (schedule.time !== undefined && (!isString(schedule.time) || !HH_MM.test(schedule.time))) {
+      return { ok: false, error: 'fleetSchedule.time must be HH:MM (24h)' };
+    }
+    if (schedule.onLogin !== undefined && typeof schedule.onLogin !== 'boolean') {
+      return { ok: false, error: 'fleetSchedule.onLogin must be a boolean' };
+    }
+  }
+  return { ok: true, config: value };
+}
+
 /** Validate an untrusted check-in document, returning a typed object or the first problem. */
 export function validateCheckin(value: unknown): { ok: true; checkin: FleetCheckin } | { ok: false; error: string } {
   if (!isRecord(value)) return { ok: false, error: 'check-in is not a JSON object' };
@@ -163,6 +258,13 @@ export function validateCheckin(value: unknown): { ok: true; checkin: FleetCheck
   for (let i = 0; i < value.media.length; i++) {
     const err = validateMedia(value.media[i], i);
     if (err) return { ok: false, error: err };
+  }
+  if (value.policies !== undefined) {
+    if (!Array.isArray(value.policies)) return { ok: false, error: 'policies is not an array' };
+    for (let i = 0; i < value.policies.length; i++) {
+      const err = validatePolicyApplied(value.policies[i], i);
+      if (err) return { ok: false, error: err };
+    }
   }
   return { ok: true, checkin: value as unknown as FleetCheckin };
 }
@@ -247,6 +349,16 @@ export function deriveMachineStatus(checkin: FleetCheckin, opts: FleetStatusOpti
     if (media.healthy === false && media.measured) {
       reasons.push(`disk ${media.diskIndex} (${media.model || 'unknown'}): SMART reports problems`);
       critical = true;
+    }
+  }
+
+  for (const policy of checkin.policies ?? []) {
+    if (policy.status === 'invalid') {
+      reasons.push(`policy ${policy.name}: ${policy.reason ?? 'invalid config'}`);
+      warning = true;
+    } else if (policy.status === 'failed') {
+      reasons.push(`policy ${policy.name} failed: ${policy.reason ?? 'could not apply'}`);
+      warning = true;
     }
   }
 

@@ -335,6 +335,40 @@ implemented; **Investigate** items need spike work first.
   policy routes, push→pull round-trip + on-disk store, invalid-file listing,
   and settings load/merge precedence (flags > file > env).
 
+### Fleet Tier 2 — auto-apply at check-in (0.6.69)
+- ✅ Auto-apply (`fleet checkin --auto-apply`, or `"autoApply": true` in the
+  `--settings` file): before sending, the machine pulls the server's policy
+  list and reconciles local state (`fleet/policy.ts`) — new/changed backup
+  configs are validated, written to `<policyDir>/<name>.json` and registered
+  (or refreshed) as a Windows task `OPBS Fleet <name>` running `--cli backup
+  <config> --elevated` on the policy's schedule (`fleetSchedule: {time, onLogin}`,
+  default daily 02:00); unchanged policies are skipped by content hash;
+  policies that disappeared from the server get their task + local config
+  removed. The apply result rides inside the check-in (`policies:
+  [{name, status, task?, reason?, appliedAt?}]`).
+- ✅ Safety rails: opt-in only (flag/settings — scheduled check-ins get it via
+  `schedule install-checkin --auto-apply` or the settings file), token-gated
+  pull, and `validateBackupPolicy` refuses any job that is not plainly a
+  backup (`kind` must be `backup` or absent — restores/clones/drills never run
+  from a pushed policy), requires integer disk/partition fields plus a real
+  destination, type-checks known knobs and validates `fleetSchedule.time` as
+  24h HH:MM. Policy names are re-validated locally (defense in depth against
+  traversal), invalid configs keep their last-known-good task, failed
+  registrations leave state untouched so the next check-in retries, and a
+  failed pull never removes tasks.
+- ✅ Visibility: `validateCheckin` accepts the `policies` array,
+  `deriveMachineStatus` turns `invalid`/`failed` into warning reasons on the
+  dashboard and `fleet status`, the dashboard gained a Policies column
+  (applied/total, failed highlighted), and `fleet policy apply [--dry-run]`
+  runs the same reconciliation manually with a printed result table.
+- ✅ Tests (+35, 100 fleet tests): config validation (kind gate, field types,
+  schedule format, unknown-field tolerance), the full apply lifecycle with
+  injected task helpers (apply/unchanged/re-register/removal/invalid-keeps-
+  task/failed-retry/remove-error/dry-run/sorted order/state file round-trip),
+  check-in contract for the `policies` array, status derivation with policy
+  reasons, aggregate surfacing, and settings/flag merge for
+  `autoApply`/`policyDir`.
+
 
 ### Disk-to-disk clone (selected partitions → another disk)
 - ✅ `CloneEngine` (`imaging/clone-engine.ts`): builds clone jobs exactly like

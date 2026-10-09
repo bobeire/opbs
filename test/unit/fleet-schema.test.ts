@@ -3,6 +3,7 @@ import {
   FLEET_SCHEMA_VERSION,
   fleetMachineId,
   validateCheckin,
+  validateBackupPolicy,
   deriveMachineStatus,
   lastBackupAt,
   FleetCheckin,
@@ -275,6 +276,173 @@ describe('backup-staleness (backupStaleDays)', () => {
     expect(result.status).toBe('critical');
     expect(result.reasons.some((r) => /broken restore chain/.test(r))).toBe(true);
     expect(result.reasons.some((r) => /last backup/.test(r))).toBe(true);
+  });
+});
+
+describe('policy statuses in deriveMachineStatus', () => {
+  const now = 1_700_000_000_000;
+
+  it('warns on invalid and failed policies with the reason inline', () => {
+    const doc = checkin({
+      policies: [
+        { name: 'nightly.json', status: 'invalid', reason: 'destinationPath must be a non-empty string' },
+        { name: 'weekly.json', status: 'failed', reason: 'schtasks exited with code 1' }
+      ]
+    });
+    const result = deriveMachineStatus(doc, { receivedAt: now, now });
+    expect(result.status).toBe('warning');
+    expect(result.reasons).toContain('policy nightly.json: destinationPath must be a non-empty string');
+    expect(result.reasons).toContain('policy weekly.json failed: schtasks exited with code 1');
+  });
+
+  it('ignores applied/unchanged/removed policies', () => {
+    const doc = checkin({
+      policies: [
+        { name: 'nightly.json', status: 'applied', task: 'OPBS Fleet nightly', appliedAt: now },
+        { name: 'old.json', status: 'removed' }
+      ]
+    });
+    const result = deriveMachineStatus(doc, { receivedAt: now, now });
+    expect(result.status).toBe('ok');
+    expect(result.reasons).toEqual([]);
+  });
+
+  it('lets critical outrank policy problems', () => {
+    const doc = checkin({
+      destinations: [destination({ brokenChains: 1 })],
+      policies: [{ name: 'x.json', status: 'failed', reason: 'nope' }]
+    });
+    const result = deriveMachineStatus(doc, { receivedAt: now, now });
+    expect(result.status).toBe('critical');
+    expect(result.reasons.some((r) => r.includes('broken restore chain'))).toBe(true);
+    expect(result.reasons.some((r) => r.includes('policy x.json failed'))).toBe(true);
+  });
+});
+
+describe('validateCheckin policies', () => {
+  it('accepts a well-formed policies array', () => {
+    const doc = checkin({
+      policies: [
+        { name: 'nightly.json', status: 'applied', task: 'OPBS Fleet nightly', appliedAt: 1_700_000_000_000 },
+        { name: 'bad.json', status: 'invalid', reason: 'kind must be "backup"' },
+        { name: 'gone.json', status: 'removed' }
+      ]
+    });
+    expect(validateCheckin(doc).ok).toBe(true);
+  });
+
+  it('accepts check-ins without policies (machines that do not auto-apply)', () => {
+    expect(validateCheckin(checkin()).ok).toBe(true);
+  });
+
+  it('rejects malformed policy entries with a path-precise message', () => {
+    expect(validateCheckin(checkin({ policies: 'nope' } as never))).toEqual({
+      ok: false,
+      error: 'policies is not an array'
+    });
+    expect(validateCheckin(checkin({ policies: [{ name: '', status: 'applied' }] }))).toEqual({
+      ok: false,
+      error: 'policies[0].name is missing'
+    });
+    expect(validateCheckin(checkin({ policies: [{ name: 'a.json', status: 'exported' }] } as never))).toEqual({
+      ok: false,
+      error: 'policies[0].status must be applied|unchanged|removed|invalid|failed'
+    });
+    expect(validateCheckin(checkin({ policies: [{ name: 'a.json', status: 'applied', reason: 5 }] } as never))).toEqual({
+      ok: false,
+      error: 'policies[0].reason is not a string'
+    });
+  });
+});
+
+describe('validateBackupPolicy', () => {
+  const minimal = { sourceDiskIndex: 0, sourcePartitions: [2], destinationPath: 'D:\\OPBS' };
+
+  it('accepts a minimal backup job config', () => {
+    const result = validateBackupPolicy(minimal);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config).toEqual(minimal);
+  });
+
+  it('accepts kind "backup" with a fleet schedule and unknown extra fields', () => {
+    const config = {
+      ...minimal,
+      kind: 'backup',
+      fleetSchedule: { time: '03:30', onLogin: false },
+      resume: true,
+      someFutureKnob: { deep: 1 }
+    };
+    expect(validateBackupPolicy(config).ok).toBe(true);
+  });
+
+  it('accepts kind absent (bare backup configs)', () => {
+    expect(validateBackupPolicy({ ...minimal, kind: undefined }).ok).toBe(true);
+  });
+
+  it('never auto-applies non-backup jobs', () => {
+    for (const kind of ['restore', 'clone', 'restore-drill']) {
+      const result = validateBackupPolicy({ ...minimal, kind });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain('only backup jobs can be auto-applied');
+    }
+  });
+
+  it('rejects non-objects', () => {
+    expect(validateBackupPolicy(null).ok).toBe(false);
+    expect(validateBackupPolicy([]).ok).toBe(false);
+    expect(validateBackupPolicy('backup').ok).toBe(false);
+    expect(validateBackupPolicy(42).ok).toBe(false);
+  });
+
+  it('requires a non-negative integer sourceDiskIndex', () => {
+    expect(validateBackupPolicy({ ...minimal, sourceDiskIndex: -1 })).toEqual({
+      ok: false,
+      error: 'sourceDiskIndex must be a non-negative integer'
+    });
+    expect(validateBackupPolicy({ ...minimal, sourceDiskIndex: 1.5 }).ok).toBe(false);
+    expect(validateBackupPolicy({ ...minimal, sourceDiskIndex: '0' }).ok).toBe(false);
+    expect(validateBackupPolicy({ ...minimal, sourceDiskIndex: undefined }).ok).toBe(false);
+  });
+
+  it('requires non-empty integer sourcePartitions', () => {
+    expect(validateBackupPolicy({ ...minimal, sourcePartitions: [] }).ok).toBe(false);
+    expect(validateBackupPolicy({ ...minimal, sourcePartitions: [-1] }).ok).toBe(false);
+    expect(validateBackupPolicy({ ...minimal, sourcePartitions: ['2'] }).ok).toBe(false);
+    expect(validateBackupPolicy({ ...minimal, sourcePartitions: 2 }).ok).toBe(false);
+    expect(validateBackupPolicy({ ...minimal, sourcePartitions: [1, 3] }).ok).toBe(true);
+  });
+
+  it('requires a non-empty destinationPath', () => {
+    expect(validateBackupPolicy({ ...minimal, destinationPath: '' })).toEqual({
+      ok: false,
+      error: 'destinationPath must be a non-empty string'
+    });
+    expect(validateBackupPolicy({ ...minimal, destinationPath: 5 }).ok).toBe(false);
+  });
+
+  it('type-checks the optional knobs it knows', () => {
+    expect(validateBackupPolicy({ ...minimal, compressionLevel: '3' }).ok).toBe(false);
+    expect(validateBackupPolicy({ ...minimal, compressionType: 1 }).ok).toBe(false);
+    expect(validateBackupPolicy({ ...minimal, compressionThreads: '4' }).ok).toBe(false);
+    expect(validateBackupPolicy({ ...minimal, verificationEnabled: 'yes' }).ok).toBe(false);
+    expect(validateBackupPolicy({ ...minimal, compressionLevel: 3, verificationEnabled: true }).ok).toBe(true);
+  });
+
+  it('rejects malformed fleet schedules', () => {
+    expect(validateBackupPolicy({ ...minimal, fleetSchedule: '02:00' })).toEqual({
+      ok: false,
+      error: 'fleetSchedule must be an object'
+    });
+    expect(validateBackupPolicy({ ...minimal, fleetSchedule: { time: '25:00' } })).toEqual({
+      ok: false,
+      error: 'fleetSchedule.time must be HH:MM (24h)'
+    });
+    expect(validateBackupPolicy({ ...minimal, fleetSchedule: { time: '3am' } }).ok).toBe(false);
+    expect(validateBackupPolicy({ ...minimal, fleetSchedule: { onLogin: 'yes' } })).toEqual({
+      ok: false,
+      error: 'fleetSchedule.onLogin must be a boolean'
+    });
+    expect(validateBackupPolicy({ ...minimal, fleetSchedule: { time: '00:00', onLogin: true } }).ok).toBe(true);
   });
 });
 

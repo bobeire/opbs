@@ -13,18 +13,15 @@ import * as path from 'path';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { AddressInfo } from 'net';
 import { FLEET_DASHBOARD_HTML } from './dashboard';
-import { deriveMachineStatus, FleetCheckin, FleetStatus, validateCheckin } from './schema';
+import { deriveMachineStatus, isValidPolicyName, FleetCheckin, FleetStatus, validateCheckin } from './schema';
+
+export { isValidPolicyName } from './schema';
 
 export const MAX_CHECKIN_BYTES = 256 * 1024;
 /** Policy configs use the same cap as check-ins. */
 export const MAX_POLICY_BYTES = MAX_CHECKIN_BYTES;
 /** Default days without a backup before a machine reads as stale. */
 export const DEFAULT_BACKUP_STALE_DAYS = 14;
-
-/** Policy file names are deliberately boring: no traversal, no surprises. */
-export function isValidPolicyName(name: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.json$/.test(name);
-}
 
 export interface FleetStore {
   schema: number;

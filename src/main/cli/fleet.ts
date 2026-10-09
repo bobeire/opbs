@@ -7,6 +7,7 @@ import { buildFleetReport } from '../fleet/report';
 import { deriveMachineStatus, FleetCheckin, lastBackupAt } from '../fleet/schema';
 import { sendCheckin, fetchFleet, pullPolicies, pushPolicy } from '../fleet/client';
 import { startFleetServer, DEFAULT_BACKUP_STALE_DAYS, isValidPolicyName } from '../fleet/server';
+import { applyPolicies, defaultPolicyDir } from '../fleet/policy';
 
 function fmtBytes(bytes: number | null): string {
   if (bytes == null) return '?';
@@ -49,6 +50,10 @@ export interface CheckinSettings {
   dirs?: string[];
   noMedia?: boolean;
   machineId?: string;
+  /** Pull + apply server policies on every check-in (Tier 2 auto-apply). */
+  autoApply?: boolean;
+  /** Where applied policy configs + state live (default APPDATA/opbs/fleet-policies). */
+  policyDir?: string;
 }
 
 /** Loads and type-checks a `fleet checkin --settings` JSON file. Throws with a precise message. */
@@ -96,6 +101,12 @@ export function loadCheckinSettings(filePath: string): CheckinSettings {
   if (value.machineId !== undefined) {
     settings.machineId = typeof value.machineId === 'string' ? value.machineId : bad('machineId', 'a string');
   }
+  if (value.autoApply !== undefined) {
+    settings.autoApply = typeof value.autoApply === 'boolean' ? value.autoApply : bad('autoApply', 'a boolean');
+  }
+  if (value.policyDir !== undefined) {
+    settings.policyDir = typeof value.policyDir === 'string' ? value.policyDir : bad('policyDir', 'a string');
+  }
   return settings;
 }
 
@@ -113,7 +124,16 @@ function readTokenFile(filePath: string): string {
 export function resolveCheckinInvocation(
   argv: string[],
   settings: CheckinSettings
-): { server?: string; token?: string; dirs?: string[]; includeMedia: boolean; machineId?: string; dryRun: boolean } {
+): {
+  server?: string;
+  token?: string;
+  dirs?: string[];
+  includeMedia: boolean;
+  machineId?: string;
+  dryRun: boolean;
+  autoApply: boolean;
+  policyDir?: string;
+} {
   const server = flagValue(argv, '--server') ?? settings.server;
   const inlineToken = flagValue(argv, '--token');
   const inlineTokenFile = flagValue(argv, '--token-file');
@@ -136,7 +156,9 @@ export function resolveCheckinInvocation(
     dirs: explicitDirs.length > 0 ? explicitDirs : settings.dirs,
     includeMedia: !(argv.includes('--no-media') || settings.noMedia === true),
     machineId: flagValue(argv, '--machine-id') ?? settings.machineId,
-    dryRun: argv.includes('--dry-run')
+    dryRun: argv.includes('--dry-run'),
+    autoApply: argv.includes('--auto-apply') || settings.autoApply === true,
+    policyDir: flagValue(argv, '--policy-dir') ?? settings.policyDir
   };
 }
 
@@ -235,8 +257,17 @@ async function cmdFleetCheckin(ctx: CommandContext): Promise<number> {
   if (!server) {
     console.error(
       'Usage: fleet checkin --server <url> [--settings <file>] [--token T|--token-file F] ' +
-        '[--dir <dir>]... [--no-media] [--dry-run] [--json]'
+        '[--dir <dir>]... [--no-media] [--auto-apply] [--policy-dir <dir>] [--dry-run] [--json]'
     );
+    return 1;
+  }
+  const token = invocation.token;
+  if (invocation.autoApply && !token) {
+    console.error('--auto-apply needs a token: pass --token/--token-file, put "token" in --settings, or set OPBS_FLEET_TOKEN.');
+    return 1;
+  }
+  if (!invocation.dryRun && !token) {
+    console.error('No token: pass --token/--token-file, put "token" in --settings, or set OPBS_FLEET_TOKEN.');
     return 1;
   }
 
@@ -246,17 +277,27 @@ async function cmdFleetCheckin(ctx: CommandContext): Promise<number> {
     includeMedia: invocation.includeMedia
   });
 
+  // Tier 2: reconcile local scheduled backups against the server's policies
+  // before the report goes out, so the check-in carries the apply result.
+  if (invocation.autoApply && server && token) {
+    try {
+      const list = await pullPolicies({ server, token });
+      checkin.policies = await applyPolicies(invocation.policyDir ?? defaultPolicyDir(), list, {
+        dryRun: invocation.dryRun
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      checkin.policies = [{ name: '(pull)', status: 'failed', reason: `cannot pull policies: ${detail}` }];
+      console.error(`policy sync skipped: ${detail}`);
+    }
+  }
+
   if (invocation.dryRun) {
     console.log(JSON.stringify(checkin, null, 2));
     return 0;
   }
 
-  const token = invocation.token;
-  if (!token) {
-    console.error('No token: pass --token/--token-file, put "token" in --settings, or set OPBS_FLEET_TOKEN.');
-    return 1;
-  }
-  const result = await sendCheckin(checkin, { server, token });
+  const result = await sendCheckin(checkin, { server, token: token! });
   if (ctx.opts.json) {
     console.log(JSON.stringify({ ...result, machineId: checkin.machineId }, null, 2));
   } else if (result.ok) {
@@ -370,7 +411,7 @@ async function cmdFleetPolicy(ctx: CommandContext): Promise<number> {
   const rest = ctx.argv.slice(1);
   const server = flagValue(rest, '--server');
   if (!server) {
-    console.error('Usage: fleet policy list|pull|push --server <url> [--token T|--token-file F] ...');
+    console.error('Usage: fleet policy list|pull|apply|push --server <url> [--token T|--token-file F] ...');
     return 1;
   }
   const token = resolveToken(rest);
@@ -426,6 +467,31 @@ async function cmdFleetPolicy(ctx: CommandContext): Promise<number> {
       return 0;
     }
 
+    case 'apply': {
+      const policyDir = flagValue(rest, '--policy-dir') ?? defaultPolicyDir();
+      const dryRun = rest.includes('--dry-run');
+      const list = await pullPolicies({ server, token });
+      const results = await applyPolicies(policyDir, list, { dryRun });
+      if (ctx.opts.json) {
+        console.log(JSON.stringify({ policyDir, dryRun, results }, null, 2));
+      } else {
+        for (const r of results) {
+          const marker = r.status === 'invalid' || r.status === 'failed' ? '!' : r.status === 'removed' ? '-' : '+';
+          console.log(
+            `  ${marker} ${r.status.padEnd(9)} ${r.name}` +
+              (r.task ? ` → ${r.task}` : '') +
+              (r.reason ? ` (${r.reason})` : '')
+          );
+        }
+        const bad = results.filter((r) => r.status === 'invalid' || r.status === 'failed');
+        console.log(
+          `${dryRun ? 'would apply' : 'applied'} ${results.length} polic(y/ies) in ${policyDir}` +
+            (bad.length ? `, ${bad.length} problem(s)` : '')
+        );
+      }
+      return results.some((r) => r.status === 'invalid' || r.status === 'failed') ? 1 : 0;
+    }
+
     case 'push': {
       const valueFlags = new Set(['--server', '--name', '--token', '--token-file']);
       let file: string | undefined;
@@ -460,7 +526,7 @@ async function cmdFleetPolicy(ctx: CommandContext): Promise<number> {
     }
 
     default:
-      console.error('Usage: fleet policy list|pull|push --server <url> ...');
+      console.error('Usage: fleet policy list|pull|apply|push --server <url> ...');
       return 1;
   }
 }

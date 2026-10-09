@@ -188,6 +188,7 @@ describe('fleet server', () => {
     expect(html).toBe(FLEET_DASHBOARD_HTML);
     expect(html).toContain('OPBS Fleet');
     expect(html).toContain('/api/fleet');
+    expect(html).toContain('<th>Policies</th>');
 
     const health = await fetch(`${server.url}/health`);
     expect(health.status).toBe(200);
@@ -303,6 +304,28 @@ describe('aggregateFleet', () => {
     expect(fleet.machineCount).toBe(0);
     expect(fleet.summary).toEqual({ ok: 0, warning: 0, critical: 0, stale: 0 });
     expect(fleet.backupStaleDays).toBeNull();
+  });
+
+  it('surfaces failed policy applies as a warning with the reason', () => {
+    const now = 1_700_000_000_000;
+    const fleetStore: FleetStore = {
+      schema: 1,
+      machines: {
+        p: {
+          receivedAt: now - 1000,
+          checkin: makeCheckin({
+            machineId: 'p',
+            hostname: 'policy-host',
+            policies: [{ name: 'nightly.json', status: 'failed', reason: 'schtasks exit 1' }]
+          })
+        }
+      }
+    };
+    const fleet = aggregateFleet(fleetStore, { staleDays: 7, now });
+    expect(fleet.summary.warning).toBe(1);
+    expect(fleet.machines[0].status).toBe('warning');
+    expect(fleet.machines[0].reasons).toContain('policy nightly.json failed: schtasks exit 1');
+    expect(fleet.machines[0].checkin.policies).toHaveLength(1);
   });
 });
 

@@ -240,11 +240,12 @@ Commands:
   schedule install-backup <name> --config <config.json> [--time HH:MM|--on-login] [--as-system] [--run-as-user]
   schedule install-verify <name> --dir <dir> [--scope newest|all] [--time HH:MM|--on-login] [--run-as-user]
   schedule install-drill <name> --dir <dir> --disk <targetDiskIndex> [--verify] [--time HH:MM|--on-login] [--run-as-user]
-  schedule install-checkin <name> --server <url> [--settings <file>] [--token-file <f>|--token <t>] [--dir <dir>]... [--no-media]
+  schedule install-checkin <name> --server <url> [--settings <file>] [--token-file <f>|--token <t>] [--dir <dir>]... [--no-media] [--auto-apply]
                                           Register a scheduled fleet check-in (daily --time HH:MM, default
                                           02:00, or --on-login). With --settings the task just references a
-                                          JSON settings file (short command line, token stays off the task);
-                                          inline mode embeds --server/--token-file/--dir instead.
+                                          JSON settings file (short command line, token stays off the task;
+                                          put "autoApply": true inside to auto-apply policies); inline mode
+                                          embeds --server/--token-file/--dir/--auto-apply instead.
   schedule list                          List Windows scheduled tasks.
   schedule remove <name>                 Delete a scheduled task.
   prune <directory> [options]            Apply retention/GFS policy. Never runs inside a
@@ -284,11 +285,15 @@ Commands:
                                           drills) plus a SMART disk inventory. Exits 1 when the
                                           derived machine status is critical. Without --dir the
                                           recent backup destinations are scanned.
-  fleet checkin --server <url> [--settings <file>] [--token-file F|--token T] [--dir <dir>]... [--no-media] [--dry-run] [--json]
+  fleet checkin --server <url> [--settings <file>] [--token-file F|--token T] [--dir <dir>]... [--no-media] [--auto-apply] [--policy-dir <dir>] [--dry-run] [--json]
                                           Send the check-in to a fleet server (token also from --settings or
                                           OPBS_FLEET_TOKEN). --settings <file> reads a JSON object
-                                          {server, token?, tokenFile?, dirs?, noMedia?, machineId?} — flags
-                                          override the file. --dry-run prints the JSON instead of sending.
+                                          {server, token?, tokenFile?, dirs?, noMedia?, machineId?,
+                                          autoApply?, policyDir?} — flags override the file. --dry-run
+                                          prints the JSON instead of sending it. With --auto-apply the
+                                          machine pulls the server's policies first, applies them
+                                          (validate → config file → scheduled backup task) and reports
+                                          the result inside the check-in.
   fleet serve [--host H] [--port N] [--data <dir>] [--token T] [--stale-days N] [--backup-stale-days N]
                                           Run the fleet control server (default http://127.0.0.1:8787):
                                           accepts token-authenticated check-ins, stores them in
@@ -304,6 +309,10 @@ Commands:
   fleet policy pull --server <url> [--out DIR] [--overwrite] [--json]
                                           Download every policy into DIR (default ./fleet-policies);
                                           existing files are kept unless --overwrite.
+  fleet policy apply --server <url> [--policy-dir DIR] [--dry-run] [--json]
+                                          Pull the policies and apply them here (same reconciliation
+                                          as check-in auto-apply): register/refresh the scheduled
+                                          backup tasks, drop removed ones. --dry-run previews.
   fleet policy push <config.json> --server <url> [--name <name.json>]
                                           Upload a backup job config as a server-side policy. Drop files
                                           into <dataDir>/policies/ on the server to publish them.
@@ -1868,7 +1877,8 @@ async function cmdScheduleInstallCheckin(ctx: CommandContext): Promise<number> {
   if (!name || (!settingsFile && !server)) {
     console.error(
       'Usage: schedule install-checkin <name> --server <url> [--settings <file>] ' +
-        '[--token-file <f>|--token <t>] [--dir <dir>]... [--no-media] [--time HH:MM|--on-login] [--run-as-user] [--as-system]'
+        '[--token-file <f>|--token <t>] [--dir <dir>]... [--no-media] [--auto-apply] [--policy-dir <dir>] ' +
+        '[--time HH:MM|--on-login] [--run-as-user] [--as-system]'
     );
     return 1;
   }
@@ -1892,6 +1902,9 @@ async function cmdScheduleInstallCheckin(ctx: CommandContext): Promise<number> {
     }
     for (const dir of flagValues(ctx.argv, '--dir')) parts.push(`--dir "${dir}"`);
     if (ctx.argv.includes('--no-media')) parts.push('--no-media');
+    if (ctx.argv.includes('--auto-apply')) parts.push('--auto-apply');
+    const policyDir = flagValue(ctx.argv, '--policy-dir');
+    if (policyDir) parts.push(`--policy-dir "${policyDir}"`);
     commandLine = parts.join(' ');
     if (!tokenFile && !token) {
       console.log(
@@ -1900,7 +1913,8 @@ async function cmdScheduleInstallCheckin(ctx: CommandContext): Promise<number> {
       );
     }
     if (commandLine.length > 250) {
-      console.log('note: long command line — schtasks caps /TR at 261 chars; prefer a --settings file');
+      console.log('note: long command line — schtasks caps /TR at 261 chars; prefer a --settings file' +
+        (ctx.argv.includes('--auto-apply') ? ' (with "autoApply": true inside it)' : ''));
     }
   }
 
