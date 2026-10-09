@@ -1,5 +1,7 @@
 # OPBS — Open Pickle Backup System
 
+The ultimate FOSS imaging solution
+
 A FOSS disk imaging backup solution for Windows, inspired by Macrium Reflect.
 created by **RHITCS** — named in honour of a certain well-preserved pickle.
 
