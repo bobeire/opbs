@@ -21,6 +21,7 @@ import type { VssJob, VssJobResult } from './utils/vss';
 import { winfspAvailable, winfspLoadNote } from './imaging/mount-manager';
 import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains, writeManifest } from './backup/retention';
 import { checkDiskHealth } from './utils/disk-health';
+import { toDiskIndex, toChkdskVolume } from './utils/input-guard';
 import { runCli } from './cli';
 import { readImageInfo, verifyImage, CIPHER_NONE, deriveImageKey, clearImageInfoCache } from './imaging/image-format';
 import { openAnyBrowse as fsOpenBrowseAny, listDirectory, extractPath, detectPartitionFilesystem, BrowseSession } from './imaging/fs/file-browse';
@@ -568,7 +569,7 @@ function setupIpcHandlers(): void {
   });
 
   ipcMain.handle('get-partitions', async (_, diskIndex: number) => {
-    return diskEnumerator.getPartitions(diskIndex);
+    return diskEnumerator.getPartitions(toDiskIndex(diskIndex));
   });
 
   // Backup operations
@@ -1236,7 +1237,7 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
 
   // Disk health
   ipcMain.handle('check-disk-health', async (_, diskIndex: number) => {
-    return checkDiskHealth(diskIndex);
+    return checkDiskHealth(toDiskIndex(diskIndex));
   });
 
   // SMART health inventory across every physical disk (not just destinations).
@@ -1248,12 +1249,12 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
   // Disk tools
   ipcMain.handle('get-mbr-info', async (_, diskIndex: number) => {
     const { getMbrInfo } = await import('./utils/disk-tools');
-    return getMbrInfo(diskIndex);
+    return getMbrInfo(toDiskIndex(diskIndex));
   });
 
   ipcMain.handle('get-mbr-raw', async (_, diskIndex: number) => {
     const { getMbrRaw } = await import('./utils/disk-tools');
-    return getMbrRaw(diskIndex);
+    return getMbrRaw(toDiskIndex(diskIndex));
   });
 
   ipcMain.handle('bootrec-fix-mbr', async () => {
@@ -1268,17 +1269,17 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
 
   ipcMain.handle('chkdsk-scan', async (_, volume: string) => {
     const { chkdskScan } = await import('./utils/disk-tools');
-    return chkdskScan(volume);
+    return chkdskScan(toChkdskVolume(volume));
   });
 
   ipcMain.handle('chkdsk-fix', async (_, volume: string) => {
     const { chkdskFix } = await import('./utils/disk-tools');
-    return chkdskFix(volume);
+    return chkdskFix(toChkdskVolume(volume));
   });
 
   ipcMain.handle('chkdsk-bad-sectors', async (_, volume: string) => {
     const { chkdskBadSectors } = await import('./utils/disk-tools');
-    return chkdskBadSectors(volume);
+    return chkdskBadSectors(toChkdskVolume(volume));
   });
 
   ipcMain.handle('get-trim-status', async () => {
@@ -1288,7 +1289,7 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
 
   ipcMain.handle('retrim-volume', async (_, volume: string) => {
     const { retrimVolume } = await import('./utils/disk-tools');
-    return retrimVolume(volume);
+    return retrimVolume(toChkdskVolume(volume));
   });
 
   ipcMain.handle('get-smart-all-disks', async () => {

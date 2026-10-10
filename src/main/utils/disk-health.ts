@@ -1,6 +1,7 @@
 import { execFileSync } from 'child_process';
 import { logger } from './logger';
 import { resolvePowershell } from './elevated';
+import { toDiskIndex } from './input-guard';
 
 export interface DiskReliability {
   model?: string;
@@ -63,6 +64,9 @@ $rc = $disk | Get-StorageReliabilityCounter -ErrorAction SilentlyContinue
  */
 export function queryReliability(diskIndex: number): DiskReliability | null {
   try {
+    // diskIndex is interpolated into the PowerShell command below — re-check
+    // it at the sink (IPC callers can pass anything despite the TS annotation).
+    diskIndex = toDiskIndex(diskIndex);
     const out = execFileSync(
       resolvePowershell(),
       ['-NoProfile', '-NonInteractive', '-Command', `$diskIndex = ${diskIndex}; ${PS_SCRIPT}`],

@@ -1,5 +1,6 @@
 import { execFileSync } from 'child_process';
 import { psQuote, resolvePowershell, runElevatedPowerShell } from './elevated';
+import { toDiskIndex, toChkdskVolume } from './input-guard';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -200,6 +201,9 @@ export function parseMbrRaw(buf: Buffer): Omit<MbrInfo, 'ok' | 'diskIndex'> {
 
 export function getMbrInfo(diskIndex: number): MbrInfo {
   try {
+    // diskIndex is interpolated into PowerShell text below — re-check it at
+    // the sink (IPC callers can pass anything despite the TS annotation).
+    diskIndex = toDiskIndex(diskIndex);
     const ps = [
       `$d = Get-Disk -Number ${diskIndex} -ErrorAction Stop`,
       `$partStyle = $d.PartitionStyle`,
@@ -264,6 +268,9 @@ export function getMbrInfo(diskIndex: number): MbrInfo {
 
 export async function getMbrRaw(diskIndex: number): Promise<{ ok: boolean; error?: string; diskIndex: number; bootSignature: string; diskSignatureHex: string; partitions: MbrPartitionEntry[] }> {
   try {
+    // diskIndex is interpolated into PowerShell text below — re-check it at
+    // the sink (IPC callers can pass anything despite the TS annotation).
+    diskIndex = toDiskIndex(diskIndex);
     const ps = [
       `$stream = [System.IO.FileStream]::new("\\\\.\\PhysicalDrive${diskIndex}", [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)`,
       `$buffer = New-Object byte[] 512`,
@@ -338,6 +345,7 @@ export interface ChkdskResult {
 
 export function chkdskScan(volume: string): ChkdskResult {
   try {
+    volume = toChkdskVolume(volume);
     const output = run([`chkdsk ${volume} /scan 2>&1`], 60000);
     return { ok: true, volume, mode: 'scan', output };
   } catch (error) {
@@ -347,6 +355,7 @@ export function chkdskScan(volume: string): ChkdskResult {
 
 export async function chkdskFix(volume: string): Promise<ChkdskResult> {
   try {
+    volume = toChkdskVolume(volume);
     const result = await runElevated(`& chkdsk ${volume} /f 2>&1`);
     const output = (result.stdout + '\n' + result.stderr).trim();
     const locked = output.includes('cannot lock') || output.includes('scheduled');
@@ -358,6 +367,7 @@ export async function chkdskFix(volume: string): Promise<ChkdskResult> {
 
 export async function chkdskBadSectors(volume: string): Promise<ChkdskResult> {
   try {
+    volume = toChkdskVolume(volume);
     const result = await runElevated(`& chkdsk ${volume} /r 2>&1`);
     const output = (result.stdout + '\n' + result.stderr).trim();
     const locked = output.includes('cannot lock') || output.includes('scheduled');
@@ -389,6 +399,7 @@ export function getTrimStatus(): TrimStatus {
 
 export async function retrimVolume(volume: string): Promise<{ ok: boolean; error?: string; output: string }> {
   try {
+    volume = toChkdskVolume(volume);
     const result = await runElevated(`& defrag ${volume} /L 2>&1`);
     return { ok: result.exitCode === 0, output: (result.stdout + '\n' + result.stderr).trim() };
   } catch (error) {

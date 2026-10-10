@@ -349,6 +349,31 @@ implemented; **Investigate** items need spike work first.
   (grouping + base protection after a move) and `chain-health.test.ts`
   (moved folder reports complete, no missing bases).
 
+### IPC input hardening — disk/volume sinks (0.6.75)
+- ✅ Defense in depth at the IPC boundary: the disk tools
+  (`get-mbr-info`, `get-mbr-raw`, `check-disk-health`) interpolated the
+  renderer-supplied `diskIndex` straight into PowerShell `-Command` text
+  (`Get-Disk -Number ${diskIndex}`, `\\.\PhysicalDrive${diskIndex}`,
+  `$diskIndex = ${diskIndex}; ...`), and the chkdsk/retrim handlers did the
+  same with `volume` (`chkdsk ${volume} /scan`, `& defrag ${volume} /L`).
+  TypeScript annotations are erased at runtime — `contextIsolation` and
+  `nodeIntegration: false` harden the renderer, but a compromised renderer
+  can still `invoke` any handler with any argument shape, so main must
+  re-validate anything that reaches a command string.
+- ✅ New `src/main/utils/input-guard.ts`: `toDiskIndex` (non-negative
+  integer only) and `toChkdskVolume` (bare drive letter, optional trailing
+  slash — `^[A-Za-z]:\\?$`, matching what the UI sends). Both are applied
+  at the **sinks** (`queryReliability`, `getMbrInfo`, `getMbrRaw`,
+  `chkdskScan/Fix/BadSectors`, `retrimVolume`) so the CLI/helper-process
+  paths are covered too, and at the IPC handlers for clean boundary
+  errors. `get-partitions` was never injectable (the value crosses into
+  the native addon, coerced to int32) but now validates at the boundary as
+  well. BitLocker unlock already validated its letter (`/^[A-Z]$/`) —
+  this brings the rest of the surface to the same standard.
+- ✅ Tests: `input-guard.test.ts` — payload rejection (`0; Start-Process
+  calc`, floats, negatives, non-strings) plus sink-level assertions that
+  malicious values are refused *before* any process spawns.
+
 ### Multi-machine fleet control — Tier 0 (0.6.67)
 - ✅ Check-in contract (`src/main/fleet/schema.ts`): versioned, flat
   `FleetCheckin` JSON — machine identity (hostname+arch hash, `--machine-id`
