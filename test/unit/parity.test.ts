@@ -26,6 +26,7 @@ import {
 } from '../../src/main/imaging/image-format';
 import {
   buildParity,
+  buildParityAsync,
   verifyParity,
   repairParityBlock,
   paritySidecarPath,
@@ -226,5 +227,60 @@ describe('parity (XOR repair)', () => {
     const report = buildParity(imagePath);
     expect(report.groups).toBe(2);
     expect(report.blocksProtected).toBe(PARITY_GROUP_SIZE + 2);
+  });
+});
+
+describe('parity async (worker thread)', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-parity-async-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('produces a byte-identical sidecar to the sync build', async () => {
+    const imagePath = path.join(dir, 'img.opbs');
+    writeImageFromBytes(imagePath, makeRaw(40), BLOCK);
+
+    const report = await buildParityAsync(imagePath);
+    expect(report.groups).toBeGreaterThan(0);
+    expect(report.blocksProtected).toBe(40);
+
+    const asyncBytes = fs.readFileSync(paritySidecarPath(imagePath));
+
+    // Rebuild synchronously over the same image and compare raw bytes: the
+    // sidecar format carries no timestamps, so the two must match exactly.
+    const syncReport = buildParity(imagePath);
+    const syncBytes = fs.readFileSync(paritySidecarPath(imagePath));
+
+    expect(report).toEqual(syncReport);
+    expect(Buffer.compare(asyncBytes, syncBytes)).toBe(0);
+    expect(verifyParity(imagePath).ok).toBe(true);
+  });
+
+  it('streams monotonic per-group progress that ends at the total', async () => {
+    const imagePath = path.join(dir, 'img.opbs');
+    writeImageFromBytes(imagePath, makeRaw(PARITY_GROUP_SIZE * 2 + 5), BLOCK);
+
+    const progress: Array<[number, number]> = [];
+    const report = await buildParityAsync(imagePath, (done, total) => {
+      progress.push([done, total]);
+    });
+
+    expect(progress.length).toBe(report.groups);
+    for (let i = 0; i < progress.length; i++) {
+      expect(progress[i][0]).toBe(i + 1);
+      expect(progress[i][1]).toBe(report.groups);
+    }
+    expect(progress[progress.length - 1][0]).toBe(progress[progress.length - 1][1]);
+  });
+
+  it('rejects for a missing image and leaves no sidecar behind', async () => {
+    const imagePath = path.join(dir, 'missing.opbs');
+    await expect(buildParityAsync(imagePath)).rejects.toThrow();
+    expect(fs.existsSync(paritySidecarPath(imagePath))).toBe(false);
   });
 });

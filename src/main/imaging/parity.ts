@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { Worker } from 'worker_threads';
 import {
   readImageInfo,
   crc32,
@@ -88,8 +89,15 @@ function xorInto(target: Buffer, src: Buffer, length: number): void {
  * Build (or rebuild) the `.opar` sidecar for an image. Reads frame bytes from
  * the image and XORs them into per-group parity blocks. Does not touch the
  * image itself. Returns the group count (0 for images with no block index).
+ *
+ * `onProgress` (optional) is invoked once per completed group with
+ * `(groupsDone, groupsTotal)` — every sync call site can ignore it; the
+ * worker-thread wrapper uses it to stream progress to the main process.
  */
-export function buildParity(imagePath: string): ParityBuildReport {
+export function buildParity(
+  imagePath: string,
+  onProgress?: (groupsDone: number, groupsTotal: number) => void
+): ParityBuildReport {
   const info = readImageInfo(imagePath);
   const nameBuf = Buffer.from(path.basename(imagePath), 'utf-8');
   const headerBufferLen = 24 + nameBuf.length;
@@ -132,6 +140,7 @@ export function buildParity(imagePath: string): ParityBuildReport {
     const parityBuf = Buffer.alloc(4 * 1024 * 1024);
     const frameBuf = Buffer.alloc(4 * 1024 * 1024);
 
+    let groupsDone = 0;
     for (const group of groups) {
       if (group.parityLen > parityBuf.length) {
         throw new Error(`${label}: group parity exceeds scratch buffer`);
@@ -168,6 +177,8 @@ export function buildParity(imagePath: string): ParityBuildReport {
       fs.writeSync(outFd, parityBuf, 0, group.parityLen, cursor);
       cursor += group.parityLen;
       parityBytes += group.parityLen;
+      groupsDone++;
+      onProgress?.(groupsDone, groups.length);
     }
 
     return { sidecarPath, groups: groups.length, blocksProtected, parityBytes };
@@ -379,4 +390,55 @@ export function repairParityBlock(imagePath: string, blockIndex: number): Parity
     fs.closeSync(sidecarFd);
     fs.closeSync(imgFd);
   }
+}
+
+/**
+ * Resolve the path to the compiled parity worker. Mirrors the
+ * compression-pool resolution: in production the worker lives next to this
+ * module in dist/; in vitest (running from source) fall back to dist/.
+ */
+function resolveParityWorkerPath(): string {
+  const candidate = path.resolve(__dirname, 'parity-worker.js');
+  if (fs.existsSync(candidate)) return candidate;
+  const distCandidate = path.resolve(__dirname, '../../../dist/imaging/parity-worker.js');
+  if (fs.existsSync(distCandidate)) return distCandidate;
+  return candidate; // let it fail with a clear error
+}
+
+/**
+ * Run {@link buildParity} on a worker thread so the Electron main thread (or
+ * any other event loop) stays responsive while every frame of the image is
+ * re-read. Streams per-group progress; resolves with the same report the
+ * sync build returns. On failure the worker has already removed the partial
+ * sidecar (buildParity's own catch), so the promise simply rejects.
+ */
+export function buildParityAsync(
+  imagePath: string,
+  onProgress?: (groupsDone: number, groupsTotal: number) => void
+): Promise<ParityBuildReport> {
+  return new Promise<ParityBuildReport>((resolve, reject) => {
+    const worker = new Worker(resolveParityWorkerPath(), {
+      workerData: { imagePath }
+    });
+    let settled = false;
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      fn();
+      void worker.terminate();
+    };
+    worker.on('message', (msg: { type: string; groupsDone?: number; groupsTotal?: number; report?: ParityBuildReport; error?: string }) => {
+      if (msg.type === 'progress') {
+        onProgress?.(msg.groupsDone ?? 0, msg.groupsTotal ?? 0);
+      } else if (msg.type === 'done') {
+        settle(() => resolve(msg.report!));
+      } else if (msg.type === 'error') {
+        settle(() => reject(new Error(msg.error ?? 'Parity worker failed')));
+      }
+    });
+    worker.on('error', (err) => settle(() => reject(err)));
+    worker.on('exit', (code) => {
+      settle(() => reject(new Error(`Parity worker exited unexpectedly with code ${code}`)));
+    });
+  });
 }

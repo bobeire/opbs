@@ -374,6 +374,24 @@ implemented; **Investigate** items need spike work first.
   calc`, floats, negatives, non-strings) plus sink-level assertions that
   malicious values are refused *before* any process spawns.
 
+### Parity build off the main thread (0.6.77)
+- ✅ Post-backup XOR parity (`buildParity`) re-reads every frame of the new
+  image via thousands of synchronous `fs` calls — on the Electron main
+  thread that froze the whole UI during the "finalizing" phase (the label
+  painted once, then the window went unresponsive until the sidecar was
+  done, and the completion screen could not appear until parity finished).
+  It now runs on a **worker thread** (`parity-worker.ts`): the main thread
+  stays fully responsive, per-group progress streams back over
+  `postMessage` so the finalizing label shows a live percentage
+  (`Building parity recovery data… 47%`), and the sidecar is byte-identical
+  to the sync build (both paths share the same code). Semantics unchanged:
+  a backup is not "completed" until its recovery data exists, and parity
+  failure remains a logged warning, never a backup failure. Sync
+  `buildParity` is untouched for CLI/WinPE (`parity build`, scrub child
+  processes) where there is no event loop to keep alive. Cancellable
+  parity deliberately deferred (single sequential read, a fraction of the
+  backup's own runtime; a half-written sidecar state isn't worth it yet).
+
 ### PBKDF2 work factor raised to OWASP guidance (0.6.76)
 - ✅ New encrypted images and passphrase-mode repositories now stretch keys
   with **600,000** PBKDF2-HMAC-SHA256 iterations (OWASP 2023+ guidance),

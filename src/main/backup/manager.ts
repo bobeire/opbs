@@ -9,7 +9,7 @@ import { JobProgress, JobResult } from '../imaging/imaging-job';
 import { normalizeBackupLocation } from '../utils/location';
 import { recordBackupDestination } from '../utils/recent';
 import { recordBackupAnalytics } from '../utils/backup-analytics';
-import { buildParity } from '../imaging/parity';
+import { buildParityAsync } from '../imaging/parity';
 import { checkMediaHealth } from '../utils/media-health';
 import { isNonFilesystemLocation } from '../utils/location';
 import { isVirtualDiskPath } from '../utils/virtual-disk';
@@ -110,9 +110,11 @@ export class BackupManager extends EventEmitter {
       // backup. It used to run silently after the helper already reported
       // 100%/"completed", so the wizard sat on a finished-looking progress
       // bar with no way to reach the completion screen. Surface it as its
-      // own phase so the user sees real activity, and build parity on the
-      // next tick so the final 'completed' emit + IPC return are not held
-      // hostage by the parity pass.
+      // own phase so the user sees real activity — and run it on a worker
+      // thread so the main thread (and the whole UI) stays responsive while
+      // every frame is re-read, with per-group progress instead of a frozen
+      // window. The final 'completed' emit still waits for parity: a backup
+      // is not done until its recovery data exists.
       this.emitProgress({
         phase: 'finalizing',
         percentComplete: 100,
@@ -124,7 +126,18 @@ export class BackupManager extends EventEmitter {
       });
       await new Promise<void>((resolve) => setImmediate(resolve));
       try {
-        buildParity(result.imagePath);
+        await buildParityAsync(result.imagePath, (groupsDone, groupsTotal) => {
+          const pct = groupsTotal > 0 ? Math.round((groupsDone / groupsTotal) * 100) : 100;
+          this.emitProgress({
+            phase: 'finalizing',
+            percentComplete: 100,
+            bytesProcessed: result.bytesWritten,
+            totalBytes: result.totalBytes,
+            speed: 0,
+            estimatedTimeRemaining: 0,
+            currentPartition: `Building parity recovery data… ${pct}%`
+          });
+        });
       } catch (error) {
         logger.warn(`Could not build parity for ${result.imagePath}: ${error instanceof Error ? error.message : error}`);
       }
