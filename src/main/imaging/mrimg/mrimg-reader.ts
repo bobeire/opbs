@@ -86,21 +86,29 @@ function loadBaseChainBlock(
  * (QuickLZ) image.
  *
  * Block N of a partition covers partition bytes
- * `[dataStart + N*blockSize, dataStart + (N+1)*blockSize)`. For an NTFS volume
- * the boot sector (LCN 0) lives at `lcn0Offset` within those bytes, so reads
- * are shifted by that offset: reader offset 0 always maps to the volume start,
- * exactly what the shared NTFS layer expects.
+ * `[dataStart + N*blockSize, dataStart + (N+1)*blockSize)`. `dataStart` is
+ * `lcn0_offset - start`: 0 for NTFS (LCN 0 holds the boot sector, so block 0
+ * *is* the boot sector), and megabytes for FAT32, whose boot area + FATs
+ * before the first cluster are stored separately as the index's "reserved"
+ * track. This reader maps that track in front of the data blocks, so reader
+ * offset 0 is always the partition's boot sector — what the NTFS/FAT32/exFAT
+ * browse and restore layers expect.
  */
 
 export class MacriumPartitionReader implements PartitionReader {
   size: number;
+  /** Partition bytes before the filesystem's first cluster (FAT32 boot region). */
+  private readonly dataStart: number;
+  private readonly blockCount: number;
   private readonly compressed: boolean;
+  private reservedTrack: Buffer | undefined;
 
   constructor(
     private readonly info: MacriumImageInfo,
     private readonly part: MacriumPartitionInfo
   ) {
     this.compressed = !!this.info.compression.level && this.info.compression.level !== 'none';
+    this.dataStart = this.part.dataStart > 0 ? this.part.dataStart : 0;
     // An incremental has no full-extent index of its own; its extent is the
     // base's. readMacriumImage resolves that when the base is on disk, but a
     // reader built directly on an unresolved part needs it here.
@@ -112,7 +120,18 @@ export class MacriumPartitionReader implements PartitionReader {
         blockCount = 0;
       }
     }
-    this.size = blockCount * this.part.blockSize;
+    this.blockCount = blockCount;
+    const dataBytes = blockCount * this.part.blockSize;
+    // dataStart === 0 keeps the historic size (NTFS chains rely on it); a
+    // FAT32 boot region extends the reader over the reserved track, capped
+    // by the captured partition extent when the container records one (the
+    // index may round blockCount up past the partition's last byte).
+    this.size =
+      this.dataStart === 0
+        ? dataBytes
+        : this.part.geometry.length > 0
+          ? Math.min(this.dataStart + dataBytes, this.part.geometry.length)
+          : this.dataStart + dataBytes;
   }
 
   read(offset: number, length: number): Buffer {
@@ -124,8 +143,16 @@ export class MacriumPartitionReader implements PartitionReader {
     let outPos = 0;
     let cur = offset;
     while (outPos < length) {
-      const idx = Math.floor(cur / this.part.blockSize);
-      const inBlock = cur % this.part.blockSize;
+      if (cur < this.dataStart) {
+        const want = Math.min(length - outPos, this.dataStart - cur);
+        this.loadReservedTrack().copy(out, outPos, cur, cur + want);
+        outPos += want;
+        cur += want;
+        continue;
+      }
+      const rel = cur - this.dataStart;
+      const idx = Math.floor(rel / this.part.blockSize);
+      const inBlock = rel % this.part.blockSize;
       const want = Math.min(length - outPos, this.part.blockSize - inBlock);
       const data = this.loadBlock(idx);
       data.copy(out, outPos, inBlock, inBlock + want);
@@ -158,7 +185,7 @@ export class MacriumPartitionReader implements PartitionReader {
   }
 
   private loadBlock(idx: number): Buffer {
-    const totalBlocks = this.size / this.part.blockSize;
+    const totalBlocks = this.blockCount;
     if (idx >= totalBlocks) {
       throw new Error(`Macrium block index out of range: ${idx}`);
     }
@@ -238,15 +265,49 @@ export class MacriumPartitionReader implements PartitionReader {
     // matches, so the data is correct — the block size was misdetected. Correct
     // it and return the full block.
     (this.part as { blockSize: number }).blockSize = raw.length;
-    (this as { size: number }).size = totalBlocks * raw.length;
+    (this as { size: number }).size = this.dataStart + totalBlocks * raw.length;
     return raw;
+  }
+
+  /**
+   * The reserved/boot-region track (FAT32 boot area + FATs): every index
+   * element decompressed, hash-verified and concatenated, then truncated to
+   * `dataStart` bytes. Built once per reader and shared across reads.
+   */
+  private loadReservedTrack(): Buffer {
+    if (this.reservedTrack) return this.reservedTrack;
+    const els = this.part.reserved ?? [];
+    const chunks: Buffer[] = [];
+    for (const el of els) {
+      if (el.storedLength <= 0 || el.filePosition < 0) {
+        throw new MacriumUnsupportedError(
+          `${this.info.imagePath}: the reserved boot region of partition ${this.part.partitionIndex} has an uncaptured gap; browsing needs a capture that includes the boot sector.`
+        );
+      }
+      const src = this.resolveBlockSource(el.fileNumber);
+      const stored = readImageFileRange(src.path, el.filePosition, el.storedLength);
+      const raw = src.compressed ? decompressBlock(stored, COMPRESSION_ZSTD) : stored;
+      const digest = createHash('md5').update(raw).digest();
+      if (!digest.equals(el.md5)) {
+        throw new Error(`Macrium reserved block failed hash verification in ${src.path}.`);
+      }
+      chunks.push(raw);
+    }
+    const track = Buffer.concat(chunks);
+    if (track.length < this.dataStart) {
+      throw new MacriumUnsupportedError(
+        `${this.info.imagePath}: the reserved boot region of partition ${this.part.partitionIndex} is captured short (${track.length} of ${this.dataStart} bytes); browsing needs a capture that includes the boot sector.`
+      );
+    }
+    this.reservedTrack = track.subarray(0, this.dataStart);
+    return this.reservedTrack;
   }
 }
 
 /**
  * Build a partition reader for a Macrium image, rejecting the container
  * features that are recognised but not yet readable (encryption, splits,
- * delta chains, reserved-sector/FAT data regions).
+ * delta chains without their base, headless captures).
  */
 export function openMacriumPartitionReader(
   info: MacriumImageInfo,
@@ -268,9 +329,16 @@ export function openMacriumPartitionReader(
       `${info.imagePath}: partition ${partitionIndex} has no data blocks in this image.`
     );
   }
-  if (part.dataStart !== 0) {
+  // `$JSON` records where the filesystem's first cluster sits
+  // (`lcn0_offset - start`). NTFS always has 0 (LCN 0 holds the boot sector).
+  // FAT32 reserves megabytes of boot area + FATs, captured separately as the
+  // index's reserved track — the reader maps it in front of the data blocks.
+  // dataStart > 0 with no reserved track means the boot region was never
+  // captured (a headless/partial capture): refuse, since a reader maps
+  // offset 0 to the boot sector and a shifted stream would corrupt every byte.
+  if (part.dataStart > 0 && !(part.reserved ?? []).some((el) => el.storedLength > 0)) {
     throw new MacriumUnsupportedError(
-      `${info.imagePath}: partition ${partitionIndex} (${part.fsType}) has a reserved-sectors data region; only NTFS volumes are browsable.`
+      `${info.imagePath}: partition ${partitionIndex} (${part.fsType}) reserves a ${part.dataStart}-byte boot region that is not captured in this image; browsing needs a capture that includes the boot sector.`
     );
   }
   // A chain member needs its base image on disk to resolve carried-forward and

@@ -185,6 +185,15 @@ export interface MacriumPartitionInfo {
   offsetOnDisk?: number;
   blocks: MacriumIndexElement[];
   /**
+   * mrimgx reserved/boot-region elements: the sectors before the
+   * filesystem's first cluster (FAT32 boot area + FATs), stored as one or
+   * more compressed tracks when `dataStart > 0`. The reader maps these in
+   * front of `blocks` so reader offset 0 is always the partition's boot
+   * sector. Absent when `dataStart` is 0 (NTFS: LCN 0 holds the boot sector,
+   * so every block is a data block).
+   */
+  reserved?: MacriumIndexElement[];
+  /**
    * mrimgx delta $INDEX records: the blocks this file stores locally, each
    * with the logical block slot it overlays during chain composition. Present
    * only on delta-incremental containers; `blocks` holds the composed
@@ -1340,6 +1349,7 @@ function readMacriumImageUncached(imagePath: string, opts: MrimgxParseOptions = 
 
       let blocks: MacriumIndexElement[] = [];
       let deltaBlocks: Array<MacriumIndexElement & { blockIndex: number }> | undefined;
+      let reserved: MacriumIndexElement[] = [];
       // Split containers carry no $INDEX sections. Delta containers store a
       // 34-byte record shape, parsed into `deltaBlocks` (the composed
       // full-extent view is built from them during set resolution). The group
@@ -1352,6 +1362,7 @@ function readMacriumImageUncached(imagePath: string, opts: MrimgxParseOptions = 
           const parsedIndex = parseIndexPayload(payload, info.deltaIndex);
           blocks = parsedIndex.blocks;
           deltaBlocks = parsedIndex.deltaBlocks;
+          reserved = parsedIndex.reserved;
         }
         g++;
       }
@@ -1380,6 +1391,7 @@ function readMacriumImageUncached(imagePath: string, opts: MrimgxParseOptions = 
         // partition on a restore target.
         offsetOnDisk: num(partGeometry.start, 0) || num(partFs.start, 0),
         blocks,
+        ...(reserved.length ? { reserved } : {}),
         ...(deltaBlocks ? { deltaBlocks } : {})
       });
     });

@@ -60,3 +60,23 @@ export function findV7ChainSample(): V7ChainSample {
     present: !!full && fs.existsSync(diff) && fs.existsSync(inc)
   };
 }
+
+/**
+ * Real `.mrimgx` (Reflect X) samples, gitignored like the v7 ones:
+ *  - `$OPBS_MRIMGX_SAMPLE` points at one image (highest priority),
+ *  - else every `*.mrimgx` in `imagefilesamples/`.
+ */
+export function findMrimgxSamples(): string[] {
+  const env = process.env.OPBS_MRIMGX_SAMPLE;
+  if (env && fs.existsSync(env)) return [env];
+  const dir = path.join(REPO_ROOT, 'imagefilesamples');
+  try {
+    return fs
+      .readdirSync(dir)
+      .filter((n) => /\.mrimgx$/i.test(n))
+      .sort()
+      .map((n) => path.join(dir, n));
+  } catch {
+    return [];
+  }
+}

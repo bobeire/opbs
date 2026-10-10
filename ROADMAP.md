@@ -289,6 +289,36 @@ implemented; **Investigate** items need spike work first.
   over 64 MiB): it compares the restored extent in memory, which a sparse
   multi-hundred-gigabyte fleet partition would take down with it.
 
+### Reflect X (.mrimgx) real-sample validation (0.6.73)
+- ✅ Ground-truth validation against three real Reflect X full images
+  (100 MiB FAT32 EFI system partitions on a 500 GB GPT disk, zstd/medium,
+  unencrypted): the `$JSON`/`$INDEX`/`$TRACK0` chains parse cleanly
+  (1 partition, 1600 × 64 KiB data blocks, ~5.8k blocks/sample when full),
+  `unsupported` and `restoreRefusal` are null, and every stored block the
+  reader serves is MD5-verified against its index record.
+- ✅ Bug fixed for FAT32 volumes with large boot regions: the filesystem
+  reserves megabytes before its first cluster (`lcn0_offset - start` =
+  4 MiB on these samples), so the data blocks start at LCN 0 — not at the
+  boot sector — and the boot area + FATs are captured separately as the
+  index's single "reserved" track (one zstd frame at the head of the file,
+  86 KB stored for the 4 MiB region). The reader used to refuse any
+  partition with `dataStart > 0` ("only NTFS volumes are browsable");
+  instead it now maps the reserved track in front of the data blocks
+  (`MacriumPartitionInfo.reserved` is populated by the parser), so reader
+  offset 0 is always the boot sector — what the NTFS/FAT32/exFAT browse
+  and restore layers expect. A `dataStart > 0` image *without* a reserved
+  track (a headless capture) is still refused with a clear message.
+- ✅ End-to-end FAT32 browse proven on all three samples: boot sector
+  (`EB 58 90 MSDOS5.0`, `"FAT32   "` @0x52, `55 AA`) reads from the
+  reserved track, the filesystem layers detect FAT32, and directory
+  listings walk the ESP (`EFI/`, `System Volume Information/`).
+- ✅ Real-sample suite `test/unit/mrimgx-real.test.ts` (17 tests) discovers
+  samples via `findMrimgxSamples()` (`$OPBS_MRIMGX_SAMPLE` or every
+  `imagefilesamples/*.mrimgx`) and skips cleanly when none are present;
+  synthetic regressions cover the reserved-track mapping (including a
+  boundary-spanning read and the headless-capture refusal) without needing
+  real samples.
+
 ### Multi-machine fleet control — Tier 0 (0.6.67)
 - ✅ Check-in contract (`src/main/fleet/schema.ts`): versioned, flat
   `FleetCheckin` JSON — machine identity (hostname+arch hash, `--machine-id`
