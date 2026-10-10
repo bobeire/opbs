@@ -52,7 +52,13 @@ export const GCM_IV_LENGTH = 12;
 export const GCM_TAG_LENGTH = 16;
 export const SALT_LENGTH = 16;
 export const KEY_LENGTH = 32;
-export const KDF_ITERATIONS_DEFAULT = 210000;
+/**
+ * PBKDF2-HMAC-SHA256 iterations for new encrypted images (OWASP 2023+
+ * guidance). Stored per-image in the header, so existing images keep
+ * deriving with their recorded count — bumping this only strengthens
+ * images created from now on.
+ */
+export const KDF_ITERATIONS_DEFAULT = 600000;
 
 /** Byte offset of the fixed-size base-image path field inside the header. */
 export const BASE_IMAGE_PATH_OFFSET = 128;

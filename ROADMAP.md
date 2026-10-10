@@ -374,6 +374,20 @@ implemented; **Investigate** items need spike work first.
   calc`, floats, negatives, non-strings) plus sink-level assertions that
   malicious values are refused *before* any process spawns.
 
+### PBKDF2 work factor raised to OWASP guidance (0.6.76)
+- ✅ New encrypted images and passphrase-mode repositories now stretch keys
+  with **600,000** PBKDF2-HMAC-SHA256 iterations (OWASP 2023+ guidance),
+  up from 210,000 (a ~2016-era figure). Both constants are create-time
+  only — the iteration count has always been stored per container (image
+  header field at offset 52; `kdf.iterations` in `opbs-repo.json`) and
+  every decrypt path derives with the *stored* value, so all existing
+  encrypted images and repositories keep opening unchanged; no migration
+  and no format bump. Cost: ~+0.3–1s of `pbkdf2Sync` per image open,
+  against operations that already take seconds to hours. Tests now pin
+  the ≥600k floor for new ciphers and repo headers. (Argon2id remains
+  OWASP's preferred KDF but needs a new alg id in the header — a future
+  format extension, not a constant bump.)
+
 ### Multi-machine fleet control — Tier 0 (0.6.67)
 - ✅ Check-in contract (`src/main/fleet/schema.ts`): versioned, flat
   `FleetCheckin` JSON — machine identity (hostname+arch hash, `--machine-id`

@@ -42,7 +42,10 @@ export const REPO_JOURNAL_NAME = 'opbs-repo.journal';
 export const REPO_IMAGES_DIR = 'images';
 
 export const DEFAULT_LOCK_DAYS = 30;
-const KDF_ITERATIONS = 210_000;
+// PBKDF2-HMAC-SHA256 iterations for new repositories (OWASP 2023+ guidance).
+// Stored in the repo header at init, so existing repositories keep deriving
+// with their recorded count.
+const KDF_ITERATIONS = 600_000;
 const KEY_BYTES = 32;
 const MS_PER_DAY = 86_400_000;
 

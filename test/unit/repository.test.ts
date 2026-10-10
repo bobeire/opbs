@@ -137,6 +137,8 @@ describe('repository init', () => {
   it('passphrase mode stores no keyfile and rejects wrong passphrases', async () => {
     const { repoDir, header } = await newRepo({ passphrase: 'correct horse battery' });
     expect(header.kdf?.alg).toBe('pbkdf2-sha256');
+    // OWASP PBKDF2-HMAC-SHA256 guidance (2023+): 600k iterations for new repos.
+    expect(header.kdf?.iterations).toBeGreaterThanOrEqual(600000);
     expect(() => resolveRepoKey(header, { passphrase: 'wrong' })).toThrow(/Wrong passphrase/);
     expect(() => resolveRepoKey(header)).toThrow(/key not found|passphrase/i);
     const key = resolveRepoKey(header, { passphrase: 'correct horse battery' });

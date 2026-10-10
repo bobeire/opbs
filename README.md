@@ -845,7 +845,7 @@ which writes:
 The signing key is **never stored inside the repository**: by default it lives
 in a keyfile under `~/.opbs/repo-keys/<id>.key` (override with `--keyfile f`
 or the `OPBS_REPO_KEY_DIR` environment variable), or it is derived from
-`--passphrase` (PBKDF2-SHA256, 210,000 iterations, no file written).
+`--passphrase` (PBKDF2-SHA256, 600,000 iterations, no file written).
 
 Back up into a repository with the `--repo` flag:
 
@@ -1097,7 +1097,7 @@ The generated script: `copype` a WinPE working dir, layer OPBS under
 - **Block index**: `[u64 count][28 B entries]` (partition, block index, file
   offset, sizes, raw CRC-32).
 - Encryption: AES-256-GCM, one IV+tag per frame, key derived from the passphrase
-  via PBKDF2-SHA256 (210,000 iterations), salt stored in the header.
+  via PBKDF2-SHA256 (600,000 iterations), salt stored in the header.
 
 ## Development
 

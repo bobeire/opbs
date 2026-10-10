@@ -411,7 +411,8 @@ describe('image-format', () => {
       const b = newImageCipher('pass');
       expect(a.salt).not.toEqual(b.salt);
       expect(a.cipherId).toBe(CIPHER_AES256_GCM);
-      expect(a.kdfIterations).toBeGreaterThan(1000);
+      // OWASP PBKDF2-HMAC-SHA256 guidance (2023+): 600k iterations.
+      expect(a.kdfIterations).toBeGreaterThanOrEqual(600000);
     });
 
     it('round-trips encrypted frames via encodeBlockFrame + verifyImage with key', async () => {
