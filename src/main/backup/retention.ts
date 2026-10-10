@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { readImageInfo, FLAG_INCREMENTAL, FLAG_VERIFIED, ImageInfo } from '../imaging/image-format';
+import { readImageInfo, FLAG_INCREMENTAL, FLAG_VERIFIED, ImageInfo, baseImageCandidates } from '../imaging/image-format';
 import { isRepository } from '../imaging/repository';
 import { logger } from '../utils/logger';
 
@@ -74,6 +74,23 @@ function canonical(p: string): string {
   return path.resolve(p);
 }
 
+/**
+ * Canon of the base an incremental references, resolved against the scanned
+ * set: the recorded base *name* sitting beside the delta first (chains live
+ * in one folder, so this survives a moved/copied folder whose stored
+ * absolute path is stale — and never picks a stale original over the copy
+ * being scanned), then the recorded path itself for layouts where the base
+ * legitimately lives elsewhere. Undefined when neither is in the set.
+ */
+function baseCanonOf(entry: BackupImageEntry, byCanon: Map<string, BackupImageEntry>): string | undefined {
+  if (!entry.incremental || !entry.baseImagePath) return undefined;
+  for (const candidate of baseImageCandidates(entry.path, entry.baseImagePath)) {
+    const canon = canonical(candidate);
+    if (byCanon.has(canon)) return canon;
+  }
+  return undefined;
+}
+
 export function groupIntoChains(entries: BackupImageEntry[]): RetentionChain[] {
   const byCanon = new Map<string, BackupImageEntry>();
   for (const entry of entries) {
@@ -84,14 +101,12 @@ export function groupIntoChains(entries: BackupImageEntry[]): RetentionChain[] {
   const children = new Map<string, BackupImageEntry[]>();
   const roots = new Set<string>();
   for (const entry of entries) {
-    if (entry.incremental && entry.baseImagePath) {
-      const baseCanon = canonical(entry.baseImagePath);
-      if (byCanon.has(baseCanon)) {
-        const list = children.get(baseCanon) ?? [];
-        list.push(entry);
-        children.set(baseCanon, list);
-        continue;
-      }
+    const baseCanon = baseCanonOf(entry, byCanon);
+    if (baseCanon) {
+      const list = children.get(baseCanon) ?? [];
+      list.push(entry);
+      children.set(baseCanon, list);
+      continue;
     }
     roots.add(canonical(entry.path));
   }
@@ -109,7 +124,7 @@ export function groupIntoChains(entries: BackupImageEntry[]): RetentionChain[] {
       }
     }
     // complete if every delta in the chain could be linked back to a root.
-    const complete = items.every((item) => !item.incremental || (item.baseImagePath && byCanon.has(canonical(item.baseImagePath))));
+    const complete = items.every((item) => !item.incremental || baseCanonOf(item, byCanon) !== undefined);
     return { items, complete };
   };
 
@@ -243,20 +258,20 @@ export function planRetention(input: BackupImageEntry[] | string, options: Reten
   }
 
   // Invariant: never delete a base image that a kept delta still references.
-  // Promote such bases into the keep set until stable.
+  // Promote such bases into the keep set until stable. Base lookup goes
+  // through baseCanonOf, so a kept delta protects the base sitting beside it
+  // even when the stored absolute path went stale (moved/copied folder).
   const byCanon = new Map(entries.map((e) => [canonical(e.path), e]));
   let changed = true;
   while (changed) {
     changed = false;
     for (const entry of entries) {
       if (!keep.has(canonical(entry.path))) continue;
-      if (entry.incremental && entry.baseImagePath) {
-        const baseKey = canonical(entry.baseImagePath);
-        if (byCanon.has(baseKey) && !keep.has(baseKey)) {
-          keep.add(baseKey);
-          reason[baseKey] = 'kept as base of a retained delta';
-          changed = true;
-        }
+      const baseKey = baseCanonOf(entry, byCanon);
+      if (baseKey && !keep.has(baseKey)) {
+        keep.add(baseKey);
+        reason[baseKey] = 'kept as base of a retained delta';
+        changed = true;
       }
     }
   }

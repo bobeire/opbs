@@ -166,4 +166,22 @@ describe('chain health (missing delta bases)', () => {
     const report = buildChainHealthReport(dir);
     expect(report.unparseableImages).toContain('stray_99_9999.opbs');
   });
+
+  it('reports a relocated folder (stale stored base paths) as a healthy chain', () => {
+    const a = path.join(dir, 'A');
+    fs.mkdirSync(a);
+    const fullPath = path.join(a, 'img_0_1000.opbs');
+    writeImage(fullPath, makeRaw(3), BLOCK, 1000);
+    writeImage(path.join(a, 'img_1_2000.opbs'), makeRaw(1), BLOCK, 2000, fullPath);
+    const b = path.join(dir, 'B');
+    fs.renameSync(a, b);
+
+    const report = buildChainHealthReport(b);
+    expect(report.chainCount).toBe(1);
+    expect(report.completeChains).toBe(1);
+    expect(report.brokenChains).toBe(0);
+    expect(report.missingBases).toEqual([]);
+    expect(report.chains[0].orphaned).toBe(false);
+    expect(report.chains[0].complete).toBe(true);
+  });
 });

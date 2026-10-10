@@ -26,7 +26,8 @@ import {
   writeManifest,
   manifestFilePath,
   selectImagesForVerify,
-  resolveScheduledRetention
+  resolveScheduledRetention,
+  BackupImageEntry
 } from '../../src/main/backup/retention';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -229,5 +230,63 @@ describe('resolveScheduledRetention', () => {
   it('mixes overrides with global fallbacks per field', () => {
     const result = resolveScheduledRetention({ retentionApplied: true, retentionKeepFull: 2 }, globals);
     expect(result.options).toEqual({ keepFull: 2, keepDeltasPerFull: 3, retentionDays: 30 });
+  });
+});
+describe('relocated chain folders', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-reloc-ret-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("groups a moved folder's chain against the co-located base", () => {
+    const a = path.join(dir, 'A');
+    fs.mkdirSync(a);
+    const full = writeTestImage(a, 'full_1.opbs', { ts: NOW - 2 * DAY });
+    writeTestImage(a, 'delta_1.opbs', { ts: NOW - DAY, incremental: true, baseImagePath: full });
+    const b = path.join(dir, 'B');
+    fs.renameSync(a, b);
+
+    const chains = groupIntoChains(scanBackupDirectory(b));
+    expect(chains.length).toBe(1);
+    expect(chains[0].root.name).toBe('full_1.opbs');
+    expect(chains[0].complete).toBe(true);
+    expect(chains[0].items.map((i) => i.name).sort()).toEqual(['delta_1.opbs', 'full_1.opbs']);
+  });
+
+  it('protects the co-located base of a kept delta when the stored path is stale', () => {
+    const a = path.join(dir, 'A');
+    fs.mkdirSync(a);
+    const full = writeTestImage(a, 'full_9.opbs', { ts: NOW - 60 * DAY });
+    writeTestImage(a, 'delta_9.opbs', { ts: NOW - DAY, incremental: true, baseImagePath: full });
+    const b = path.join(dir, 'B');
+    fs.renameSync(a, b);
+
+    // Same shape as the promotion test above, but after a move: the kept
+    // delta must still protect the base beside it from age-based pruning.
+    const plan = planRetention(b, { keepFull: 0, keepDeltasPerFull: 1, retentionDays: 5 });
+    expect(names(plan.prune)).toEqual([]);
+    expect(names(plan.keep).sort()).toEqual(['delta_9.opbs', 'full_9.opbs']);
+  });
+
+  it('links by the stored path when the base legitimately lives in another folder', () => {
+    const f = path.join(dir, 'F');
+    const d = path.join(dir, 'D');
+    fs.mkdirSync(f);
+    fs.mkdirSync(d);
+    const full = writeTestImage(f, 'full_1.opbs', { ts: NOW - 2 * DAY });
+    const delta = writeTestImage(d, 'delta_1.opbs', { ts: NOW - DAY, incremental: true, baseImagePath: full });
+    const entries: BackupImageEntry[] = [
+      { path: full, name: 'full_1.opbs', timestamp: NOW - 2 * DAY, size: 0, incremental: false, encrypted: false, verified: false },
+      { path: delta, name: 'delta_1.opbs', timestamp: NOW - DAY, size: 0, incremental: true, baseImagePath: full, encrypted: false, verified: false }
+    ];
+    const chains = groupIntoChains(entries);
+    expect(chains.length).toBe(1);
+    expect(chains[0].root.name).toBe('full_1.opbs');
+    expect(chains[0].complete).toBe(true);
   });
 });

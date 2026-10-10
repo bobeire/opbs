@@ -319,6 +319,36 @@ implemented; **Investigate** items need spike work first.
   boundary-spanning read and the headless-capture refusal) without needing
   real samples.
 
+### Incremental chain relocation (0.6.74)
+- ✅ OPBS incremental headers store their base as an absolute path captured
+  at backup time, which goes stale the moment the backup folder is moved,
+  copied to a NAS, or its drive letter changes (USB drives, WinPE recovery
+  media where letters are reassigned). Every chain walker now resolves each
+  hop through `locateBaseImage` (`image-format.ts`): candidates come back
+  **co-located file first, stored path second** — the base sitting beside
+  the referencing image is the one written with that chain, while the stored
+  path may still exist yet already hold a *different generation* of the same
+  file (a copy with the original still attached, a rotated full). Ordering
+  matters: stored-first would silently chain deltas onto the stale original.
+- ✅ Retention and chain health follow the same rule via
+  `baseImageCandidates` (`retention.ts`): `groupIntoChains` links deltas to
+  the co-located base when the recorded path is stale (chain completeness
+  and `inChain` manifest flags included), and the base-protection fixpoint
+  now protects that co-located base from pruning — previously a kept delta
+  in a relocated folder could not match its base, so retention was free to
+  delete it out from under the delta. Chain-health reports derive from
+  grouping, so healthy relocated sets no longer show up as orphaned chains
+  with missing bases (which fed warning/critical fleet check-in status).
+- ✅ Single walker: the duplicated `resolveBaseChain` copy in `job-runner.ts`
+  is gone — restore, browse, and the backup base-CRC map all use
+  `resolveImageChain`, so this class of fix can never be half-applied again.
+- ✅ Tests: `chain-relocation.test.ts` (control, moved folder with exact
+  chain assertion, **copy-with-original-alive must bind to the copy**,
+  multi-hop move, cross-folder stored fallback, missing-base error naming
+  the stored path); relocation cases added to `retention.test.ts`
+  (grouping + base protection after a move) and `chain-health.test.ts`
+  (moved folder reports complete, no missing bases).
+
 ### Multi-machine fleet control — Tier 0 (0.6.67)
 - ✅ Check-in contract (`src/main/fleet/schema.ts`): versioned, flat
   `FleetCheckin` JSON — machine identity (hostname+arch hash, `--machine-id`

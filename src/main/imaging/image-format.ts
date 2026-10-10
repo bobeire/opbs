@@ -458,8 +458,50 @@ export function readFrameCompressed(
 }
 
 /**
+ * Candidate locations for the base image an incremental points at, most
+ * likely first: the same file name beside the referencing image, then the
+ * stored path itself.
+ *
+ * Headers store the base as an absolute path captured at backup time, which
+ * stops being valid as soon as the backup folder is moved, copied to a NAS,
+ * or its drive letter changes (routine for USB backup drives and for WinPE
+ * recovery media, where letters are reassigned). Chains are written into one
+ * folder, so the co-located name is the base of *this* chain — while the
+ * stored path may still exist yet already hold a different generation of the
+ * same file (a copy with the original still attached, a rotated full). The
+ * stored path stays as the fallback for layouts where the base legitimately
+ * lives elsewhere. Duplicates (unmoved chains) are collapsed.
+ */
+export function baseImageCandidates(referencingImagePath: string, storedBasePath: string): string[] {
+  const name = path.basename(storedBasePath);
+  const sibling = name ? path.join(path.dirname(referencingImagePath), name) : '';
+  const candidates: string[] = [];
+  for (const c of [sibling, storedBasePath]) {
+    if (c && !candidates.includes(c)) candidates.push(c);
+  }
+  return candidates;
+}
+
+/**
+ * Locate the base image a delta points at: the first candidate that exists
+ * on disk (see `baseImageCandidates` — co-located file first, stored path
+ * second). `.001` continuation volumes count as existing. Returns the stored
+ * path unchanged when neither does, so callers raise their usual not-found
+ * error against the path the header recorded.
+ */
+export function locateBaseImage(referencingImagePath: string, storedBasePath: string): string {
+  const exists = (p: string): boolean => fs.existsSync(p) || fs.existsSync(`${p}.001`);
+  for (const candidate of baseImageCandidates(referencingImagePath, storedBasePath)) {
+    if (exists(candidate)) return candidate;
+  }
+  return storedBasePath;
+}
+
+/**
  * Resolve the restore chain for an image: walk `baseImagePath` links back to
- * the root full image, then return [root, ...intermediates, image].
+ * the root full image, then return [root, ...intermediates, image]. Each hop
+ * is located relative to the file that references it first, so a chain keeps
+ * resolving after its folder is moved or copied.
  */
 export function resolveImageChain(imagePath: string): string[] {
   const chain: string[] = [];
@@ -475,7 +517,7 @@ export function resolveImageChain(imagePath: string): string[] {
     if (!(info.header.flags & FLAG_INCREMENTAL) || !info.header.baseImagePath) {
       break;
     }
-    current = info.header.baseImagePath;
+    current = locateBaseImage(current, info.header.baseImagePath);
   }
   return chain;
 }

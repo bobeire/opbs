@@ -39,7 +39,8 @@ import {
   ImageCipher,
   CIPHER_NONE,
   cipherFromMetadata,
-  resolveVolumePath
+  resolveVolumePath,
+  resolveImageChain
 } from '../imaging/image-format';
 import { CompressionPool } from '../imaging/compression-pool';
 import { validateRestoredFilesystem, FsValidation } from '../imaging/drill-validation';
@@ -157,7 +158,7 @@ export async function runBackupJob(
   if (job.baseImagePath) {
     let chain: string[];
     try {
-      chain = resolveBaseChain(job.baseImagePath);
+      chain = resolveImageChain(job.baseImagePath);
     } catch (error) {
       throw new Error(`Cannot resolve base chain for incremental backup: ${errorMessage(error)}`, { cause: error });
     }
@@ -2598,25 +2599,6 @@ function errorMessage(error: unknown): string {
  * base itself last) by following `baseImagePath` links. Used so a delta can
  * skip blocks already present anywhere in its ancestry.
  */
-function resolveBaseChain(imagePath: string): string[] {
-  const chain: string[] = [];
-  const seen = new Set<string>();
-  let current = imagePath;
-  while (current) {
-    if (seen.has(current)) {
-      throw new Error(`Circular incremental chain detected at ${current}`);
-    }
-    seen.add(current);
-    chain.unshift(current);
-    const info = readImageInfo(current);
-    if (!(info.header.flags & FLAG_INCREMENTAL) || !info.header.baseImagePath) {
-      break;
-    }
-    current = info.header.baseImagePath;
-  }
-  return chain;
-}
-
 /**
  * Assemble the leading bytes of a restored partition from the restore chain,
  * stopping once `maxBytes` have been read (or the partition content ends).
