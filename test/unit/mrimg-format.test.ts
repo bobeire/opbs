@@ -6,6 +6,7 @@ import { detectMacriumFormat, readMacriumImage, MacriumUnsupportedError, macrium
 import { openMacriumPartitionReader } from '../../src/main/imaging/mrimg/mrimg-reader';
 import { openAnyBrowse, detectPartitionFilesystem } from '../../src/main/imaging/fs/file-browse';
 import { buildMrimgxImage } from '../helpers/mrimg-image';
+import { findV7FullSample } from './helpers/v7-sample';
 
 describe('mrimg-format', () => {
   let fixtureDir: string;
@@ -178,12 +179,11 @@ describe('mrimg-format', () => {
     expect(() => readMacriumImage(v7)).toThrow();
   });
 
-  // The user-provided real .mrimg lives next to the repo root. When present it
+  // A user-provided real .mrimg (Reflect 7/8) — discovered at the repo root
+  // or in imagefilesamples/, or pinned with OPBS_V7_SAMPLE. When present it
   // doubles as an end-to-end check of the trailer/footer/index/QuickLZ path.
-  const v7Sample =
-    process.env.OPBS_V7_SAMPLE ??
-    path.join(__dirname, '..', '..', '14CC07500E727036-00-00.mrimg');
-  const v7SamplePresent = fs.existsSync(v7Sample);
+  const v7Sample = findV7FullSample() ?? '';
+  const v7SamplePresent = v7Sample !== '';
   describe.skipIf(!v7SamplePresent)('mrimg-v7 container (real sample)', () => {
     it('parses the trailer, footer, indexes and reports the source disk', () => {
       const info = readMacriumImage(v7Sample);
@@ -191,9 +191,9 @@ describe('mrimg-format', () => {
       expect(info.compression.method).toBe('quicklz');
       expect(info.partitions.length).toBe(1);
       const part = info.partitions[0];
-      expect(part.blockCount).toBe(256);
+      expect(part.blockCount).toBeGreaterThan(0);
       expect(part.blockSize).toBe(65536);
-      expect(part.blocks.length).toBe(256);
+      expect(part.blocks.length).toBe(part.blockCount);
       expect(part.blocks[0].filePosition).toBe(0);
       expect(info.netbiosName).toBeTruthy();
       expect(info.disks[0].diskFormat).toBeTruthy();
@@ -201,8 +201,9 @@ describe('mrimg-format', () => {
 
     it('decodes a stored block through the partition reader with a valid hash', () => {
       const info = readMacriumImage(v7Sample);
+      const part = info.partitions[0];
       const reader = openMacriumPartitionReader(info, 0);
-      expect(reader.size).toBe(256 * 65536);
+      expect(reader.size).toBe(part.blockCount * part.blockSize);
       const head = reader.read(0, 64);
       expect(head.length).toBe(64);
       // Every stored block must pass the per-block MD5 gate; a read spanning

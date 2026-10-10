@@ -939,6 +939,25 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
   const chainRole = v7ChainRole(incrementNo, methodValue);
   const basePath = v7ChainBasePath(imagePath, incrementNo);
 
+  // The role decides which section kind can be real: an incremental holds
+  // only its delta index, a differential or full image only its full-extent
+  // index. Marker scans can latch onto adjacent metadata as a phantom second
+  // section — seen on Reflect 8 incrementals, whose footer packs the delta
+  // records tightly after the path marker so a 30-byte "index" of 45 records
+  // validates by bounds yet holds garbage offsets — so once the role is
+  // known, drop sections of the impossible kind before building partitions.
+  if (chainRole === 'incremental') {
+    if (sections.some((s) => s.delta)) {
+      for (let i = sections.length - 1; i >= 0; i--) {
+        if (!sections[i].delta) sections.splice(i, 1);
+      }
+    }
+  } else if (sections.some((s) => !s.delta)) {
+    for (let i = sections.length - 1; i >= 0; i--) {
+      if (sections[i].delta) sections.splice(i, 1);
+    }
+  }
+
   // Incremental members keep their changed-block list (the delta index) in
   // the chain record instead of a full-extent `blocks` array.
   const chainDelta: MacriumV7ChainMember['delta'] = [];

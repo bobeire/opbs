@@ -2089,10 +2089,18 @@ describe('runRestoreJob (Macrium)', () => {
   });
 });
 
+// A real-image restore round-trip reads the whole restored extent into
+// memory for the content comparison, so it needs a deliberately provided,
+// modestly sized sample — never an auto-discovered fleet image whose sparse
+// partition can span hundreds of gigabytes.
+const V7_SAMPLE_MAX_BYTES = 64 * 1024 * 1024;
+const V7_SAMPLE_ENV = process.env.OPBS_V7_SAMPLE;
 const V7_SAMPLE =
-  process.env.OPBS_V7_SAMPLE ?? path.join(__dirname, '..', '..', '14CC07500E727036-00-00.mrimg');
+  V7_SAMPLE_ENV && fs.existsSync(V7_SAMPLE_ENV) && fs.statSync(V7_SAMPLE_ENV).size <= V7_SAMPLE_MAX_BYTES
+    ? V7_SAMPLE_ENV
+    : '';
 
-describe.skipIf(!fs.existsSync(V7_SAMPLE))('runRestoreJob with a real Reflect v7 .mrimg image', () => {
+describe.skipIf(!V7_SAMPLE)('runRestoreJob with a real Reflect .mrimg image (OPBS_V7_SAMPLE)', () => {
   it('round-trips every captured block through the runner', async () => {
     const info = readMacriumImage(V7_SAMPLE);
     const part = info.partitions[0];

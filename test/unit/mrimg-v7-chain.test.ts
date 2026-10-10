@@ -7,113 +7,134 @@ import {
   clearMacriumInfoCache,
   macriumRestoreRefusal,
   macriumUnsupportedReason,
-  readMacriumImage
+  readMacriumImage,
+  MacriumIndexElement
 } from '../../src/main/imaging/mrimg/mrimg-format';
 import { openMacriumPartitionReader } from '../../src/main/imaging/mrimg/mrimg-reader';
+import { findV7ChainSample } from './helpers/v7-sample';
 
 /**
- * Real-sample tests for v7 (.mrimg) differential/incremental chains. The
- * samples are user-provided and gitignored, so the suite skips itself when
- * they are absent (override the directory with OPBS_V7_CHAIN_DIR).
+ * Real-sample tests for `.mrimg` (Reflect 7/8) chains: full + two members.
+ * The samples are user-provided and gitignored, so the suite skips itself
+ * when they are absent (override the directory with OPBS_V7_CHAIN_DIR).
+ * Roles are read from each file's footer — Reflect defaults to differential
+ * first members but incremental chains name their members identically.
  */
-const CHAIN_DIR =
-  process.env.OPBS_V7_CHAIN_DIR ?? path.join(__dirname, '..', '..', 'imagefilesamples');
-const FULL = path.join(CHAIN_DIR, 'DACACA7B7E92AAFB-00-00.mrimg');
-const DIFF = path.join(CHAIN_DIR, 'DACACA7B7E92AAFB-01-01.mrimg');
-const INC = path.join(CHAIN_DIR, 'DACACA7B7E92AAFB-02-02.mrimg');
-const present = [FULL, DIFF, INC].every((p) => fs.existsSync(p));
+const sample = findV7ChainSample();
+const { full: FULL, diff: MEMBER1, inc: MEMBER2 } = sample;
 
-describe.skipIf(!present)('mrimg-v7 chain (real samples)', () => {
-  it('parses full / differential / incremental roles and extents', () => {
+function localBlocks(blocks: MacriumIndexElement[]): Array<{ b: MacriumIndexElement; i: number }> {
+  return blocks.map((b, i) => ({ b, i })).filter(({ b }) => b.filePosition >= 0);
+}
+
+describe.skipIf(!sample.present)('mrimg chain (real samples)', () => {
+  it('parses full / member roles and extents, one partition per file', () => {
     clearMacriumInfoCache();
     const full = readMacriumImage(FULL);
-    const diff = readMacriumImage(DIFF);
-    const inc = readMacriumImage(INC);
+    const m1 = readMacriumImage(MEMBER1);
+    const m2 = readMacriumImage(MEMBER2);
     const fp = full.partitions[0];
-    const dp = diff.partitions[0];
-    const ip = inc.partitions[0];
 
     expect(full.chain).toBeUndefined();
     expect(fp.chain).toBeUndefined();
-    expect(dp.chain?.role).toBe('differential');
-    expect(dp.chain?.basePath).toBe(FULL);
-    expect(dp.chain?.incrementNo).toBe(1);
-    // The differential's own extent is a full-extent index; its changed
-    // blocks are the 54 sequential QuickLZ frames in its data region, the
-    // rest resolve from the full image.
-    expect(dp.blockCount).toBe(fp.blockCount);
-    expect(dp.blocks.length).toBe(fp.blockCount);
-    expect(dp.blocks.filter((b) => b.carry).length).toBeGreaterThan(0);
-    expect(dp.blocks.filter((b) => b.filePosition >= 0).length).toBe(54);
-    expect(dp.fsType).toBe('ntfs');
+    expect(fp.blockCount).toBeGreaterThan(0);
+    expect(fp.blocks.length).toBe(fp.blockCount);
 
-    expect(inc.chain?.role).toBe('incremental');
-    expect(inc.chain?.basePath).toBe(DIFF);
-    expect(inc.chain?.incrementNo).toBe(2);
-    expect(inc.chain?.delta?.length).toBe(55);
-    // An incremental inherits its extent and filesystem from the base.
-    expect(ip.blockCount).toBe(fp.blockCount);
-    expect(ip.blocks.length).toBe(0);
-    expect(ip.fsType).toBe('ntfs');
+    // Member 1: a chain member rooted at the full image. Either a
+    // differential (full-extent index with carry markers) or an incremental
+    // (delta index only) — both are valid Reflect chain shapes.
+    expect(m1.chain?.incrementNo).toBe(1);
+    expect(m1.chain?.basePath).toBe(FULL);
+    if (m1.chain?.role === 'differential') {
+      expect(m1.partitions[0].blocks.length).toBe(fp.blockCount);
+      expect(m1.partitions[0].blocks.filter((b) => b.carry).length).toBeGreaterThan(0);
+      expect(localBlocks(m1.partitions[0].blocks).length).toBeGreaterThan(0);
+      expect(m1.chain.delta ?? []).toEqual([]);
+    } else {
+      expect(m1.chain?.role).toBe('incremental');
+      expect(m1.partitions[0].blocks.length).toBe(0);
+      expect((m1.chain?.delta ?? []).length).toBeGreaterThan(0);
+    }
 
+    // Member 2 sits on top of member 1 and stores its own changed blocks.
+    expect(m2.chain?.incrementNo).toBe(2);
+    expect(m2.chain?.basePath).toBe(MEMBER1);
+    expect(m2.chain?.role === 'differential' || m2.chain?.role === 'incremental').toBe(true);
+    const m2local = m2.partitions.reduce((n, p) => n + localBlocks(p.blocks).length, 0);
+    expect(m2local + (m2.chain?.delta?.length ?? 0)).toBeGreaterThan(0);
+
+    // Regression: marker scans on Reflect 8 incrementals can invent a phantom
+    // second partition with garbage offsets — every file must parse to exactly
+    // the one partition its single partition index describes.
+    expect(full.partitions.length).toBe(1);
+    expect(m1.partitions.length).toBe(1);
+    expect(m2.partitions.length).toBe(1);
+
+    expect(fp.fsType).toBe('ntfs');
     expect(macriumUnsupportedReason(full)).toBeNull();
-    expect(macriumUnsupportedReason(diff)).toBeNull();
-    expect(macriumUnsupportedReason(inc)).toBeNull();
-    expect(macriumRestoreRefusal(diff)).toBeNull();
-    expect(macriumRestoreRefusal(inc)).toBeNull();
+    expect(macriumUnsupportedReason(m1)).toBeNull();
+    expect(macriumUnsupportedReason(m2)).toBeNull();
+    expect(macriumRestoreRefusal(m1)).toBeNull();
+    expect(macriumRestoreRefusal(m2)).toBeNull();
   });
 
   it('browses every chain member to identical resolved content', () => {
     clearMacriumInfoCache();
     const full = readMacriumImage(FULL);
-    const diff = readMacriumImage(DIFF);
-    const inc = readMacriumImage(INC);
+    const m1 = readMacriumImage(MEMBER1);
+    const m2 = readMacriumImage(MEMBER2);
     const fp = full.partitions[0];
-    const dp = diff.partitions[0];
-    const ip = inc.partitions[0];
     const blockSize = fp.blockSize;
 
     const fr = openMacriumPartitionReader(full, 0);
-    const dr = openMacriumPartitionReader(diff, 0);
-    const ir = openMacriumPartitionReader(inc, 0);
-    expect(dr.size).toBe(fr.size);
-    expect(ir.size).toBe(fr.size);
+    const r1 = openMacriumPartitionReader(m1, 0);
+    const r2 = openMacriumPartitionReader(m2, 0);
+    expect(r1.size).toBe(fr.size);
+    expect(r2.size).toBe(fr.size);
 
     // The boot sector resolves identically through every member.
     const boot = fr.read(0, 512);
     expect(boot.subarray(3, 11).toString('latin1')).toBe('NTFS    ');
-    expect(dr.read(0, 512).equals(boot)).toBe(true);
-    expect(ir.read(0, 512).equals(boot)).toBe(true);
+    expect(r1.read(0, 512).equals(boot)).toBe(true);
+    expect(r2.read(0, 512).equals(boot)).toBe(true);
 
-    // Every differential-local (changed) block reads through the reader and
-    // matches its record md5 — loadBlock verifies, so a throw also fails.
-    const diffLocals = dp.blocks
-      .map((b, i) => ({ b, i }))
-      .filter(({ b }) => b.filePosition >= 0);
-    expect(diffLocals.length).toBe(54);
-    for (const { b, i } of diffLocals) {
-      const raw = dr.read(i * blockSize, Math.min(blockSize, dr.size - i * blockSize));
-      expect(crypto.createHash('md5').update(raw).digest().equals(b.md5)).toBe(true);
+    // Every locally stored block reads through the reader and matches its
+    // record md5 — loadBlock verifies, so a throw also fails the test.
+    for (const [info, reader] of [
+      [m1, r1],
+      [m2, r2]
+    ] as const) {
+      for (const part of info.partitions) {
+        for (const { b, i } of localBlocks(part.blocks)) {
+          const raw = reader.read(i * blockSize, Math.min(blockSize, reader.size - i * blockSize));
+          expect(crypto.createHash('md5').update(raw).digest().equals(b.md5)).toBe(true);
+        }
+      }
+      // Every incremental delta block reads through and matches its md5.
+      const part0 = info.partitions[0];
+      for (const d of info.chain?.delta ?? []) {
+        const raw = reader.read(d.logicalIndex * blockSize, Math.min(blockSize, reader.size - d.logicalIndex * blockSize));
+        expect(crypto.createHash('md5').update(raw).digest().equals(d.md5)).toBe(true);
+      }
+      expect(part0.blockCount).toBe(fp.blockCount);
     }
 
-    // Every incremental delta block reads through and matches its delta md5.
-    let deltaOk = 0;
-    for (const d of ip.chain?.delta ?? []) {
-      const raw = ir.read(d.logicalIndex * blockSize, Math.min(blockSize, ir.size - d.logicalIndex * blockSize));
-      if (crypto.createHash('md5').update(raw).digest().equals(d.md5)) deltaOk++;
-    }
-    expect(deltaOk).toBe(55);
-
-    // Blocks unchanged across the chain are byte-identical through all three.
-    const deltaIdx = new Set((ip.chain?.delta ?? []).map((d) => d.logicalIndex));
-    const changedDiffIdx = new Set(diffLocals.map(({ i }) => i));
+    // Blocks unchanged across the chain are byte-identical to the full image.
+    const deltaIdx = new Set([
+      ...(m1.chain?.delta ?? []).map((d) => d.logicalIndex),
+      ...(m2.chain?.delta ?? []).map((d) => d.logicalIndex)
+    ]);
+    const localIdx = new Set([
+      ...localBlocks(m1.partitions[0].blocks).map(({ i }) => i),
+      ...localBlocks(m2.partitions[0].blocks).map(({ i }) => i)
+    ]);
     let checked = 0;
-    for (let i = 1; i < fp.blockCount && checked < 12; i += 97) {
-      if (deltaIdx.has(i) || changedDiffIdx.has(i)) continue;
+    for (let i = 1; i < fp.blockCount && checked < 12; i += 9973) {
+      if (deltaIdx.has(i) || localIdx.has(i)) continue;
       const want = Math.min(blockSize, fr.size - i * blockSize);
       const a = fr.read(i * blockSize, want);
-      expect(dr.read(i * blockSize, want).equals(a)).toBe(true);
-      expect(ir.read(i * blockSize, want).equals(a)).toBe(true);
+      expect(r1.read(i * blockSize, want).equals(a)).toBe(true);
+      expect(r2.read(i * blockSize, want).equals(a)).toBe(true);
       checked++;
     }
     expect(checked).toBeGreaterThan(5);
@@ -122,8 +143,8 @@ describe.skipIf(!present)('mrimg-v7 chain (real samples)', () => {
   it('refuses a chain member whose base image is missing', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-chain-missing-'));
     try {
-      const lonely = path.join(tmp, 'DACACA7B7E92AAFB-02-02.mrimg');
-      fs.copyFileSync(INC, lonely);
+      const lonely = path.join(tmp, path.basename(MEMBER2));
+      fs.copyFileSync(MEMBER2, lonely);
       clearMacriumInfoCache();
       const info = readMacriumImage(lonely);
       expect(macriumUnsupportedReason(info)).toMatch(/base image .* not found/);

@@ -3,6 +3,7 @@ import * as path from 'path';
 import { describe, it, expect } from 'vitest';
 import { createHash } from 'crypto';
 import { parseQuickLzFrame, decompressQuickLz } from '../../src/main/imaging/mrimg/quicklz';
+import { findV7FullSample } from './helpers/v7-sample';
 
 type Token =
   | { lit: Buffer }
@@ -249,11 +250,9 @@ describe('decompressQuickLz compressed payloads', () => {
 });
 
 describe('decompressQuickLz against the real .mrimg sample', () => {
-  const sample =
-    process.env.OPBS_V7_SAMPLE ??
-    path.join(__dirname, '..', '..', '14CC07500E727036-00-00.mrimg');
+  const sample = findV7FullSample() ?? '';
 
-  const sampleAvailable = fs.existsSync(sample);
+  const sampleAvailable = sample !== '';
 
   it.skipIf(!sampleAvailable)('decodes stored blocks and verifies their MD5 checksums', () => {
     const buf = fs.readFileSync(sample);

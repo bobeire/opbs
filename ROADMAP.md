@@ -262,6 +262,33 @@ implemented; **Investigate** items need spike work first.
   refusal, pruned-increment refusal, non-delta incremental with set present;
   fixture builder grew a `delta` option + `buildMrimgxDeltaIndex`.
 
+
+### Reflect 8 (.mrimg) real-sample validation (0.6.72)
+- ✅ Ground-truth validation against a real Reflect 8 chain (full 206 MB +
+  `-01-01` + `-02-02`, sparse 119 GiB NTFS partition, ~5.8k stored blocks):
+  the container is byte-compatible with the v7 layout (same trailer magic and
+  `07 00` version word, same footer XML tags `<aes>`/`<method>`, 30-byte
+  records / 34-byte delta records), so the existing reader parses it
+  unchanged — full images, differentials (full-extent index with carry
+  markers) and incrementals (delta index) all browse with every stored block
+  MD5-verified and carried blocks byte-identical to the base.
+- ✅ Bug fixed for Reflect 8 incrementals: their footer packs the delta
+  records tightly after the path marker, so the 30-byte marker scan latches
+  onto adjacent metadata and invents a phantom second partition whose records
+  hold garbage offsets (seen: a 79 TB filePosition) — generic block
+  iteration then threw `read out of range`. The chain role now prunes
+  impossible section kinds before partitions are built: an incremental keeps
+  only its delta index, a differential/full only its full-extent index.
+  Regression-guarded by an explicit one-partition-per-file assertion.
+- ✅ Real-sample test suites now discover samples dynamically
+  (`test/unit/helpers/v7-sample.ts`): `$OPBS_V7_SAMPLE` / `$OPBS_V7_CHAIN_DIR`
+  first, then `*-00-00.mrimg` at the repo root or in `imagefilesamples/`,
+  with chain roles read from each file's footer instead of assumed from the
+  numbering — so future sample drops keep the suites running. The job-runner
+  restore round-trip stays opt-in via `$OPBS_V7_SAMPLE` (and refuses samples
+  over 64 MiB): it compares the restored extent in memory, which a sparse
+  multi-hundred-gigabyte fleet partition would take down with it.
+
 ### Multi-machine fleet control — Tier 0 (0.6.67)
 - ✅ Check-in contract (`src/main/fleet/schema.ts`): versioned, flat
   `FleetCheckin` JSON — machine identity (hostname+arch hash, `--machine-id`
