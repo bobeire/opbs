@@ -12,7 +12,7 @@
     "build:main": "tsc -p tsconfig.main.json",
     "build:preload": "tsc -p tsconfig.preload.json",
     "build:renderer": "vite build",
-    "build:native": "node-gyp rebuild",
+    "build:native": "node-gyp rebuild --directory src/native",
     "start": "electron .",
     "test": "vitest",
     "lint": "eslint src",

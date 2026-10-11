@@ -45,8 +45,15 @@ jobs:
       # Electron integration test boots the built app.
       - name: Build
         run: npm run build
-      - name: Native addon (tests skip without it)
+      # The native addon is required here: the Electron integration test boots
+      # the app, whose CLI entry constructs a DiskEnumerator at module load.
+      # --ignore-scripts skips src/native's own install hook (its bundled
+      # node-gyp predates Visual Studio 2026); the root node-gyp 12 builds it.
+      - name: Native deps
+        working-directory: src/native
+        run: npm ci --ignore-scripts
+      - name: Native addon
         shell: bash
-        run: npm run build:native || echo "::warning::native build failed; native-dependent tests will skip"
+        run: npm run build:native
       - name: Unit tests
         run: npx vitest run
