@@ -19,7 +19,11 @@ jobs:
       # npm's allow-scripts guard leaves electron's postinstall pending, and
       # the Electron integration test needs the real binary on disk.
       - name: Electron binary
-        run: node node_modules/electron/install.js
+        shell: bash
+        run: |
+          node node_modules/electron/install.js
+          test -f node_modules/electron/dist/electron.exe
+          echo "electron.exe present"
       - name: Typecheck (main/preload)
         run: npx tsc --noEmit -p tsconfig.main.json
       - name: Typecheck (renderer, baseline 16)

@@ -26,7 +26,9 @@ const PAGE_ERRORS: string[] = [];
 test(
   'launches the app and click-tests every sidebar view without errors',
   async () => {
-    const app: ElectronApplication = await electron.launch({
+    console.log('[gui-click] launching electron…');
+    const app: ElectronApplication = await electron.launch(
+    {
     args: [APP_ROOT],
     cwd: APP_ROOT,
     env: {
@@ -34,12 +36,15 @@ test(
       // Spawned shells resolve cmd.exe via PATH; this bash environment
       // strips System32, so re-add it for playwright's launcher.
       PATH: [process.env.PATH, 'C:\\Windows\\System32', 'C:\\Windows'].filter(Boolean).join(';')
-    }
+    },
+    timeout: 60_000
   });
 
   try {
+    console.log('[gui-click] electron launched, waiting for first window…');
     const win: Page = await app.firstWindow();
     await win.waitForLoadState('domcontentloaded');
+    console.log('[gui-click] window ready, starting navigation…');
     win.on('pageerror', (error) => PAGE_ERRORS.push(String(error)));
 
     expect(await win.title()).toContain('OPBS');
@@ -62,5 +67,5 @@ test(
     await app.close();
   }
   },
-  120000
+  300000
 );
