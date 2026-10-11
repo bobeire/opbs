@@ -38,6 +38,7 @@ jobs:
       - name: Build
         run: npm run build
       - name: Native addon (tests skip without it)
+        shell: bash
         run: npm run build:native || echo "::warning::native build failed; native-dependent tests will skip"
       - name: Unit tests
         run: npx vitest run
