@@ -374,6 +374,27 @@ implemented; **Investigate** items need spike work first.
   calc`, floats, negatives, non-strings) plus sink-level assertions that
   malicious values are refused *before* any process spawns.
 
+### CI on GitHub Actions + encrypted-image restore drills (0.6.81)
+- ✅ `.github/workflows/ci.yml`: every push/PR runs the full gate stack on
+  `windows-latest` — `npm ci`, main/preload tsc (must be clean), renderer tsc
+  (fails if error count exceeds the 16-error baseline), eslint parsed from
+  JSON output (fails above the 9-error / 195-problem baseline), the entire
+  vitest suite, and `npm run build`. Native-module tests self-skip when
+  `opbs_native.node` is absent, so a fresh checkout runs everything without a
+  node-gyp step. The gates that were previously only ever run by hand now
+  guard every commit.
+- ✅ **Restore drills cover encrypted images.** The scheduler's
+  `pickDrillImage(entries, passphrase)` (in `retention.ts`, shared with the
+  CLI's inline `--dir` mode) picks the newest *drillable* image: any image
+  when a passphrase is configured, otherwise unencrypted-only as before. The
+  drill schedule gained an **Image passphrase** field (Settings → Scheduled
+  Restore Drills) that is encrypted at rest by the 0.6.79 secret walk, and
+  the key reaches the elevated drill child inside the short-lived drill
+  config — the same job-file channel backups already use, never on argv. The
+  engine's existing `RestoreJobConfig.passphrase` does the actual decrypt, so
+  no imaging code changed. Previously the backups you'd most want tested
+  (encrypted) were the only ones never drilled.
+
 ### Theme selector — match Windows / light / dark (0.6.80)
 - ✅ Settings → **Appearance** offers three modes: **Match Windows**
   (default-follows-OS), **Light**, and **Dark** (the app's current look, and

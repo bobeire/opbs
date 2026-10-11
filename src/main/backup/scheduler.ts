@@ -5,7 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { BackupManager, BackupConfig } from '../backup/manager';
 import { ScheduledBackup, ScheduledVerification, ScheduledRestoreDrill, ScheduledScrub, SettingsManager } from '../utils/settings-manager';
-import { applyRetention, findNewestImage, resolveScheduledRetention, scanBackupDirectory } from './retention';
+import { applyRetention, findNewestImage, pickDrillImage, resolveScheduledRetention, scanBackupDirectory } from './retention';
 import { summarizeImage } from '../imaging/restore-engine';
 import { recordDrillResult } from '../utils/drill-history';
 import { tryNotify } from '../utils/notify';
@@ -279,29 +279,26 @@ export class BackupScheduler {
     return true;
   }
 
-  /** Newest unencrypted image in a directory (a delta drills as its full chain). */
-  private pickDrillImage(dir: string): string | undefined {
-    const entries = scanBackupDirectory(dir).filter((entry) => !entry.encrypted);
-    if (entries.length === 0) {
-      return undefined;
-    }
-    entries.sort((a, b) => b.timestamp - a.timestamp);
-    return entries[0].path;
-  }
-
   /**
    * Run a restore drill in a detached child (`--cli drill <config> --elevated`).
-   * Restores the newest unencrypted image (with deltas) to the configured
+   * Restores the newest drillable image (with deltas) to the configured
    * scratch disk, then reads the written filesystems back and validates them.
-   * Encrypted images are skipped — a drill cannot supply a passphrase.
+   * Encrypted images drill too when a passphrase is configured; the key is
+   * handed to the child inside the short-lived drill config, never on argv.
    */
   private async runDrill(config: ScheduledRestoreDrill): Promise<void> {
     const dir = config.destinationPath;
-    const imagePath = this.pickDrillImage(dir);
-    if (!imagePath) {
-      logger.warn(`Restore drill: no unencrypted images in ${dir}; skipping`);
+    const entries = scanBackupDirectory(dir);
+    const picked = pickDrillImage(entries, config.passphrase);
+    if (!picked) {
+      logger.warn(
+        entries.some((entry) => entry.encrypted) && !config.passphrase
+          ? `Restore drill: images in ${dir} are encrypted and no drill passphrase is configured; skipping`
+          : `Restore drill: no images in ${dir}; skipping`
+      );
       return;
     }
+    const imagePath = picked.path;
 
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-drill-'));
     const configPath = path.join(tmpDir, 'drill.json');
@@ -315,7 +312,8 @@ export class BackupScheduler {
         targetPartitions: summary.partitions.map((p) => p.index),
         verifyBeforeWrite: config.verifyBeforeWrite !== false,
         applyDeltas: true,
-        compressionThreads: 0
+        compressionThreads: 0,
+        ...(picked.encrypted && config.passphrase ? { passphrase: config.passphrase } : {})
       };
       fs.writeFileSync(configPath, JSON.stringify(drillConfig));
 

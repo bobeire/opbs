@@ -70,6 +70,20 @@ export function scanBackupDirectory(dir: string): BackupImageEntry[] {
   return entries;
 }
 
+/**
+ * Newest drillable image in a scanned directory (a delta drills as its full
+ * chain). Any image qualifies when a passphrase is available; without one,
+ * encrypted images are skipped because the restore key is unknown.
+ */
+export function pickDrillImage(entries: BackupImageEntry[], passphrase?: string): BackupImageEntry | undefined {
+  const drillable = entries.filter((entry) => !entry.encrypted || Boolean(passphrase));
+  if (drillable.length === 0) {
+    return undefined;
+  }
+  drillable.sort((a, b) => b.timestamp - a.timestamp);
+  return drillable[0];
+}
+
 function canonical(p: string): string {
   return path.resolve(p);
 }

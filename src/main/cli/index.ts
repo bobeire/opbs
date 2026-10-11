@@ -8,7 +8,7 @@ import { CloneEngine } from '../imaging/clone-engine';
 import { summarizeImage } from '../imaging/restore-engine';
 import type { RestoreJobConfig } from '../imaging/restore-engine';
 import { verifyImage, readImageInfo, deriveImageKey, scanPartialImage, DEFAULT_BLOCK_SIZE } from '../imaging/image-format';
-import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains, writeManifest, selectImagesForVerify, RetentionPlan } from '../backup/retention';
+import { applyRetention, planRetention, scanBackupDirectory, pickDrillImage, groupIntoChains, writeManifest, selectImagesForVerify, RetentionPlan } from '../backup/retention';
 import { checkDiskHealth } from '../utils/disk-health';
 import { registerScheduledTask, removeScheduledTask, listScheduledTasks } from '../utils/task-scheduler';
 import { decryptSecret } from '../utils/secret-store';
@@ -1011,11 +1011,14 @@ async function cmdDrill(ctx: CommandContext): Promise<number> {
     applyDeltas?: boolean;
     compressionThreads?: number;
     validateAfterWrite?: boolean;
+    passphrase?: string;
   };
 
   const dirFlag = flagValue(ctx.argv, '--dir');
   if (dirFlag) {
-    // Inline mode: drill the newest unencrypted image in a directory.
+    // Inline mode: drill the newest unencrypted image in a directory (no
+    // passphrase source here — encrypted images drill via the scheduled
+    // drill's configured passphrase).
     const diskFlag = flagValue(ctx.argv, '--disk');
     if (diskFlag === undefined) {
       console.error('Usage: drill --dir <directory> --disk <targetDiskIndex> [--verify] [--elevated] [--json-out FILE]');
@@ -1026,14 +1029,14 @@ async function cmdDrill(ctx: CommandContext): Promise<number> {
       console.error('--disk must be a non-negative disk index');
       return 1;
     }
-    const eligible = scanBackupDirectory(dirFlag)
-      .filter((e) => !e.encrypted)
-      .sort((a, b) => b.timestamp - a.timestamp);
-    if (eligible.length === 0) {
-      console.error(`No unencrypted images in ${dirFlag}; skipping drill`);
+    const picked = pickDrillImage(scanBackupDirectory(dirFlag));
+    if (!picked) {
+      console.error(
+        `No drillable images in ${dirFlag} (encrypted images need a scheduled drill with a passphrase); skipping drill`
+      );
       return 1;
     }
-    const imagePath = eligible[0].path;
+    const imagePath = picked.path;
     const summary = summarizeImage(imagePath);
     config = {
       kind: 'restore-drill',

@@ -517,7 +517,8 @@ OPBS.exe --cli restore job-restore.json
 
 Every backup tool promises "you can restore", but that is rarely *proven* until
 disaster strikes. OPBS runs real restore drills: it restores the newest
-unencrypted backup in a directory onto a **scratch disk you dedicate** (its data
+drillable backup in a directory (encrypted images too — set the image
+passphrase under the drill settings) onto a **scratch disk you dedicate** (its data
 is overwritten), then **reads the filesystems back from the physical disk** and
 validates the boot sector (`0x55AA` signature, OEM id, NTFS `$MFT` record 0
 `FILE` magic and in-use flag, or FAT sector/cluster geometry). A restore that
@@ -526,7 +527,8 @@ completes but fails validation is surfaced as a failed drill.
 - Configure a schedule under **Settings → Scheduled Restore Drills** (the script
   makes its own Windows Task with `--cli drill` when you use the CLI):
   ```bash
-  # Manual drill: restore the newest unencrypted image in D:\OPBS onto disk 2.
+  # Manual drill: newest unencrypted image in D:\OPBS onto disk 2 (encrypted
+  # images need a scheduled drill with the image passphrase configured).
   OPBS.exe --cli drill --dir D:\OPBS --disk 2 --verify
   ```
 - Each successful drill records a per-image timestamp in

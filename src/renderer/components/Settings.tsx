@@ -25,6 +25,7 @@ interface ScheduledRestoreDrill {
   notifyOnFailure: boolean;
   verifyBeforeWrite?: boolean;
   alertAfter?: number;
+  passphrase?: string;
 }
 
 interface ScheduledScrub {
@@ -685,6 +686,21 @@ function Settings() {
                 />
                 <button onClick={handleSelectDrillDir}>Browse</button>
               </div>
+            </div>
+            <div className="setting-item">
+              <label>Image passphrase (leave empty if images are not encrypted):</label>
+              <input
+                type="password"
+                value={settings.scheduledDrill.passphrase ?? ''}
+                onChange={(e) =>
+                  handleChange('scheduledDrill', {
+                    ...settings.scheduledDrill,
+                    passphrase: e.target.value
+                  })
+                }
+                autoComplete="off"
+                placeholder="Lets drills restore encrypted images"
+              />
             </div>
             <div className="setting-item">
               <label>Target (scratch) disk — will be overwritten:</label>

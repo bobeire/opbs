@@ -114,6 +114,22 @@ describe('SettingsManager secret encryption at rest', () => {
     expect((raw as { scheduledBackups: { destinationPath: string }[] }).scheduledBackups[0].destinationPath).toBe('D:\\bk');
   });
 
+  it('encrypts the scheduled drill passphrase at rest and hydrates it', () => {
+    const manager = new SettingsManager();
+    manager.updateSettings({
+      scheduledDrill: { ...manager.getSettings().scheduledDrill, destinationPath: 'D:\\bk', passphrase: 'drillpw' }
+    });
+
+    expect(manager.getSettings().scheduledDrill.passphrase).toBe('drillpw');
+    const raw = readDisk(dir);
+    expect((raw as { scheduledDrill: { passphrase?: string } }).scheduledDrill.passphrase).toMatch(/^enc:v1:/);
+    expect(JSON.stringify(raw)).not.toContain('drillpw');
+
+    const reloaded = new SettingsManager();
+    expect(reloaded.getSettings().scheduledDrill.passphrase).toBe('drillpw');
+    expect(reloaded.getSettings().scheduledDrill.destinationPath).toBe('D:\\bk');
+  });
+
   it('serves plaintext to consumers and survives a reload round-trip', () => {
     const manager = new SettingsManager();
     manager.updateSettings({ scheduledBackups: [backup('hunter2')] });

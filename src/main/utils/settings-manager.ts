@@ -91,7 +91,7 @@ export interface ScheduledVerification {
 export interface ScheduledRestoreDrill {
   enabled: boolean;
   cronExpression: string;
-  /** Directory scanned for the image to drill (the newest unencrypted one). */
+  /** Directory scanned for the image to drill (the newest drillable one). */
   destinationPath: string;
   /** Scratch disk the image is restored onto (its data is destructively overwritten). */
   targetDiskIndex: number;
@@ -100,6 +100,8 @@ export interface ScheduledRestoreDrill {
   verifyBeforeWrite?: boolean;
   /** Alert (webhook/toast) only after this many consecutive failures. */
   alertAfter?: number;
+  /** Passphrase for encrypted images in the drill directory (encrypted at rest). */
+  passphrase?: string;
 }
 
 export interface ScheduledScrub {
@@ -270,6 +272,9 @@ const DEFAULT_SETTINGS: AppSettings = {
 function forEachSecret(settings: AppSettings, fn: (value: string) => string): void {
   for (const backup of settings.scheduledBackups) {
     if (backup.passphrase) backup.passphrase = fn(backup.passphrase);
+  }
+  if (settings.scheduledDrill.passphrase) {
+    settings.scheduledDrill.passphrase = fn(settings.scheduledDrill.passphrase);
   }
   for (const profile of settings.backupProfiles) {
     if (profile.passphrase) profile.passphrase = fn(profile.passphrase);
