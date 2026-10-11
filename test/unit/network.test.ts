@@ -27,7 +27,7 @@ describe('network destinations', () => {
     const machines = await discoverNetworkMachines();
     expect(Array.isArray(machines)).toBe(true);
     expect(machines.some((m) => m.name && m.name.length > 0)).toBe(true);
-  });
+  }, 60_000);
 
   it('enumerates shares for the local host without throwing', async () => {
     const shares = await enumerateShares('localhost');

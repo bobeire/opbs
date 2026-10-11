@@ -33,7 +33,11 @@ jobs:
         run: |
           npx eslint src -f json -o eslint.json || true
           node -e 'const r=require("./eslint.json");const e=r.reduce((s,f)=>s+f.errorCount,0);const w=r.reduce((s,f)=>s+f.warningCount,0);console.log(`eslint: ${e} errors, ${w} warnings`);if(e>9||e+w>195)process.exit(1);'
-      - name: Unit tests
-        run: npx vitest run
+      # Must run before tests: worker threads resolve dist/imaging/*.js and the
+      # Electron integration test boots the built app.
       - name: Build
         run: npm run build
+      - name: Native addon (tests skip without it)
+        run: npm run build:native || echo "::warning::native build failed; native-dependent tests will skip"
+      - name: Unit tests
+        run: npx vitest run

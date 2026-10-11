@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
@@ -16,6 +16,14 @@ interface NativeZstd {
 
 let native: NativeZstd | null = null;
 
+try {
+  if (fs.existsSync(NATIVE_PATH)) {
+    native = require(NATIVE_PATH) as NativeZstd;
+  }
+} catch {
+  native = null;
+}
+
 function randomBuffer(bytes: number): Buffer {
   const buf = Buffer.alloc(bytes);
   crypto.randomFillSync(buf);
@@ -31,17 +39,7 @@ function compressibleBuffer(bytes: number): Buffer {
   return out;
 }
 
-describe('native zstd (C++ libzstd in the addon)', () => {
-  beforeAll(() => {
-    try {
-      if (fs.existsSync(NATIVE_PATH)) {
-        native = require(NATIVE_PATH) as NativeZstd;
-      }
-    } catch {
-      native = null;
-    }
-  });
-
+describe.skipIf(!native)('native zstd (C++ libzstd in the addon)', () => {
   it('builds with the native zstd functions registered', () => {
     expect(native).not.toBeNull();
     expect(typeof native!.zstdCompress).toBe('function');

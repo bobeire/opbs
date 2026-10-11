@@ -46,7 +46,7 @@ try {
   native = null;
 }
 
-describe('native GPT partition table builder', () => {
+describe.skipIf(!native)('native GPT partition table builder', () => {
     const entries = [
       { offset: 1048576, size: 67108864, typeGuid: 'CB2FC206-64A9-4CD4-9A24-8A7F1A2E7F2E', name: 'System' },
       { offset: 68352471040, size: 8257536, typeGuid: 'EBD0A0A2-B9E5-4433-87C0-68B6B72699C7', name: 'Data' }

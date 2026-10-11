@@ -1,6 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { DiskEnumerator, NativeDiskApi } from '../../src/main/utils/disk-enumerator';
 
+// Volume enrichment shells out to PowerShell with the machine's real partition
+// layout — an environment-dependent leak into these mock-driven assertions
+// (a CI runner's system partition flipped isSystem to true). Return empty
+// output so every partition deterministically gets the documented defaults.
+vi.mock('child_process', () => ({
+  execFile: (
+    _file: string,
+    _args: string[],
+    _options: unknown,
+    callback: (error: Error | null, stdout: string) => void
+  ) => {
+    callback(null, '');
+    return { on: () => undefined };
+  }
+}));
+
 function createMockNative(): NativeDiskApi {
   return {
     getDisks: vi.fn(),
