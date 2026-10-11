@@ -4,6 +4,7 @@ import { app } from 'electron';
 import { SftpProfileSettings } from './sftp';
 import { FtpProfileSettings } from './ftp';
 import { ErrorReportingConfig } from './error-reporter';
+import { encryptSecret, decryptSecret, isSecretEncrypted } from './secret-store';
 
 export interface AppSettings {
   defaultCompression: number;
@@ -258,16 +259,36 @@ const DEFAULT_SETTINGS: AppSettings = {
   }
 };
 
+/**
+ * Every secret-bearing field of the settings object. Secrets live as `enc:v1:`
+ * blobs on disk and as plaintext in memory — this walks them in either
+ * direction (encrypt before writing, decrypt after reading).
+ */
+function forEachSecret(settings: AppSettings, fn: (value: string) => string): void {
+  for (const backup of settings.scheduledBackups) {
+    if (backup.passphrase) backup.passphrase = fn(backup.passphrase);
+  }
+  for (const profile of settings.backupProfiles) {
+    if (profile.passphrase) profile.passphrase = fn(profile.passphrase);
+  }
+  const cloud = settings.cloud;
+  if (cloud.s3.secretAccessKey) cloud.s3.secretAccessKey = fn(cloud.s3.secretAccessKey);
+  if (cloud.sftp.password) cloud.sftp.password = fn(cloud.sftp.password);
+  if (cloud.sftp.privateKey) cloud.sftp.privateKey = fn(cloud.sftp.privateKey);
+  if (cloud.ftp.password) cloud.ftp.password = fn(cloud.ftp.password);
+}
+
 export class SettingsManager {
   private settingsFile: string;
   private settings: AppSettings;
+  private secretsHydrated = false;
 
   constructor() {
     const configDir = app.getPath('userData');
     if (!fs.existsSync(configDir)) {
       fs.mkdirSync(configDir, { recursive: true });
     }
-    
+
     this.settingsFile = path.join(configDir, 'settings.json');
     this.settings = this.load();
   }
@@ -296,11 +317,34 @@ export class SettingsManager {
     return { ...DEFAULT_SETTINGS };
   }
 
+  /**
+   * Decrypt secret fields in memory. Runs lazily because this module is
+   * constructed at load time while `safeStorage` only works after the app is
+   * ready — the first post-ready read hydrates, then the flag short-circuits.
+   * A file written before 0.6.79 still holds plaintext secrets: hydrating
+   * detects them and rewrites the file once (encrypted).
+   */
+  private hydrateSecrets(): void {
+    if (this.secretsHydrated || !app.isReady?.()) return;
+    let hadPlaintext = false;
+    forEachSecret(this.settings, (value) => {
+      if (!isSecretEncrypted(value)) hadPlaintext = true;
+      return decryptSecret(value);
+    });
+    this.secretsHydrated = true;
+    if (hadPlaintext) this.save();
+  }
+
   save(): void {
+    this.hydrateSecrets();
     try {
+      // In-memory settings stay plaintext for every consumer (scheduler,
+      // wizard, IPC); only the serialized copy carries `enc:v1:` blobs.
+      const forDisk = JSON.parse(JSON.stringify(this.settings)) as AppSettings;
+      forEachSecret(forDisk, encryptSecret);
       fs.writeFileSync(
         this.settingsFile,
-        JSON.stringify(this.settings, null, 2),
+        JSON.stringify(forDisk, null, 2),
         'utf-8'
       );
     } catch (error) {
@@ -309,6 +353,7 @@ export class SettingsManager {
   }
 
   getSettings(): AppSettings {
+    this.hydrateSecrets();
     return { ...this.settings };
   }
 

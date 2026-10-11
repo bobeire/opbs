@@ -4,7 +4,7 @@ Prioritized backlog for OPBS (Open Pickle Backup System). Items in **Planned**
 are designed but not
 implemented; **Investigate** items need spike work first.
 
-## In Progress
+## Shipped
 
 ### File-level / image-browse restore
 - ✅ NTFS reader (`imaging/fs/ntfs.ts`): boot sector, MFT FILE records,
@@ -373,6 +373,52 @@ implemented; **Investigate** items need spike work first.
 - ✅ Tests: `input-guard.test.ts` — payload rejection (`0; Start-Process
   calc`, floats, negatives, non-strings) plus sink-level assertions that
   malicious values are refused *before* any process spawns.
+
+### Secrets encrypted at rest + passphrase off the command line (0.6.79)
+- ✅ `settings.json` held every secret in plaintext: scheduled-backup and
+  backup-profile passphrases, plus the S3 secret access key, SFTP
+  password/private key and FTP password — readable by anything that can read
+  the user's AppData. All six fields are now encrypted at rest with
+  Electron's **safeStorage** (DPAPI on Windows — the same OS store BitLocker/
+  EFS-style secrets live in, bound to the logged-in user), stored as
+  `enc:v1:` blobs by the new `secret-store.ts`. In-memory settings stay
+  plaintext so the scheduler, wizard and IPC round-trip are unchanged; the
+  encrypted form only ever exists on disk. A legacy plaintext file is
+  migrated on the first post-ready read (one rewrite, detected via the
+  prefix), and if the OS secret store is ever unavailable the code degrades
+  to the old plaintext behavior with a warning instead of failing the app.
+  Hydration is lazy because `SettingsManager` is constructed at module load,
+  before `app.whenReady()` — safeStorage only works after ready.
+- ✅ The unattended-task job configs (`%APPDATA%\opbs\tasks\<id>.json`) were
+  a **second plaintext copy** of the schedule passphrase; they now store the
+  same `enc:v1:` blob. Only the GUI writes these files and only
+  `OPBS.exe --cli backup` reads them — both post-ready, so the CLI decrypts
+  transparently; hand-written configs stay plaintext and pass through
+  unchanged.
+- ✅ CLI passphrase sources: `--passphrase-file <path|->` (file, or `-` for
+  stdin) and the `OPBS_PASSPHRASE` environment variable, resolved by one
+  shared `resolvePassphrase()` across all eight call sites (verify, scrub,
+  browse, extract, mount, store verify, repo key resolution) with precedence
+  file > env > flag. The legacy `--passphrase p` keeps working — argv is
+  readable by other processes, so it now prints a one-time stderr warning
+  pointing at the alternatives, and an unreadable passphrase file throws a
+  loud error rather than silently continuing without a key. The GUI never
+  put a passphrase on argv (job files are consumed on read since 0.6.78) and
+  scheduled tasks already used the config file, so this closes the last
+  exposure surface.
+- ✅ Tests: `secret-store.test.ts` (round-trip, no double-encrypt, legacy
+  plaintext, pre-ready and unavailable fallbacks, foreign-blob handling),
+  `settings-secrets.test.ts` (all six fields encrypted on disk + plaintext
+  served in memory + reload round-trip + legacy migration + no-keyring
+  fallback), task-config encryption cases in `task-scheduler.test.ts`, and
+  `cli-passphrase.test.ts` (precedence, newline stripping, `=` form, one-time
+  warning, unreadable file). A small `electron-access.ts` indirection makes
+  the lazy `electron` require testable — `vi.mock('electron')` does not
+  intercept raw `require()`.
+- ⏸️ Left as-is by design: settings **export** writes the values a user
+  explicitly picked a path for (import on the same machine keeps working),
+  and the WinPE pre-seeded restore config template ships `passphrase: ''` for
+  the user to fill on physical media.
 
 ### Helper job files consumed on read + stale temp sweep (0.6.78)
 - ✅ The encryption key (or passphrase) travels from a writer to a runner in

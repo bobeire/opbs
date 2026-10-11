@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { flagValue, positionals } from './flags';
+import { resolvePassphrase } from './passphrase';
 import type { CommandContext } from './index';
 import type { JobResult } from '../imaging/imaging-job';
 import type { BackupJobConfig } from '../imaging/backup-engine';
@@ -25,7 +26,7 @@ import type { S3Config } from '../utils/s3';
 
 function keyOpts(argv: string[]): RepoKeyOptions {
   const opts: RepoKeyOptions = {};
-  const passphrase = flagValue(argv, '--passphrase');
+  const passphrase = resolvePassphrase(argv).value;
   if (passphrase) opts.passphrase = passphrase;
   const keyfile = flagValue(argv, '--keyfile');
   if (keyfile) opts.keyfile = keyfile;
@@ -156,14 +157,17 @@ async function runRepoAction(
           return 1;
         }
         const states = repoImageStates(records).filter((s) => s.active);
-        const hasKey = ctx.argv.includes('--passphrase') || ctx.argv.includes('--keyfile') || (() => {
-          try {
-            resolveRepoKey(header, keyOpts(ctx.argv));
-            return true;
-          } catch {
-            return false;
-          }
-        })();
+        const hasKey =
+          resolvePassphrase(ctx.argv).value !== undefined ||
+          ctx.argv.includes('--keyfile') ||
+          (() => {
+            try {
+              resolveRepoKey(header, keyOpts(ctx.argv));
+              return true;
+            } catch {
+              return false;
+            }
+          })();
         if (ctx.opts.json) {
           console.log(JSON.stringify({ header, signaturesVerified: hasKey, images: states }, null, 2));
           return 0;

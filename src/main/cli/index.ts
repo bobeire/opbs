@@ -11,6 +11,7 @@ import { verifyImage, readImageInfo, deriveImageKey, scanPartialImage, DEFAULT_B
 import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains, writeManifest, selectImagesForVerify, RetentionPlan } from '../backup/retention';
 import { checkDiskHealth } from '../utils/disk-health';
 import { registerScheduledTask, removeScheduledTask, listScheduledTasks } from '../utils/task-scheduler';
+import { decryptSecret } from '../utils/secret-store';
 import { dispatchHelperJob } from '../helper/job-runner';
 import { launchElevatedJob } from '../helper/launcher';
 import { winfspAvailable } from '../imaging/mount-manager';
@@ -35,6 +36,7 @@ import { buildStorageHealthReport } from '../utils/storage-health';
 import { runDiskPerfTest, assessWriteSpeed } from '../utils/disk-perf';
 import { queryVssServiceState, normalizeVolumeRoot, VssJob, VssJobResult } from '../utils/vss';
 import { flagValue, flagValues } from './flags';
+import { resolvePassphrase } from './passphrase';
 import { cmdRepo, finalizeBackupRepo, parseLockDays } from './repo';
 import { cmdFleet } from './fleet';
 import { isRepository } from '../imaging/repository';
@@ -374,7 +376,9 @@ store put <s3://bucket/prefix|sftp://user@host/path|ftp://user@host/path> <file>
 Global:
   --json        Machine-readable output.
   --elevated    Run the job in-process (use inside an elevated scheduled task).
-  --passphrase P  Passphrase for encrypted images (verify).
+  --passphrase P  Passphrase for encrypted images (legacy — visible in process lists; a warning is printed).
+  --passphrase-file F  Read the passphrase from file F ('-' reads stdin).
+  OPBS_PASSPHRASE  Environment variable alternative to --passphrase.
   --keep-full N   prune: number of recent full chains to keep.
   --keep-deltas N prune: trailing deltas kept per chain.
   --days N        prune: never delete images newer than N days.
@@ -588,6 +592,13 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   }
   const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
+  // Unattended task configs carry the passphrase as an `enc:v1:` safeStorage
+  // blob (written by the GUI); hand-written configs stay plaintext and pass
+  // through decryptSecret unchanged.
+  if (typeof config.passphrase === 'string') {
+    config.passphrase = decryptSecret(config.passphrase);
+  }
+
   // --repo flag wins; config-driven runs (GUI wizard / scheduled) can carry
   // repoDir + repoLockDays inside the job JSON instead.
   const repoTarget: string | undefined =
@@ -625,7 +636,7 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   const repoOpts = {
     lockDays,
     quiet: ctx.opts.json,
-    passphrase: flagValue(ctx.argv, '--passphrase'),
+    passphrase: resolvePassphrase(ctx.argv).value,
     keyfile: flagValue(ctx.argv, '--keyfile')
   };
   const finalizeRepoBackup = async (result: JobResult): Promise<void> => {
@@ -1242,7 +1253,7 @@ async function cmdVerify(ctx: CommandContext): Promise<number> {
   const dir = flagValue(ctx.argv, '--dir');
   const jsonOutPath = flagValue(ctx.argv, '--json-out');
   const scope = (flagValue(ctx.argv, '--scope') ?? 'newest') as 'newest' | 'all';
-  const passphrase = flagValue(ctx.argv, '--passphrase');
+  const passphrase = resolvePassphrase(ctx.argv).value;
 
   if (dir) {
     return await verifyDirectory(dir, scope, passphrase, ctx.opts.json, jsonOutPath);
@@ -1367,7 +1378,7 @@ async function cmdScrub(ctx: CommandContext): Promise<number> {
   }
   const scope = (flagValue(ctx.argv, '--scope') ?? 'all') as 'newest' | 'all';
   const repair = ctx.argv.includes('--repair');
-  const passphrase = flagValue(ctx.argv, '--passphrase');
+  const passphrase = resolvePassphrase(ctx.argv).value;
   const jsonOutPath = flagValue(ctx.argv, '--json-out');
 
   const summary = scrubDirectory(dir, { scope, repair, passphrase });
@@ -2288,7 +2299,7 @@ async function cmdBrowse(ctx: CommandContext): Promise<number> {
     return 1;
   }
   const relPath = flagValue(ctx.argv, '--path') ?? '';
-  const passphrase = flagValue(ctx.argv, '--passphrase');
+  const passphrase = resolvePassphrase(ctx.argv).value;
 
   try {
     let key: Buffer | undefined;
@@ -2347,7 +2358,7 @@ async function cmdExtract(ctx: CommandContext): Promise<number> {
     console.error('Invalid --partition value');
     return 1;
   }
-  const passphrase = flagValue(ctx.argv, '--passphrase');
+  const passphrase = resolvePassphrase(ctx.argv).value;
 
   try {
     let key: Buffer | undefined;
@@ -2458,7 +2469,7 @@ async function cmdStore(ctx: CommandContext): Promise<number> {
 
   if (action === 'verify' && store) {
     const key = flagValue(ctx.argv, '--key');
-    const passphrase = flagValue(ctx.argv, '--passphrase');
+    const passphrase = resolvePassphrase(ctx.argv).value;
     const objects = key ? [key] : await store.list();
     if (objects.length === 0) {
       console.error('No objects found to verify');
@@ -2545,7 +2556,7 @@ async function cmdMount(ctx: CommandContext): Promise<number> {
   }
   const letter = flagValue(ctx.argv, '--letter');
   const label = flagValue(ctx.argv, '--label');
-  const passphrase = flagValue(ctx.argv, '--passphrase');
+  const passphrase = resolvePassphrase(ctx.argv).value;
   if (letter && !/^[A-Za-z]:$/.test(letter)) {
     console.error('--letter must look like "X:"');
     return 1;

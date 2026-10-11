@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { logger } from './logger';
+import { encryptSecret } from './secret-store';
 
 /**
  * `electron` is required lazily so the WinPE CLI (plain node.exe) can load this
@@ -371,6 +372,41 @@ function taskNameForSchedule(scheduleId: string): string {
 }
 
 /**
+ * Build the job-config JSON for an unattended backup. The passphrase is
+ * encrypted at rest (`enc:v1:` + safeStorage/DPAPI) — only the GUI writes
+ * these files and only `OPBS.exe --cli backup` reads them, both post-ready.
+ * Plaintext passphrases (hand-edited configs) remain accepted at read time.
+ */
+export function buildUnattendedBackupConfig(schedule: {
+  sourceDiskIndex: number;
+  sourcePartitions: number[];
+  destinationPath: string;
+  compressionLevel: number;
+  compressionType?: string;
+  compressionThreads?: number;
+  verificationEnabled: boolean;
+  incremental: boolean;
+  passphrase?: string;
+}): Record<string, unknown> {
+  const config: Record<string, unknown> = {
+    sourceDiskIndex: schedule.sourceDiskIndex,
+    sourcePartitions: schedule.sourcePartitions,
+    destinationPath: schedule.destinationPath,
+    compressionLevel: schedule.compressionLevel,
+    compressionType: schedule.compressionType ?? 'zstd',
+    compressionThreads: schedule.compressionThreads ?? 1,
+    verificationEnabled: schedule.verificationEnabled,
+    incremental: schedule.incremental,
+    // For incremental: omit baseImagePath — the CLI resolves it dynamically
+    // via findNewestImage() so each run picks up the latest chain.
+  };
+  if (schedule.passphrase) {
+    config.passphrase = encryptSecret(schedule.passphrase);
+  }
+  return config;
+}
+
+/**
  * Write a job-config JSON for the given schedule and register a Windows
  * scheduled task.  When `incremental` is true the config is written WITHOUT
  * a `baseImagePath` — the CLI resolves the newest image at run time via
@@ -395,22 +431,7 @@ export async function registerUnattendedBackupTask(
   const configPath = path.join(taskDir, `${scheduleId}.json`);
 
   // Build the config the CLI backup command will read.
-  const config: Record<string, unknown> = {
-    sourceDiskIndex: schedule.sourceDiskIndex,
-    sourcePartitions: schedule.sourcePartitions,
-    destinationPath: schedule.destinationPath,
-    compressionLevel: schedule.compressionLevel,
-    compressionType: schedule.compressionType ?? 'zstd',
-    compressionThreads: schedule.compressionThreads ?? 1,
-    verificationEnabled: schedule.verificationEnabled,
-    incremental: schedule.incremental,
-    // For incremental: omit baseImagePath — the CLI resolves it dynamically
-    // via findNewestImage() so each run picks the latest chain.
-  };
-  if (schedule.passphrase) {
-    config.passphrase = schedule.passphrase;
-  }
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  fs.writeFileSync(configPath, JSON.stringify(buildUnattendedBackupConfig(schedule), null, 2));
 
   // Determine schedule type + days from the cron expression.
   const cronParts = schedule.cronExpression.split(/\s+/);

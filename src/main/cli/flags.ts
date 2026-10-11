@@ -38,6 +38,7 @@ export function flagValues(argv: string[], name: string): string[] {
 export const VALUE_FLAGS = [
   '--lock-days',
   '--passphrase',
+  '--passphrase-file',
   '--keyfile',
   '--to',
   '--anchor',
