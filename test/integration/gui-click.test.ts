@@ -45,6 +45,19 @@ test(
     const win: Page = await app.firstWindow();
     await win.waitForLoadState('domcontentloaded');
     console.log('[gui-click] window ready, starting navigation…');
+
+    // First run on a machine without the Windows ADK shows the install
+    // preflight; it resolves a beat after first paint and would otherwise
+    // intercept the sidebar clicks below.
+    const adkModal = win.locator('.modal-overlay');
+    try {
+      await adkModal.waitFor({ state: 'visible', timeout: 5000 });
+      await adkModal.getByRole('button', { name: 'Later' }).click();
+      await adkModal.waitFor({ state: 'hidden' });
+      console.log('[gui-click] ADK preflight dismissed');
+    } catch {
+      console.log('[gui-click] no ADK preflight shown');
+    }
     win.on('pageerror', (error) => PAGE_ERRORS.push(String(error)));
 
     expect(await win.title()).toContain('OPBS');
