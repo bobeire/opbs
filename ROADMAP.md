@@ -376,13 +376,19 @@ implemented; **Investigate** items need spike work first.
 
 ### CI on GitHub Actions + encrypted-image restore drills (0.6.81)
 - ✅ `.github/workflows/ci.yml`: every push/PR runs the full gate stack on
-  `windows-latest` — `npm ci`, main/preload tsc (must be clean), renderer tsc
-  (fails if error count exceeds the 16-error baseline), eslint parsed from
-  JSON output (fails above the 9-error / 195-problem baseline), the entire
-  vitest suite, and `npm run build`. Native-module tests self-skip when
-  `opbs_native.node` is absent, so a fresh checkout runs everything without a
-  node-gyp step. The gates that were previously only ever run by hand now
-  guard every commit.
+  `windows-latest` — `npm ci` (+ electron's binary invoked explicitly, since
+  npm's allow-scripts guard leaves its postinstall pending), main/preload tsc
+  (must be clean), renderer tsc (fails if error count exceeds the 16-error
+  baseline), eslint parsed from JSON output (fails above the 9-error /
+  195-problem baseline), `npm run build`, the native addon, and the entire
+  vitest suite — Electron integration test included. Two real bugs surfaced
+  getting there: `build:native` ran `node-gyp rebuild` at the repo root where
+  no `binding.gyp` exists (it now targets `src/native`, the only directory it
+  ever worked from — historically masked by the manual `cd src/native &&
+  npm install` flow), and root node-gyp needed 12.1+ for the runners'
+  Visual Studio 2026. Native-dependent tests also self-skip cleanly when the
+  addon is absent, so partial environments stay green. The gates that were
+  previously only ever run by hand now guard every commit.
 - ✅ **Restore drills cover encrypted images.** The scheduler's
   `pickDrillImage(entries, passphrase)` (in `retention.ts`, shared with the
   CLI's inline `--dir` mode) picks the newest *drillable* image: any image
