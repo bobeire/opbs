@@ -22,6 +22,7 @@ const NAV: NavTarget[] = [
 ];
 
 const PAGE_ERRORS: string[] = [];
+const CSP_VIOLATIONS: string[] = [];
 
 test(
   'launches the app and click-tests every sidebar view without errors',
@@ -43,6 +44,13 @@ test(
   try {
     console.log('[gui-click] electron launched, waiting for first window…');
     const win: Page = await app.firstWindow();
+    // Collect CSP rejections from the built renderer (production builds ship a
+    // Content-Security-Policy meta tag); anything "Refused to …" means the
+    // policy is blocking a resource the app actually needs.
+    win.on('console', (message) => {
+      const text = message.text();
+      if (/Content Security Policy|Refused to/i.test(text)) CSP_VIOLATIONS.push(text);
+    });
     await win.waitForLoadState('domcontentloaded');
     console.log('[gui-click] window ready, starting navigation…');
 
@@ -74,8 +82,10 @@ test(
       expect((await content.textContent()) ?? '').toMatch(target.heading);
     }
 
-    // Every view navigated without a single renderer-side uncaught error.
+    // Every view navigated without a single renderer-side uncaught error,
+    // and without tripping the renderer's content-security policy.
     expect(PAGE_ERRORS).toEqual([]);
+    expect(CSP_VIOLATIONS).toEqual([]);
   } finally {
     await app.close();
   }

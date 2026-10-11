@@ -374,6 +374,25 @@ implemented; **Investigate** items need spike work first.
   calc`, floats, negatives, non-strings) plus sink-level assertions that
   malicious values are refused *before* any process spawns.
 
+### Renderer content-security policy (0.6.82)
+- ✅ Production builds ship a `Content-Security-Policy` meta tag in the
+  renderer: `default-src 'self'` with strict `script-src 'self'`,
+  `style-src 'self' 'unsafe-inline'` (React style attributes — the only
+  inline exception), `img-src 'self'`, `font-src 'self'`, `connect-src
+  'self'`, `object-src 'none'`, `base-uri 'self'`, `form-action 'self'`.
+  The renderer does no fetch/XHR/websocket/worker/blob loading at all (every
+  cross-boundary call goes through the contextBridge IPC), so nothing else
+  needs an allowance; no `eval`/`new Function`, iframes, or data-URIs exist
+  anywhere in the renderer.
+- ✅ Injected by a build-only Vite plugin (`transformIndexHtml`, `apply:
+  'build'`) so the dev server keeps its inline module preamble and Electron's
+  dev-mode `localhost:5173` load is unaffected; the built
+  `dist/renderer/index.html` carries the meta tag.
+- ✅ Enforcement test: `gui-click.test.ts` collects renderer console messages
+  matching `Content Security Policy` / `Refused to` and fails if any appear
+  while it walks all seven sidebar views, so CI proves the policy blocks
+  nothing the app actually needs.
+
 ### CI on GitHub Actions + encrypted-image restore drills (0.6.81)
 - ✅ `.github/workflows/ci.yml`: every push/PR runs the full gate stack on
   `windows-latest` — `npm ci` (+ electron's binary invoked explicitly, since
@@ -916,7 +935,54 @@ implemented; **Investigate** items need spike work first.
   hydrate/flush/conflict, end-to-end verify/tamper/orphans, Object-Lock prune
   refusal, anchor round-trip, cleanup).
 
+### Native partition-table builder (dissimilar-hardware restore)
+- ✅ Native addon `buildPartitionTable(scheme, lbaCount, entries, {diskGuid})`
+  emits a full GPT layout (protective MBR @0, primary header @LBA1, primary
+  entries @LBA2, backup entries @lastLBA−32, backup header @lastLBA, with
+  header/entry CRCs, deterministic disk GUID, UTF-16LE entry names) or an MBR
+  table (≤4 entries, bootable flag, 0x55AA signature) as a list of byte regions.
+- ✅ TS planner (`partition-table.ts`): automatic scheme selection (MBR only
+  when representable — ≤4 partitions, ≤2 TiB, 32-bit LBAs, ≥LBA63 offsets —
+  otherwise GPT), overlap/alignment/bounds validation, and a serializable
+  `RestoreJob.writeTable` plan handed to the elevated helper.
+- ✅ Safety gate: a custom layout that moves a partition away from its captured
+  offset now requires `acknowledgeLayout:true` (CLI `--confirm-layout`);
+  otherwise the restore refuses with an explicit warning. `writePartitionTable:false`
+  (`--no-write-table`) restores raw blocks only.
+- ✅ `restore --table-scheme gpt|mbr|auto`, `--table-disk-guid`/JSON-config
+  `tableDiskGuid`, per-partition `tableTypeGuids`, and `tableBootPartition`
+  (MBR boot flag). The elevated runner lays the table down before any
+  partition blocks via `writeBlocks`.
+- ✅ Disk-identity safety: backups record the source disk's model/serial in
+  the image header. A dissimilar restore onto the *same physical disk* the
+  image came from (matching serial) is refused unless
+  `acknowledgeSameDisk:true` (`--acknowledge-same-disk`); a same-model
+  different-serial target only produces a warning hint surfaced on the
+  result.
+- ✅ Filesystem grow-on-restore: `ntfs-resize.ts` plans an NTFS grow (boot
+  total-sector patch, $Bitmap run/size extension + free-tail write, $BadClus
+  sparse extension) using canonical BPB offsets; `--layout P:OFF[:SIZE]` (or
+  `targetLayout[].size`) grows the partition after the blocks are written.
+  Shrinking is refused; non-NTFS/growable layouts become warnings, never
+  failures.
+
+### Dissimilar-hardware restore
+- ✅ Layout mapping: a restore may specify `targetLayout` (or CLI
+  `restore --layout 0:4096,1:8388608`) to re-order/move captured partitions to
+  different target offsets; placements are validated against target disk size.
+- ✅ Partition-table builder + disk-identity guards + filesystem resize: see the
+  "Native partition-table builder" section.
+
 ## Planned
+
+### Restore directly from cloud
+- Restore takes a *local* image path: `restore-engine` and the Restore UI
+  accept `imagePath` on disk only, while `s3://`/`sftp://`/`ftp://`
+  destinations (backup upload, `store get/list/verify`, cloud prune) all work.
+  Recovering an offsite copy therefore needs a manual `store get` download
+  first. Needed: a restore path that accepts a cloud URI — download to temp
+  (progress + resume + free-space check) or stream via ranged reads — wired
+  through the GUI, the CLI, and scheduled restore drills.
 
 ### Cloud / network destinations
 - ✅ `backupLocation` URI handling (`utils/location.ts`): `file://`, `smb://`,
@@ -956,45 +1022,7 @@ implemented; **Investigate** items need spike work first.
   `store put/get/list/verify` and `prune` commands work over FTP too. Images
   stay AES-256-GCM encrypted regardless of transport.
 
-### Native partition-table builder (dissimilar-hardware restore)
-- ✅ Native addon `buildPartitionTable(scheme, lbaCount, entries, {diskGuid})`
-  emits a full GPT layout (protective MBR @0, primary header @LBA1, primary
-  entries @LBA2, backup entries @lastLBA−32, backup header @lastLBA, with
-  header/entry CRCs, deterministic disk GUID, UTF-16LE entry names) or an MBR
-  table (≤4 entries, bootable flag, 0x55AA signature) as a list of byte regions.
-- ✅ TS planner (`partition-table.ts`): automatic scheme selection (MBR only
-  when representable — ≤4 partitions, ≤2 TiB, 32-bit LBAs, ≥LBA63 offsets —
-  otherwise GPT), overlap/alignment/bounds validation, and a serializable
-  `RestoreJob.writeTable` plan handed to the elevated helper.
-- ✅ Safety gate: a custom layout that moves a partition away from its captured
-  offset now requires `acknowledgeLayout:true` (CLI `--confirm-layout`);
-  otherwise the restore refuses with an explicit warning. `writePartitionTable:false`
-  (`--no-write-table`) restores raw blocks only.
-- ✅ `restore --table-scheme gpt|mbr|auto`, `--table-disk-guid`/JSON-config
-  `tableDiskGuid`, per-partition `tableTypeGuids`, and `tableBootPartition`
-  (MBR boot flag). The elevated runner lays the table down before any
-  partition blocks via `writeBlocks`.
-- ✅ Disk-identity safety: backups record the source disk's model/serial in
-  the image header. A dissimilar restore onto the *same physical disk* the
-  image came from (matching serial) is refused unless
-  `acknowledgeSameDisk:true` (`--acknowledge-same-disk`); a same-model
-  different-serial target only produces a warning hint surfaced on the
-  result.
-- ✅ Filesystem grow-on-restore: `ntfs-resize.ts` plans an NTFS grow (boot
-  total-sector patch, $Bitmap run/size extension + free-tail write, $BadClus
-  sparse extension) using canonical BPB offsets; `--layout P:OFF[:SIZE]` (or
-  `targetLayout[].size`) grows the partition after the blocks are written.
-  Shrinking is refused; non-NTFS/growable layouts become warnings, never
-  failures.
-
 ## Investigate
-
-### Dissimilar-hardware restore
-- ✅ Layout mapping: a restore may specify `targetLayout` (or CLI
-  `restore --layout 0:4096,1:8388608`) to re-order/move captured partitions to
-  different target offsets; placements are validated against target disk size.
-- ✅ Partition-table builder + disk-identity guards + filesystem resize: see the
-  "Native partition-table builder" section.
 
 ### Changed-block tracking via NTFS USN journal
 - ✅ Native addon `queryUsnJournal` + `getUsnJournalInfo` read the NTFS USN
@@ -1019,6 +1047,11 @@ implemented; **Investigate** items need spike work first.
   (full image + every intermediate delta via `baseImagePath` links) instead of
   only the immediate parent, so a delta never rewrites a block a grandparent
   already holds. Skipped-block accounting still reflects the true source bytes.
+- Remaining: chain *compaction* itself — flattening a long delta chain (or
+  rebasing onto a fresh full) so restores stop walking N images — was never
+  built; the bullet above is delta-on-delta correctness, not compaction. Needs
+  a design pass first (rewrite/verify/prune semantics, encrypted frames, S3
+  chains) since a bug here corrupts live backups.
 
 ### Self-healing verification / read-scrub
 - Periodically re-read archived images and report bit-rot via CRC mismatch;
