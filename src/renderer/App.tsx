@@ -16,6 +16,7 @@ import Repositories from './components/Repositories';
 import ToastHost from './components/ToastHost';
 import AdkPrompt from './components/AdkPrompt';
 import SplashScreen from './components/SplashScreen';
+import { applyTheme } from './lib/theme';
 
 type Page =
   | 'dashboard'
@@ -74,6 +75,8 @@ function App() {
 
   useEffect(() => {
     void window.electronAPI.getVersion().then((v) => setAppVersion(v));
+    // Theme: authoritative settings value over the cached first-paint value.
+    void window.electronAPI.getSettings().then((s) => applyTheme(s?.theme));
     // Update check happens in main at startup (initAutoUpdater); calling it
     // here too would make background checks indistinguishable from the
     // manual "Check for updates" button.

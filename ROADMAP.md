@@ -374,6 +374,33 @@ implemented; **Investigate** items need spike work first.
   calc`, floats, negatives, non-strings) plus sink-level assertions that
   malicious values are refused *before* any process spawns.
 
+### Theme selector — match Windows / light / dark (0.6.80)
+- ✅ Settings → **Appearance** offers three modes: **Match Windows**
+  (default-follows-OS), **Light**, and **Dark** (the app's current look, and
+  still the default — existing installs render identically). The renderer
+  resolves the mode to `data-theme` on `<html>`: the `:root` block keeps the
+  dark palette as the shipped default (correct paint before any JS runs), a
+  `:root[data-theme='light']` block overrides the surface/text/border/link
+  vars, and `color-scheme` flips so native controls (scrollbars, form
+  widgets) follow too. The mode lives in `settings.json` (`theme`), synced to
+  Electron's `nativeTheme.themeSource` in main so OS-level UI (menus,
+  `prefers-color-scheme`) matches the choice; **Match Windows** additionally
+  subscribes to the `prefers-color-scheme` media query and re-renders live
+  when Windows switches themes.
+- ✅ Beyond the palette vars, the conversion swept the hard-coded colors that
+  would break on white: the three light-grey hover/input text colors became
+  `var(--text-color)`, link blues became `--link-color` (light variant darkens
+  to `#2563eb` for contrast), and the white-alpha row tints/hovers (breadcrumb
+  bar, file-table head, hover rows, zebra tables, inline code) became
+  `--subtle-bg/-hover/-strong` vars with dark-alpha equivalents in light
+  mode. Terminal-style panels (`.log-content`, `.disk-tools-pre`, copy-strip)
+  deliberately keep their dark background in **both** themes so their light
+  text stays correct — they're console output, not surfaces.
+- ✅ No flash: the resolved mode is mirrored to `localStorage` and applied
+  synchronously in `main.tsx` before React mounts; App then reconciles with
+  the authoritative settings value over IPC, and the Settings page applies a
+  change on Save (consistent with every other setting).
+
 ### Secrets encrypted at rest + passphrase off the command line (0.6.79)
 - ✅ `settings.json` held every secret in plaintext: scheduled-backup and
   backup-profile passphrases, plus the S3 secret access key, SFTP

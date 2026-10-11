@@ -43,6 +43,8 @@ export interface AppSettings {
    * backups re-anchor automatically and Verify checks against it.
    */
   lastRepoAnchorTarget: string;
+  /** Appearance: follow the OS (Windows) theme or force light/dark. */
+  theme: 'system' | 'light' | 'dark';
 }
 
 export interface CloudSettings {
@@ -177,6 +179,7 @@ export interface BackupProfile {
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
+  theme: 'dark',
   defaultCompression: 3,
   defaultVerification: true,
   backupLocation: '',

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, Menu, Notification } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, Menu, Notification, nativeTheme } from 'electron';
 import path from 'path';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
@@ -412,6 +412,12 @@ function buildAppMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+/** Keep Electron's native UI (menus, prefers-color-scheme) in sync with the
+ *  Appearance setting: 'system' follows the Windows theme. */
+function syncNativeTheme(theme: unknown): void {
+  nativeTheme.themeSource = theme === 'light' || theme === 'dark' ? theme : 'system';
+}
+
 function main(): void {
   // Headless CLI mode: run the requested command and exit without a window.
   const cliIndex = process.argv.indexOf('--cli');
@@ -503,6 +509,7 @@ function main(): void {
 
   app.whenReady().then(() => {
     initErrorReporter(() => settingsManager.getSettings().errorReporting);
+    syncNativeTheme(settingsManager.getSettings().theme);
     // GUI-only path (helper/CLI branches returned above): clear out job
     // temp dirs orphaned by a crash before their key material can linger.
     try {
@@ -769,6 +776,7 @@ function setupIpcHandlers(): void {
 
   ipcMain.handle('update-settings', async (_, updates) => {
     const result = settingsManager.updateSettings(updates);
+    syncNativeTheme(result.theme);
     if (result.logLevel) {
       logger.setLevel(result.logLevel as any);
     }

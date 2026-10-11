@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { applyTheme } from '../lib/theme';
 
 interface NotificationSettings {
   enabled: boolean;
@@ -107,9 +108,11 @@ interface Settings {
   cloud: CloudSettings;
   errorReporting: { enabled: boolean; endpoint: string };
   fileAssociations: boolean;
+  theme: 'system' | 'light' | 'dark';
 }
 
 const DEFAULT_SETTINGS: Settings = {
+  theme: 'dark',
   defaultCompression: 3,
   defaultVerification: true,
   backupLocation: '',
@@ -249,6 +252,7 @@ function Settings() {
   const handleSave = async () => {
     const saved = await window.electronAPI.updateSettings(settings);
     setSettings(mergeSettings(saved));
+    applyTheme(saved?.theme ?? settings.theme);
     setHasChanges(false);
   };
 
@@ -383,7 +387,24 @@ function Settings() {
   return (
     <div className="settings">
       <h1>Settings</h1>
-      
+
+      <div className="settings-section">
+        <h2>Appearance</h2>
+        <div className="target-kind-toggle">
+          {(['system', 'light', 'dark'] as const).map((mode) => (
+            <label key={mode} className={`target-kind-option ${settings.theme === mode ? 'selected' : ''}`}>
+              <input
+                type="radio"
+                name="theme"
+                checked={settings.theme === mode}
+                onChange={() => handleChange('theme', mode)}
+              />
+              {mode === 'system' ? 'Match Windows' : mode === 'light' ? 'Light' : 'Dark'}
+            </label>
+          ))}
+        </div>
+      </div>
+
       <div className="settings-section">
         <h2>Backup Defaults</h2>
         

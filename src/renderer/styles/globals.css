@@ -5,6 +5,7 @@
 }
 
 :root {
+  color-scheme: dark;
   --primary-color: #2563eb;
   --primary-hover: #1d4ed8;
   --danger-color: #dc2626;
@@ -17,6 +18,28 @@
   --text-color: #f9fafb;
   --text-muted: #9ca3af;
   --border-color: #4b5563;
+  --link-color: #60a5fa;
+  --subtle-bg: rgba(255, 255, 255, 0.04);
+  --subtle-hover: rgba(255, 255, 255, 0.06);
+  --subtle-strong: rgba(255, 255, 255, 0.08);
+}
+
+/* Light palette — selected via data-theme (Settings → Appearance). The dark
+   values above stay the default so the app renders correctly before the
+   theme setting is read. Terminal-style panels (log content, disk-tool
+   output) keep their dark background in both themes on purpose. */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg-color: #f3f4f6;
+  --sidebar-bg: #ffffff;
+  --card-bg: #ffffff;
+  --text-color: #111827;
+  --text-muted: #6b7280;
+  --border-color: #d1d5db;
+  --link-color: #2563eb;
+  --subtle-bg: rgba(17, 24, 39, 0.04);
+  --subtle-hover: rgba(17, 24, 39, 0.06);
+  --subtle-strong: rgba(17, 24, 39, 0.06);
 }
 
 body {
@@ -1225,7 +1248,7 @@ body {
   align-items: center;
   gap: 12px;
   padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--subtle-bg);
   border-bottom: 1px solid var(--border-color, #ddd);
 }
 
@@ -1245,7 +1268,7 @@ body {
 }
 
 .crumb:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--subtle-strong);
 }
 
 .crumb.active {
@@ -1270,7 +1293,7 @@ body {
   font-size: 12px;
   text-transform: uppercase;
   color: var(--text-muted);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--subtle-bg);
   border-bottom: 1px solid var(--border-color, #ddd);
 }
 
@@ -1279,7 +1302,7 @@ body {
 }
 
 .file-row:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--subtle-hover);
 }
 
 .node-name {
@@ -1957,7 +1980,7 @@ body {
 }
 
 .copy-active-badge {
-  color: #60a5fa;
+  color: var(--link-color);
   font-weight: 600;
   font-size: 12px;
 }
@@ -2094,11 +2117,11 @@ body {
 }
 
 .disk-tools-tab:hover {
-  color: #e5e7eb;
+  color: var(--text-color);
 }
 
 .disk-tools-tab.active {
-  color: #60a5fa;
+  color: var(--link-color);
   border-bottom-color: #60a5fa;
   font-weight: 600;
 }
@@ -2144,7 +2167,7 @@ body {
   border: 1px solid var(--border-color, #4b5563);
   border-radius: 4px;
   background: var(--bg-color, #1f2937);
-  color: #e5e7eb;
+  color: var(--text-color);
   font-size: 13px;
 }
 
@@ -2310,7 +2333,7 @@ body {
 }
 
 .mbr-table tbody tr:nth-child(even) {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--subtle-bg);
 }
 
 .disk-tools-section {
@@ -2378,7 +2401,7 @@ body {
 }
 
 .builder-note code {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--subtle-hover);
   padding: 1px 5px;
   border-radius: 4px;
   font-size: 12px;
@@ -2402,11 +2425,11 @@ body {
 }
 
 .builder-tab:hover {
-  color: #e5e7eb;
+  color: var(--text-color);
 }
 
 .builder-tab.active {
-  color: #60a5fa;
+  color: var(--link-color);
   border-bottom-color: #60a5fa;
   font-weight: 600;
 }
