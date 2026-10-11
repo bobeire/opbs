@@ -5,6 +5,7 @@ import { isVirtualDiskPath } from '../utils/virtual-disk';
 import type { BackupJobConfig, BackupVhdJob } from '../imaging/backup-engine';
 import type { JobResult } from '../imaging/imaging-job';
 import { appendResultWarning, attachAndDiscoverDisk, detachWithRetries, errorMessage } from './vhd-attach';
+import { readAndConsumeJob } from './job-file';
 
 /**
  * Elevated backup FROM a .vhd/.vhdx file. Runs in the helper process:
@@ -66,7 +67,7 @@ export async function runBackupVhdJob(
   pipeClient?: PipeClient
 ): Promise<void> {
   const start = Date.now();
-  const raw = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as BackupVhdJob;
+  const raw = readAndConsumeJob<BackupVhdJob>(jobPath);
   const config = raw.config;
   const warnings: string[] = [];
   let attachedByUs = false;

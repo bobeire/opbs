@@ -5,6 +5,7 @@ import { logger } from '../utils/logger';
 import { collectAndWriteSidecar } from '../utils/bitlocker-capture';
 import { loadNative } from '../utils/native-loader';
 import type { PipeClient } from '../utils/pipe-ipc';
+import { readAndConsumeJob } from './job-file';
 import {
   ImageHeader,
   PartitionEntryMeta,
@@ -107,7 +108,7 @@ export async function runBackupJob(
   let job: ImagingJob;
   let native: NativeImagingApi;
   try {
-    job = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as ImagingJob;
+    job = readAndConsumeJob<ImagingJob>(jobPath);
     native = nativeApi ?? loadNative<NativeImagingApi>();
   } catch (error) {
     // Everything before the main body's own try/catch (below) used to be
@@ -1057,7 +1058,7 @@ export async function runRestoreJob(
   pipeClient?: PipeClient
 ): Promise<void> {
   const start = Date.now();
-  const job = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as RestoreJob;
+  const job = readAndConsumeJob<RestoreJob>(jobPath);
   const native: NativeImagingApi = nativeApi ?? loadNative<NativeImagingApi>();
 
   // Macrium containers (.mrimgx / .mrimg) restore through their own reader
@@ -2101,7 +2102,7 @@ export async function runCloneJob(
   let job: CloneJob;
   let native: NativeImagingApi;
   try {
-    job = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as CloneJob;
+    job = readAndConsumeJob<CloneJob>(jobPath);
     native = nativeApi ?? loadNative<NativeImagingApi>();
   } catch (error) {
     // Everything before the main body's own try/catch below used to be
@@ -2469,13 +2470,13 @@ export async function runMountJob(
   cancelPath: string,
   pipeClient?: PipeClient
 ): Promise<void> {
-  const job = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as {
+  const job = readAndConsumeJob<{
     imagePath: string;
     partitionIndex: number;
     driveLetter?: string;
     label?: string;
     passphrase?: string;
-  };
+  }>(jobPath);
 
   const writeResult = (result: Record<string, unknown>): void => {
     emitResult(resultPath, result, pipeClient);
@@ -2578,6 +2579,13 @@ export async function dispatchHelperJob(
     return;
   }
   if (raw.type === 'vss') {
+    // runVssJob receives the already-parsed payload — this is the only read
+    // of jobPath on this path, so consume it here to match every runner.
+    try {
+      fs.rmSync(jobPath, { force: true });
+    } catch {
+      /* best-effort */
+    }
     const { runVssJob } = await import('./vss-job');
     const result = await runVssJob(raw as { type: 'vss'; operation: 'writers' | 'smoke-test' | 'repair' | 'start' | 'stop'; volume?: string });
     fs.writeFileSync(resultPath, JSON.stringify(result));

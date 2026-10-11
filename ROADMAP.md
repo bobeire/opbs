@@ -374,6 +374,48 @@ implemented; **Investigate** items need spike work first.
   calc`, floats, negatives, non-strings) plus sink-level assertions that
   malicious values are refused *before* any process spawns.
 
+### Helper job files consumed on read + stale temp sweep (0.6.78)
+- ✅ The encryption key (or passphrase) travels from a writer to a runner in
+  a plaintext `job.json` under the OS temp dir, and every runner used to
+  leave it there: `dispatchHelperJob` read it for a type sniff and the
+  runners re-read it, so the file survived until the launcher's `cleanup()`
+  on settle — which never runs if the helper crashes or the machine dies.
+  Every runner read now goes through **`readAndConsumeJob`**
+  (`src/main/helper/job-file.ts`): read → delete → parse, at the six real
+  read sites (`job-runner.ts` backup/restore/clone/mount plus the VSS
+  branch of dispatch, `backup-vhd-job.ts`, `restore-vhd-job.ts`). The delete
+  happens *before* the parse, so a corrupt file is destroyed rather than
+  left for anyone to read. Dispatch keeps its own plain read (it only
+  sniffs `type`); the runners consume milliseconds later regardless.
+  The VHD jobs are a two-stage flow — consume the wrapper job, rebuild an
+  inner `backup`/`restore` job, write it, hand it to the real runner which
+  consumes again — verified end to end.
+- ✅ Consumers that were already gone: `launchElevatedJob` writes the file
+  and only ever reads `result.json`/`progress.json` afterwards; the CLI
+  wizard/drill/scheduled paths read `resultPath`; `runAsHelper` reads
+  `resultPath`. No engine (`backup-engine`, `restore-engine`, `clone-engine`)
+  or scheduler code touches `job.json`.
+- ✅ **Sweep for the crash gap** (`src/main/utils/job-dir-sweep.ts`): a
+  defensive scan of the temp dir at GUI startup removes `opbs-job-`,
+  `opbs-wizard-`, `opbs-scheduled-` and `opbs-drill-inproc-` directories
+  whose *entries* are stale — 1h if an unconsumed `job.json` is still in
+  there (the reader never ran: helper crashed between spawn and read), 24h
+  if the job ran and only `progress.json`/`result.json` litter remains.
+  Age is computed from the newest entry, not the directory's own mtime:
+  NTFS never bumps a directory's mtime when files inside are rewritten, so
+  a directory can look hours old while a job is actively progressing — and
+  `runMountJob` heartbeats `progress.json` every 5s, so a multi-day mount
+  is never swept. Best-effort per directory (races, in-use handles), logged
+  and skipped.
+- ✅ Tests: `job-file.test.ts` (consume + corrupt-JSON consume + missing),
+  `job-dir-sweep.test.ts` (unconsumed stale, fresh, live-heartbeat with an
+  artificially old dir mtime, consumed-stale, consumed-recent, all three
+  temp-dir prefixes, non-matching prefixes and regular files untouched,
+  empty-dir fallback), plus `existsSync(jobPath) === false` assertions after
+  runs in `job-runner.test.ts` (success and cancelled), `mount-job.test.ts`
+  (dispatch) and `backup-vhd-job.test.ts` (all four tests — the mocked
+  inner runner now consumes like production).
+
 ### Parity build off the main thread (0.6.77)
 - ✅ Post-backup XOR parity (`buildParity`) re-reads every frame of the new
   image via thousands of synchronous `fs` calls — on the Electron main

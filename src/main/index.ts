@@ -41,6 +41,7 @@ import { initErrorReporter, setErrorReporting } from './utils/error-reporter';
 import { resolveImageChain } from './imaging/restore-engine';
 import { registerFileAssociations, unregisterFileAssociations, parseFileActionArgs, FileAction } from './utils/file-associations';
 import { readDrillHistory } from './utils/drill-history';
+import { sweepStaleJobDirs } from './utils/job-dir-sweep';
 
 const HELPER_FLAG = '--opbs-helper';
 
@@ -502,6 +503,13 @@ function main(): void {
 
   app.whenReady().then(() => {
     initErrorReporter(() => settingsManager.getSettings().errorReporting);
+    // GUI-only path (helper/CLI branches returned above): clear out job
+    // temp dirs orphaned by a crash before their key material can linger.
+    try {
+      sweepStaleJobDirs();
+    } catch (error) {
+      logger.warn(`Stale job dir sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     if (app.isPackaged && settingsManager.getSettings().fileAssociations) {
       const result = registerFileAssociations();
       if (!result.ok) {

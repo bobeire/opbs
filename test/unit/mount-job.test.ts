@@ -124,5 +124,7 @@ describe('runMountJob', () => {
 
     expect(pipe.sent.some((m) => m.type === 'progress')).toBe(true);
     expect(pipe.sent.find((m) => m.type === 'result')).toMatchObject({ ok: true });
+    // dispatch → runMountJob consumed job.json on read.
+    expect(fs.existsSync(jobPath)).toBe(false);
   });
 });

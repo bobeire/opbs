@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import { logger } from '../utils/logger';
+import { readAndConsumeJob } from './job-file';
 import type { PipeClient } from '../utils/pipe-ipc';
 import { createVirtualDiskFile } from '../utils/virtual-disk';
 import type { RestoreJobConfig, RestoreVhdJob } from '../imaging/restore-engine';
@@ -76,7 +77,7 @@ export async function runRestoreVhdJob(
   pipeClient?: PipeClient
 ): Promise<void> {
   const start = Date.now();
-  const raw = JSON.parse(fs.readFileSync(jobPath, 'utf-8')) as RestoreVhdJob;
+  const raw = readAndConsumeJob<RestoreVhdJob>(jobPath);
   const config = raw.config;
   const warnings: string[] = [];
   let attachedByUs = false;

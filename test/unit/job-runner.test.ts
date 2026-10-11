@@ -111,6 +111,9 @@ describe('runBackupJob', () => {
     expect(info.header.partitionCount).toBe(2);
     expect(info.header.totalBytes).toBe(BLOCK * 5);
     expect(info.partitions.map((p) => p.blockCount)).toEqual([3, 2]);
+
+    // The runner consumes job.json on read so a crashed helper cannot leave it behind.
+    expect(fs.existsSync(jobPath)).toBe(false);
   });
 
   it('creates one snapshot per unique volume', async () => {
@@ -216,6 +219,7 @@ describe('runBackupJob', () => {
     expect(result.ok).toBe(false);
     expect(result.cancelled).toBe(true);
     expect(fs.existsSync(imagePath)).toBe(false);
+    expect(fs.existsSync(jobPath)).toBe(false);
   });
 
   it('reports read failures as warnings but finishes other partitions', async () => {

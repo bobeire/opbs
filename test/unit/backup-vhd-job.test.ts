@@ -60,6 +60,7 @@ vi.mock('../../src/main/utils/disk-enumerator', () => ({
 vi.mock('../../src/main/helper/job-runner', () => ({
   runBackupJob: vi.fn(async (jobPath: string, resultPath: string) => {
     captured.builtJob = JSON.parse(fs.readFileSync(jobPath, 'utf-8'));
+    fs.rmSync(jobPath, { force: true });
     captured.runBackupJobCalls.push([jobPath, resultPath]);
     fs.writeFileSync(
       resultPath,
@@ -152,6 +153,7 @@ describe('runBackupVhdJob', () => {
 
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
     expect(result.ok).toBe(true);
+    expect(fs.existsSync(jobPath)).toBe(false);
   });
 
   it('fails without attaching when the source file is missing', async () => {
@@ -165,6 +167,7 @@ describe('runBackupVhdJob', () => {
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/Source virtual disk not found/);
+    expect(fs.existsSync(jobPath)).toBe(false);
   });
 
   it('rejects a path that is not a VHD/VHDX file', async () => {
@@ -175,6 +178,7 @@ describe('runBackupVhdJob', () => {
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/not a \.vhd\/\.vhdx file/);
+    expect(fs.existsSync(jobPath)).toBe(false);
   });
 
   it('honors a cancel file before attaching', async () => {
@@ -186,5 +190,6 @@ describe('runBackupVhdJob', () => {
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
     expect(result.ok).toBe(false);
     expect(result.cancelled).toBe(true);
+    expect(fs.existsSync(jobPath)).toBe(false);
   });
 });
