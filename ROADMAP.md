@@ -1068,11 +1068,115 @@ implemented; **Investigate** items need spike work first.
   (full image + every intermediate delta via `baseImagePath` links) instead of
   only the immediate parent, so a delta never rewrites a block a grandparent
   already holds. Skipped-block accounting still reflects the true source bytes.
-- Remaining: chain *compaction* itself — flattening a long delta chain (or
-  rebasing onto a fresh full) so restores stop walking N images — was never
-  built; the bullet above is delta-on-delta correctness, not compaction. Needs
-  a design pass first (rewrite/verify/prune semantics, encrypted frames, S3
-  chains) since a bug here corrupts live backups.
+- ✅ **Design pass complete (2026-10-12)** — implementation phased below; a
+  bug here corrupts live backups, so every phase lands behind the full gate
+  stack with round-trip tests.
+
+#### Phase 0 — prerequisite: encrypted-chain key correctness (bugs found in design)
+- The design audit surfaced two real bugs that flatten-and-re-encode depends
+  on fixing first:
+  - **Wrong key minted for every encrypted restore.** `buildJob` derives the
+    job's `encryption` from `metadataFromCipher(newImageCipher(passphrase))`
+    (`restore-engine.ts` — a *fresh random salt*), and the helper decrypts
+    with that key (`job-runner.ts` `cipherFromMetadata(job.encryption).key`).
+    The image was encrypted with the key derived from the *image header's*
+    salt, so any encrypted restore with a passphrase fails at the verify
+    gate (or the first encrypted frame when `FLAG_VERIFIED` skips it). The
+    correct pattern already exists everywhere else (CLI verify/scrub/browse,
+    IPC, mount, scrub all use `deriveImageKey(passphrase, header.salt,
+    header.kdfIterations)`). This hits the GUI, the CLI `restore`, and the
+    scheduled restore drills (`cmdDrill` → `buildJob`).
+  - **One key for a whole chain, but each member has its own salt.** Every
+    backup mints its own cipher, so `[full, Δ1, Δ2]` normally have three
+    different keys; restore applies one job key to all sources, and browse
+    derives one key from the chain *head* (`main-ipc.ts` →
+    `ChainPartitionReader`). A block living only in a non-head member fails
+    decryption even after the first bug is fixed.
+- Fix: key material is derived **per source from that source's header** and
+  carried as a per-source array on the job (`RestoreJob` gains
+  `sourceEncryption[]`); the helper picks the key per source, and
+  `ChainPartitionReader`/`openBrowse` take a per-member key map. Regression
+  tests: encrypted full restore through `buildJob` → `runRestoreJob`, and an
+  encrypted-chain browse/restore round-trip with per-member salts — both fail
+  on today's code.
+- Compaction's re-encode path reuses exactly this per-member derivation, so
+  Phase 0 is shared plumbing, not a detour.
+
+#### Composition semantics (all phases)
+- **Logical block map**: for every `(partitionIndex, blockIndex)`, the newest
+  member holding an index record wins — same newest-wins rule as
+  `ChainPartitionReader` and the restore apply loop, so the compacted image
+  is byte-equivalent to restoring the chain. Blocks absent from every member
+  stay absent (sparse = zeros on restore; restore already zero-fills from the
+  chain union).
+- **Frame relocation, not re-encoding, for plaintext chains**: the exact
+  stored frame bytes (self-describing 16-byte header + payload, incl. IV/tag
+  for encrypted frames) are copied verbatim into the new file; the new
+  `BlockRecord` keeps `rawSize`/`compSize`/`rawCrc32` and gets the new
+  `fileOffset`. No decompress/recompress → no CPU cost, and the CRC fields
+  (plaintext in the frame header) keep `verifyImage`/scrub/parity working on
+  the output without any key. Multi-volume members are read volume-routed via
+  `resolveVolumePath`.
+- **Re-encode for encrypted chains** (needs the passphrase): each frame is
+  decrypted with its *member's* key (Phase 0), the **compressed payload is
+  preserved** (no recompression), re-encrypted under a new image cipher
+  (`newImageCipher` — new salt, fresh IV per frame), CRCs unchanged. Mixed
+  plaintext/encrypted members, or a chain mixing block sizes, compression
+  codecs, or cipher modes, is refused — frame headers carry no codec field,
+  so restore already assumes a chain's compressionId is uniform; compaction
+  validates that invariant instead of inheriting a latent break.
+- **New image header**: version 2, `timestamp = now` (it is a new restore
+  point — retention grace and `findNewestImage` treat it accordingly, so the
+  next incremental attaches to it), `totalBytes`/`blockSize`/`partitionCount`
+  from the root with uniformity checks across members, no `FLAG_INCREMENTAL`,
+  empty `baseImagePath`. Written through the normal header/index/patch
+  sequence (`blockIndexOffset` patched, `FLAG_VERIFIED` set only after a full
+  `verifyImage` of the output).
+- **Sidecars**: the newest member's `.usn` cursors and `.bitlocker.json` are
+  carried onto the new image (same partition/volume identity — the next
+  incremental keeps USN tracking; BitLocker keys are per-disk), old
+  `.volumes.json`/`.opar` are not carried; a fresh `.opar` is built for the
+  new image best-effort (same as post-backup). Manifest/analytics/chain-health
+  need no schema change — the output is a healthy 1-item chain.
+- **Atomicity & source removal**: output is written into an
+  `opbs-compact-<id>/` temp sibling dir (covered by the startup
+  `job-dir-sweep` prefixes), fully verified, then atomically renamed into
+  place. `--remove-source` deletes the old chain only after that rename,
+  newest-delta-first, root last (same leaf-first order as retention), and
+  never touches a member whose removal fails (report, don't half-delete).
+  Default keeps sources for retention to age out.
+- **Free space** is checked up front against the *composed unique bytes*
+  (union size) plus headroom — the cloud-restore `statfs` pattern.
+
+#### Triggers, surfaces, phasing
+- **CLI (Phase 1)**: `compact <image> [--remove-source] [--dry-run]` — any
+  chain member names the whole chain; prints member list, composed unique
+  blocks/bytes, estimated output, and the refusal reason when gated. IPC
+  `compact-chain` mirrors it for the GUI.
+- **Automatic (Phase 1.5)**: `compactAfterDeltas` setting (default 0 = off)
+  runs compaction after a scheduled backup, before retention, with
+  remove-source — retention then sees a single-image chain. Settings toggle +
+  a Dashboard action complete the GUI surface.
+- **Refused in v1**: Macrium containers, repository members (immutable
+  signed journal — Phase 2), cloud destinations (Phase 2: stage via the new
+  `cloud-restore`, compact locally, upload, prune), multi-volume *output*
+  (single-file output with a free-space gate first; the rollover writer comes
+  with Phase 2).
+- **Phase 2**: multi-volume output; repository compaction as a signed
+  journal operation (create-compact + prune records, using the repository's
+  existing root-eligibility ordering); S3/SFTP/FTP chains end-to-end; and the
+  parity/scrub multi-volume gap this design pass noticed (`.opar` building
+  and `classifyImage` open only `imagePath` while multi-volume
+  `BlockRecord.fileOffset` is volume-relative — verify/restore volume-route
+  correctly, parity does not).
+- **Tests**: composition map (newest-wins, sparse gaps, multi-hop),
+  copy-mode round-trip (per-block equality against `ChainPartitionReader`
+  over the original chain), encrypted re-encode with per-member salts,
+  refusal matrix, remove-source ordering + sidecar carry, USN continuity
+  (next delta after compaction still skips unchanged blocks), free-space and
+  crash-simulation (mid-write kill leaves no final artifact, sweep cleans
+  the temp dir), plus a restore-to-VHD byte-compare of pre- vs
+  post-compaction chains.
 
 ### Self-healing verification / read-scrub
 - Periodically re-read archived images and report bit-rot via CRC mismatch;
