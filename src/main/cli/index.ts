@@ -21,9 +21,10 @@ import { locateAdk, peArchForProcess } from '../utils/adk';
 import { createRecoveryMedia, resolveNodeExe, smokeMediaPayload } from '../utils/winpe-media';
 import { openAnyBrowse, listDirectory, extractPath, formatTimestamp, resolvePath } from '../imaging/fs/file-browse';
 import { detectMacriumFormat, readMacriumImage, macriumUnsupportedReason } from '../imaging/mrimg';
-import { S3Store, parseS3Location } from '../utils/s3';
-import { SftpStore, parseSftpLocation, resolveSftpConfig } from '../utils/sftp';
-import { FtpStore, resolveFtpConfig } from '../utils/ftp';
+import { SftpStore } from '../utils/sftp';
+import { FtpStore } from '../utils/ftp';
+import { cloudStoreFromLocation } from '../utils/cloud-store';
+import { materializeImageFromCloud, isCloudImageLocation, type StagedCloudImage } from '../imaging/cloud-restore';
 import { applyRetentionS3, planRetentionS3 } from '../backup/retention-s3';
 import { loadNative } from '../utils/native-loader';
 import { NativeImagingApi } from '../imaging/imaging-job';
@@ -770,8 +771,8 @@ function renderRestorePlan(plan: any): string {
 async function cmdRestore(ctx: CommandContext): Promise<number> {
   const configPath = ctx.argv[0];
   if (!configPath) {
-    console.error('Usage: restore <config.json> [--preflight] [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk]');
-    console.error('imagePath accepts .opbs, .mrimgx, and .mrimg (Macrium Reflect) images.');
+    console.error('Usage: restore <config.json> [--preflight] [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk] [--region R]');
+    console.error('imagePath accepts a local .opbs/.mrimgx/.mrimg file, or an s3://, sftp://, ftp:// .opbs URI (the chain is staged to a temp dir first).');
     return 1;
   }
   const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
@@ -835,44 +836,77 @@ async function cmdRestore(ctx: CommandContext): Promise<number> {
     config.acknowledgeSameDisk = true;
   }
 
-  // Dry-run: build the restore plan and validate the image, target disk and
-  // layout gates without writing a single block.
-  if (ctx.argv.includes('--preflight')) {
-    try {
-      const plan = await restoreEngine.buildJob(config);
-      console.log(ctx.opts.json ? JSON.stringify(plan, null, 2) : renderRestorePlan(plan));
-      return plan ? 0 : 1;
-    } catch (error) {
-      console.error(`Preflight FAILED: ${error instanceof Error ? error.message : error}`);
-      return 1;
+  // A cloud imagePath (s3://, sftp://, ftp://) is staged to a temp dir first:
+  // the restore engine, the elevated helper and the per-block reads only ever
+  // open local paths. The temp dir is removed whatever happens afterwards.
+  const cloudImagePath = String(config.imagePath ?? '');
+  let staged: StagedCloudImage | undefined;
+  try {
+    if (isCloudImageLocation(cloudImagePath)) {
+      if (!ctx.opts.json) console.log(`Staging cloud image ${cloudImagePath}…`);
+      let lastPrint = 0;
+      let printedProgress = false;
+      staged = await materializeImageFromCloud(cloudImagePath, {
+        storeOptions: { region: flagValue(ctx.argv, '--region') },
+        onProgress: ctx.opts.json
+          ? undefined
+          : (p) => {
+              const now = Date.now();
+              if (now - lastPrint < 400) return;
+              lastPrint = now;
+              printedProgress = true;
+              const pct = p.bytesTotal > 0 ? ((p.bytesDone / p.bytesTotal) * 100).toFixed(1) : '0.0';
+              process.stdout.write(
+                `\r[download] ${pct}%  ${p.file} (${p.fileIndex}/${p.fileCount})  ` +
+                  `${formatBytes(p.bytesDone)} / ${formatBytes(p.bytesTotal)}   `
+              );
+            }
+      });
+      if (printedProgress) process.stdout.write('\n');
+      config.imagePath = staged.imagePath;
     }
-  }
 
-  if (ctx.argv.includes('--elevated')) {
-    return await runJobInProcess(async function () {
-      if (config.targetVirtualDisk) {
-        return { type: 'restore-vhd', config };
+    // Dry-run: build the restore plan and validate the image, target disk and
+    // layout gates without writing a single block.
+    if (ctx.argv.includes('--preflight')) {
+      try {
+        const plan = await restoreEngine.buildJob(config);
+        console.log(ctx.opts.json ? JSON.stringify(plan, null, 2) : renderRestorePlan(plan));
+        return plan ? 0 : 1;
+      } catch (error) {
+        console.error(`Preflight FAILED: ${error instanceof Error ? error.message : error}`);
+        return 1;
       }
-      return restoreEngine.buildJob(config);
-    }, ctx);
-  }
-
-  const result = await restoreEngine.runRestore(config, (progress) => {
-    if (!ctx.opts.json) {
-      process.stdout.write(
-        `\r[${progress.phase}] ${progress.percent.toFixed(0)}%  ` +
-          `${progress.currentPartition || ''}  ${formatBytes(progress.bytesDone)} at ` +
-          `${formatBytes(progress.speed)}/s     `
-      );
     }
-  });
-  if (!ctx.opts.json) {
-    process.stdout.write('\n');
-    console.log(result.ok ? `Restore OK (${formatBytes(result.bytesWritten)})` : `Restore FAILED: ${result.error}`);
-  } else {
-    console.log(JSON.stringify(result, null, 2));
+
+    if (ctx.argv.includes('--elevated')) {
+      return await runJobInProcess(async function () {
+        if (config.targetVirtualDisk) {
+          return { type: 'restore-vhd', config };
+        }
+        return restoreEngine.buildJob(config);
+      }, ctx);
+    }
+
+    const result = await restoreEngine.runRestore(config, (progress) => {
+      if (!ctx.opts.json) {
+        process.stdout.write(
+          `\r[${progress.phase}] ${progress.percent.toFixed(0)}%  ` +
+            `${progress.currentPartition || ''}  ${formatBytes(progress.bytesDone)} at ` +
+            `${formatBytes(progress.speed)}/s     `
+        );
+      }
+    });
+    if (!ctx.opts.json) {
+      process.stdout.write('\n');
+      console.log(result.ok ? `Restore OK (${formatBytes(result.bytesWritten)})` : `Restore FAILED: ${result.error}`);
+    } else {
+      console.log(JSON.stringify(result, null, 2));
+    }
+    return result.ok ? 0 : 1;
+  } finally {
+    staged?.cleanup();
   }
-  return result.ok ? 0 : 1;
 }
 
 /**
@@ -1016,6 +1050,10 @@ async function cmdDrill(ctx: CommandContext): Promise<number> {
 
   const dirFlag = flagValue(ctx.argv, '--dir');
   if (dirFlag) {
+    if (isCloudImageLocation(dirFlag)) {
+      console.error('drill --dir takes a local directory; for cloud destinations use a scheduled restore drill (Settings → Scheduled Restore Drills)');
+      return 1;
+    }
     // Inline mode: drill the newest unencrypted image in a directory (no
     // passphrase source here — encrypted images drill via the scheduled
     // drill's configured passphrase).
@@ -1062,6 +1100,16 @@ async function cmdDrill(ctx: CommandContext): Promise<number> {
   config.validateAfterWrite = true;
   config.applyDeltas = config.applyDeltas ?? true;
 
+  // Cloud drill configs stage the chain to a temp dir (like cmdRestore); the
+  // ORIGINAL URI is what gets reported so drill history keeps a durable label.
+  const reportedImagePath = String(config.imagePath);
+  let staged: StagedCloudImage | undefined;
+  if (isCloudImageLocation(reportedImagePath)) {
+    if (!ctx.opts.json) console.error(`Staging cloud image ${reportedImagePath}…`);
+    staged = await materializeImageFromCloud(reportedImagePath, {});
+    config.imagePath = staged.imagePath;
+  }
+
   const finish = (result: {
     ok: boolean;
     error?: string;
@@ -1076,7 +1124,7 @@ async function cmdDrill(ctx: CommandContext): Promise<number> {
       restored,
       validated,
       failures,
-      imagePath: config.imagePath,
+      imagePath: reportedImagePath,
       fsValidation: result.fsValidation,
       durationMs: Date.now() - started
     };
@@ -1087,7 +1135,7 @@ async function cmdDrill(ctx: CommandContext): Promise<number> {
       console.log(JSON.stringify(output, null, 2));
     } else if (restored && validated) {
       console.log(
-        `Drill PASSED: ${path.basename(config.imagePath)} restored to disk ${config.targetDiskIndex} and validated ${result.fsValidation?.length ?? 0} partition(s)`
+        `Drill PASSED: ${path.basename(reportedImagePath)} restored to disk ${config.targetDiskIndex} and validated ${result.fsValidation?.length ?? 0} partition(s)`
       );
     } else if (restored) {
       console.error(`Drill FAILED: filesystem validation error(s): ${failures.join('; ')}`);
@@ -1097,33 +1145,37 @@ async function cmdDrill(ctx: CommandContext): Promise<number> {
     return restored && validated ? 0 : 1;
   };
 
-  if (ctx.argv.includes('--elevated')) {
-    const job = await restoreEngine.buildJob(config);
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-drill-inproc-'));
-    const jobPath = path.join(dir, 'job.json');
-    const resultPath = path.join(dir, 'result.json');
-    const progressPath = path.join(dir, 'progress.json');
-    const cancelPath = path.join(dir, 'cancel');
-    try {
-      fs.writeFileSync(jobPath, JSON.stringify(job));
-      await dispatchHelperJob(jobPath, resultPath, progressPath, cancelPath);
-      const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
-      return finish(result);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
+  try {
+    if (ctx.argv.includes('--elevated')) {
+      const job = await restoreEngine.buildJob(config);
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-drill-inproc-'));
+      const jobPath = path.join(dir, 'job.json');
+      const resultPath = path.join(dir, 'result.json');
+      const progressPath = path.join(dir, 'progress.json');
+      const cancelPath = path.join(dir, 'cancel');
+      try {
+        fs.writeFileSync(jobPath, JSON.stringify(job));
+        await dispatchHelperJob(jobPath, resultPath, progressPath, cancelPath);
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+        return finish(result);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     }
-  }
 
-  const result = await restoreEngine.runRestore(config, (progress) => {
-    if (!ctx.opts.json) {
-      process.stdout.write(
-        `\r[${progress.phase}] ${progress.percent.toFixed(0)}%  ` +
-          `${progress.currentPartition || ''}  ${formatBytes(progress.bytesDone)} at ` +
-          `${formatBytes(progress.speed)}/s     `
-      );
-    }
-  });
-  return finish(result);
+    const result = await restoreEngine.runRestore(config, (progress) => {
+      if (!ctx.opts.json) {
+        process.stdout.write(
+          `\r[${progress.phase}] ${progress.percent.toFixed(0)}%  ` +
+            `${progress.currentPartition || ''}  ${formatBytes(progress.bytesDone)} at ` +
+            `${formatBytes(progress.speed)}/s     `
+        );
+      }
+    });
+    return finish(result);
+  } finally {
+    staged?.cleanup();
+  }
 }
 
 async function cmdClone(ctx: CommandContext): Promise<number> {
@@ -1965,7 +2017,7 @@ async function cmdPrune(ctx: CommandContext): Promise<number> {
 
   let plan: RetentionPlan;
   if (dir.startsWith('s3://') || dir.startsWith('sftp://') || dir.startsWith('ftp://')) {
-    const store = cloudStoreFromLocation(dir, flagValue(ctx.argv, '--region'));
+    const store = cloudStoreFromLocation(dir, { region: flagValue(ctx.argv, '--region') });
     plan = dryRun ? await planRetentionS3(store, options) : await applyRetentionS3(store, options);
   } else {
     plan = dryRun ? planRetention(dir, options) : await applyRetention(dir, options);
@@ -2390,53 +2442,12 @@ async function cmdExtract(ctx: CommandContext): Promise<number> {
   }
 }
 
-function s3StoreFromLocation(uri: string, region?: string): S3Store {
-  const { bucket, prefix } = parseS3Location(uri);
-  const accessKeyId = process.env.AWS_ACCESS_KEY_ID ?? '';
-  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY ?? '';
-  if (!accessKeyId || !secretAccessKey) {
-    throw new Error('AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY environment variables are required');
-  }
-  return new S3Store({
-    region: region ?? process.env.AWS_REGION ?? 'us-east-1',
-    accessKeyId,
-    secretAccessKey,
-    bucket,
-    prefix
-  });
-}
-
-/** Object-store client for an `s3://`, `sftp://` or `ftp://` location. */
-function cloudStoreFromLocation(uri: string, region?: string): S3Store | SftpStore | FtpStore {
-  if (uri.trim().startsWith('sftp://')) {
-    const config = resolveSftpConfig(undefined, uri);
-    if (!config.username) {
-      throw new Error(`sftp:// location requires a username (sftp://user@host/path) or SFTP_USER`);
-    }
-    if (!config.password && !config.privateKey) {
-      throw new Error('SFTP credentials are required (SFTP_PASSWORD or SFTP_PRIVATE_KEY)');
-    }
-    return new SftpStore({ config });
-  }
-  if (uri.trim().startsWith('ftp://')) {
-    const config = resolveFtpConfig(undefined, uri);
-    if (!config.username) {
-      throw new Error(`ftp:// location requires a username (ftp://user@host/path) or FTP_USER`);
-    }
-    if (!config.password) {
-      throw new Error('FTP credentials are required (FTP_PASSWORD)');
-    }
-    return new FtpStore({ config });
-  }
-  return s3StoreFromLocation(uri, region);
-}
-
 async function cmdStore(ctx: CommandContext): Promise<number> {
   const action = ctx.argv[0];
   const uri = ctx.argv[1];
   const file = ctx.argv[2];
   const region = flagValue(ctx.argv, '--region');
-  const store = uri && (uri.startsWith('s3://') || uri.startsWith('sftp://') || uri.startsWith('ftp://')) ? cloudStoreFromLocation(uri, region) : undefined;
+  const store = uri && (uri.startsWith('s3://') || uri.startsWith('sftp://') || uri.startsWith('ftp://')) ? cloudStoreFromLocation(uri, { region }) : undefined;
 
   if (action === 'put' && store && file) {
     const key = file.includes('/') ? path.basename(file) : file;

@@ -5,7 +5,11 @@ import * as os from 'os';
 import * as path from 'path';
 import { BackupManager, BackupConfig } from '../backup/manager';
 import { ScheduledBackup, ScheduledVerification, ScheduledRestoreDrill, ScheduledScrub, SettingsManager } from '../utils/settings-manager';
-import { applyRetention, findNewestImage, pickDrillImage, resolveScheduledRetention, scanBackupDirectory } from './retention';
+import { applyRetention, findNewestImage, pickDrillImage, resolveScheduledRetention, scanBackupDirectory, type BackupImageEntry } from './retention';
+import { cloudImageEntries } from './retention-s3';
+import { isCloudImageLocation, materializeImageFromCloud, type StagedCloudImage } from '../imaging/cloud-restore';
+import { cloudStoreFromLocation } from '../utils/cloud-store';
+import { cloudStoreOptionsFrom } from '../utils/cloud-profiles';
 import { summarizeImage } from '../imaging/restore-engine';
 import { recordDrillResult } from '../utils/drill-history';
 import { tryNotify } from '../utils/notify';
@@ -288,7 +292,26 @@ export class BackupScheduler {
    */
   private async runDrill(config: ScheduledRestoreDrill): Promise<void> {
     const dir = config.destinationPath;
-    const entries = scanBackupDirectory(dir);
+    let staged: StagedCloudImage | undefined;
+    let entries: BackupImageEntry[];
+    let cloudStore: ReturnType<typeof cloudStoreFromLocation> | undefined;
+    if (isCloudImageLocation(dir)) {
+      // Cloud destinations: read each image's header from the store (the same
+      // metadata walk `prune` uses), then stage the picked chain locally —
+      // the drill child restores from plain paths like any other drill.
+      try {
+        cloudStore = cloudStoreFromLocation(dir, cloudStoreOptionsFrom(this.settingsManager.getSettings()));
+        entries = (await cloudImageEntries(cloudStore)).map((entry) => ({
+          ...entry,
+          path: `${dir.replace(/\/+$/, '')}/${entry.path}`
+        }));
+      } catch (error) {
+        logger.error(`Restore drill could not list cloud images at ${dir}:`, error);
+        return;
+      }
+    } else {
+      entries = scanBackupDirectory(dir);
+    }
     const picked = pickDrillImage(entries, config.passphrase);
     if (!picked) {
       logger.warn(
@@ -298,7 +321,20 @@ export class BackupScheduler {
       );
       return;
     }
-    const imagePath = picked.path;
+    const drillSource = picked.path;
+    if (cloudStore) {
+      try {
+        logger.info(`Restore drill: staging ${drillSource}…`);
+        staged = await materializeImageFromCloud(drillSource, { store: cloudStore });
+        logger.info(
+          `Restore drill: staged ${staged.plan.files.length} file(s), ${(staged.plan.totalBytes / 1024 ** 3).toFixed(1)} GiB`
+        );
+      } catch (error) {
+        logger.error(`Restore drill could not stage ${drillSource}:`, error);
+        return;
+      }
+    }
+    const imagePath = staged ? staged.imagePath : drillSource;
 
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-drill-'));
     const configPath = path.join(tmpDir, 'drill.json');
@@ -359,27 +395,29 @@ export class BackupScheduler {
             durationMs: number;
           };
 
+          // Report against the ORIGINAL image (path or cloud URI), never the
+          // staged temp path — the temp dir is removed just below.
           if (!result.ok || !result.validated) {
             const reasons =
               result.failures?.join('; ') || (result.ok ? 'filesystem validation failed' : 'restore failed');
-            logger.warn(`Restore drill FAILED for ${result.imagePath}: ${reasons}`);
-            recordDrillResult(result.imagePath, { ok: false, failures: result.failures ?? [], targetDiskIndex: config.targetDiskIndex, durationMs: result.durationMs });
+            logger.warn(`Restore drill FAILED for ${drillSource}: ${reasons}`);
+            recordDrillResult(drillSource, { ok: false, failures: result.failures ?? [], targetDiskIndex: config.targetDiskIndex, durationMs: result.durationMs });
 
             this.drillFailures.record(false);
             if (config.notifyOnFailure && this.drillFailures.shouldAlert(config.alertAfter ?? 2)) {
-              await this.notify('failure', path.basename(result.imagePath), dir, 0, reasons);
+              await this.notify('failure', path.basename(drillSource), dir, 0, reasons);
               this.drillFailures.reset();
             }
           } else {
-            logger.info(`Restore drill PASSED for ${result.imagePath} (${result.fsValidation?.length ?? 0} partition(s) validated)`);
-            recordDrillResult(result.imagePath, {
+            logger.info(`Restore drill PASSED for ${drillSource} (${result.fsValidation?.length ?? 0} partition(s) validated)`);
+            recordDrillResult(drillSource, {
               ok: true,
               targetDiskIndex: config.targetDiskIndex,
               partitionsValidated: result.fsValidation?.length ?? 0,
               durationMs: result.durationMs
             });
             this.drillFailures.record(true);
-            await this.notify('success', path.basename(result.imagePath), dir, 0);
+            await this.notify('success', path.basename(drillSource), dir, 0);
           }
         } catch (error) {
           logger.error(`Restore drill result handling failed:`, error);
@@ -391,10 +429,14 @@ export class BackupScheduler {
           } catch {
             /* best-effort */
           }
+          // Only safe here: the child has exited, so nothing reads the staged
+          // chain anymore.
+          staged?.cleanup();
         }
       });
     } catch (error) {
       logger.error(`Restore drill setup failed for ${dir}:`, error);
+      staged?.cleanup();
       try {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       } catch {

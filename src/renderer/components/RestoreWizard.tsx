@@ -11,6 +11,17 @@ interface RestoreWizardProps {
   mode?: 'restore' | 'clone';
 }
 
+/** Payload of the 'cloud-download-progress' event. */
+interface CloudDownloadProgress {
+  file: string;
+  fileIndex: number;
+  fileCount: number;
+  fileBytesDone: number;
+  fileBytesTotal: number;
+  bytesDone: number;
+  bytesTotal: number;
+}
+
 interface DiskInfo {
   index: number;
   model: string;
@@ -118,12 +129,44 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   const [progress, setProgress] = useState<any>(null);
   const [restoreResult, setRestoreResult] = useState<RestoreResultSummary | null>(null);
   const [restoreError, setRestoreError] = useState<string | null>(null);
+  // Cloud fetch: the URI downloads into an opbs-restore-* temp dir and the
+  // staged local path feeds the normal flow. A ref (not state) holds the
+  // staged path so the unmount cleanup always sees the current value.
+  const [cloudUri, setCloudUri] = useState('');
+  const [cloudFetching, setCloudFetching] = useState(false);
+  const [cloudError, setCloudError] = useState<string | null>(null);
+  const [cloudProgress, setCloudProgress] = useState<CloudDownloadProgress | null>(null);
+  const [stagedFrom, setStagedFrom] = useState<string | null>(null);
+  const stagedRef = useRef<string | null>(null);
+
+  const releaseStaged = () => {
+    const staged = stagedRef.current;
+    if (staged) {
+      stagedRef.current = null;
+      setStagedFrom(null);
+      void window.electronAPI.releaseStagedImage(staged).catch(() => {});
+    }
+  };
 
   useEffect(() => {
     const cleanup = window.electronAPI.onRestoreProgress((p) => {
       setProgress(p);
     });
     return cleanup;
+  }, []);
+
+  useEffect(() => {
+    const cleanup = window.electronAPI.onCloudDownloadProgress((p) => setCloudProgress(p));
+    return cleanup;
+  }, []);
+
+  // Leaving the wizard drops any staged temp copy (restore completion and
+  // image replacement release earlier; this is the safety net).
+  useEffect(() => {
+    return () => {
+      const staged = stagedRef.current;
+      if (staged) void window.electronAPI.releaseStagedImage(staged).catch(() => {});
+    };
   }, []);
 
   useEffect(() => {
@@ -245,6 +288,30 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     }
   };
 
+  const handleFetchCloud = async () => {
+    const uri = cloudUri.trim();
+    if (!uri || cloudFetching) return;
+    setCloudFetching(true);
+    setCloudError(null);
+    setCloudProgress(null);
+    releaseStaged();
+    try {
+      const result = await window.electronAPI.fetchCloudImage(uri);
+      if (result?.ok && result.imagePath) {
+        stagedRef.current = result.imagePath;
+        setStagedFrom(uri);
+        setImagePath(result.imagePath);
+        setCloudProgress(null);
+      } else {
+        setCloudError(result?.error ?? 'Download failed');
+      }
+    } catch (error) {
+      setCloudError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCloudFetching(false);
+    }
+  };
+
   const handleSelectImage = async () => {
     const path = await window.electronAPI.selectFile({
       filters: [
@@ -255,6 +322,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     });
     
     if (path) {
+      releaseStaged();
       setImagePath(path);
     }
   };
@@ -293,6 +361,12 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
           : { targetDiskIndex: targetDiskIndex! }),
         ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {})
       })) as RestoreResultSummary | undefined;
+      if (stagedRef.current) {
+        // Restore finished — the staged temp copy has served its purpose.
+        releaseStaged();
+        setImagePath('');
+        setImageInfo(null);
+      }
       setRestoreResult(result ?? null);
       setCurrentStep('complete');
     } catch (error) {
@@ -348,6 +422,36 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                   <button onClick={handleSelectImage}>Browse</button>
                 </div>
               </div>
+
+              <div className="current-path">
+                <label>Fetch from cloud (s3://, sftp://, ftp://)</label>
+                <div className="path-input">
+                  <input
+                    type="text"
+                    value={cloudUri}
+                    onChange={(e) => setCloudUri(e.target.value)}
+                    placeholder="s3://bucket/prefix/image.opbs"
+                    disabled={cloudFetching}
+                  />
+                  <button onClick={handleFetchCloud} disabled={cloudFetching || !cloudUri.trim()}>
+                    {cloudFetching ? 'Fetching…' : 'Fetch'}
+                  </button>
+                </div>
+              </div>
+              {cloudError && <p className="warning-text">{cloudError}</p>}
+              {cloudFetching && cloudProgress && (
+                <p>
+                  Downloading {cloudProgress.file} ({cloudProgress.fileIndex}/{cloudProgress.fileCount}) —{' '}
+                  {cloudProgress.bytesTotal > 0 ? Math.round((cloudProgress.bytesDone / cloudProgress.bytesTotal) * 100) : 0}%
+                  {' ('}
+                  {formatSize(cloudProgress.bytesDone)} of {formatSize(cloudProgress.bytesTotal)})
+                </p>
+              )}
+              {stagedFrom && !cloudFetching && (
+                <p>
+                  Staged {stagedFrom} — the temporary copy is removed after the restore finishes.
+                </p>
+              )}
               
               {imageInfo && (
                 <div className="image-info">

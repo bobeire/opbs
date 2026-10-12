@@ -1,5 +1,16 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+/** Payload of the 'cloud-download-progress' event (mirrors CloudDownloadProgress in main). */
+type CloudDownloadProgress = {
+  file: string;
+  fileIndex: number;
+  fileCount: number;
+  fileBytesDone: number;
+  fileBytesTotal: number;
+  bytesDone: number;
+  bytesTotal: number;
+};
+
 contextBridge.exposeInMainWorld('electronAPI', {
   // Disk information
   getDisks: () => ipcRenderer.invoke('get-disks'),
@@ -21,6 +32,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   cancelRestore: () => ipcRenderer.invoke('cancel-restore'),
   restorePreflight: (config: any) => ipcRenderer.invoke('restore-preflight', config),
   getImageInfo: (imagePath: string) => ipcRenderer.invoke('get-image-info', imagePath),
+  fetchCloudImage: (uri: string) => ipcRenderer.invoke('fetch-cloud-image', uri),
+  releaseStagedImage: (imagePath: string) => ipcRenderer.invoke('release-staged-image', imagePath),
 
   // Partition copy (disk-to-disk clone)
   startClone: (config: any) => ipcRenderer.invoke('start-clone', config),
@@ -192,6 +205,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('restore-progress', handler);
     return () => {
       ipcRenderer.removeListener('restore-progress', handler);
+    };
+  },
+  onCloudDownloadProgress: (callback: (progress: CloudDownloadProgress) => void) => {
+    const handler = (_event: unknown, progress: CloudDownloadProgress) => callback(progress);
+    ipcRenderer.on('cloud-download-progress', handler);
+    return () => {
+      ipcRenderer.removeListener('cloud-download-progress', handler);
     };
   },
   onCloneProgress: (callback: (progress: any) => void) => {

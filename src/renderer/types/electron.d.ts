@@ -41,6 +41,8 @@ declare global {
         targetIsSystemDisk?: boolean;
       }>;
       getImageInfo: (imagePath: string) => Promise<any>;
+      fetchCloudImage: (uri: string) => Promise<{ ok: boolean; imagePath?: string; error?: string }>;
+      releaseStagedImage: (imagePath: string) => Promise<{ ok: boolean }>;
       startClone: (config: any) => Promise<void>;
       cancelClone: () => Promise<void>;
       clonePreflight: (config: any) => Promise<{
@@ -337,6 +339,7 @@ declare global {
       verifyFtp: () => Promise<any>;
       onBackupProgress: (callback: (progress: any) => void) => () => void;
       onRestoreProgress: (callback: (progress: any) => void) => () => void;
+      onCloudDownloadProgress: (callback: (progress: { file: string; fileIndex: number; fileCount: number; fileBytesDone: number; fileBytesTotal: number; bytesDone: number; bytesTotal: number }) => void) => () => void;
       onCloneProgress: (callback: (progress: any) => void) => () => void;
       onMediaProgress: (callback: (progress: { message: string }) => void) => () => void;
 

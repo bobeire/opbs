@@ -243,6 +243,52 @@ export class FtpStore {
     return out;
   }
 
+  /**
+   * Stream the object at `key` to a local file without buffering it in
+   * memory — the download path for restoring an image from `ftp://`.
+   * `onProgress` reports cumulative bytes written for this file.
+   */
+  async downloadFile(key: string, destPath: string, onProgress?: (bytes: number) => void): Promise<void> {
+    await this.withFtp(async (client) => {
+      const ws = fs.createWriteStream(destPath);
+      let written = 0;
+      let writeError: Error | null = null;
+      ws.on('error', (err) => {
+        writeError = err as Error;
+      });
+      const sink = new Writable({
+        write(chunk: Buffer | string, _enc, cb) {
+          if (writeError) {
+            cb(writeError);
+            return;
+          }
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          written += buf.length;
+          onProgress?.(written);
+          if (!ws.write(buf)) {
+            ws.once('drain', () => cb());
+          } else {
+            cb();
+          }
+        },
+        final(cb) {
+          if (writeError) {
+            cb(writeError);
+            return;
+          }
+          ws.end(() => cb());
+        }
+      });
+      try {
+        await client.downloadTo(sink, this.remoteKey(key));
+      } catch (err) {
+        ws.destroy();
+        throw new Error(`FTP download ${key} failed: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+      }
+      if (writeError) throw writeError;
+    });
+  }
+
   /** Download a byte range of an object (restarts at `offset`). */
   async getRange(key: string, offset: number, length: number): Promise<Buffer> {
     let out: Buffer = Buffer.alloc(0);

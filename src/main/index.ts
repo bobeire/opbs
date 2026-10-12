@@ -12,6 +12,7 @@ import { initAutoUpdater, checkForUpdates, quitAndInstall } from './utils/auto-u
 import { discoverNetworkMachines, enumerateShares, testNetworkDestination } from './utils/network';
 import { ImagingEngine } from './imaging/backup-engine';
 import { RestoreEngine } from './imaging/restore-engine';
+import { materializeImageFromCloud, isCloudImageLocation } from './imaging/cloud-restore';
 import { CloneEngine } from './imaging/clone-engine';
 import { CloneManager } from './clone/manager';
 import { dispatchHelperJob } from './helper/job-runner';
@@ -754,6 +755,44 @@ function setupIpcHandlers(): void {
 
   ipcMain.handle('restore-preflight', async (_, config) => {
     return restoreManager.preflight(config);
+  });
+
+  // Cloud restore: stage an s3://, sftp:// or ftp:// image (plus its delta
+  // chain) into an opbs-restore-* temp dir, then hand the local path to the
+  // normal flow. Downloads run unelevated here, before any helper job.
+  ipcMain.handle('fetch-cloud-image', async (_, uri: string) => {
+    const clean = String(uri ?? '').trim();
+    if (!clean || !isCloudImageLocation(clean)) {
+      return { ok: false, error: 'Enter a cloud image URI (s3://, sftp:// or ftp://…)' };
+    }
+    try {
+      const staged = await materializeImageFromCloud(clean, {
+        storeOptions: {
+          s3Profile: s3ProfileFromSettings(),
+          sftpProfile: sftpProfileFromSettings(),
+          ftpProfile: ftpProfileFromSettings()
+        },
+        onProgress: (progress) => mainWindow?.webContents.send('cloud-download-progress', progress)
+      });
+      return { ok: true, imagePath: staged.imagePath };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  // Remove a staged cloud image (wizard unmount, replacement, or restore
+  // completion). Guarded so only our own opbs-restore-* dirs can be deleted.
+  ipcMain.handle('release-staged-image', async (_, imagePath: string) => {
+    const target = String(imagePath ?? '');
+    const dir = target ? path.dirname(target) : '';
+    if (dir && path.basename(dir).startsWith('opbs-restore-')) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
+    return { ok: true };
   });
 
   // Partition copy (disk-to-disk clone)

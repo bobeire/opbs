@@ -263,6 +263,29 @@ export class SftpStore {
     });
   }
 
+  /**
+   * Stream the object at `key` to a local file without buffering it in
+   * memory — the download path for restoring an image from `sftp://`.
+   * `onProgress` reports cumulative bytes written for this file.
+   */
+  async downloadFile(key: string, destPath: string, onProgress?: (bytes: number) => void): Promise<void> {
+    await this.withSftp(async (sftp) => {
+      const rs = (sftp as { createReadStream: (p: string, o?: Record<string, unknown>) => NodeJS.ReadableStream }).createReadStream(
+        this.remoteKey(key)
+      );
+      let written = 0;
+      rs.on('data', (chunk: Buffer) => {
+        written += chunk.length;
+        onProgress?.(written);
+      });
+      try {
+        await pipeline(rs as NodeJS.ReadableStream, fs.createWriteStream(destPath));
+      } catch (err) {
+        throw new Error(`SFTP download ${key} failed: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+      }
+    });
+  }
+
   /** Download a byte range of an object. */
   async getRange(key: string, offset: number, length: number): Promise<Buffer> {
     return this.withSftp(async (sftp) => {

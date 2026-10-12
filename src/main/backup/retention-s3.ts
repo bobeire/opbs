@@ -10,12 +10,12 @@ export interface CloudStore {
 }
 
 /**
- * Retention/GFS planning over an object store prefix. Reads each `.opbs`
- * object's header (via a ranged GET) to build the image metadata, then reuses
- * the same chain + GFS policy as the local path. Incremental bases are matched
- * by basename so chains link across the stored object keys.
+ * List a store's `.opbs` images as `BackupImageEntry` metadata. Reads each
+ * object's header via a ranged GET; incremental bases are matched by basename
+ * so chains link across stored object keys (the ancestor recorded in the
+ * header is a stale absolute path from capture time).
  */
-export async function planRetentionS3(store: CloudStore, options: RetentionOptions): Promise<RetentionPlan> {
+export async function cloudImageEntries(store: CloudStore): Promise<BackupImageEntry[]> {
   const objects = await store.listWithMeta();
   const keyByBasename = new Map<string, string>();
   for (const obj of objects) {
@@ -38,7 +38,15 @@ export async function planRetentionS3(store: CloudStore, options: RetentionOptio
       verified: (header.flags & FLAG_VERIFIED) !== 0
     });
   }
+  return entries;
+}
 
+/**
+ * Retention/GFS planning over an object store prefix: header metadata via
+ * ranged GETs, then the same chain + GFS policy as the local path.
+ */
+export async function planRetentionS3(store: CloudStore, options: RetentionOptions): Promise<RetentionPlan> {
+  const entries = await cloudImageEntries(store);
   return planRetention(entries, options);
 }
 

@@ -3,8 +3,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { logger } from './logger';
 
-/** Temp-dir prefixes created by job launchers (helper/launcher.ts, cli/index.ts). */
-const JOB_DIR_PREFIXES = ['opbs-job-', 'opbs-wizard-', 'opbs-scheduled-', 'opbs-drill-inproc-'];
+/** Temp-dir prefixes created by job launchers (helper/launcher.ts, cli/index.ts) and cloud-restore staging. */
+const JOB_DIR_PREFIXES = ['opbs-job-', 'opbs-wizard-', 'opbs-scheduled-', 'opbs-drill-inproc-', 'opbs-restore-'];
 
 /**
  * A dir still holding job.json means its reader never ran — the launcher or

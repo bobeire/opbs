@@ -6,6 +6,71 @@ implemented; **Investigate** items need spike work first.
 
 ## Shipped
 
+### Restore directly from cloud (0.6.83)
+- ✅ `restore` accepts cloud URIs (`s3://`, `sftp://`, `ftp://`, `ftps://`):
+  `imaging/cloud-restore.ts` plans the download — resolves the URI against the
+  object-store listing (exact key, or a directory holding a single image; a
+  delta key pulls its whole `baseImagePath` chain, root first, plus `.NNN`
+  split volumes) — and `materializeImageFromCloud` stages the set into an
+  `opbs-restore-*` temp dir with per-file progress (`cloud-download-progress`
+  IPC), a free-space check against the temp volume, and dir cleanup on success
+  or failure. `utils/cloud-store.ts` builds the right store from the URI
+  scheme with the existing profile/env credential resolution
+  (`utils/cloud-profiles.ts`).
+- ✅ Surfaces: the Restore wizard cloud field (fetch + live download progress +
+  staged-copy notice; staged copies are released when replaced, when the
+  restore completes, and on wizard unmount), the `restore` CLI (cloud
+  `imagePath`), and scheduled restore drills (cloud `--dir` listings via
+  `cloudImageEntries`, staged before the drill runs).
+- ✅ Tests: `cloud-restore.test.ts` (13) — URI classification, chain planning
+  (root-first order, split volumes, missing base, cycles, ambiguity),
+  staging lifecycle (progress, free-space refusal, partial-dir cleanup on
+  failed downloads, non-cloud refusal) and the cloud listing → drill picker
+  path; plus 3 chain-order regression tests in `restore-engine.test.ts`
+  (a picked delta roots the job at the chain full — `applyDeltas` no longer
+  drops it).
+- ⏸️ Deferred by design: download resume and ranged-read streaming (the
+  alternative to staging) — staging covers the drill/restore sizes seen so
+  far; revisit if multi-TB offsite restores become common.
+
+### Cloud / network destinations
+- ✅ `backupLocation` URI handling (`utils/location.ts`): `file://`, `smb://`,
+  `smb3://` and UNC (`\\server\share`) locations are normalised into filesystem
+  paths, so network-share (NAS) destinations are first-class.
+- ✅ S3 backend (`utils/s3.ts`): dependency-free S3 client with AWS SigV4
+  signing, PUT/GET/DELETE, ranged GET, ListObjectsV2 (`list`), custom endpoints
+  and path-style addressing. `store put/get/list/verify` CLI + backup upload: an
+  `s3://bucket/prefix` destination writes the image to a local temp dir, uploads
+  after the job, then cleans up. `store verify` re-downloads + runs per-block CRC
+  verification.
+- ✅ S3 retention: `prune s3://bucket/prefix` lists objects, reads headers
+  (ranged GET), reuses the chain/GFS policy, and deletes pruned objects.
+- ✅ Cloud settings/UI wiring: `Settings → Cloud (S3)` stores the key
+  profile (`resolveS3Config` falls back to AWS env vars; the destination URI
+  still picks the bucket/prefix); `restore-engine`/scheduler path not needed —
+  `ImagingEngine` injects the profile via `start-backup` for `s3://`
+  destinations; a "Test Connection" handler lists objects.
+- ✅ SFTP backend: `utils/sftp.ts` (`parseSftpLocation`,
+  `resolveSftpConfig` with `SFTP_USER`/`SFTP_PASSWORD`/`SFTP_PRIVATE_KEY` env
+  fallbacks, `SftpStore` — an `S3Store`-compatible object store over the
+  `ssh2` SFTP subsystem, streamed uploads + ranged reads). `sftp://user@host/path`
+  destinations write to a temp dir then stream up after the job; `Settings →
+  Cloud (SFTP)` holds the profile with a Test Connection handler; the CLI
+  `store put/get/list/verify` and `prune` commands and S3 retention now work
+  over either backend (shared `CloudStore` interface). ssh2 works without its
+  install script (pure-JS fallback), so the `allow-scripts` guard is not a
+  blocker.
+- ✅ **Remaining**: none for SFTP.
+- ✅ FTP/FTPS backend: `utils/ftp.ts` (`parseFtpLocation`, `resolveFtpConfig`
+  with `FTP_USER`/`FTP_PASSWORD`/`FTP_SECURE` env fallbacks, `FtpStore` — an
+  `SftpStore`-compatible object store over the `basic-ftp` client, streamed
+  uploads + ranged reads). `ftp://user@host/path` (and `ftps://` implicit)
+  destinations write to a temp dir then stream up after the job; `Settings →
+  Cloud (FTP/FTPS)` holds the profile with a Test Connection handler and a TLS
+  mode selector (Explicit TLS default; implicit; plain opt-in). The CLI
+  `store put/get/list/verify` and `prune` commands work over FTP too. Images
+  stay AES-256-GCM encrypted regardless of transport.
+
 ### File-level / image-browse restore
 - ✅ NTFS reader (`imaging/fs/ntfs.ts`): boot sector, MFT FILE records,
   update-sequence fixup, attributes (Standard Info / File Name / Data),
@@ -975,52 +1040,8 @@ implemented; **Investigate** items need spike work first.
 
 ## Planned
 
-### Restore directly from cloud
-- Restore takes a *local* image path: `restore-engine` and the Restore UI
-  accept `imagePath` on disk only, while `s3://`/`sftp://`/`ftp://`
-  destinations (backup upload, `store get/list/verify`, cloud prune) all work.
-  Recovering an offsite copy therefore needs a manual `store get` download
-  first. Needed: a restore path that accepts a cloud URI — download to temp
-  (progress + resume + free-space check) or stream via ranged reads — wired
-  through the GUI, the CLI, and scheduled restore drills.
-
-### Cloud / network destinations
-- ✅ `backupLocation` URI handling (`utils/location.ts`): `file://`, `smb://`,
-  `smb3://` and UNC (`\\server\share`) locations are normalised into filesystem
-  paths, so network-share (NAS) destinations are first-class.
-- ✅ S3 backend (`utils/s3.ts`): dependency-free S3 client with AWS SigV4
-  signing, PUT/GET/DELETE, ranged GET, ListObjectsV2 (`list`), custom endpoints
-  and path-style addressing. `store put/get/list/verify` CLI + backup upload: an
-  `s3://bucket/prefix` destination writes the image to a local temp dir, uploads
-  after the job, then cleans up. `store verify` re-downloads + runs per-block CRC
-  verification.
-- ✅ S3 retention: `prune s3://bucket/prefix` lists objects, reads headers
-  (ranged GET), reuses the chain/GFS policy, and deletes pruned objects.
-- ✅ Cloud settings/UI wiring: `Settings → Cloud (S3)` stores the key
-  profile (`resolveS3Config` falls back to AWS env vars; the destination URI
-  still picks the bucket/prefix); `restore-engine`/scheduler path not needed —
-  `ImagingEngine` injects the profile via `start-backup` for `s3://`
-  destinations; a "Test Connection" handler lists objects.
-- ✅ SFTP backend: `utils/sftp.ts` (`parseSftpLocation`,
-  `resolveSftpConfig` with `SFTP_USER`/`SFTP_PASSWORD`/`SFTP_PRIVATE_KEY` env
-  fallbacks, `SftpStore` — an `S3Store`-compatible object store over the
-  `ssh2` SFTP subsystem, streamed uploads + ranged reads). `sftp://user@host/path`
-  destinations write to a temp dir then stream up after the job; `Settings →
-  Cloud (SFTP)` holds the profile with a Test Connection handler; the CLI
-  `store put/get/list/verify` and `prune` commands and S3 retention now work
-  over either backend (shared `CloudStore` interface). ssh2 works without its
-  install script (pure-JS fallback), so the `allow-scripts` guard is not a
-  blocker.
-- ✅ **Remaining**: none for SFTP.
-- ✅ FTP/FTPS backend: `utils/ftp.ts` (`parseFtpLocation`, `resolveFtpConfig`
-  with `FTP_USER`/`FTP_PASSWORD`/`FTP_SECURE` env fallbacks, `FtpStore` — an
-  `SftpStore`-compatible object store over the `basic-ftp` client, streamed
-  uploads + ranged reads). `ftp://user@host/path` (and `ftps://` implicit)
-  destinations write to a temp dir then stream up after the job; `Settings →
-  Cloud (FTP/FTPS)` holds the profile with a Test Connection handler and a TLS
-  mode selector (Explicit TLS default; implicit; plain opt-in). The CLI
-  `store put/get/list/verify` and `prune` commands work over FTP too. Images
-  stay AES-256-GCM encrypted regardless of transport.
+- (empty — the designed backlog is fully shipped; open design work lives
+  under Investigate.)
 
 ## Investigate
 

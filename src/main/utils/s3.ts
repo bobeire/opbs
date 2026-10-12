@@ -472,6 +472,39 @@ export class S3Store {
     return res.body;
   }
 
+  /**
+   * Stream an object to a local file without buffering it in memory — the
+   * download path for restoring an image from `s3://`. `onProgress` reports
+   * cumulative bytes written for this file.
+   */
+  async downloadFile(key: string, destPath: string, onProgress?: (bytes: number) => void): Promise<void> {
+    const res = await this.perform('GET', key);
+    if (res.statusCode !== 200 && res.statusCode !== 206) {
+      const chunks: Buffer[] = [];
+      await new Promise<void>((resolve) => {
+        res.on('data', (c) => chunks.push(Buffer.from(c)));
+        res.on('end', () => resolve());
+        res.on('error', () => resolve());
+      });
+      throw new Error(`S3 GET ${key} failed: HTTP ${res.statusCode} ${Buffer.concat(chunks).toString('utf8')}`);
+    }
+    let written = 0;
+    res.on('data', (c: Buffer) => {
+      written += c.length;
+      onProgress?.(written);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const ws = fs.createWriteStream(destPath);
+      ws.on('finish', () => resolve());
+      ws.on('error', (err) => {
+        res.destroy();
+        reject(err);
+      });
+      res.on('error', reject);
+      res.pipe(ws);
+    });
+  }
+
   /** Delete the object at `key`. */
   async delete(key: string): Promise<void> {
     const res = await this.request('DELETE', key);

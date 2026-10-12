@@ -7,7 +7,7 @@ import { GPT_BASIC_DATA_GUID, GPT_EFI_SYSTEM_GUID } from '../../src/main/imaging
 import { inferMbrTypes, inferTableTypeGuids } from '../../src/main/imaging/fs/file-browse';
 import { DiskEnumerator } from '../../src/main/utils/disk-enumerator';
 import { launchElevatedJob } from '../../src/main/helper/launcher';
-import { encodeHeader, encodePartitionEntry, encodeBlockIndexEntry, encodeBlockFrame, compressBlock, crc32, newImageCipher, ImageCipher, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
+import { encodeHeader, encodePartitionEntry, encodeBlockIndexEntry, encodeBlockFrame, compressBlock, crc32, newImageCipher, ImageCipher, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, FLAG_INCREMENTAL, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, PartitionEntryMeta, BlockRecord, ImageHeader, parseHeader, clearImageInfoCache } from '../../src/main/imaging/image-format';
 import { buildMrimgxImage } from '../helpers/mrimg-image';
 
 vi.mock('../../src/main/helper/launcher', () => ({
@@ -944,5 +944,83 @@ describe('RestoreEngine Macrium images', () => {
     );
     expect(result).toEqual({ ok: true });
     expect(launchElevatedJob).toHaveBeenCalledWith(expect.objectContaining({ type: 'restore' }));
+  });
+});
+
+describe('RestoreEngine auto chain resolution', () => {
+  /** Write a full image, then mark `deltaPath` incremental with `basePath` recorded the way backups do. */
+  function makeChain(dir: string): { rootPath: string; deltaPath: string } {
+    const rootPath = path.join(dir, 'full.opbs');
+    writeImage(rootPath);
+    const deltaPath = path.join(dir, 'delta.opbs');
+    writeImage(deltaPath);
+    const fd = fs.openSync(deltaPath, 'r+');
+    const raw = Buffer.alloc(HEADER_SIZE);
+    fs.readSync(fd, raw, 0, HEADER_SIZE, 0);
+    const header = parseHeader(raw);
+    header.flags |= FLAG_INCREMENTAL;
+    header.baseImagePath = rootPath;
+    fs.writeSync(fd, encodeHeader(header), 0, HEADER_SIZE, 0);
+    fs.closeSync(fd);
+    clearImageInfoCache();
+    return { rootPath, deltaPath };
+  }
+
+  it('roots the job at the chain full when a delta is picked', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-chain-order-'));
+    try {
+      const { rootPath, deltaPath } = makeChain(dir);
+      const engine = new RestoreEngine(createFakeEnumerator());
+      const job = await engine.buildJob({
+        imagePath: deltaPath,
+        targetDiskIndex: 1,
+        targetPartitions: [0],
+        writePartitionTable: false
+      });
+      // job-runner applies sources in order, so the full must be primary —
+      // a picked delta as imagePath used to drop the root from the job.
+      expect(job.imagePath).toBe(rootPath);
+      expect(job.applyDeltas).toEqual([deltaPath]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the picked image primary when deltas are disabled', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-chain-order-'));
+    try {
+      const { deltaPath } = makeChain(dir);
+      const engine = new RestoreEngine(createFakeEnumerator());
+      const job = await engine.buildJob({
+        imagePath: deltaPath,
+        targetDiskIndex: 1,
+        targetPartitions: [0],
+        writePartitionTable: false,
+        applyDeltas: false
+      });
+      expect(job.imagePath).toBe(deltaPath);
+      expect(job.applyDeltas).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps an explicitly supplied chain order', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-chain-order-'));
+    try {
+      const { rootPath, deltaPath } = makeChain(dir);
+      const engine = new RestoreEngine(createFakeEnumerator());
+      const job = await engine.buildJob({
+        imagePath: rootPath,
+        targetDiskIndex: 1,
+        targetPartitions: [0],
+        writePartitionTable: false,
+        applyDeltas: [deltaPath]
+      });
+      expect(job.imagePath).toBe(rootPath);
+      expect(job.applyDeltas).toEqual([deltaPath]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

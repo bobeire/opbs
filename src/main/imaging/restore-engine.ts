@@ -503,7 +503,11 @@ export class RestoreEngine implements RestoreCoordinator {
 
     return {
       type: 'restore',
-      imagePath: config.imagePath,
+      // The primary source is always the chain ROOT: resolveImageChain is
+      // root-first and job-runner applies sources in order (later deltas
+      // overwrite). Picking a delta as imagePath must not demote it to the
+      // primary source and drop the root from the job entirely.
+      imagePath: chain[0] ?? config.imagePath,
       // `.opbs` images carry per-block CRCs for a pre-write pass; Macrium
       // containers are MD5-verified per block by the reader instead.
       verifyBeforeWrite: source.isMacrium ? false : config.verifyBeforeWrite !== false,
