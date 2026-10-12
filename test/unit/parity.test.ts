@@ -17,6 +17,7 @@ import {
   IMAGE_VERSION,
   FLAG_HAS_BLOCK_INDEX,
   COMPRESSION_ZSTD,
+  COMPRESSION_NONE,
   HEADER_SIZE,
   PARTITION_TABLE_ENTRY_SIZE,
   BLOCK_INDEX_ENTRY_SIZE,
@@ -30,9 +31,12 @@ import {
   verifyParity,
   repairParityBlock,
   paritySidecarPath,
+  readParity,
+  frameLength,
   PARITY_GROUP_SIZE
 } from '../../src/main/imaging/parity';
 import { classifyImage } from '../../src/main/imaging/scrub';
+import { writeMultiVolumeImage } from '../helpers/opbs-image';
 
 const BLOCK = 64 * 1024;
 
@@ -227,6 +231,131 @@ describe('parity (XOR repair)', () => {
     const report = buildParity(imagePath);
     expect(report.groups).toBe(2);
     expect(report.blocksProtected).toBe(PARITY_GROUP_SIZE + 2);
+  });
+});
+
+describe('parity (multi-volume images)', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-parity-mv-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('builds, verifies, detects and repairs frames across volumes', async () => {
+    const imagePath = path.join(dir, 'mv.opbs');
+    const blocks = writeMultiVolumeImage(imagePath, makeRaw(12), BLOCK, 300 * 1024, {
+      compressionId: COMPRESSION_NONE
+    });
+    expect(fs.existsSync(`${imagePath}.001`)).toBe(true);
+    expect(fs.existsSync(`${imagePath}.002`)).toBe(true);
+
+    const report = buildParity(imagePath);
+    expect(report.blocksProtected).toBe(12);
+    expect(verifyParity(imagePath).ok).toBe(true);
+
+    // Victim lives in .001 (blocks 4-7): a base-file read would miss this
+    // corruption entirely, so verify must fail and repair must rewrite the
+    // frame inside .001 with the exact original bytes.
+    const victim = blocks[6];
+    expect(victim.volumeIndex).toBe(1);
+    const victimPath = `${imagePath}.001`;
+    const frameLen = frameLength(victim.compSize, 0);
+    const original = Buffer.alloc(frameLen);
+    let fd = fs.openSync(victimPath, 'r');
+    fs.readSync(fd, original, 0, frameLen, victim.fileOffset);
+    fs.closeSync(fd);
+
+    const corrupted = Buffer.from(original);
+    corrupted[16 + 10] ^= 0xff;
+    fd = fs.openSync(victimPath, 'r+');
+    fs.writeSync(fd, corrupted, 0, frameLen, victim.fileOffset);
+    fs.closeSync(fd);
+
+    expect(verifyParity(imagePath).ok).toBe(false);
+
+    const repair = repairParityBlock(imagePath, victim.blockIndex);
+    expect(repair.repaired).toBe(true);
+
+    const restored = Buffer.alloc(frameLen);
+    fd = fs.openSync(victimPath, 'r');
+    fs.readSync(fd, restored, 0, frameLen, victim.fileOffset);
+    fs.closeSync(fd);
+    expect(restored.equals(original)).toBe(true);
+
+    expect(verifyParity(imagePath).ok).toBe(true);
+    const scan = classifyImage(imagePath);
+    expect(scan.checks.filter((c) => !c.ok)).toHaveLength(0);
+    const verified = await verifyImage(imagePath);
+    expect(verified.ok).toBe(true);
+  });
+
+  it('classifies every block of a multi-volume image cleanly', () => {
+    const imagePath = path.join(dir, 'mv-scan.opbs');
+    writeMultiVolumeImage(imagePath, makeRaw(12), BLOCK, 300 * 1024, {
+      compressionId: COMPRESSION_NONE
+    });
+
+    const scan = classifyImage(imagePath);
+    expect(scan.checks).toHaveLength(12);
+    expect(scan.checks.filter((c) => !c.ok)).toHaveLength(0);
+  });
+
+  it('parses v1 sidecars written before multi-volume support', () => {
+    const imagePath = path.join(dir, 'v1.opbs');
+    const blocks = writeImageFromBytes(imagePath, makeRaw(4), BLOCK);
+
+    // Hand-roll a v1 sidecar: 16-byte member entries without a volume index,
+    // parity payload = XOR of the stored frames (same rule as buildParity).
+    const nameBuf = Buffer.from(path.basename(imagePath), 'utf-8');
+    const lens = blocks.map((b) => frameLength(b.compSize, 0));
+    const parityLen = Math.max(...lens);
+    const headerLen = 24 + nameBuf.length;
+    const total = headerLen + 8 + blocks.length * 16 + parityLen;
+    const sidecar = Buffer.alloc(total);
+    sidecar.write('OPAR', 0, 'ascii');
+    sidecar.writeUInt16LE(1, 4);
+    sidecar.writeUInt16LE(0, 6);
+    sidecar.writeUInt32LE(PARITY_GROUP_SIZE, 8);
+    sidecar.writeUInt32LE(BLOCK, 12);
+    sidecar.writeUInt32LE(1, 16);
+    sidecar.writeUInt32LE(nameBuf.length, 20);
+    nameBuf.copy(sidecar, 24);
+
+    let cursor = headerLen;
+    sidecar.writeUInt16LE(blocks.length, cursor);
+    sidecar.writeUInt16LE(0, cursor + 2);
+    sidecar.writeUInt32LE(parityLen, cursor + 4);
+    cursor += 8;
+
+    const parityPayload = Buffer.alloc(parityLen);
+    const imgFd = fs.openSync(imagePath, 'r');
+    const frameBuf = Buffer.alloc(parityLen);
+    for (let i = 0; i < blocks.length; i++) {
+      const block = blocks[i];
+      sidecar.writeUInt32LE(block.blockIndex, cursor);
+      sidecar.writeBigUInt64LE(BigInt(block.fileOffset), cursor + 4);
+      sidecar.writeUInt32LE(lens[i], cursor + 12);
+      cursor += 16;
+
+      frameBuf.fill(0);
+      fs.readSync(imgFd, frameBuf, 0, lens[i], block.fileOffset);
+      for (let b = 0; b < lens[i]; b++) parityPayload[b] ^= frameBuf[b];
+    }
+    fs.closeSync(imgFd);
+    parityPayload.copy(sidecar, cursor);
+    fs.writeFileSync(paritySidecarPath(imagePath), sidecar);
+
+    const parsed = readParity(imagePath);
+    expect(parsed.version).toBe(1);
+    expect(parsed.groups).toHaveLength(1);
+    expect(parsed.groups[0].members).toHaveLength(4);
+    expect(parsed.groups[0].members[0].volumeIndex).toBeUndefined();
+    expect(parsed.groups[0].members[0].fileOffset).toBe(blocks[0].fileOffset);
+    expect(verifyParity(imagePath).ok).toBe(true);
   });
 });
 

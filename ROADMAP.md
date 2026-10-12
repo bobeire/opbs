@@ -1177,7 +1177,11 @@ implemented; **Investigate** items need spike work first.
   parity/scrub multi-volume gap this design pass noticed (`.opar` building
   and `classifyImage` open only `imagePath` while multi-volume
   `BlockRecord.fileOffset` is volume-relative — verify/restore volume-route
-  correctly, parity does not).
+  correctly, parity does not) — ✅ fixed 2026-10-12: sidecar v2 stores each
+  member's `volumeIndex` (v1 sidecars still parse), and `buildParity`,
+  `verifyParity`, `repairParityBlock` and `classifyImage` route every frame
+  read through the volume file the block lives in — repair rewrites the
+  recovered frame inside its own volume, never the base file.
 - **Tests**: composition map (newest-wins, sparse gaps, multi-hop),
   copy-mode round-trip (per-block equality against `ChainPartitionReader`
   over the original chain), encrypted re-encode with per-member salts,

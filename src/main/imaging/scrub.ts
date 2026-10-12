@@ -6,7 +6,8 @@ import {
   decompressBlock,
   readFrameCompressed,
   crc32,
-  CIPHER_NONE
+  CIPHER_NONE,
+  resolveVolumePath
 } from './image-format';
 import { scanBackupDirectory } from '../backup/retention';
 import {
@@ -121,9 +122,21 @@ export function classifyImage(imagePath: string, passphrase?: string): ImageBloc
     key = deriveImageKey(passphrase, info.header.salt, info.header.kdfIterations);
   }
 
-  const fd = fs.openSync(imagePath, 'r');
+  // Frame offsets are volume-relative on multi-volume images: classify each
+  // block through the volume file it actually lives in.
+  const fds = new Map<string, number>();
+  const fdFor = (volumeIndex: number | undefined): number => {
+    const p = resolveVolumePath(imagePath, volumeIndex ?? 0);
+    let fd = fds.get(p);
+    if (fd === undefined) {
+      fd = fs.openSync(p, 'r');
+      fds.set(p, fd);
+    }
+    return fd;
+  };
   try {
     for (const block of info.blocks) {
+      const fd = fdFor(block.volumeIndex);
       const dataPos = block.fileOffset + 16;
       const check: BlockCheck = { blockIndex: block.blockIndex, ok: true };
       try {
@@ -161,7 +174,8 @@ export function classifyImage(imagePath: string, passphrase?: string): ImageBloc
       checks.push(check);
     }
   } finally {
-    fs.closeSync(fd);
+    for (const fd of fds.values()) fs.closeSync(fd);
+    fds.clear();
   }
 
   return { encrypted, keyRequired, checks };

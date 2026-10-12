@@ -12,6 +12,7 @@ import {
   IMAGE_VERSION,
   FLAG_HAS_BLOCK_INDEX,
   COMPRESSION_ZSTD,
+  COMPRESSION_NONE,
   HEADER_SIZE,
   PARTITION_TABLE_ENTRY_SIZE,
   BLOCK_INDEX_ENTRY_SIZE,
@@ -21,6 +22,7 @@ import {
 } from '../../src/main/imaging/image-format';
 import { scrubDirectory, readScrubHistory, classifyImage } from '../../src/main/imaging/scrub';
 import { buildParity } from '../../src/main/imaging/parity';
+import { writeMultiVolumeImage } from '../helpers/opbs-image';
 
 const BLOCK = 64 * 1024;
 
@@ -189,5 +191,38 @@ describe('self-healing scrub', () => {
     expect(history).toHaveLength(1);
     expect(history[0].imagePath).toBe(path.resolve(imagePath));
     expect(history[0].ok).toBe(true);
+  });
+
+  it('classifies and repairs a multi-volume image frame-by-frame', () => {
+    const imagePath = path.join(dir, 'img_0_1000.opbs');
+    const blocks = writeMultiVolumeImage(imagePath, makeRaw(12), BLOCK, 300 * 1024, {
+      compressionId: COMPRESSION_NONE
+    });
+    expect(blocks.some((b) => b.volumeIndex === 1)).toBe(true);
+    buildParity(imagePath);
+
+    // Corrupt a frame that lives inside .001 — classification must read the
+    // volume file, not the base image.
+    const victim = blocks[6];
+    const victimPath = `${imagePath}.001`;
+    const fd = fs.openSync(victimPath, 'r+');
+    const byte = Buffer.alloc(1);
+    fs.readSync(fd, byte, 0, 1, victim.fileOffset + 20);
+    byte[0] ^= 0xff;
+    fs.writeSync(fd, byte, 0, 1, victim.fileOffset + 20);
+    fs.closeSync(fd);
+
+    const scan = classifyImage(imagePath);
+    expect(scan.checks).toHaveLength(12);
+    expect(scan.checks.filter((c) => !c.ok)).toHaveLength(1);
+
+    const summary = scrubDirectory(dir, { scope: 'all', repair: true });
+    expect(summary.checked).toBe(1);
+    expect(summary.ok).toBe(true);
+    expect(summary.repairedBlocks).toBe(1);
+    expect(summary.failed).toBe(0);
+
+    const after = classifyImage(imagePath);
+    expect(after.checks.filter((c) => !c.ok)).toHaveLength(0);
   });
 });

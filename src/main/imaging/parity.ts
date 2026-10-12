@@ -6,7 +6,8 @@ import {
   crc32,
   GCM_IV_LENGTH,
   GCM_TAG_LENGTH,
-  CIPHER_NONE
+  CIPHER_NONE,
+  resolveVolumePath
 } from './image-format';
 import { logger } from '../utils/logger';
 
@@ -30,11 +31,15 @@ import { logger } from '../utils/logger';
  */
 
 export const PARITY_MAGIC = 'OPAR';
-export const PARITY_VERSION = 1;
+/** v2 appends the frame's volume index to each member entry (multi-volume). */
+export const PARITY_VERSION = 2;
+/** Sidecars written before multi-volume support carry no volume index. */
+export const PARITY_VERSION_V1 = 1;
 /** Number of data blocks covered by one parity block (SnapRAID-style group). */
 export const PARITY_GROUP_SIZE = 31;
 
-const MEMBER_ENTRY_SIZE = 16;
+const MEMBER_ENTRY_SIZE_V1 = 16;
+const MEMBER_ENTRY_SIZE = 20;
 const GROUP_HEADER_SIZE = 8;
 
 export interface ParityMember {
@@ -44,6 +49,8 @@ export interface ParityMember {
   fileOffset: number;
   /** Total frame length (16 + payload, +IV+tag for encrypted). */
   frameLen: number;
+  /** Volume holding the frame; absent means the base file (volume 0). */
+  volumeIndex?: number;
 }
 
 export interface ParityGroup {
@@ -86,6 +93,33 @@ function xorInto(target: Buffer, src: Buffer, length: number): void {
 }
 
 /**
+ * Per-volume fd cache for multi-volume images: block-index offsets are
+ * volume-relative, so every frame read must go through the volume file the
+ * block actually lives in. Volume 0 is the base image path.
+ */
+function openVolumeReader(baseImagePath: string): {
+  fdFor(volumeIndex: number | undefined): number;
+  close(): void;
+} {
+  const fds = new Map<string, number>();
+  return {
+    fdFor(volumeIndex) {
+      const p = resolveVolumePath(baseImagePath, volumeIndex ?? 0);
+      let fd = fds.get(p);
+      if (fd === undefined) {
+        fd = fs.openSync(p, 'r');
+        fds.set(p, fd);
+      }
+      return fd;
+    },
+    close() {
+      for (const fd of fds.values()) fs.closeSync(fd);
+      fds.clear();
+    }
+  };
+}
+
+/**
  * Build (or rebuild) the `.opar` sidecar for an image. Reads frame bytes from
  * the image and XORs them into per-group parity blocks. Does not touch the
  * image itself. Returns the group count (0 for images with no block index).
@@ -110,13 +144,14 @@ export function buildParity(
     const members = chunk.map((block) => ({
       blockIndex: block.blockIndex,
       fileOffset: block.fileOffset,
-      frameLen: frameLength(block.compSize, info.header.cipherId)
+      frameLen: frameLength(block.compSize, info.header.cipherId),
+      volumeIndex: block.volumeIndex
     }));
     const maxLen = Math.max(...members.map((m) => m.frameLen));
     groups.push({ members, parityOffset: 0, parityLen: maxLen });
   }
 
-  const imgFd = fs.openSync(imagePath, 'r');
+  const volumes = openVolumeReader(imagePath);
   const sidecarPath = paritySidecarPath(imagePath);
   const outFd = fs.openSync(sidecarPath, 'w');
 
@@ -150,7 +185,7 @@ export function buildParity(
         if (member.frameLen > frameBuf.length) {
           throw new Error(`${label}: frame ${member.blockIndex} exceeds scratch buffer`);
         }
-        const read = fs.readSync(imgFd, frameBuf, 0, member.frameLen, member.fileOffset);
+        const read = fs.readSync(volumes.fdFor(member.volumeIndex), frameBuf, 0, member.frameLen, member.fileOffset);
         if (read !== member.frameLen) {
           throw new Error(`${label}: truncated frame for block ${member.blockIndex}`);
         }
@@ -168,6 +203,7 @@ export function buildParity(
         memberBuf.writeUInt32LE(member.blockIndex, 0);
         memberBuf.writeBigUInt64LE(BigInt(member.fileOffset), 4);
         memberBuf.writeUInt32LE(member.frameLen, 12);
+        memberBuf.writeUInt32LE(member.volumeIndex ?? 0, 16);
         fs.writeSync(outFd, memberBuf, 0, MEMBER_ENTRY_SIZE, cursor);
         cursor += MEMBER_ENTRY_SIZE;
         blocksProtected++;
@@ -187,7 +223,7 @@ export function buildParity(
     fs.rmSync(sidecarPath, { force: true });
     throw error;
   } finally {
-    fs.closeSync(imgFd);
+    volumes.close();
     fs.closeSync(outFd);
   }
 }
@@ -210,9 +246,11 @@ export function readParity(imagePath: string): ParityFile {
     if (headRead < 24 || head.toString('ascii', 0, 4) !== PARITY_MAGIC) {
       throw new Error('Not an OPAR parity sidecar (bad magic)');
     }
-    if (head.readUInt16LE(4) !== PARITY_VERSION) {
+    const version = head.readUInt16LE(4);
+    if (version !== PARITY_VERSION && version !== PARITY_VERSION_V1) {
       throw new Error('Unsupported parity sidecar version');
     }
+    const memberSize = version >= PARITY_VERSION ? MEMBER_ENTRY_SIZE : MEMBER_ENTRY_SIZE_V1;
     const groupSize = head.readUInt32LE(8);
     const imageBlockSize = head.readUInt32LE(12);
     const groupCount = head.readUInt32LE(16);
@@ -239,12 +277,13 @@ export function readParity(imagePath: string): ParityFile {
       const parityLen = groupHead.readUInt32LE(4);
       const members: ParityMember[] = [];
       for (let m = 0; m < memberCount; m++) {
-        fs.readSync(fd, memberBuf, 0, MEMBER_ENTRY_SIZE, cursor);
-        cursor += MEMBER_ENTRY_SIZE;
+        fs.readSync(fd, memberBuf, 0, memberSize, cursor);
+        cursor += memberSize;
         members.push({
           blockIndex: memberBuf.readUInt32LE(0),
           fileOffset: Number(memberBuf.readBigUInt64LE(4)),
-          frameLen: memberBuf.readUInt32LE(12)
+          frameLen: memberBuf.readUInt32LE(12),
+          volumeIndex: version >= PARITY_VERSION ? memberBuf.readUInt32LE(16) || undefined : undefined
         });
       }
       groups.push({ members, parityOffset: cursor, parityLen });
@@ -254,7 +293,7 @@ export function readParity(imagePath: string): ParityFile {
       throw new Error(`Truncated parity sidecar (expected ${cursor} bytes, got ${stat.size})`);
     }
 
-    return { version: PARITY_VERSION, groupSize, imageBlockSize, imageName, groups };
+    return { version, groupSize, imageBlockSize, imageName, groups };
   } finally {
     fs.closeSync(fd);
   }
@@ -285,7 +324,7 @@ export function verifyParity(imagePath: string): ParityVerifyReport {
 
   const sidecarPath = paritySidecarPath(imagePath);
   const sidecarFd = fs.openSync(sidecarPath, 'r');
-  const imgFd = fs.openSync(imagePath, 'r');
+  const volumes = openVolumeReader(imagePath);
   const scratch = Buffer.alloc(64 * 1024 * 1024);
   try {
     for (let g = 0; g < parity.groups.length; g++) {
@@ -303,7 +342,7 @@ export function verifyParity(imagePath: string): ParityVerifyReport {
         if (member.frameLen > scratch.length) {
           throw new Error(`Frame ${member.blockIndex} exceeds scratch buffer`);
         }
-        fs.readSync(imgFd, scratch, 0, member.frameLen, member.fileOffset);
+        fs.readSync(volumes.fdFor(member.volumeIndex), scratch, 0, member.frameLen, member.fileOffset);
         xorInto(computed, scratch, member.frameLen);
       }
       if (!computed.equals(payload)) {
@@ -313,7 +352,7 @@ export function verifyParity(imagePath: string): ParityVerifyReport {
     }
   } finally {
     fs.closeSync(sidecarFd);
-    fs.closeSync(imgFd);
+    volumes.close();
   }
   return result;
 }
@@ -345,7 +384,11 @@ export function repairParityBlock(imagePath: string, blockIndex: number): Parity
 
   const sidecarPath = paritySidecarPath(imagePath);
   const sidecarFd = fs.openSync(sidecarPath, 'r');
-  const imgFd = fs.openSync(imagePath, 'r+');
+  const volumes = openVolumeReader(imagePath);
+  // The recovered frame goes back into the volume the block lives in — not
+  // necessarily the base file.
+  const targetPath = resolveVolumePath(imagePath, target.volumeIndex ?? 0);
+  const imgFd = fs.openSync(targetPath, 'r+');
   const scratch = Buffer.alloc(64 * 1024 * 1024);
   try {
     const recovered = Buffer.alloc(group.parityLen);
@@ -354,7 +397,7 @@ export function repairParityBlock(imagePath: string, blockIndex: number): Parity
       if (member.frameLen > scratch.length) {
         throw new Error(`Frame ${member.blockIndex} exceeds scratch buffer`);
       }
-      fs.readSync(imgFd, scratch, 0, member.frameLen, member.fileOffset);
+      fs.readSync(volumes.fdFor(member.volumeIndex), scratch, 0, member.frameLen, member.fileOffset);
       xorInto(recovered, scratch, member.frameLen);
     }
     const parityPayload = Buffer.alloc(group.parityLen);
@@ -389,6 +432,7 @@ export function repairParityBlock(imagePath: string, blockIndex: number): Parity
   } finally {
     fs.closeSync(sidecarFd);
     fs.closeSync(imgFd);
+    volumes.close();
   }
 }
 
