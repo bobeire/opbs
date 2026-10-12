@@ -82,7 +82,7 @@ describe('sweepStaleJobDirs', () => {
   });
 
   it('sweeps stale wizard, scheduled and drill-inproc job dirs', () => {
-    for (const name of ['opbs-wizard-a', 'opbs-scheduled-b', 'opbs-drill-inproc-c']) {
+    for (const name of ['opbs-wizard-a', 'opbs-scheduled-b', 'opbs-drill-inproc-c', 'opbs-compact-d']) {
       const dir = makeDir(name, { 'job.json': '{}' });
       backdate(path.join(dir, 'job.json'), 2 * HOUR);
       backdate(dir, 2 * HOUR);
@@ -90,7 +90,7 @@ describe('sweepStaleJobDirs', () => {
 
     const removed = sweepStaleJobDirs(root).sort();
 
-    expect(removed).toEqual(['opbs-drill-inproc-c', 'opbs-scheduled-b', 'opbs-wizard-a']);
+    expect(removed).toEqual(['opbs-compact-d', 'opbs-drill-inproc-c', 'opbs-scheduled-b', 'opbs-wizard-a']);
   });
 
   it('leaves non-job prefixes and regular files alone', () => {

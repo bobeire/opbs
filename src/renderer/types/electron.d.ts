@@ -393,7 +393,53 @@ declare global {
       repoPrune: (options: { dir: string; dryRun?: boolean; passphrase?: string }) => Promise<RepoPruneResult>;
       repoUnlock: (options: { dir: string; target: string; passphrase?: string }) => Promise<RepoActionResult>;
       onRepoProgress: (callback: (progress: { message: string }) => void) => () => void;
+      compactChain: (
+        imagePath: string,
+        options?: { removeSource?: boolean; dryRun?: boolean; passphrase?: string }
+      ) => Promise<CompactResult>;
+      cancelCompact: () => Promise<{ ok: boolean }>;
+      onCompactProgress: (callback: (progress: CompactProgress) => void) => () => void;
     };
+  }
+
+  interface CompactProgress {
+    phase: 'composing' | 'copying' | 'verifying' | 'finalizing';
+    percent: number;
+    blocksDone: number;
+    blocksTotal: number;
+    bytesDone: number;
+    totalBytes: number;
+    createdAt: number;
+  }
+
+  interface CompactMemberInfo {
+    path: string;
+    timestamp: number;
+    blocks: number;
+    bytes: number;
+  }
+
+  interface CompactPlan {
+    members: CompactMemberInfo[];
+    uniqueBlocks: number;
+    uniqueRawBytes: number;
+    estimatedOutputBytes: number;
+    encrypted: boolean;
+    refusal?: string;
+  }
+
+  interface CompactResult {
+    ok: boolean;
+    error?: string;
+    cancelled?: boolean;
+    dryRun: boolean;
+    plan: CompactPlan;
+    outputPath?: string;
+    blocksWritten?: number;
+    bytesWritten?: number;
+    durationMs: number;
+    warnings: string[];
+    sourcesRemoved?: string[];
   }
 
   interface RepoHeaderInfo {

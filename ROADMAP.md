@@ -1149,10 +1149,15 @@ implemented; **Investigate** items need spike work first.
   (union size) plus headroom — the cloud-restore `statfs` pattern.
 
 #### Triggers, surfaces, phasing
-- **CLI (Phase 1)**: `compact <image> [--remove-source] [--dry-run]` — any
-  chain member names the whole chain; prints member list, composed unique
-  blocks/bytes, estimated output, and the refusal reason when gated. IPC
-  `compact-chain` mirrors it for the GUI.
+- ✅ **CLI (Phase 1, done 2026-10-12)**: `compact <image> [--remove-source]
+  [--dry-run]` — any chain member names the whole chain; prints member list,
+  composed unique blocks/bytes, estimated output, and the refusal reason when
+  gated. IPC `compact-chain` (+ `cancel-compact` + `compact-progress`) mirrors
+  it for the GUI. Encrypted chains re-encode under a fresh cipher (per-member
+  keys, compressed payload preserved); plaintext chains relocate frames
+  verbatim. Output lands in `opbs-compact-<id>/`, is fully verified, then
+  atomically renamed; `--remove-source` deletes leaf-first with USN/BitLocker
+  sidecar carry (BitLocker re-sealed under the new key) and a fresh `.opar`.
 - **Automatic (Phase 1.5)**: `compactAfterDeltas` setting (default 0 = off)
   runs compaction after a scheduled backup, before retention, with
   remove-source — retention then sees a single-image chain. Settings toggle +

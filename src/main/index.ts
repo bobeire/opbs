@@ -43,6 +43,7 @@ import { resolveImageChain } from './imaging/restore-engine';
 import { registerFileAssociations, unregisterFileAssociations, parseFileActionArgs, FileAction } from './utils/file-associations';
 import { readDrillHistory } from './utils/drill-history';
 import { sweepStaleJobDirs } from './utils/job-dir-sweep';
+import { compactChain } from './imaging/compact-engine';
 
 const HELPER_FLAG = '--opbs-helper';
 
@@ -1118,6 +1119,40 @@ function setupIpcHandlers(): void {
       }
     }
     return out;
+  });
+
+  // Chain compaction: flatten a full+delta chain into a single verified image.
+  let compactCancelRequested = false;
+  ipcMain.handle(
+    'compact-chain',
+    async (
+      event,
+      imagePath: string,
+      options?: { removeSource?: boolean; dryRun?: boolean; passphrase?: string }
+    ) => {
+      if (!imagePath) {
+        throw new Error('No image given');
+      }
+      compactCancelRequested = false;
+      return compactChain({
+        imagePath,
+        passphrase: options?.passphrase,
+        removeSource: options?.removeSource,
+        dryRun: options?.dryRun,
+        shouldCancel: () => compactCancelRequested,
+        onProgress: (progress) => {
+          try {
+            event.sender.send('compact-progress', progress);
+          } catch {
+            // renderer navigated away
+          }
+        }
+      });
+    }
+  );
+  ipcMain.handle('cancel-compact', async () => {
+    compactCancelRequested = true;
+    return { ok: true };
   });
 
   // Ransomware/tamper resistance: chain integrity (missing delta bases) and

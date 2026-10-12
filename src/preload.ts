@@ -258,5 +258,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => {
       ipcRenderer.removeListener('repo-progress', handler);
     };
+  },
+  // Chain compaction
+  compactChain: (imagePath: string, options?: { removeSource?: boolean; dryRun?: boolean; passphrase?: string }) =>
+    ipcRenderer.invoke('compact-chain', imagePath, options),
+  cancelCompact: () => ipcRenderer.invoke('cancel-compact'),
+  onCompactProgress: (callback: (progress: {
+    phase: 'composing' | 'copying' | 'verifying' | 'finalizing';
+    percent: number;
+    blocksDone: number;
+    blocksTotal: number;
+    bytesDone: number;
+    totalBytes: number;
+    createdAt: number;
+  }) => void) => {
+    const handler = (_event: unknown, progress: Parameters<typeof callback>[0]) => callback(progress);
+    ipcRenderer.on('compact-progress', handler);
+    return () => {
+      ipcRenderer.removeListener('compact-progress', handler);
+    };
   }
 });

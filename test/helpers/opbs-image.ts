@@ -8,6 +8,7 @@ import {
   crc32,
   IMAGE_VERSION,
   FLAG_HAS_BLOCK_INDEX,
+  FLAG_INCREMENTAL,
   HEADER_SIZE,
   PARTITION_TABLE_ENTRY_SIZE,
   BLOCK_INDEX_ENTRY_SIZE,
@@ -24,7 +25,7 @@ export function writeImageFromBytes(
   raw: Buffer,
   blockSize: number,
   compressionId = COMPRESSION_ZSTD,
-  opts?: { cipher?: ImageCipher }
+  opts?: { cipher?: ImageCipher; baseImagePath?: string; timestamp?: number }
 ): BlockRecord[] {
   const partition: PartitionEntryMeta = {
     partitionIndex: 0,
@@ -35,16 +36,17 @@ export function writeImageFromBytes(
   };
   const header: ImageHeader = {
     version: IMAGE_VERSION,
-    timestamp: Date.now(),
+    timestamp: opts?.timestamp ?? Date.now(),
     totalBytes: raw.length,
     blockSize,
     compressionId,
     partitionCount: 1,
-    flags: FLAG_HAS_BLOCK_INDEX,
+    flags: FLAG_HAS_BLOCK_INDEX | (opts?.baseImagePath ? FLAG_INCREMENTAL : 0),
     blockIndexOffset: 0,
     cipherId: opts?.cipher ? opts.cipher.cipherId : 0,
     kdfIterations: opts?.cipher ? opts.cipher.kdfIterations : 0,
-    salt: opts?.cipher ? opts.cipher.salt : Buffer.alloc(16)
+    salt: opts?.cipher ? opts.cipher.salt : Buffer.alloc(16),
+    baseImagePath: opts?.baseImagePath ?? ''
   };
 
   const fd = fs.openSync(imagePath, 'w+');

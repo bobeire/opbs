@@ -42,6 +42,7 @@ import { cmdRepo, finalizeBackupRepo, parseLockDays } from './repo';
 import { cmdFleet } from './fleet';
 import { isRepository } from '../imaging/repository';
 import { openRepoSession, type RepoSession } from '../imaging/repo-s3';
+import { compactChain } from '../imaging/compact-engine';
 
 const diskEnumerator = new DiskEnumerator();
 const imagingEngine = new ImagingEngine(diskEnumerator);
@@ -98,6 +99,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdParity(ctx);
       case 'chain':
         return await cmdChainCheck(ctx);
+      case 'compact':
+        return await cmdCompact(ctx);
       case 'tamper':
         return await cmdTamperCheck(ctx);
       case 'storage-health':
@@ -205,6 +208,16 @@ Commands:
                                          base image must still be present. Missing delta
                                          bases (silent deletes) are reported per chain and
                                          the command exits 1 when any chain is broken.
+  compact <image> [--remove-source] [--dry-run]
+                                         Compact a delta chain into a single new image.
+                                         Any chain member names the whole chain. The
+                                         composed (newest-wins) blocks are relocated into
+                                         one verified image; encrypted chains are
+                                         re-encrypted under a fresh key (needs the
+                                         passphrase). --remove-source deletes the old
+                                         chain after the new image is in place; --dry-run
+                                         only prints the plan. Repository and Macrium
+                                         images are refused.
   tamper check --dir <directory> [--json] Compare the directory against the last-known-good
                                          manifest: missing images, size-changed images, and
                                          unexpected .opbs files are reported (ransomware /
@@ -1564,6 +1577,82 @@ async function cmdChainCheck(ctx: CommandContext): Promise<number> {
     );
   }
   return report.brokenChains === 0 ? 0 : 1;
+}
+
+async function cmdCompact(ctx: CommandContext): Promise<number> {
+  const imagePath = ctx.argv[0];
+  if (!imagePath) {
+    console.error(
+      'Usage: compact <image> [--remove-source] [--dry-run] [--json] [--passphrase-file <file>]'
+    );
+    return 1;
+  }
+  const removeSource = ctx.argv.includes('--remove-source');
+  const dryRun = ctx.argv.includes('--dry-run');
+  const passphrase = resolvePassphrase(ctx.argv).value;
+
+  const result = await compactChain({
+    imagePath,
+    passphrase,
+    removeSource,
+    dryRun,
+    onProgress: ctx.opts.json
+      ? undefined
+      : (p) => {
+          process.stdout.write(`\r[${p.phase}] ${p.percent}% (${p.blocksDone}/${p.blocksTotal} blocks)   `);
+        }
+  });
+  if (!ctx.opts.json && !dryRun) process.stdout.write('\n');
+
+  if (ctx.opts.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return result.ok ? 0 : 1;
+  }
+
+  if (result.plan.members.length > 0) {
+    console.log('Chain (root-first):');
+    for (const member of result.plan.members) {
+      console.log(
+        `  + ${member.path}  ${new Date(member.timestamp).toISOString()}  ` +
+          `${member.blocks} block(s), ${formatBytes(member.bytes)}`
+      );
+    }
+    console.log(
+      `Composed: ${result.plan.uniqueBlocks} unique block(s), ` +
+        `${formatBytes(result.plan.uniqueRawBytes)} raw -> ~${formatBytes(result.plan.estimatedOutputBytes)} output` +
+        (result.plan.encrypted ? ' (encrypted)' : '')
+    );
+  }
+
+  if (result.dryRun) {
+    if (result.ok) {
+      console.log(`[dry-run] would compact to ${result.outputPath ?? '(default name)'}`);
+      if (removeSource) console.log('[dry-run] would then remove the old chain (newest first)');
+    } else {
+      console.error(`Gated: ${result.error}`);
+    }
+    return result.ok ? 0 : 1;
+  }
+
+  if (!result.ok) {
+    console.error(`Compaction failed: ${result.error}${result.cancelled ? ' (cancelled)' : ''}`);
+    return 1;
+  }
+
+  console.log(
+    `Compacted ${result.plan.members.length} member(s) -> ${result.outputPath} ` +
+      `(${result.blocksWritten} block(s), ${formatBytes(result.bytesWritten ?? 0)}, ` +
+      `${(result.durationMs / 1000).toFixed(1)}s)`
+  );
+  if (removeSource) {
+    for (const removed of result.sourcesRemoved ?? []) {
+      console.log(`  - removed source: ${removed}`);
+    }
+  }
+  for (const warning of result.warnings) {
+    console.log(`  ! warning: ${warning}`);
+  }
+  return 0;
 }
 
 async function cmdTamperCheck(ctx: CommandContext): Promise<number> {
