@@ -73,13 +73,13 @@ export type BrowseSession = NtfsBrowseSession | Fat32BrowseSession | ExfatBrowse
 export function openBrowse(
   imagePath: string,
   partitionIndex: number,
-  key?: Buffer
+  passphrase?: string
 ): BrowseSession {
   // Normalise a multi-volume path (`.001`, `.002`, ...) to the base image so
   // chain resolution and volume mapping start from volume 0.
   const basePath = baseVolumePath(imagePath);
   const chain = resolveImageChain(basePath);
-  const { reader } = partitionReaderForChain(chain, partitionIndex, key);
+  const { reader } = partitionReaderForChain(chain, partitionIndex, passphrase);
   return openBrowseFromReader(basePath, partitionIndex, reader);
 }
 
@@ -168,14 +168,14 @@ function openExfatBrowse(
  * Open a browse session for whatever image flavor the path holds: a `.opbs`
  * image chain, a `.mrimgx` Reflect X image, or a `.mrimg` Reflect 7/8 image.
  */
-export function openAnyBrowse(imagePath: string, partitionIndex: number, key?: Buffer): BrowseSession {
+export function openAnyBrowse(imagePath: string, partitionIndex: number, passphrase?: string): BrowseSession {
   const format = detectMacriumFormat(imagePath);
   if (format) {
     const info = readMacriumImage(imagePath);
     const reader = openMacriumPartitionReader(info, partitionIndex);
     return openBrowseFromReader(imagePath, partitionIndex, reader);
   }
-  return openBrowse(imagePath, partitionIndex, key);
+  return openBrowse(imagePath, partitionIndex, passphrase);
 }
 
 /**
@@ -186,7 +186,7 @@ export function openAnyBrowse(imagePath: string, partitionIndex: number, key?: B
 export function detectPartitionFilesystem(
   imagePath: string,
   partitionIndex: number,
-  key?: Buffer
+  passphrase?: string
 ): { fsType: string; browsable: boolean; reason?: string } {
   try {
     const format = detectMacriumFormat(imagePath);
@@ -197,7 +197,7 @@ export function detectPartitionFilesystem(
     } else {
       const basePath = baseVolumePath(imagePath);
       const chain = resolveImageChain(basePath);
-      reader = partitionReaderForChain(chain, partitionIndex, key).reader;
+      reader = partitionReaderForChain(chain, partitionIndex, passphrase).reader;
     }
     if (reader.size === 0) return { fsType: 'Empty', browsable: false };
     const bpb = reader.read(0, 512);
@@ -230,13 +230,13 @@ export function detectPartitionFilesystem(
  * a restore. Never throws; failures (encrypted image without a key, corrupt
  * data) mean "not an ESP".
  */
-export function probeEspPartition(imagePath: string, partitionIndex: number, key?: Buffer): boolean {
+export function probeEspPartition(imagePath: string, partitionIndex: number, passphrase?: string): boolean {
   try {
-    const { fsType } = detectPartitionFilesystem(imagePath, partitionIndex, key);
+    const { fsType } = detectPartitionFilesystem(imagePath, partitionIndex, passphrase);
     if (fsType !== 'FAT32') {
       return false;
     }
-    const session = openAnyBrowse(imagePath, partitionIndex, key);
+    const session = openAnyBrowse(imagePath, partitionIndex, passphrase);
     if (session.filesystem !== 'fat32') {
       return false;
     }
@@ -247,7 +247,7 @@ export function probeEspPartition(imagePath: string, partitionIndex: number, key
   }
 }
 
-export type EspProbe = (imagePath: string, partitionIndex: number, key?: Buffer) => boolean;
+export type EspProbe = (imagePath: string, partitionIndex: number, passphrase?: string) => boolean;
 
 /**
  * Infer GPT type GUIDs for the partitions a restore will lay down: every EFI
@@ -258,12 +258,12 @@ export type EspProbe = (imagePath: string, partitionIndex: number, key?: Buffer)
 export function inferTableTypeGuids(
   imagePath: string,
   partitionIndexes: number[],
-  key?: Buffer,
+  passphrase?: string,
   probe: EspProbe = probeEspPartition
 ): Record<number, string> {
   const typeGuids: Record<number, string> = {};
   for (const idx of partitionIndexes) {
-    if (probe(imagePath, idx, key)) {
+    if (probe(imagePath, idx, passphrase)) {
       typeGuids[idx] = GPT_EFI_SYSTEM_GUID;
     }
   }
@@ -290,11 +290,11 @@ export function mbrTypeForFs(fsType: string): number {
 export function inferMbrTypes(
   imagePath: string,
   partitionIndexes: number[],
-  key?: Buffer
+  passphrase?: string
 ): Record<number, number> {
   const mbrTypes: Record<number, number> = {};
   for (const idx of partitionIndexes) {
-    const { fsType } = detectPartitionFilesystem(imagePath, idx, key);
+    const { fsType } = detectPartitionFilesystem(imagePath, idx, passphrase);
     mbrTypes[idx] = mbrTypeForFs(fsType);
   }
   return mbrTypes;

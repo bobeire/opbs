@@ -4,8 +4,6 @@ import * as path from 'path';
 import { DiskEnumerator } from '../utils/disk-enumerator';
 import {
   readImageInfo,
-  newImageCipher,
-  metadataFromCipher,
   deriveImageKey,
   resolveImageChain,
   FLAG_INCREMENTAL,
@@ -176,8 +174,6 @@ interface RestoreSourceView {
   partitions: Array<{ partitionIndex: number; size: number; offsetOnDisk: number; blockCount: number }>;
   sourceDiskModel: string;
   sourceDiskSerial: string;
-  /** Key for an encrypted `.opbs` source (Macrium containers refuse encryption). */
-  detectKey?: Buffer;
   chain: string[];
   /** Decompression id used only to default the thread count (Macrium: none). */
   compressionId: number;
@@ -195,10 +191,6 @@ function opbsRestoreSource(config: RestoreJobConfig, chain: string[]): RestoreSo
     })),
     sourceDiskModel: info.header.sourceDiskModel ?? '',
     sourceDiskSerial: info.header.sourceDiskSerial ?? '',
-    detectKey:
-      config.passphrase && info.header.cipherId !== CIPHER_NONE
-        ? deriveImageKey(config.passphrase, info.header.salt, info.header.kdfIterations)
-        : undefined,
     chain,
     compressionId: info.header.compressionId,
     isMacrium: false
@@ -220,7 +212,6 @@ function macriumRestoreSource(config: RestoreJobConfig): RestoreSourceView {
     })),
     sourceDiskModel: '',
     sourceDiskSerial: '',
-    detectKey: undefined,
     chain: [config.imagePath],
     compressionId: COMPRESSION_NONE,
     isMacrium: true
@@ -401,8 +392,6 @@ export class RestoreEngine implements RestoreCoordinator {
       }
     }
 
-    const detectKey = source.detectKey;
-
     // Table-type inference: probe the image contents for EFI System
     // Partitions (FAT32 with the spec-required \EFI directory) so a freshly
     // laid table is bootable in a VM — GPT type GUID 0xEF as ESP, MBR type
@@ -411,11 +400,11 @@ export class RestoreEngine implements RestoreCoordinator {
       config.writePartitionTable !== false &&
       ((config.targetLayout != null && deviatesFromCaptured) || vhd != null || blankTarget);
     const inferredTypeGuids = willWriteTable
-      ? inferTableTypeGuids(config.imagePath, targets.map((t) => t.partitionIndex), detectKey)
+      ? inferTableTypeGuids(config.imagePath, targets.map((t) => t.partitionIndex), config.passphrase)
       : {};
     const tableTypeGuids = { ...inferredTypeGuids, ...config.tableTypeGuids };
     const mbrTypes = willWriteTable
-      ? inferMbrTypes(config.imagePath, targets.map((t) => t.partitionIndex), detectKey)
+      ? inferMbrTypes(config.imagePath, targets.map((t) => t.partitionIndex), config.passphrase)
       : {};
     for (const idx of Object.keys(inferredTypeGuids)) {
       mbrTypes[Number(idx)] = 0xef;
@@ -488,8 +477,38 @@ export class RestoreEngine implements RestoreCoordinator {
       logger.warn(warnings.join(' '));
     }
 
-    const encryption: JobEncryption | undefined =
-      config.passphrase && !source.isMacrium ? metadataFromCipher(newImageCipher(config.passphrase)) : undefined;
+    // Per-source key material: every chain member was written with its own
+    // header salt, so the helper must hold one derivation per source — a
+    // single key cannot decrypt a chain. The legacy `encryption` field keeps
+    // the ROOT's key as the single-source fallback.
+    let sourceEncryption: Array<JobEncryption & { imagePath: string }> | undefined;
+    let encryption: JobEncryption | undefined;
+    if (config.passphrase && !source.isMacrium) {
+      const entries: Array<JobEncryption & { imagePath: string }> = [];
+      for (const member of chain) {
+        const memberInfo = readImageInfo(member);
+        if (memberInfo.header.cipherId === CIPHER_NONE) continue;
+        entries.push({
+          imagePath: member,
+          cipherId: memberInfo.header.cipherId,
+          saltHex: memberInfo.header.salt.toString('hex'),
+          kdfIterations: memberInfo.header.kdfIterations,
+          keyHex: deriveImageKey(config.passphrase, memberInfo.header.salt, memberInfo.header.kdfIterations).toString('hex')
+        });
+      }
+      if (entries.length > 0) {
+        sourceEncryption = entries;
+        const rootEntry = entries.find((e) => e.imagePath === (chain[0] ?? config.imagePath));
+        if (rootEntry) {
+          encryption = {
+            cipherId: rootEntry.cipherId,
+            saltHex: rootEntry.saltHex,
+            kdfIterations: rootEntry.kdfIterations,
+            keyHex: rootEntry.keyHex
+          };
+        }
+      }
+    }
 
     // Default to a few worker threads for decompression when the image is
     // compressed; 0/synchronous preserves the simplest path. Macrium readers
@@ -514,6 +533,7 @@ export class RestoreEngine implements RestoreCoordinator {
       targets,
       applyDeltas: chain.slice(1),
       encryption,
+      sourceEncryption,
       compressionThreads,
       writeTable,
       validateAfterWrite: config.validateAfterWrite,

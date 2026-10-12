@@ -1343,6 +1343,66 @@ describe('incremental and encrypted jobs', () => {
     expect(firstData).toEqual(blockPattern(3, BLOCK));
   });
 
+  it('restores an encrypted chain applying each member\'s own key', async () => {
+    const native = createIncrementalMock();
+    const passphrase = 'correct horse battery staple';
+    const cipherA = newImageCipher(passphrase);
+    const cipherB = newImageCipher(passphrase);
+
+    // verificationEnabled: false skips the post-backup verify pass (flags are
+    // cleared below anyway — the runner marks every success VERIFIED).
+    writeJob({
+      ...singlePartitionJob(fullPath),
+      verificationEnabled: false,
+      encryption: metadataFromCipher(cipherA)
+    });
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+    expect(readResult().ok).toBe(true);
+
+    native.changeBlock1();
+    writeJob({
+      ...singlePartitionJob(deltaPath),
+      baseImagePath: fullPath,
+      verificationEnabled: false,
+      encryption: metadataFromCipher(cipherB)
+    });
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+    expect(readResult().ok).toBe(true);
+
+    // The runner marks every successful backup VERIFIED regardless of the
+    // verification pass; clear both members' flags so the restore's
+    // verify-before-write gate actually decrypts each source.
+    for (const p of [fullPath, deltaPath]) {
+      const info = readImageInfo(p);
+      const fd = fs.openSync(p, 'r+');
+      fs.writeSync(fd, Buffer.from([info.header.flags & ~FLAG_VERIFIED]), 0, 1, FLAGS_OFFSET);
+      fs.closeSync(fd);
+    }
+
+    // The two members were written under different salts, so the job carries
+    // one derivation per source; a single key would fail on one member.
+    const restoreNative = createIncrementalMock();
+    writeJob({
+      type: 'restore',
+      imagePath: fullPath,
+      applyDeltas: [deltaPath],
+      verifyBeforeWrite: true,
+      sourceEncryption: [
+        { imagePath: fullPath, ...metadataFromCipher(cipherA) },
+        { imagePath: deltaPath, ...metadataFromCipher(cipherB) }
+      ],
+      targets: [{ partitionIndex: 2, diskIndex: 1, offset: 4096, label: 'Partition 2' }]
+    } as RestoreJob);
+    await runRestoreJob(jobPath, resultPath, progressPath, cancelPath, restoreNative);
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as RestoreJobResult;
+    expect(result.ok).toBe(true);
+    expect(result.verifiedBeforeWrite).toBe(true);
+    expect(result.blocksWritten).toBe(4); // 3 full + 1 delta
+    const lastData = ((restoreNative.writeBlocks as any).mock.calls[3][2] as Buffer);
+    expect(lastData).toEqual(blockPattern(9, BLOCK));
+  });
+
   it('writes a zstd image using multithreaded compression that verifies and restores', async () => {
     const native = createMockNative();
     writeJob({

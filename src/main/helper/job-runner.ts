@@ -1086,12 +1086,20 @@ export async function runRestoreJob(
     }
   });
 
-  const cipher = job.encryption ? cipherFromMetadata(job.encryption) : null;
-  const key = cipher?.cipherId !== CIPHER_NONE ? cipher?.key : undefined;
+  // Each chain member was written with its own header salt, so keys are per
+  // source: `sourceEncryption` (written by buildJob) carries one derivation
+  // per member. `encryption` remains the fallback for jobs built by older
+  // callers and single-image restores.
+  const sourceKeys: Array<Buffer | undefined> = sources.map((sourcePath) => {
+    const meta = job.sourceEncryption?.find((s) => s.imagePath === sourcePath) ?? job.encryption;
+    if (!meta) return undefined;
+    const sourceCipher = cipherFromMetadata(meta);
+    return sourceCipher?.cipherId !== CIPHER_NONE ? sourceCipher.key : undefined;
+  });
 
   // Fail fast if any source is encrypted but we have no key.
   for (let i = 0; i < infos.length; i++) {
-    if (infos[i].header.cipherId !== CIPHER_NONE && !key) {
+    if (infos[i].header.cipherId !== CIPHER_NONE && !sourceKeys[i]) {
       fs.writeFileSync(
         resultPath,
         JSON.stringify({
@@ -1260,7 +1268,7 @@ export async function runRestoreJob(
           const sourceIndex = unverified[n];
           progress.currentPartition = `Verifying image (${n + 1}/${unverified.length})`;
           writeProgress('verifying');
-          const verified = await verifyImage(sources[sourceIndex], key);
+          const verified = await verifyImage(sources[sourceIndex], sourceKeys[sourceIndex]);
           if (!verified.ok) {
             throw new Error(
               `Image verification failed before restore (${path.basename(sources[sourceIndex])}): ${verified.error ?? 'unknown error'}`
@@ -1354,6 +1362,8 @@ export async function runRestoreJob(
       // Apply each source in order; later sources (deltas) overwrite changed blocks.
       for (let s = 0; s < infos.length; s++) {
         const info = infos[s];
+        // Each member decrypts with its own key (per-member header salts).
+        const sourceKey = sourceKeys[s];
         const blocksForPartition = info.blocks.filter((b) => b.partitionIndex === target.partitionIndex);
         const useBlockPool = decompPool !== null && info.header.compressionId === sharedCompressionId;
 
@@ -1391,7 +1401,7 @@ export async function runRestoreJob(
 
           if (useBlockPool) {
             const blockImagePath = block.volumeIndex != null ? resolveVolumePath(sources[s], block.volumeIndex) : sources[s];
-            const frame = readFrameFromImage(blockImagePath, block.fileOffset, info.header.cipherId, key);
+            const frame = readFrameFromImage(blockImagePath, block.fileOffset, info.header.cipherId, sourceKey);
             inFlight.push({ block, promise: decompPool!.decompress(frame.comp) });
             while (inFlight.length >= windowSize) {
               const item = inFlight.shift()!;
@@ -1404,7 +1414,7 @@ export async function runRestoreJob(
               block.fileOffset,
               info.header.compressionId,
               info.header.cipherId,
-              key
+              sourceKey
             );
             await writeBlock(block, raw);
           }
@@ -1494,7 +1504,7 @@ export async function runRestoreJob(
           throw new CancelledError();
         }
         try {
-          const metadata = readPartitionMetadata(sources, infos, target.partitionIndex, MAX_METADATA_BYTES, key);
+          const metadata = readPartitionMetadata(sources, infos, target.partitionIndex, MAX_METADATA_BYTES, sourceKeys);
           const plan = planNtfsGrow(metadata, Math.floor(target.size / SECTOR_SIZE));
           for (const region of plan.regions) {
             if (isCancelled()) {
@@ -2618,11 +2628,11 @@ function readPartitionMetadata(
   infos: Array<{ header: ImageHeader; blocks: BlockRecord[] }>,
   partitionIndex: number,
   maxBytes: number,
-  key?: Buffer
+  keys: Array<Buffer | undefined>
 ): Buffer {
   const overlay = new Map<
     number,
-    { source: string; fileOffset: number; compressionId: number; cipherId: number }
+    { source: string; sourceIndex: number; fileOffset: number; compressionId: number; cipherId: number }
   >();
   for (let s = 0; s < infos.length; s++) {
     const info = infos[s];
@@ -2630,6 +2640,7 @@ function readPartitionMetadata(
       if (block.partitionIndex !== partitionIndex) continue;
       overlay.set(block.blockIndex, {
         source: sources[s],
+        sourceIndex: s,
         fileOffset: block.fileOffset,
         compressionId: info.header.compressionId,
         cipherId: info.header.cipherId
@@ -2647,7 +2658,7 @@ function readPartitionMetadata(
       entry.fileOffset,
       entry.compressionId,
       entry.cipherId,
-      key
+      keys[entry.sourceIndex]
     );
     const take = Math.min(raw.length, maxBytes - total);
     chunks.push(raw.subarray(0, take));

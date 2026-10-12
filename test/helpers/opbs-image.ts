@@ -14,7 +14,8 @@ import {
   COMPRESSION_ZSTD,
   PartitionEntryMeta,
   BlockRecord,
-  ImageHeader
+  ImageHeader,
+  ImageCipher
 } from '../../src/main/imaging/image-format';
 
 /** Write a .opbs image whose single partition holds `raw` bytes. */
@@ -22,7 +23,8 @@ export function writeImageFromBytes(
   imagePath: string,
   raw: Buffer,
   blockSize: number,
-  compressionId = COMPRESSION_ZSTD
+  compressionId = COMPRESSION_ZSTD,
+  opts?: { cipher?: ImageCipher }
 ): BlockRecord[] {
   const partition: PartitionEntryMeta = {
     partitionIndex: 0,
@@ -39,7 +41,10 @@ export function writeImageFromBytes(
     compressionId,
     partitionCount: 1,
     flags: FLAG_HAS_BLOCK_INDEX,
-    blockIndexOffset: 0
+    blockIndexOffset: 0,
+    cipherId: opts?.cipher ? opts.cipher.cipherId : 0,
+    kdfIterations: opts?.cipher ? opts.cipher.kdfIterations : 0,
+    salt: opts?.cipher ? opts.cipher.salt : Buffer.alloc(16)
   };
 
   const fd = fs.openSync(imagePath, 'w+');
@@ -53,7 +58,7 @@ export function writeImageFromBytes(
     const start = b * blockSize;
     const blockRaw = raw.subarray(start, Math.min(start + blockSize, raw.length));
     const comp = compressBlock(blockRaw, compressionId, 3);
-    const frame = encodeBlockFrame(blockRaw, comp);
+    const frame = encodeBlockFrame(blockRaw, comp, opts?.cipher);
     fs.writeSync(fd, frame, 0, frame.length, cursor);
     blocks.push({
       partitionIndex: 0,

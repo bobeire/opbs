@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { readImageInfo, COMPRESSION_NONE } from '../../src/main/imaging/image-format';
+import { readImageInfo, COMPRESSION_NONE, newImageCipher } from '../../src/main/imaging/image-format';
 import { ChainPartitionReader, partitionReaderForChain } from '../../src/main/imaging/image-browse';
 import { openBrowse, listDirectory, readPath, resolvePath, extractPath } from '../../src/main/imaging/fs/file-browse';
 import { buildNtfsVolume, CLUSTER } from '../helpers/ntfs-fixture';
@@ -44,6 +44,24 @@ describe('image browse', () => {
     writeImageFromBytes(imagePath, Buffer.alloc(CLUSTER), CLUSTER);
     const { reader } = partitionReaderForChain([imagePath], 0);
     expect(() => reader.read(CLUSTER, 10)).toThrow(/out of bounds/i);
+  });
+
+  it('reads an encrypted chain with per-member salts via the passphrase', () => {
+    // Every backup mints its own salt, so full and delta carry different
+    // keys; one key cannot decrypt the chain.
+    const passphrase = 'correct horse battery staple';
+    const cipherRoot = newImageCipher(passphrase);
+    const cipherDelta = newImageCipher(passphrase);
+    const rawRoot = Buffer.alloc(CLUSTER, 0x41);
+    const rawDelta = Buffer.alloc(CLUSTER, 0x42);
+    writeImageFromBytes(imagePath, rawRoot, CLUSTER, COMPRESSION_NONE, { cipher: cipherRoot });
+    const deltaPath = path.join(dir, 'delta.opbs');
+    writeImageFromBytes(deltaPath, rawDelta, CLUSTER, COMPRESSION_NONE, { cipher: cipherDelta });
+
+    const { reader } = partitionReaderForChain([imagePath, deltaPath], 0, passphrase);
+    // Newest member wins for the overlapping block.
+    expect(reader.read(0, 1)[0]).toBe(0x42);
+    expect(reader.read(CLUSTER - 1, 1)[0]).toBe(0x42);
   });
 
   it('explains a missing used-space block when browsing', () => {

@@ -140,6 +140,13 @@ export interface RestoreJob {
   /** For chained restoration: delta images to apply after the base image. */
   applyDeltas?: string[];
   encryption?: JobEncryption;
+  /**
+   * Per-source key material: every backup mints its own salt, so each chain
+   * member decrypts with a different key. The helper must never apply one
+   * source's key to another member. Preferred over `encryption`, which keeps
+   * the root's key as the single-source fallback.
+   */
+  sourceEncryption?: Array<JobEncryption & { imagePath: string }>;
   /** Worker threads for multithreaded restore decompression (0/unset = sync). */
   compressionThreads?: number;
   /**

@@ -24,7 +24,7 @@ import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains, wr
 import { checkDiskHealth } from './utils/disk-health';
 import { toDiskIndex, toChkdskVolume } from './utils/input-guard';
 import { runCli } from './cli';
-import { readImageInfo, verifyImage, CIPHER_NONE, deriveImageKey, clearImageInfoCache } from './imaging/image-format';
+import { readImageInfo, verifyImage, CIPHER_NONE, clearImageInfoCache } from './imaging/image-format';
 import { openAnyBrowse as fsOpenBrowseAny, listDirectory, extractPath, detectPartitionFilesystem, BrowseSession } from './imaging/fs/file-browse';
 import { detectMacriumFormat, readMacriumImage, closeImageFds, clearMacriumInfoCache } from './imaging/mrimg';
 import { locateAdk, peArchForProcess } from './utils/adk';
@@ -113,8 +113,8 @@ function queueFileAction(action: FileAction): void {
   pendingFileAction = action;
 }
 
-function browseCacheKey(imagePath: string, partitionIndex: number, keyHex?: string): string {
-  return `${imagePath}#${partitionIndex}${keyHex ? '#' + keyHex : ''}`;
+function browseCacheKey(imagePath: string, partitionIndex: number, secret?: string): string {
+  return `${imagePath}#${partitionIndex}${secret ? '#' + secret : ''}`;
 }
 
 function imageFileSignature(imagePath: string): string {
@@ -135,20 +135,14 @@ interface BrowseCacheEntry {
 const browseSessions = new Map<string, BrowseCacheEntry>();
 
 function openBrowseSession(imagePath: string, partitionIndex: number, passphrase?: string): BrowseSession {
-  let key: Buffer | undefined;
   if (!detectMacriumFormat(imagePath)) {
     const info = readImageInfo(imagePath);
-    const header = info.header;
-    key =
-      header.cipherId !== CIPHER_NONE
-        ? deriveImageKey(passphrase ?? '', header.salt, header.kdfIterations)
-        : undefined;
     const partition = info.partitions.find((p) => p.partitionIndex === partitionIndex);
     if (partition && partition.size === 0) {
       throw new Error(`Partition ${partitionIndex} is empty (0 bytes) and cannot be browsed.`);
     }
   }
-  const cacheKey = browseCacheKey(imagePath, partitionIndex, key?.toString('hex'));
+  const cacheKey = browseCacheKey(imagePath, partitionIndex, passphrase);
   const signature = imageFileSignature(imagePath);
   const cached = browseSessions.get(cacheKey);
   if (cached && cached.signature === signature) {
@@ -160,7 +154,7 @@ function openBrowseSession(imagePath: string, partitionIndex: number, passphrase
     );
     browseSessions.delete(cacheKey);
   }
-  const session = fsOpenBrowseAny(imagePath, partitionIndex, key);
+  const session = fsOpenBrowseAny(imagePath, partitionIndex, passphrase);
   browseSessions.set(cacheKey, { session, signature: imageFileSignature(imagePath) });
   return session;
 }

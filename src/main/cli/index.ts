@@ -2357,14 +2357,7 @@ async function cmdBrowse(ctx: CommandContext): Promise<number> {
   const passphrase = resolvePassphrase(ctx.argv).value;
 
   try {
-    let key: Buffer | undefined;
-    if (!detectMacriumFormat(imagePath)) {
-      const info = readImageInfo(imagePath);
-      if (passphrase && info.header.cipherId !== 0) {
-        key = deriveImageKey(passphrase, info.header.salt, info.header.kdfIterations);
-      }
-    }
-    const session = openAnyBrowse(imagePath, partitionIndex, key);
+    const session = openAnyBrowse(imagePath, partitionIndex, passphrase);
     const entries = listDirectory(session, relPath);
     if (ctx.opts.json) {
       console.log(
@@ -2416,14 +2409,7 @@ async function cmdExtract(ctx: CommandContext): Promise<number> {
   const passphrase = resolvePassphrase(ctx.argv).value;
 
   try {
-    let key: Buffer | undefined;
-    if (!detectMacriumFormat(imagePath)) {
-      const info = readImageInfo(imagePath);
-      if (passphrase && info.header.cipherId !== 0) {
-        key = deriveImageKey(passphrase, info.header.salt, info.header.kdfIterations);
-      }
-    }
-    const session = openAnyBrowse(imagePath, partitionIndex, key);
+    const session = openAnyBrowse(imagePath, partitionIndex, passphrase);
     const rec = resolvePath(session, relPath);
     if (!rec) {
       console.error(`Path not found: ${relPath}`);

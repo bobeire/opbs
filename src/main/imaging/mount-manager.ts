@@ -2,8 +2,6 @@ import * as path from 'path';
 import { loadNative } from '../utils/native-loader';
 import { openAnyBrowse, BrowseSession } from './fs/file-browse';
 import { handleBridgeRequest, BridgeRequest, BridgeReply } from './fs/mount-fs';
-import { readImageInfo, deriveImageKey, CIPHER_NONE } from './image-format';
-import { detectMacriumFormat } from './mrimg';
 import { logger } from '../utils/logger';
 
 /**
@@ -78,15 +76,6 @@ export function winfspLoadNote(): string {
   }
 }
 
-function keyFor(config: MountConfig): Buffer | undefined {
-  if (detectMacriumFormat(config.imagePath)) return undefined;
-  const info = readImageInfo(config.imagePath);
-  const header = info.header;
-  return header.cipherId !== CIPHER_NONE
-    ? deriveImageKey(config.passphrase ?? '', header.salt, header.kdfIterations)
-    : undefined;
-}
-
 const mounts = new Map<number, ActiveMount>();
 
 /** Open an image partition as a read-only WinFsp volume. Returns synchronously. */
@@ -100,7 +89,7 @@ export function mountImage(config: MountConfig): MountHandle {
     );
   }
   logger.info(`mountImage: opening ${config.imagePath}#${config.partitionIndex}`);
-  const session = openAnyBrowse(config.imagePath, config.partitionIndex, keyFor(config));
+  const session = openAnyBrowse(config.imagePath, config.partitionIndex, config.passphrase);
   const handler = (req: BridgeRequest): BridgeReply => handleBridgeRequest(session, req);
   const label = config.label ?? `OPBS ${path.basename(config.imagePath)}`;
   const res = native.winfspMount(

@@ -7,7 +7,7 @@ import { GPT_BASIC_DATA_GUID, GPT_EFI_SYSTEM_GUID } from '../../src/main/imaging
 import { inferMbrTypes, inferTableTypeGuids } from '../../src/main/imaging/fs/file-browse';
 import { DiskEnumerator } from '../../src/main/utils/disk-enumerator';
 import { launchElevatedJob } from '../../src/main/helper/launcher';
-import { encodeHeader, encodePartitionEntry, encodeBlockIndexEntry, encodeBlockFrame, compressBlock, crc32, newImageCipher, ImageCipher, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, FLAG_INCREMENTAL, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, PartitionEntryMeta, BlockRecord, ImageHeader, parseHeader, clearImageInfoCache } from '../../src/main/imaging/image-format';
+import { encodeHeader, encodePartitionEntry, encodeBlockIndexEntry, encodeBlockFrame, compressBlock, crc32, newImageCipher, deriveImageKey, ImageCipher, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, FLAG_INCREMENTAL, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, PartitionEntryMeta, BlockRecord, ImageHeader, parseHeader, clearImageInfoCache } from '../../src/main/imaging/image-format';
 import { buildMrimgxImage } from '../helpers/mrimg-image';
 
 vi.mock('../../src/main/helper/launcher', () => ({
@@ -1019,6 +1019,64 @@ describe('RestoreEngine auto chain resolution', () => {
       });
       expect(job.imagePath).toBe(rootPath);
       expect(job.applyDeltas).toEqual([deltaPath]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/** Mark `deltaPath` incremental with its base recorded the way backups do. */
+function linkDeltaToBase(deltaPath: string, rootPath: string): void {
+  const fd = fs.openSync(deltaPath, 'r+');
+  const raw = Buffer.alloc(HEADER_SIZE);
+  fs.readSync(fd, raw, 0, HEADER_SIZE, 0);
+  const header = parseHeader(raw);
+  header.flags |= FLAG_INCREMENTAL;
+  header.baseImagePath = rootPath;
+  fs.writeSync(fd, encodeHeader(header), 0, HEADER_SIZE, 0);
+  fs.closeSync(fd);
+  clearImageInfoCache();
+}
+
+describe('RestoreEngine encrypted chain keys', () => {
+  it("derives one job key per chain member from that member's own header salt", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-enc-keys-'));
+    try {
+      const passphrase = 'correct horse battery staple';
+      const rootPath = path.join(dir, 'full.opbs');
+      const cipherA = newImageCipher(passphrase);
+      writeImage(rootPath, undefined, { cipher: cipherA });
+      const deltaPath = path.join(dir, 'delta.opbs');
+      const cipherB = newImageCipher(passphrase);
+      writeImage(deltaPath, undefined, { cipher: cipherB });
+      linkDeltaToBase(deltaPath, rootPath);
+
+      const engine = new RestoreEngine(createFakeEnumerator());
+      const job = await engine.buildJob({
+        imagePath: deltaPath,
+        passphrase,
+        targetDiskIndex: 1,
+        targetPartitions: [0]
+      });
+
+      // Each member was written with its own salt, so the helper must hold
+      // one derivation per source — a single key cannot decrypt the chain.
+      expect(job.sourceEncryption).toHaveLength(2);
+      expect(job.sourceEncryption![0]).toEqual(
+        expect.objectContaining({
+          imagePath: rootPath,
+          keyHex: deriveImageKey(passphrase, cipherA.salt, cipherA.kdfIterations).toString('hex')
+        })
+      );
+      expect(job.sourceEncryption![1]).toEqual(
+        expect.objectContaining({
+          imagePath: deltaPath,
+          keyHex: deriveImageKey(passphrase, cipherB.salt, cipherB.kdfIterations).toString('hex')
+        })
+      );
+      expect(job.sourceEncryption![0].keyHex).not.toBe(job.sourceEncryption![1].keyHex);
+      // The legacy single-field fallback keeps the ROOT's key.
+      expect(job.encryption?.keyHex).toBe(job.sourceEncryption![0].keyHex);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

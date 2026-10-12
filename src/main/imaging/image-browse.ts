@@ -1,4 +1,4 @@
-import { readImageInfo, readFrameFromImage, decompressBlock, ImageInfo, PartitionEntryMeta, BlockRecord, DEFAULT_BLOCK_SIZE, resolveVolumePath } from './image-format';
+import { readImageInfo, readFrameFromImage, decompressBlock, ImageInfo, PartitionEntryMeta, BlockRecord, DEFAULT_BLOCK_SIZE, resolveVolumePath, deriveImageKey, CIPHER_NONE } from './image-format';
 
 /** A sequential byte reader over a partition's raw bytes. */
 export interface PartitionReader {
@@ -15,14 +15,19 @@ export interface PartitionReader {
  */
 export class ChainPartitionReader implements PartitionReader {
   private readonly blockSize: number;
-  private readonly key?: Buffer;
+  /** Per-source decryption keys (parallel to `sources`); members carry their own salts. */
+  private readonly keys: Array<Buffer | undefined>;
   private readonly sources: Array<{ imagePath: string; info: ImageInfo; byIndex: Map<number, BlockRecord> }>;
   private readonly cache = new Map<number, Buffer>();
   readonly size: number;
 
-  constructor(sources: Array<{ imagePath: string; info: ImageInfo }>, partition: PartitionEntryMeta, key?: Buffer) {
+  constructor(
+    sources: Array<{ imagePath: string; info: ImageInfo }>,
+    partition: PartitionEntryMeta,
+    keys: Array<Buffer | undefined> = []
+  ) {
     this.blockSize = sources[0]?.info.header.blockSize || DEFAULT_BLOCK_SIZE;
-    this.key = key;
+    this.keys = keys;
     this.size = partition.size;
     this.sources = sources.map(({ imagePath, info }) => {
       const byIndex = new Map<number, BlockRecord>();
@@ -58,11 +63,11 @@ export class ChainPartitionReader implements PartitionReader {
     const cached = this.cache.get(blockIndex);
     if (cached) return cached;
     // Newest source (last in the chain) that stores this block wins.
-    let selected: { imagePath: string; info: ImageInfo; block: BlockRecord } | null = null;
+    let selected: { imagePath: string; info: ImageInfo; block: BlockRecord; sourceIndex: number } | null = null;
     for (let i = this.sources.length - 1; i >= 0; i--) {
       const block = this.sources[i].byIndex.get(blockIndex);
       if (block) {
-        selected = { imagePath: this.sources[i].imagePath, info: this.sources[i].info, block };
+        selected = { imagePath: this.sources[i].imagePath, info: this.sources[i].info, block, sourceIndex: i };
         break;
       }
     }
@@ -75,7 +80,7 @@ export class ChainPartitionReader implements PartitionReader {
     const blockImagePath = selected.block.volumeIndex != null
       ? resolveVolumePath(selected.imagePath, selected.block.volumeIndex)
       : selected.imagePath;
-    const frame = readFrameFromImage(blockImagePath, selected.block.fileOffset, selected.info.header.cipherId, this.key);
+    const frame = readFrameFromImage(blockImagePath, selected.block.fileOffset, selected.info.header.cipherId, this.keys[selected.sourceIndex]);
     const raw = decompressBlock(frame.comp, selected.info.header.compressionId);
     this.cache.set(blockIndex, raw);
     return raw;
@@ -90,19 +95,26 @@ export function readChainInfos(chain: string[]): Array<{ imagePath: string; info
 /**
  * Build a PartitionReader over a partition of the given chain of images.
  * `chain` must be root-first (full image then deltas in application order).
+ * Each member was written with its own salt, so the passphrase (when the
+ * chain is encrypted) is expanded to one key per member.
  */
 export function partitionReaderForChain(
   chain: string[],
   partitionIndex: number,
-  key?: Buffer
+  passphrase?: string
 ): { reader: PartitionReader; partition: PartitionEntryMeta } {
   const sources = readChainInfos(chain);
+  const keys = sources.map(({ info }) =>
+    passphrase && info.header.cipherId !== CIPHER_NONE
+      ? deriveImageKey(passphrase, info.header.salt, info.header.kdfIterations)
+      : undefined
+  );
   const info = sources[0].info;
   const partition = info.partitions.find((p) => p.partitionIndex === partitionIndex);
   if (!partition) {
     throw new Error(`Image chain has no partition ${partitionIndex}`);
   }
-  return { reader: new ChainPartitionReader(sources, partition, key), partition };
+  return { reader: new ChainPartitionReader(sources, partition, keys), partition };
 }
 
 export interface BrowseNode {
