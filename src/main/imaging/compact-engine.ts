@@ -13,6 +13,7 @@ import {
   CIPHER_NONE,
   FLAG_HAS_BLOCK_INDEX,
   FLAG_VERIFIED,
+  FLAG_MULTI_VOLUME,
   newImageCipher,
   deriveImageKey,
   encodeHeader,
@@ -30,6 +31,7 @@ import { frameLength, buildParityAsync, paritySidecarPath } from './parity';
 import { detectMacriumFormat } from './mrimg';
 import { isRepository } from './repository';
 import { writeManifest } from '../backup/retention';
+import { detectFilesystemType, getMaxVolumeSizeForFs } from '../utils/location';
 import {
   readBitlockerSidecar,
   writeBitlockerSidecar,
@@ -93,6 +95,8 @@ export interface CompactResult {
   warnings: string[];
   /** Members deleted by --remove-source, newest first. */
   sourcesRemoved?: string[];
+  /** Output files written, including `.001`/`.002` … side volumes. */
+  outputVolumes?: number;
 }
 
 export interface CompactOptions {
@@ -107,6 +111,12 @@ export interface CompactOptions {
   shouldCancel?: () => boolean;
   /** Free-space gate; injectable for tests. Defaults to a statfs check with margin. */
   ensureFreeSpace?: (dir: string, needed: number) => Promise<void>;
+  /**
+   * Split the output into `.001`, `.002`, … volumes at this size (bytes).
+   * Defaults to the destination filesystem's per-file limit (FAT32 → 3.9 GB);
+   * 0 forces a single file.
+   */
+  maxVolumeSize?: number;
 }
 
 export interface ComposedBlock {
@@ -246,6 +256,22 @@ function volumeFilesOf(imagePath: string): string[] {
   return files;
 }
 
+/**
+ * Existing output files for a (possibly multi-volume) path — the base and any
+ * side volumes up to the first gap. An orphan `.001` without a base still
+ * counts as a collision: renaming onto it would half-overwrite a set.
+ */
+function existingOutputVolumes(finalPath: string): string[] {
+  const found: string[] = [];
+  if (fs.existsSync(finalPath)) found.push(finalPath);
+  for (let v = 1; ; v++) {
+    const vol = resolveVolumePath(finalPath, v);
+    if (!fs.existsSync(vol)) break;
+    found.push(vol);
+  }
+  return found;
+}
+
 async function defaultEnsureFreeSpace(dir: string, needed: number): Promise<void> {
   let free: number;
   try {
@@ -335,8 +361,11 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
   if (!refusal && path.resolve(finalPath) === path.resolve(members[0].path)) {
     plan.refusal = 'the output path must not be a chain member';
   }
-  if (!plan.refusal && !options.dryRun && fs.existsSync(finalPath)) {
-    plan.refusal = `the output file already exists: ${finalPath}`;
+  if (!plan.refusal && !options.dryRun) {
+    const existing = existingOutputVolumes(finalPath);
+    if (existing.length > 0) {
+      plan.refusal = `the output file already exists: ${existing[0]}`;
+    }
   }
 
   if (!plan.refusal) {
@@ -435,6 +464,14 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
   );
   const tempOutput = path.join(tempDir, path.basename(finalPath));
 
+  // Multi-volume output: mirror the backup path — split at the destination
+  // filesystem's per-file limit (FAT32 → 3.9 GB) unless the caller forces a
+  // size (0 = single file).
+  let maxVolumeSize = options.maxVolumeSize ?? 0;
+  if (!maxVolumeSize) {
+    maxVolumeSize = getMaxVolumeSizeForFs(detectFilesystemType(finalPath));
+  }
+
   let blocksWritten = 0;
   let bytesWritten = 0;
   const records: BlockRecord[] = [];
@@ -452,28 +489,29 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
       blockSize: rootHeader.blockSize,
       compressionId: rootHeader.compressionId,
       partitionCount: rootHeader.partitionCount,
-      flags: FLAG_HAS_BLOCK_INDEX,
+      flags: FLAG_HAS_BLOCK_INDEX | (maxVolumeSize > 0 ? FLAG_MULTI_VOLUME : 0),
       blockIndexOffset: 0,
       cipherId: rootHeader.cipherId,
       kdfIterations: cipher ? cipher.kdfIterations : rootHeader.kdfIterations,
       salt: cipher ? cipher.salt : rootHeader.salt,
       baseImagePath: '',
       sourceDiskModel: rootHeader.sourceDiskModel,
-      sourceDiskSerial: rootHeader.sourceDiskSerial
+      sourceDiskSerial: rootHeader.sourceDiskSerial,
+      maxVolumeSize: maxVolumeSize > 0 ? maxVolumeSize : undefined
     };
 
-    const fd = fs.openSync(tempOutput, 'w+');
-    try {
-      fs.writeSync(fd, encodeHeader(header), 0, HEADER_SIZE, 0);
-      let cursor = HEADER_SIZE + members[0].info.partitions.length * PARTITION_TABLE_ENTRY_SIZE;
-      fs.writeSync(
-        fd,
-        Buffer.alloc(members[0].info.partitions.length * PARTITION_TABLE_ENTRY_SIZE),
-        0,
-        members[0].info.partitions.length * PARTITION_TABLE_ENTRY_SIZE,
-        HEADER_SIZE
-      );
+    const tableSize = members[0].info.partitions.length * PARTITION_TABLE_ENTRY_SIZE;
+    const dataOffset = HEADER_SIZE + tableSize;
+    const writeVolumeHead = (vfd: number): void => {
+      fs.writeSync(vfd, encodeHeader(header), 0, HEADER_SIZE, 0);
+      fs.writeSync(vfd, Buffer.alloc(tableSize), 0, tableSize, HEADER_SIZE);
+    };
 
+    let volume = 0;
+    let fd = fs.openSync(tempOutput, 'w+');
+    writeVolumeHead(fd);
+    let cursor = dataOffset;
+    try {
       emit('copying', 0, blocksTotal, 0, totalBytes);
       for (const partition of members[0].info.partitions) {
         const list = byPartition.get(partition.partitionIndex) ?? [];
@@ -514,6 +552,17 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
             }
           }
 
+          // Roll into the next volume before the frame would exceed the size
+          // limit — frames are never split (same rule as runBackupJob).
+          if (maxVolumeSize > 0 && cursor + frame.length > maxVolumeSize && cursor > dataOffset) {
+            fs.closeSync(fd);
+            fd = -1;
+            volume++;
+            fd = fs.openSync(resolveVolumePath(tempOutput, volume), 'w+');
+            writeVolumeHead(fd);
+            cursor = dataOffset;
+          }
+
           fs.writeSync(fd, frame, 0, frame.length, cursor);
           records.push({
             partitionIndex: record.partitionIndex,
@@ -521,7 +570,8 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
             fileOffset: cursor,
             rawSize: record.rawSize,
             compSize: record.compSize,
-            rawCrc32: record.rawCrc32
+            rawCrc32: record.rawCrc32,
+            volumeIndex: maxVolumeSize > 0 ? volume : undefined
           });
           cursor += frame.length;
           blocksWritten++;
@@ -539,7 +589,8 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
         });
       }
 
-      // Block index at the end, then patch partition table + header.
+      // Block index at the end of the last volume, then patch that volume's
+      // partition table + header (the index offset lives only there).
       const blockIndexOffset = cursor;
       const countBuf = Buffer.alloc(8);
       countBuf.writeBigUInt64LE(BigInt(records.length), 0);
@@ -556,8 +607,22 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
       fs.readSync(fd, patched, 0, HEADER_SIZE, 0);
       patched.writeBigUInt64LE(BigInt(blockIndexOffset), 40);
       fs.writeSync(fd, patched, 0, HEADER_SIZE, 0);
+
+      // Earlier volumes keep header.blockIndexOffset = 0 (readImageInfo
+      // redirects to the last volume); they only need the real partition
+      // table instead of the zeroed placeholder written at open.
+      for (let v = 0; v < volume; v++) {
+        const vfd = fs.openSync(resolveVolumePath(tempOutput, v), 'r+');
+        try {
+          partitionEntries.forEach((entry, i) => {
+            fs.writeSync(vfd, encodePartitionEntry(entry), 0, PARTITION_TABLE_ENTRY_SIZE, HEADER_SIZE + i * PARTITION_TABLE_ENTRY_SIZE);
+          });
+        } finally {
+          fs.closeSync(vfd);
+        }
+      }
     } finally {
-      fs.closeSync(fd);
+      if (fd >= 0) fs.closeSync(fd);
     }
 
     for (const openFd of fdCache.values()) {
@@ -571,21 +636,31 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
       throw new Error(`Compacted image failed verification: ${verified.error ?? 'unknown error'}`);
     }
 
-    // Mark verified, then atomically move into place.
-    const verifyFd = fs.openSync(tempOutput, 'r+');
-    try {
-      const headerBuf = Buffer.alloc(HEADER_SIZE);
-      fs.readSync(verifyFd, headerBuf, 0, HEADER_SIZE, 0);
-      headerBuf.writeUInt32LE(headerBuf.readUInt32LE(36) | FLAG_VERIFIED, 36);
-      fs.writeSync(verifyFd, headerBuf, 0, HEADER_SIZE, 0);
-    } finally {
-      fs.closeSync(verifyFd);
+    // Mark every output volume verified (readImageInfo returns the LAST
+    // volume's header on multi-volume images, so patching only the base
+    // would hide the flag).
+    for (let v = 0; v <= volume; v++) {
+      const verifyFd = fs.openSync(resolveVolumePath(tempOutput, v), 'r+');
+      try {
+        const headerBuf = Buffer.alloc(HEADER_SIZE);
+        fs.readSync(verifyFd, headerBuf, 0, HEADER_SIZE, 0);
+        headerBuf.writeUInt32LE(headerBuf.readUInt32LE(36) | FLAG_VERIFIED, 36);
+        fs.writeSync(verifyFd, headerBuf, 0, HEADER_SIZE, 0);
+      } finally {
+        fs.closeSync(verifyFd);
+      }
     }
     clearImageInfoCache();
 
     emit('finalizing', blocksWritten, blocksTotal, bytesWritten, totalBytes);
-    if (fs.existsSync(finalPath)) {
-      throw new Error(`The output file appeared while compacting: ${finalPath}`);
+    const appeared = existingOutputVolumes(finalPath);
+    if (appeared.length > 0) {
+      throw new Error(`The output file appeared while compacting: ${appeared[0]}`);
+    }
+    // Side volumes first, base last: the base file's presence marks a
+    // complete set for readers.
+    for (let v = volume; v >= 1; v--) {
+      fs.renameSync(resolveVolumePath(tempOutput, v), resolveVolumePath(finalPath, v));
     }
     fs.renameSync(tempOutput, finalPath);
 
@@ -672,7 +747,8 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
       bytesWritten,
       durationMs: Date.now() - started,
       warnings,
-      sourcesRemoved
+      sourcesRemoved,
+      outputVolumes: volume + 1
     };
   } catch (e) {
     for (const openFd of fdCache.values()) {

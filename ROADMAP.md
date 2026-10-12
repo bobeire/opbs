@@ -1168,10 +1168,19 @@ implemented; **Investigate** items need spike work first.
   compactions are refused cleanly.
 - **Refused in v1**: Macrium containers, repository members (immutable
   signed journal — Phase 2), cloud destinations (Phase 2: stage via the new
-  `cloud-restore`, compact locally, upload, prune), multi-volume *output*
-  (single-file output with a free-space gate first; the rollover writer comes
-  with Phase 2).
-- **Phase 2**: multi-volume output; repository compaction as a signed
+  `cloud-restore`, compact locally, upload, prune).
+- **Phase 2**: multi-volume output — ✅ done 2026-10-12: the compaction
+  writer rolls frames into `.001`/`.002`… volumes at the destination
+  filesystem's per-file limit (FAT32 → 3.9 GB auto-detected, same helper as
+  backups; `CompactOptions.maxVolumeSize` overrides, 0 forces a single file).
+  Frames are never split across volumes; the block index carries
+  volume-relative offsets with `volumeIndex`; the real partition table is
+  written to every volume while earlier volumes keep `blockIndexOffset` 0
+  (readImageInfo redirects to the last); FLAG_VERIFIED is patched on every
+  volume because readImageInfo returns the last volume's header; side volumes
+  are renamed before the base so the base file marks a complete set; and the
+  output-collision refusal also catches orphan `.001` leftovers. Also:
+  repository compaction as a signed
   journal operation (create-compact + prune records, using the repository's
   existing root-eligibility ordering); S3/SFTP/FTP chains end-to-end; and the
   parity/scrub multi-volume gap this design pass noticed (`.opar` building

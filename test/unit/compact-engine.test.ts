@@ -16,7 +16,11 @@ import {
   COMPRESSION_ZSTD,
   FLAG_VERIFIED,
   FLAG_INCREMENTAL,
+  FLAG_MULTI_VOLUME,
   FLAGS_OFFSET,
+  HEADER_SIZE,
+  PARTITION_TABLE_ENTRY_SIZE,
+  resolveVolumePath,
   ImageInfo
 } from '../../src/main/imaging/image-format';
 import { partitionReaderForChain } from '../../src/main/imaging/image-browse';
@@ -187,6 +191,70 @@ describe('compactChain', () => {
     // No temp dirs left behind.
     const leftovers = fs.readdirSync(dir).filter((f) => f.startsWith('opbs-compact-'));
     expect(leftovers).toEqual([]);
+  });
+
+  it('multi-volume output: rolls at maxVolumeSize and round-trips across volumes', async () => {
+    await buildPlainTextChain();
+    const outPath = path.join(dir, 'compacted.opbs');
+
+    // dataOffset + 1 forces a roll before every frame after the first: frame 1
+    // starts at dataOffset (the roll guard skips it), every later frame's
+    // append would exceed the cap regardless of how well it compressed.
+    const result = await compactChain({
+      imagePath: deltaPath,
+      outputPath: outPath,
+      maxVolumeSize: HEADER_SIZE + PARTITION_TABLE_ENTRY_SIZE + 1
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.ok).toBe(true);
+    expect(result.blocksWritten).toBe(3);
+    expect(result.outputVolumes).toBe(3);
+    expect(fs.existsSync(`${outPath}.001`)).toBe(true);
+    expect(fs.existsSync(`${outPath}.002`)).toBe(true);
+
+    const outInfo = readImageInfo(outPath);
+    expect(outInfo.header.flags & FLAG_MULTI_VOLUME).toBeTruthy();
+    // Verified is patched on every volume — readImageInfo returns the LAST
+    // volume's header, which would hide a base-only patch.
+    expect(outInfo.header.flags & FLAG_VERIFIED).toBeTruthy();
+    expect(outInfo.blocks).toHaveLength(3);
+    expect(outInfo.blocks.filter((b) => b.volumeIndex === 1)).toHaveLength(1);
+    expect(outInfo.blocks.filter((b) => b.volumeIndex === 2)).toHaveLength(1);
+
+    const verified = await verifyImage(outPath);
+    expect(verified.ok).toBe(true);
+
+    // Volume-routed per-block equality against the original chain reader.
+    const { reader } = partitionReaderForChain([fullPath, deltaPath], 2);
+    for (const record of outInfo.blocks) {
+      const volumePath = resolveVolumePath(outPath, record.volumeIndex ?? 0);
+      const fromOutput = readBlockDataFromImage(
+        volumePath,
+        record.fileOffset,
+        outInfo.header.compressionId,
+        outInfo.header.cipherId
+      );
+      const fromChain = reader.read(record.blockIndex * BLOCK, BLOCK);
+      expect(fromOutput).toEqual(fromChain);
+    }
+
+    // The frame in the last volume starts at its own dataOffset — offsets are
+    // volume-relative, not cumulative across the set.
+    const last = outInfo.blocks.find((b) => b.volumeIndex === 2)!;
+    expect(last.fileOffset).toBe(HEADER_SIZE + PARTITION_TABLE_ENTRY_SIZE);
+
+    const leftovers = fs.readdirSync(dir).filter((f) => f.startsWith('opbs-compact-'));
+    expect(leftovers).toEqual([]);
+  });
+
+  it('refuses when an orphan side volume occupies the output name', async () => {
+    await buildPlainTextChain();
+    const outPath = path.join(dir, 'taken.opbs');
+    fs.writeFileSync(`${outPath}.001`, 'not-an-image');
+
+    const result = await compactChain({ imagePath: deltaPath, outputPath: outPath });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/already exists/);
   });
 
   it('encrypted re-encode: per-member salts become one fresh key; data round-trips', async () => {
