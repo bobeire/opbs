@@ -29,6 +29,7 @@ import {
 import { frameLength, buildParityAsync, paritySidecarPath } from './parity';
 import { detectMacriumFormat } from './mrimg';
 import { isRepository } from './repository';
+import { writeManifest } from '../backup/retention';
 import {
   readBitlockerSidecar,
   writeBitlockerSidecar,
@@ -44,6 +45,9 @@ import { logger } from '../utils/logger';
 const FREE_SPACE_MARGIN = 256 * 1024 * 1024;
 
 const EMPTY = Buffer.alloc(0);
+
+/** One compaction at a time: concurrent callers (GUI + auto) get a clean refusal. */
+let compactBusy = false;
 
 export type CompactPhase = 'composing' | 'copying' | 'verifying' | 'finalizing';
 
@@ -413,6 +417,18 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
     return fd;
   };
 
+  if (compactBusy) {
+    return {
+      ok: false,
+      error: 'Another compaction is already running',
+      dryRun: false,
+      plan,
+      outputPath: finalPath,
+      durationMs: Date.now() - started,
+      warnings
+    };
+  }
+
   const tempDir = path.join(
     path.dirname(finalPath),
     `opbs-compact-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`
@@ -427,6 +443,7 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
   const totalBytes = plan.estimatedOutputBytes;
 
   try {
+    compactBusy = true;
     fs.mkdirSync(tempDir, { recursive: true });
     const header: ImageHeader = {
       version: IMAGE_VERSION,
@@ -631,6 +648,15 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
       }
     }
 
+    // Record the new image (and the removed sources) so the tamper manifest
+    // stays accurate — same write the CLI backup and retention do. Runs after
+    // remove-source so deleted members are not listed.
+    try {
+      await writeManifest(path.dirname(finalPath));
+    } catch (e) {
+      warnings.push(`could not update the backup manifest: ${errText(e)}`);
+    }
+
     logger.info(
       `compact: ${members.length} member(s) -> ${finalPath} ` +
         `(${blocksWritten} blocks, ${Math.round(bytesWritten / (1024 * 1024))} MB)` +
@@ -673,8 +699,36 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
       warnings
     };
   } finally {
+    compactBusy = false;
     // The renamed image is gone from the temp dir; a crash before the rename
     // leaves only this dir, which the startup sweep (opbs-compact-) clears.
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+}
+
+/**
+ * Post-backup auto-compact: when `threshold > 0` and the chain containing
+ * `imagePath` has reached `threshold` deltas (chain members beyond the root),
+ * flatten it with remove-source. Returns the compaction result, or null when
+ * the setting is off / the chain is still below the threshold (no work).
+ * Callers log refusals — a gated chain never fails the backup that preceded it.
+ */
+export async function compactAfterBackup(options: {
+  imagePath: string;
+  threshold: number;
+  passphrase?: string;
+}): Promise<CompactResult | null> {
+  if (!options.threshold || options.threshold < 1) return null;
+  let chain: string[];
+  try {
+    chain = resolveImageChain(options.imagePath);
+  } catch {
+    return null; // unreadable chain — leave it for verification/scrub to report
+  }
+  if (chain.length - 1 < options.threshold) return null;
+  return compactChain({
+    imagePath: options.imagePath,
+    passphrase: options.passphrase,
+    removeSource: true
+  });
 }

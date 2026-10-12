@@ -15,6 +15,12 @@ export interface AppSettings {
   retentionDays: number;
   keepFull: number;
   keepDeltasPerFull: number;
+  /**
+   * Chain compaction after backups: once the just-backed-up chain holds at
+   * least N deltas (chain members beyond the root), flatten it into a single
+   * image after the backup and before retention (sources removed). 0 = off.
+   */
+  compactAfterDeltas: number;
   notifications: NotificationSettings;
   scheduledVerification: ScheduledVerification;
   /** Restore drills: periodically restore the newest image in a directory to a
@@ -192,6 +198,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   retentionDays: 30,
   keepFull: 3,
   keepDeltasPerFull: 3,
+  compactAfterDeltas: 0,
   notifications: {
     enabled: true,
     webhookUrl: '',

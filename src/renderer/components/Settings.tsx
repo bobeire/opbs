@@ -102,6 +102,7 @@ interface Settings {
   retentionDays: number;
   keepFull: number;
   keepDeltasPerFull: number;
+  compactAfterDeltas: number;
   notifications: NotificationSettings;
   scheduledVerification: ScheduledVerification;
   scheduledDrill: ScheduledRestoreDrill;
@@ -122,6 +123,7 @@ const DEFAULT_SETTINGS: Settings = {
   retentionDays: 30,
   keepFull: 3,
   keepDeltasPerFull: 3,
+  compactAfterDeltas: 0,
   notifications: {
     enabled: true,
     webhookUrl: '',
@@ -513,6 +515,25 @@ function Settings() {
             </div>
           </>
         )}
+      </div>
+
+      <div className="settings-section">
+        <h2>Chain Compaction</h2>
+        <div className="setting-item">
+          <label>Auto-compact after backup (deltas, 0 = off):</label>
+          <input
+            type="number"
+            value={settings.compactAfterDeltas}
+            onChange={(e) => handleChange('compactAfterDeltas', Math.max(0, parseInt(e.target.value) || 0))}
+            min="0"
+            max="50"
+          />
+        </div>
+        <p className="field-hint">
+          When a scheduled backup leaves a chain with at least this many deltas, flatten it into a
+          single verified image before retention runs. The old chain members are removed after the
+          new image is in place. 0 disables automatic compaction.
+        </p>
       </div>
       
       <div className="settings-section">

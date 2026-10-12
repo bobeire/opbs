@@ -15,6 +15,7 @@ import { recordDrillResult } from '../utils/drill-history';
 import { tryNotify } from '../utils/notify';
 import { ConsecutiveFailureTracker } from '../utils/failure-tracker';
 import { logger } from '../utils/logger';
+import { compactAfterBackup } from '../imaging/compact-engine';
 
 /**
  * Lazily loads node-cron and electron so the WinPE/CLI payload (which bundles
@@ -706,6 +707,32 @@ export class BackupScheduler {
 
     try {
       const result = await this.backupManager.startBackup(backupConfig);
+
+      // Auto-compact the just-backed-up chain before retention when the chain
+      // reached the configured delta count: retention then sees a single-image
+      // chain. Refusals (encrypted without passphrase, repository, …) are
+      // logged and never fail the scheduled run.
+      if (settings.compactAfterDeltas > 0) {
+        try {
+          const compacted = await compactAfterBackup({
+            imagePath: result.imagePath,
+            threshold: settings.compactAfterDeltas,
+            passphrase: config.passphrase
+          });
+          if (compacted?.ok) {
+            logger.info(
+              `Auto-compact: chain flattened to ${compacted.outputPath} ` +
+                `(${compacted.plan.members.length} member(s), remove-source)`
+            );
+          } else if (compacted) {
+            logger.warn(`Auto-compact skipped for ${result.imagePath}: ${compacted.error}`);
+          }
+        } catch (error) {
+          logger.warn(
+            `Auto-compact failed for ${result.imagePath}: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+      }
 
       // Retention/GFS pruning after a successful run: either the global
       // auto-cleanup setting or a per-schedule retention policy.

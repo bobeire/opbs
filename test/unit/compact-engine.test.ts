@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { compactChain, composeChainBlocks } from '../../src/main/imaging/compact-engine';
+import { compactChain, composeChainBlocks, compactAfterBackup } from '../../src/main/imaging/compact-engine';
 import { runBackupJob } from '../../src/main/helper/job-runner';
 import { writeImageFromBytes } from '../helpers/opbs-image';
 import {
@@ -382,5 +382,74 @@ describe('compactChain', () => {
     expect(result.cancelled).toBe(true);
     expect(fs.existsSync(outPath)).toBe(false);
     expect(fs.readdirSync(dir).some((f) => f.startsWith('opbs-compact-'))).toBe(false);
+  });
+});
+
+describe('compactAfterBackup', () => {
+  let dir: string;
+  let rootPath: string;
+  let deltaPath: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-job-'));
+    rootPath = path.join(dir, 'full.opbs');
+    deltaPath = path.join(dir, 'delta.opbs');
+    writeImageFromBytes(rootPath, blockPattern(3, BLOCK * 3), BLOCK, COMPRESSION_ZSTD, {
+      timestamp: Date.now() - 60_000
+    });
+    writeImageFromBytes(deltaPath, blockPattern(9, BLOCK * 3), BLOCK, COMPRESSION_ZSTD, {
+      baseImagePath: rootPath,
+      timestamp: Date.now()
+    });
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const compactedFiles = (): string[] =>
+    fs.readdirSync(dir).filter((f) => f.includes('.compacted-') && f.endsWith('.opbs'));
+
+  it('does nothing when the setting is off or the chain is below the threshold', async () => {
+    expect(await compactAfterBackup({ imagePath: deltaPath, threshold: 0 })).toBeNull();
+    expect(await compactAfterBackup({ imagePath: deltaPath, threshold: 2 })).toBeNull();
+    expect(compactedFiles()).toEqual([]);
+    expect(fs.existsSync(rootPath)).toBe(true);
+    expect(fs.existsSync(deltaPath)).toBe(true);
+  });
+
+  it('flattens the chain with remove-source once the threshold is reached, and rewrites the manifest', async () => {
+    const result = await compactAfterBackup({ imagePath: deltaPath, threshold: 1 });
+    expect(result?.ok).toBe(true);
+    expect(result?.sourcesRemoved).toEqual([deltaPath, rootPath]);
+    expect(fs.existsSync(rootPath)).toBe(false);
+    expect(fs.existsSync(deltaPath)).toBe(false);
+    expect(compactedFiles()).toHaveLength(1);
+
+    // The tamper manifest now lists only the compacted image.
+    const manifestPath = path.join(dir, 'opbs-manifest.json');
+    expect(fs.existsSync(manifestPath)).toBe(true);
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as {
+      images: Array<{ name: string }>;
+    };
+    expect(manifest.images.map((i) => i.name)).toEqual(compactedFiles());
+  });
+
+  it('never throws when the chain is gated: an encrypted chain without a passphrase is reported', async () => {
+    const encRoot = path.join(dir, 'enc-full.opbs');
+    const encDelta = path.join(dir, 'enc-delta.opbs');
+    writeImageFromBytes(encRoot, blockPattern(3, BLOCK * 3), BLOCK, COMPRESSION_ZSTD, {
+      cipher: newImageCipher(PASS)
+    });
+    writeImageFromBytes(encDelta, blockPattern(9, BLOCK * 3), BLOCK, COMPRESSION_ZSTD, {
+      cipher: newImageCipher(PASS),
+      baseImagePath: encRoot
+    });
+
+    const result = await compactAfterBackup({ imagePath: encDelta, threshold: 1 });
+    expect(result?.ok).toBe(false);
+    expect(result?.error).toMatch(/passphrase/);
+    expect(fs.existsSync(encRoot)).toBe(true);
+    expect(fs.existsSync(encDelta)).toBe(true);
   });
 });

@@ -39,6 +39,7 @@ function Dashboard({ onNavigate, onLoaded }: DashboardProps) {
   const [mediaHealth, setMediaHealth] = useState<any[]>([]);
   const [anomalies, setAnomalies] = useState<any[]>([]);
   const [perfRunning, setPerfRunning] = useState<string | null>(null);
+  const [compactPct, setCompactPct] = useState(0);
   const [winfspMissing, setWinfspMissing] = useState(false);
   const [winfspPhase, setWinfspPhase] = useState<'idle' | 'installing' | 'error'>('idle');
   const [winfspError, setWinfspError] = useState('');
@@ -105,6 +106,49 @@ function Dashboard({ onNavigate, onLoaded }: DashboardProps) {
       setBusy(null);
     }
   }, [destinations]);
+
+  const runCompact = useCallback(async () => {
+    setBusy('compact');
+    setCompactPct(0);
+    const stop = window.electronAPI.onCompactProgress((p) => setCompactPct(p.percent));
+    try {
+      const { entries } = await window.electronAPI.listRecentBackups();
+      // One target per chain — any member names the whole chain.
+      const seen = new Set<string>();
+      const targets: string[] = [];
+      for (const e of entries) {
+        const root = e.chain?.[0] ?? e.path;
+        if ((e.chain?.length ?? 1) > 1 && !seen.has(root)) {
+          seen.add(root);
+          targets.push(e.path);
+        }
+      }
+      if (targets.length === 0) {
+        setMessage({ kind: 'ok', text: 'No delta chains to compact' });
+        return;
+      }
+      let compacted = 0;
+      const refused: string[] = [];
+      for (const imagePath of targets) {
+        const res = await window.electronAPI.compactChain(imagePath, { removeSource: false });
+        if (res.ok) compacted++;
+        else refused.push(res.error ?? 'unknown error');
+      }
+      setMessage({
+        kind: compacted > 0 ? 'ok' : 'err',
+        text:
+          `Compacted ${compacted} of ${targets.length} chain(s). ` +
+          (refused.length ? `${refused.length} skipped (${refused[0]}). ` : '') +
+          'Old chain members are kept — retention ages them out.'
+      });
+      await load();
+    } catch {
+      setMessage({ kind: 'err', text: 'Could not compact chains' });
+    } finally {
+      stop();
+      setBusy(null);
+    }
+  }, [load]);
 
   const runPerf = useCallback(async (directory: string) => {
     setPerfRunning(directory);
@@ -463,6 +507,13 @@ function Dashboard({ onNavigate, onLoaded }: DashboardProps) {
         <div className="recent-backups">
           <div className="recent-backups-head">
             <h2>Backup Integrity</h2>
+            <button
+              className="btn btn-secondary"
+              disabled={busy === 'compact'}
+              onClick={() => void runCompact()}
+            >
+              {busy === 'compact' ? `Compacting ${compactPct}%…` : 'Compact chains'}
+            </button>
           </div>
           <table className="backup-table">
             <thead>

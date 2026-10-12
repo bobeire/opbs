@@ -1158,10 +1158,14 @@ implemented; **Investigate** items need spike work first.
   verbatim. Output lands in `opbs-compact-<id>/`, is fully verified, then
   atomically renamed; `--remove-source` deletes leaf-first with USN/BitLocker
   sidecar carry (BitLocker re-sealed under the new key) and a fresh `.opar`.
-- **Automatic (Phase 1.5)**: `compactAfterDeltas` setting (default 0 = off)
-  runs compaction after a scheduled backup, before retention, with
-  remove-source — retention then sees a single-image chain. Settings toggle +
-  a Dashboard action complete the GUI surface.
+- ✅ **Automatic (Phase 1.5, done 2026-10-12)**: `compactAfterDeltas` setting
+  (default 0 = off) runs compaction after a scheduled backup, before
+  retention, with remove-source — retention then sees a single-image chain.
+  Refusals are logged and never fail the scheduled run; the tamper manifest
+  is rewritten after removal. Settings toggle (Chain Compaction section) +
+  a Dashboard "Compact chains" action (Backup Integrity panel, keeps
+  sources — retention ages them out) complete the GUI surface; concurrent
+  compactions are refused cleanly.
 - **Refused in v1**: Macrium containers, repository members (immutable
   signed journal — Phase 2), cloud destinations (Phase 2: stage via the new
   `cloud-restore`, compact locally, upload, prune), multi-volume *output*
