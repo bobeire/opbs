@@ -1066,10 +1066,15 @@ implemented; **Investigate** items need spike work first.
   crash-safe apply. The RestoreWizard gains a per-partition size field (GB)
   whose value becomes a `targetLayout` override + `acknowledgeLayout`; the
   preflight result carries `shrinkInfo` so a feasible shrink shows its
-  minimum and a too-small size surfaces the refusal live. `test/unit/clone-job.test.ts`,
-  `test/unit/clone-engine.test.ts`. Later: auto-shrink-to-fit in
-  PartitionCopy (explicit sizes only until then — no silent auto-scaling),
-  FAT32 shrink.
+  minimum and a too-small size surfaces the refusal live.   `test/unit/clone-job.test.ts`,
+  `test/unit/clone-engine.test.ts`.
+- ✅ **Auto-shrink-to-fit (PartitionCopy)**: `planTargetLayout` gains a
+  `shrinkToFit` option that scales scalable partitions down into a smaller
+  target (1 MiB–aligned, never below a per-partition `minSize`; `noShrink`
+  partitions keep their source size and the plan errors if the set can't
+  fit). PartitionCopy exposes a "Scale partitions down to fit" checkbox and
+  passes NTFS-only `minSize`/`noShrink` (shrink-on-clone is NTFS-only for
+  now). `test/unit/clone-layout.test.ts`. Later: FAT32 shrink.
 
 Partitions can already be re-placed before restore/clone (`targetLayout` /
 CLI `--layout P:OFF[:SIZE]`), and a *larger* size grows NTFS in place
@@ -1130,9 +1135,10 @@ from (say) a 500 GB disk restores onto a 256 GB drive.
   `--preflight` printing "minimum shrink target: X"), clone-to-smaller-disk
   (feasibility checked helper-side — the engine has no disk-read access), and
   the RestoreWizard per-partition size entry with live min/refusal feedback
-  (`shrinkInfo` on the preflight result). Later: auto-shrink-to-fit in
-  PartitionCopy (explicit sizes only until then — no silent auto-scaling),
-  FAT32 shrink.
+  (`shrinkInfo` on the preflight result), and auto-shrink-to-fit in
+  PartitionCopy (`planTargetLayout` `shrinkToFit` — scales NTFS partitions
+  down to a smaller target via the same helper-side plan). Later: FAT32
+  shrink.
 - **Tests**: planner fixtures extending `ntfs-resize-fixture.ts`
   (fragmented runs, sparse, front free space, refusal matrix, min-size math,
   bitmap-prefix-only reads); plan-application round-trip — apply to a buffer

@@ -62,3 +62,88 @@ describe('planTargetLayout (auto sequential placement)', () => {
     expect(plan.error).toMatch(/too small/);
   });
 });
+
+describe('planTargetLayout (shrink-to-fit)', () => {
+  it('scales partitions down proportionally to fit a smaller target', () => {
+    const target = 70 * GiB;
+    const plan = planTargetLayout([part(2, 50 * GiB), part(3, 50 * GiB)], target, {
+      growLast: false,
+      shrinkToFit: true
+    });
+
+    expect(plan.ok).toBe(true);
+    expect(plan.shrunk).toBe(true);
+    expect(plan.targets[0].size).toBeLessThan(50 * GiB);
+    expect(plan.targets[1].size).toBeLessThan(50 * GiB);
+    expect(plan.targets[0].size % MiB).toBe(0);
+    expect(plan.targets[1].size % MiB).toBe(0);
+    expect(plan.totalBytes).toBe(plan.targets[0].size + plan.targets[1].size);
+    expect(plan.totalBytes).toBeLessThanOrEqual(target - 3 * MiB);
+    expect(plan.freeBytes).toBeGreaterThanOrEqual(0);
+  });
+
+  it('never scales a partition below minSize and shares the rest by headroom', () => {
+    const plan = planTargetLayout(
+      [{ ...part(2, 30 * GiB), minSize: 16 * GiB }, part(3, 30 * GiB)],
+      30 * GiB,
+      { growLast: false, shrinkToFit: true }
+    );
+
+    expect(plan.ok).toBe(true);
+    expect(plan.shrunk).toBe(true);
+    expect(plan.targets[0].size).toBeGreaterThanOrEqual(16 * GiB);
+    expect(plan.targets[1].size).toBeLessThan(30 * GiB);
+    expect(plan.totalBytes).toBeLessThanOrEqual(30 * GiB - 3 * MiB);
+  });
+
+  it('is a no-op when the partitions already fit', () => {
+    const plan = planTargetLayout([part(2, 20 * GiB), part(3, 30 * GiB)], 100 * GiB, {
+      growLast: false,
+      shrinkToFit: true
+    });
+
+    expect(plan.ok).toBe(true);
+    expect(plan.shrunk).toBeUndefined();
+    expect(plan.targets[0].size).toBe(20 * GiB);
+    expect(plan.targets[1].size).toBe(30 * GiB);
+  });
+
+  it('keeps the last partition at full size and grows it when growLast is set', () => {
+    const plan = planTargetLayout([part(2, 50 * GiB), part(3, 50 * GiB)], 70 * GiB, {
+      growLast: true,
+      shrinkToFit: true
+    });
+
+    expect(plan.ok).toBe(true);
+    expect(plan.shrunk).toBe(true);
+    const last = plan.targets[1];
+    expect(last.size).toBeGreaterThanOrEqual(plan.targets[0].size);
+    expect(last.size).toBe(plan.totalBytes - plan.targets[0].size);
+  });
+
+  it('errors when a noShrink partition cannot be scaled down', () => {
+    const plan = planTargetLayout(
+      [{ ...part(2, 70 * GiB), noShrink: true }, part(3, 50 * GiB)],
+      70 * GiB,
+      { growLast: false, shrinkToFit: true }
+    );
+
+    expect(plan.ok).toBe(false);
+    expect(plan.error).toMatch(/Partition 2/);
+    expect(plan.error).toMatch(/unsupported filesystem/);
+  });
+
+  it('errors when minSize floors alone exceed the target', () => {
+    const plan = planTargetLayout(
+      [
+        { ...part(2, 30 * GiB), minSize: 20 * GiB },
+        { ...part(3, 30 * GiB), minSize: 20 * GiB }
+      ],
+      30 * GiB,
+      { growLast: false, shrinkToFit: true }
+    );
+
+    expect(plan.ok).toBe(false);
+    expect(plan.error).toMatch(/cannot shrink below/);
+  });
+});

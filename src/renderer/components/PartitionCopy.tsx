@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { planTargetLayout } from '../../main/utils/clone-layout';
 
+const MiB = 1024 * 1024;
+
+function alignUpMiB(bytes: number): number {
+  return Math.ceil(bytes / MiB) * MiB;
+}
+
 interface DragSource {
   diskIndex: number;
   partitionIndex: number;
@@ -28,6 +34,7 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
   const [sourceDiskIndex, setSourceDiskIndex] = useState<number | null>(null);
   const [placed, setPlaced] = useState<PlacedDrop[]>([]);
   const [growLast, setGrowLast] = useState(true);
+  const [shrinkToFit, setShrinkToFit] = useState(true);
 
   const [dragOver, setDragOver] = useState<number | null>(null);
   const [dragSource, setDragSource] = useState<DragSource | null>(null);
@@ -99,10 +106,20 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
     const parts = placed
       .map((d) => partitionOf(sourceDiskIndex, d.partitionIndex))
       .filter((p) => p !== null)
-      .map((p) => ({ partitionIndex: p.partitionIndex, offset: p.offset, size: p.size, label: partitionLabel(p) }));
+      .map((p) => ({
+        partitionIndex: p.partitionIndex,
+        offset: p.offset,
+        size: p.size,
+        label: partitionLabel(p),
+        // Auto-scale only NTFS partitions: shrink-on-clone is NTFS-only for now,
+        // so a FAT32/exFAT partition that would shrink keeps its source size and
+        // the planner errors instead of emitting a size the helper can't honour.
+        noShrink: p.fsType !== 'NTFS',
+        minSize: p.fsType === 'NTFS' ? alignUpMiB((p.usedSpace ?? 0) + MiB) : undefined
+      }));
     if (parts.length === 0) return null;
-    return planTargetLayout(parts, targetDisk.size, { growLast });
-  }, [placed, targetDiskIndex, sourceDiskIndex, targetDisk, disks, growLast]);
+    return planTargetLayout(parts, targetDisk.size, { growLast, shrinkToFit });
+  }, [placed, targetDiskIndex, sourceDiskIndex, targetDisk, disks, growLast, shrinkToFit]);
 
   const cloneConfig = useMemo(() => {
     if (!plan || !plan.ok || sourceDiskIndex === null || targetDiskIndex === null) return null;
@@ -486,6 +503,10 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
                       <input type="checkbox" checked={growLast} onChange={(e) => setGrowLast(e.target.checked)} />
                       Grow the last partition to fill free space on the target disk
                     </label>
+                    <label className="copy-grow-row">
+                      <input type="checkbox" checked={shrinkToFit} onChange={(e) => setShrinkToFit(e.target.checked)} />
+                      Scale partitions down to fit the target disk
+                    </label>
                   </>
                 )}
               </div>
@@ -503,7 +524,7 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
                 Target: {targetDisk?.model || `Disk ${targetDiskIndex}`} ({targetDisk ? formatSize(targetDisk.size) : '?'})
                 {currentPreflight?.result?.targetDiskPartitionCount ? ` · has ${currentPreflight.result.targetDiskPartitionCount} existing partition(s)` : ''}
               </li>
-              <li>Partitions: {placed.length} · {formatSize(plan.totalBytes)} to write{plan.growBytes > 0 ? ` (+${formatSize(plan.growBytes)} grow)` : ''}</li>
+              <li>Partitions: {placed.length} · {formatSize(plan.totalBytes)} to write{plan.growBytes > 0 ? ` (+${formatSize(plan.growBytes)} grow)` : ''}{plan.shrunk ? ' · scaled down to fit' : ''}</li>
               <li>Table scheme: {currentPreflight?.result?.writeTableScheme ? currentPreflight.result.writeTableScheme.toUpperCase() : 'GPT'} on {formatSize(targetDisk?.size ?? 0)}</li>
             </ul>
             {currentPreflight?.result?.warnings && currentPreflight.result.warnings.length > 0 && (
