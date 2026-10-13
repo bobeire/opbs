@@ -1040,8 +1040,96 @@ implemented; **Investigate** items need spike work first.
 
 ## Planned
 
-- (empty — the designed backlog is fully shipped; open design work lives
-  under Investigate.)
+### Shrink-on-restore (restore an image onto a smaller drive)
+- ✅ **Phase 0 — planner (read-only)**: `imaging/fs/ntfs-shrink.ts`
+  (`planNtfsShrink` + `ntfsShrinkMinimum`) walks the MFT with its own raw
+  attribute walker, reads the `$Bitmap` prefix only, cross-checks bitmap vs
+  MFT, refuses unmovable streams above the boundary (OS metadata / `$Extend`
+  children / compressed / EFS / attribute-listed / shared clusters /
+  unsupported `$BadClus`), packs vacated runs first-fit into free space below
+  the boundary (splitting across fragmentation), and emits a serializable
+  `NtfsShrinkPlan` (moves, on-disk record patches with fixups planted,
+  `$Bitmap` byte regions, boot sector with the new total-sector count,
+  `$MFTMirr` info). Fixture `test/helpers/ntfs-shrink-fixture.ts` +
+  `test/unit/ntfs-shrink.test.ts` (14 tests incl. plan/apply round-trip
+  re-parsed via `ntfs.ts`). Minimum = used + 1 MiB margin, 1 MiB aligned.
+  Remaining: Phase 1 (elevated-helper apply + CLI smaller `--layout` SIZE),
+  Phase 2 (engine preflight gates, clone, GUI).
+
+Partitions can already be re-placed before restore/clone (`targetLayout` /
+CLI `--layout P:OFF[:SIZE]`), and a *larger* size grows NTFS in place
+(`planNtfsGrow` — boot sector, `$Bitmap`, `$BadClus` metadata patch, applied
+in the elevated helper after the data write). A *smaller* size is refused in
+both engines because shrink requires relocating data clusters, not just
+patching metadata. This design adds native NTFS shrink so an image captured
+from (say) a 500 GB disk restores onto a 256 GB drive.
+
+- **Architecture — plan from the image, apply on the target.** The planner
+  runs engine-side against the image chain (`ChainPartitionReader` +
+  `imaging/fs/ntfs.ts`: boot parse, full MFT walk with attribute-list
+  resolution, runlists, `$Bitmap`) and produces a serializable
+  `NtfsShrinkPlan`. The plan travels in the job JSON to the elevated helper,
+  which interleaves it with the existing partition write (see below).
+- **Planning algorithm (ntfsresize-style, conservative).**
+  1. Parse boot + walk every MFT record; collect all non-resident runs.
+  2. Read `$Bitmap` **prefix only** (bytes up to the requested new cluster
+     count — bounded by newSize/8, not volume/8) and cross-check used
+     clusters against MFT runs; disagreement (dirty volume) → refuse.
+  3. New size: explicit from `targetLayout`, or auto = align-up of
+     used-bytes + metadata + 1 MiB slack; requested < min → refuse with the
+     numbers. Boundary = new cluster count.
+  4. Clusters ≥ boundary must be vacated. Ordinary file-data runs are
+     movable; sparse holes need no move; resident data lives in the MFT
+     (front) and is fine. Refuse (v1) when anything unmovable crosses the
+     boundary: compressed or EFS streams, streams with attribute lists,
+     or any extent of `$MFT`, `$MFTMirr`, `$LogFile`, `$Bitmap`, `$BadClus`,
+     `$Secure`, `$UpCase`, `$AttrDef`, `$Extend/*`.
+  5. Pack vacated runs into free clusters below the boundary (first-fit,
+     coalescing adjacent mappings); emit sparse `moves`
+     `[{srcCluster, dstCluster, clusterCount}]` + patched MFT record bytes
+     for every record whose runlist changed (also mirrored to `$MFTMirr`
+     for the first mirrored records). Cap the plan (moves / rewrite bytes);
+     over the cap → refuse with a fragmentation message.
+- **Apply order (crash-safe, unlike grow this FAILS the restore).**
+  1. *Before the data phase*: write the shrunken boot sector (masked out of
+     block 0's normal write while the plan is active), so a crash mid-restore
+     leaves a volume that advertises the correct, smaller size — never one
+     that reads past the partition end.
+  2. *During the data phase*: blocks below the boundary write normally;
+     used blocks at/above it are routed through the move map to their
+     relocation targets; free-space blocks above the boundary are skipped
+     entirely (the captured tail never reaches the target). Blocks straddling
+     the boundary split at cluster granularity.
+  3. *After the data phase*: patched MFT records (+ `$MFTMirr`), then the
+     truncated/updated `$Bitmap` regions and the `$BadClus` sparse run
+     re-encoded to the new cluster count (the grow record-rebuild helper
+     generalizes to any run length).
+  4. Verify: read boot + sample records + bitmap head back from the target
+     and re-run the planner's validators; later a `chkdsk /scan` opt-in.
+- **Refusal matrix (v1)**: non-NTFS; requested < minimum; compressed/EFS/
+  attribute-listed streams above the boundary; OS-metadata extents above the
+  boundary; bitmap/MFT disagreement; same-disk restore (serial match) —
+  shrink never runs against the source disk. Every refusal surfaces the
+  reason through preflight and the CLI.
+- **Surfaces.** Phase 1: restore only, CLI `--layout` with a smaller SIZE
+  (plus `--preflight` printing "minimum shrink target: X"). Phase 2:
+  clone-to-smaller-disk, engine preflight integration (shrink plan computed
+  and summarized before anything is written), RestoreWizard per-partition
+  size entry with live min/refusal feedback. Later: auto-shrink-to-fit in
+  PartitionCopy (explicit sizes only until then — no silent auto-scaling),
+  FAT32 shrink.
+- **Tests**: planner fixtures extending `ntfs-resize-fixture.ts`
+  (fragmented runs, sparse, front free space, refusal matrix, min-size math,
+  bitmap-prefix-only reads); plan-application round-trip — apply to a buffer
+  volume, re-parse with `ntfs.ts`, compare file contents; restore-to-VHD
+  integration (shrink500→256 layout, attach, compare extracted files);
+  crash-mid-apply simulation (kill between data and MFT phases — volume
+  mounts at the new size, below-boundary data intact, chkdsk-repairable
+  tail).
+- Honest scope: this is the hardest filesystem feature in the repo to date —
+  grow was ~460 lines because it is metadata-only; shrink adds data
+  movement, a write-loop remap in the helper, and engine/UI gates. Phases
+  are cut so each ships independently behind the existing layout flags.
 
 ## Investigate
 
