@@ -11,6 +11,8 @@ import {
   CIPHER_NONE
 } from './image-format';
 import { detectPartitionFilesystem, inferMbrTypes, inferTableTypeGuids } from './fs/file-browse';
+import { ntfsShrinkMinimum } from './fs/ntfs-shrink';
+import { partitionReaderForChain } from './image-browse';
 import {
   detectMacriumFormat,
   readMacriumImage,
@@ -255,6 +257,7 @@ export class RestoreEngine implements RestoreCoordinator {
 
     const source = isMacrium ? macriumRestoreSource(config) : opbsRestoreSource(config, chain);
     const targets: RestoreTarget[] = [];
+    const shrinkInfo: NonNullable<RestoreJob['shrinkInfo']> = [];
 
     const layoutByPartition = new Map<number, { offset: number; size?: number }>();
     if (config.targetLayout) {
@@ -291,9 +294,43 @@ export class RestoreEngine implements RestoreCoordinator {
       const offset = layout?.offset ?? partition.offsetOnDisk;
       const size = layout?.size;
       if (size !== undefined && size < partition.size) {
-        throw new Error(
-          `Cannot shrink partition ${partitionIndex} from ${partition.size} to ${size} bytes (grow-on-restore only supports larger targets)`
-        );
+        if (isMacrium) {
+          throw new Error(
+            `Cannot shrink partition ${partitionIndex} from ${partition.size} to ${size} bytes ` +
+              `(shrink-on-restore is not supported for Macrium images)`
+          );
+        }
+        // NTFS shrink-on-restore: refuse a target below the planner's minimum
+        // before anything is written, and surface the feasibility numbers on
+        // the job so `--preflight` can print them. The helper computes the
+        // full relocation plan (and every other refusal) itself.
+        let min;
+        try {
+          const { reader } = partitionReaderForChain(chain, partitionIndex, config.passphrase);
+          min = ntfsShrinkMinimum(reader);
+        } catch (error) {
+          throw new Error(
+            `Cannot shrink partition ${partitionIndex} to ${size} bytes: ` +
+              `${error instanceof Error ? error.message : error}`,
+            { cause: error }
+          );
+        }
+        if (size < min.minTargetClusters * min.clusterSize) {
+          throw new Error(
+            `Cannot shrink partition ${partitionIndex} from ${partition.size} to ${size} bytes: ` +
+              `the minimum shrink target is ${min.minTargetClusters * min.clusterSize} bytes ` +
+              `(${min.usedClusters} clusters in use + a 1 MiB margin, 1 MiB aligned)`
+          );
+        }
+        shrinkInfo.push({
+          partitionIndex,
+          currentBytes: partition.size,
+          targetBytes: size,
+          minTargetBytes: min.minTargetClusters * min.clusterSize,
+          minTargetClusters: min.minTargetClusters,
+          usedClusters: min.usedClusters,
+          clusterSize: min.clusterSize
+        });
       }
       targets.push({
         partitionIndex,
@@ -539,6 +576,7 @@ export class RestoreEngine implements RestoreCoordinator {
       validateAfterWrite: config.validateAfterWrite,
       verifyAfterRestore: config.verifyAfterRestore,
       clearFreeSpace: config.clearFreeSpace !== false,
+      shrinkInfo: shrinkInfo.length > 0 ? shrinkInfo : undefined,
       warnings: warnings.length > 0 ? warnings : undefined
     };
   }

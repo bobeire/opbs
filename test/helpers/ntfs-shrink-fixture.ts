@@ -18,6 +18,7 @@ export const SK_TARGET_SECTORS = SK_TARGET_CLUSTERS * SK_SPC;
 export const SK_MIN_TARGET_CLUSTERS = 512;
 export const SK_USER_LCN = 900;
 export const SK_USER_CLUSTERS = 4;
+export const SK_USER_RECORD = 16;
 
 /** Deterministic per-cluster filler so relocated data can be verified. */
 export function clusterPattern(lcn: number): Buffer {
@@ -54,7 +55,7 @@ export interface ShrinkFixtureOpts {
 export function buildShrinkVolumeData(opts?: ShrinkFixtureOpts): Buffer {
   const totalClusters = SK_TOTAL_CLUSTERS;
   const userRuns: ShrinkUserRun[] = opts?.userRuns ?? [
-    { recordNumber: 16, startLcn: SK_USER_LCN, runLength: SK_USER_CLUSTERS }
+    { recordNumber: SK_USER_RECORD, startLcn: SK_USER_LCN, runLength: SK_USER_CLUSTERS }
   ];
   const stayingRuns = opts?.stayingRuns ?? [];
   const badClusRun: DataRun = opts?.badClusRun ?? {

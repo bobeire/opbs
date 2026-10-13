@@ -178,6 +178,25 @@ export interface RestoreJob {
    * source) that the helper appends to the restore result's warnings.
    */
   warnings?: string[];
+  /**
+   * Shrink-on-restore feasibility (NTFS), present when a target is smaller
+   * than its captured partition. The helper computes the full relocation
+   * plan itself; this carries the preflight minimum so `--preflight` can
+   * print it and buildJob can refuse a target below the minimum before any
+   * disk is touched.
+   */
+  shrinkInfo?: Array<{
+    partitionIndex: number;
+    /** Captured (current) partition size in bytes. */
+    currentBytes: number;
+    /** Requested (shrunk) partition size in bytes. */
+    targetBytes: number;
+    /** Smallest size the NTFS shrink planner can safely target. */
+    minTargetBytes: number;
+    minTargetClusters: number;
+    usedClusters: number;
+    clusterSize: number;
+  }>;
 }
 
 export type JobPhase = 'snapshotting' | 'reading' | 'writing-index' | 'verifying' | 'completed';

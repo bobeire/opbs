@@ -766,6 +766,14 @@ function renderRestorePlan(plan: any): string {
   }
   const targets: any[] = Array.isArray(plan.targets) ? plan.targets : [];
   lines.push(`Target partitions: ${targets.map((t) => `disk ${t.diskIndex} part ${t.partitionIndex} @${formatBytes(t.offset)}`).join(', ') || 'none'}`);
+  if (Array.isArray(plan.shrinkInfo)) {
+    for (const s of plan.shrinkInfo) {
+      lines.push(
+        `Shrink partition ${s.partitionIndex}: ${formatBytes(s.currentBytes)} -> ${formatBytes(s.targetBytes)} ` +
+          `(minimum shrink target: ${formatBytes(s.minTargetBytes)}, ${s.usedClusters} clusters in use)`
+      );
+    }
+  }
   if (plan.encryption?.algorithm) {
     lines.push(`Encryption: ${plan.encryption.algorithm}`);
   }
