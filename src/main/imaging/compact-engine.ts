@@ -44,6 +44,7 @@ import {
   RepoKeyOptions
 } from './repository';
 import type { S3Config } from '../utils/s3';
+import type { CloudStoreOptions } from '../utils/cloud-store';
 import { writeManifest } from '../backup/retention';
 import { detectFilesystemType, getMaxVolumeSizeForFs } from '../utils/location';
 import {
@@ -65,7 +66,7 @@ const EMPTY = Buffer.alloc(0);
 /** One compaction at a time: concurrent callers (GUI + auto) get a clean refusal. */
 let compactBusy = false;
 
-export type CompactPhase = 'composing' | 'copying' | 'verifying' | 'finalizing';
+export type CompactPhase = 'staging' | 'composing' | 'copying' | 'verifying' | 'finalizing';
 
 export interface CompactProgress {
   phase: CompactPhase;
@@ -139,6 +140,11 @@ export interface CompactOptions {
   repoKey?: RepoKeyOptions;
   /** S3 profile for the repository's remote mirror (create upload / prune delete). */
   s3Profile?: Partial<S3Config>;
+  /**
+   * Credential profiles for a cloud (`s3://`, `sftp://`, `ftp://`) chain —
+   * staging, upload and prune. Ignored for local chains.
+   */
+  cloudStoreOptions?: CloudStoreOptions;
 }
 
 export interface ComposedBlock {

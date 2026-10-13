@@ -50,6 +50,10 @@ export interface StagedCloudImage {
   imagePath: string;
   tempDir: string;
   plan: CloudImagePlan;
+  /** Store location the chain came from (everything but the image key). */
+  dirUri: string;
+  /** Store-relative key the requested image was listed under. */
+  targetKey: string;
   /** Remove the staged temp dir (best-effort, never throws). */
   cleanup(): void;
 }
@@ -57,6 +61,11 @@ export interface StagedCloudImage {
 /** True for `s3://`, `sftp://`, `ftp://`, `ftps://` locations. */
 export function isCloudImageLocation(uri: string): boolean {
   return isNonFilesystemLocation(uri);
+}
+
+/** Store location of a cloud image URI (the URI without its image segment). */
+export function cloudDirUri(uri: string): string {
+  return splitImageUri(uri).dirUri;
 }
 
 /** Bytes kept free on top of the staged size (filesystem metadata, slop). */
@@ -228,10 +237,13 @@ export async function materializeImageFromCloud(
     throw error;
   }
 
+  const targetKey = plan.files.find((f) => f.destName === plan.targetDestName)?.key ?? plan.targetDestName;
   return {
     imagePath: path.join(tempDir, plan.targetDestName),
     tempDir,
     plan,
+    dirUri: splitImageUri(uri).dirUri,
+    targetKey,
     cleanup(): void {
       try {
         fs.rmSync(tempDir, { recursive: true, force: true });

@@ -43,6 +43,7 @@ import { cmdFleet } from './fleet';
 import { isRepository } from '../imaging/repository';
 import { openRepoSession, type RepoSession } from '../imaging/repo-s3';
 import { compactChain } from '../imaging/compact-engine';
+import { compactCloudChain } from '../imaging/cloud-compact';
 
 const diskEnumerator = new DiskEnumerator();
 const imagingEngine = new ImagingEngine(diskEnumerator);
@@ -208,7 +209,8 @@ Commands:
                                          base image must still be present. Missing delta
                                          bases (silent deletes) are reported per chain and
                                          the command exits 1 when any chain is broken.
-  compact <image> [--remove-source] [--dry-run] [--repo-keyfile <file>] [--repo-passphrase <p>]
+  compact <image|s3://…|sftp://…|ftp://…> [--remove-source] [--dry-run]
+           [--repo-keyfile <file>] [--repo-passphrase <p>] [--region <r>]
                                          Compact a delta chain into a single new image.
                                          Any chain member names the whole chain. The
                                          composed (newest-wins) blocks are relocated into
@@ -1579,12 +1581,25 @@ async function cmdChainCheck(ctx: CommandContext): Promise<number> {
   return report.brokenChains === 0 ? 0 : 1;
 }
 
+/** Live progress line for `compact`; staging shows bytes, the rest blocks. */
+function compactProgressPrinter(json: boolean) {
+  return json
+    ? undefined
+    : (p: { phase: string; percent: number; blocksDone: number; blocksTotal: number; bytesDone: number; totalBytes: number }) => {
+        const detail =
+          p.phase === 'staging'
+            ? `${formatBytes(p.bytesDone)}/${formatBytes(p.totalBytes)}`
+            : `${p.blocksDone}/${p.blocksTotal} blocks`;
+        process.stdout.write(`\r[${p.phase}] ${p.percent}% (${detail})   `);
+      };
+}
+
 async function cmdCompact(ctx: CommandContext): Promise<number> {
   const imagePath = ctx.argv[0];
   if (!imagePath) {
     console.error(
-      'Usage: compact <image> [--remove-source] [--dry-run] [--json] [--passphrase-file <file>] ' +
-        '[--repo-keyfile <file>] [--repo-passphrase <p>]'
+      'Usage: compact <image|s3://…|sftp://…|ftp://…> [--remove-source] [--dry-run] [--json] ' +
+        '[--passphrase-file <file>] [--repo-keyfile <file>] [--repo-passphrase <p>] [--region <r>]'
     );
     return 1;
   }
@@ -1597,18 +1612,23 @@ async function cmdCompact(ctx: CommandContext): Promise<number> {
   const repoKeyfile = flagValue(ctx.argv, '--repo-keyfile');
   if (repoKeyfile) repoKey.keyfile = repoKeyfile;
 
-  const result = await compactChain({
-    imagePath,
-    passphrase,
-    ...(Object.keys(repoKey).length > 0 ? { repoKey } : {}),
-    removeSource,
-    dryRun,
-    onProgress: ctx.opts.json
-      ? undefined
-      : (p) => {
-          process.stdout.write(`\r[${p.phase}] ${p.percent}% (${p.blocksDone}/${p.blocksTotal} blocks)   `);
-        }
-  });
+  const result = await (isCloudImageLocation(imagePath)
+    ? compactCloudChain({
+        imagePath,
+        passphrase,
+        removeSource,
+        dryRun,
+        cloudStoreOptions: { region: flagValue(ctx.argv, '--region') },
+        onProgress: compactProgressPrinter(ctx.opts.json)
+      })
+    : compactChain({
+        imagePath,
+        passphrase,
+        ...(Object.keys(repoKey).length > 0 ? { repoKey } : {}),
+        removeSource,
+        dryRun,
+        onProgress: compactProgressPrinter(ctx.opts.json)
+      }));
   if (!ctx.opts.json && !dryRun) process.stdout.write('\n');
 
   if (ctx.opts.json) {

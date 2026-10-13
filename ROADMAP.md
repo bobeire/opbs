@@ -1195,8 +1195,19 @@ implemented; **Investigate** items need spike work first.
     `--repo-keyfile`/`--repo-passphrase` (separate from the image
     passphrase), IPC passes the repo key + S3 profile; cache-hydrated S3
     repositories are refused (their journal lives with the session).
-  - ☐ **S3/SFTP/FTP chains end-to-end** (pending — stage via `cloud-restore`,
-    compact locally, upload, prune).
+  - ✅ **S3/SFTP/FTP chains end-to-end (done 2026-10-13)**: `compactCloudChain`
+    stages the cloud chain through the same `cloud-restore` download used by
+    cloud restores, compacts locally in the staging dir, then uploads the
+    compacted image (base + side volumes + BitLocker sidecar) into the same
+    store prefix. With `--remove-source`, old remote members are deleted
+    newest-first only AFTER the upload is re-listed and size-verified —
+    failed or truncated uploads are rolled back and never touch the live
+    chain. Directories holding a `opbs-repo.json` journal are refused
+    (repository images compact through the repository), S3 uploads carry
+    Object Lock retention from the profile, and the result reports the
+    remote destination URI. CLI: `compact s3://… [--region <r>]`;
+    IPC passes the saved S3/SFTP/FTP profiles; progress gains a `staging`
+    phase (byte-based percent while downloading).
   - ✅ **parity/scrub multi-volume gap (fixed 2026-10-12)**: `.opar` building
     and `classifyImage` opened only `imagePath` while multi-volume
     `BlockRecord.fileOffset` is volume-relative (verify/restore volume-route
@@ -1215,7 +1226,10 @@ implemented; **Investigate** items need spike work first.
   verify, orphan-side refusal), repository journal flow (`repo-compact`:
   signed create alongside a locked chain, lock/eligibility refusal, unlock →
   deltas-first signed prunes with signature-chain re-verification, output
-  outside `images/` and missing-key refusals), multi-volume parity/scrub
+  outside `images/` and missing-key refusals), cloud flow (`cloud-compact`:
+  stage → compact → upload → verified prune, failed-upload rollback,
+  size-mismatch verification, repository-directory refusal, dry-run
+  passthrough), multi-volume parity/scrub
   (build → corrupt `.001` → repair → exact-byte compare, v1 sidecar parse),
   plus a restore-to-VHD byte-compare of pre- vs
   post-compaction chains.

@@ -43,7 +43,8 @@ import { resolveImageChain } from './imaging/restore-engine';
 import { registerFileAssociations, unregisterFileAssociations, parseFileActionArgs, FileAction } from './utils/file-associations';
 import { readDrillHistory } from './utils/drill-history';
 import { sweepStaleJobDirs } from './utils/job-dir-sweep';
-import { compactChain } from './imaging/compact-engine';
+import { compactChain, type CompactProgress } from './imaging/compact-engine';
+import { compactCloudChain } from './imaging/cloud-compact';
 
 const HELPER_FLAG = '--opbs-helper';
 
@@ -1139,22 +1140,30 @@ function setupIpcHandlers(): void {
         throw new Error('No image given');
       }
       compactCancelRequested = false;
-      return compactChain({
+      const compactOpts = {
         imagePath,
         passphrase: options?.passphrase,
         removeSource: options?.removeSource,
         dryRun: options?.dryRun,
         repoKey: options?.repoKey,
         s3Profile: s3ProfileFromSettings() ?? undefined,
+        cloudStoreOptions: {
+          s3Profile: s3ProfileFromSettings() ?? undefined,
+          sftpProfile: sftpProfileFromSettings() ?? undefined,
+          ftpProfile: ftpProfileFromSettings() ?? undefined
+        },
         shouldCancel: () => compactCancelRequested,
-        onProgress: (progress) => {
+        onProgress: (progress: CompactProgress) => {
           try {
             event.sender.send('compact-progress', progress);
           } catch {
             // renderer navigated away
           }
         }
-      });
+      };
+      return isCloudImageLocation(imagePath)
+        ? compactCloudChain(compactOpts)
+        : compactChain(compactOpts);
     }
   );
   ipcMain.handle('cancel-compact', async () => {

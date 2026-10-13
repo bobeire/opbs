@@ -408,7 +408,7 @@ declare global {
   }
 
   interface CompactProgress {
-    phase: 'composing' | 'copying' | 'verifying' | 'finalizing';
+    phase: 'staging' | 'composing' | 'copying' | 'verifying' | 'finalizing';
     percent: number;
     blocksDone: number;
     blocksTotal: number;
