@@ -1053,8 +1053,23 @@ implemented; **Investigate** items need spike work first.
   `$MFTMirr` info). Fixture `test/helpers/ntfs-shrink-fixture.ts` +
   `test/unit/ntfs-shrink.test.ts` (14 tests incl. plan/apply round-trip
   re-parsed via `ntfs.ts`). Minimum = used + 1 MiB margin, 1 MiB aligned.
-  Remaining: Phase 1 (elevated-helper apply + CLI smaller `--layout` SIZE),
-  Phase 2 (engine preflight gates, clone, GUI).
+- ✅ **Phase 1 — restore apply (elevated helper + CLI)**: restore jobs accept
+  a smaller target (`--layout P:OFF:SIZE`). `buildJob` attaches `shrinkInfo`
+  and refuses a target below the minimum; the helper computes the full plan
+  against the image chain before the partition table write, clamps the data
+  loop to the new boundary and applies crash-safe (boot → relocated tail →
+  MFT patches/`$MFTMirr` → `$Bitmap`). A failed shrink FAILS the restore.
+  `--preflight` prints "minimum shrink target: X". `test/unit/restore-shrink.test.ts`.
+- ✅ **Phase 2 — clone + wizard**: clones accept a smaller target (the engine
+  has no disk-read access, so the helper computes min + plan against the live
+  source before any write and fails the job if infeasible) with the same
+  crash-safe apply. The RestoreWizard gains a per-partition size field (GB)
+  whose value becomes a `targetLayout` override + `acknowledgeLayout`; the
+  preflight result carries `shrinkInfo` so a feasible shrink shows its
+  minimum and a too-small size surfaces the refusal live. `test/unit/clone-job.test.ts`,
+  `test/unit/clone-engine.test.ts`. Later: auto-shrink-to-fit in
+  PartitionCopy (explicit sizes only until then — no silent auto-scaling),
+  FAT32 shrink.
 
 Partitions can already be re-placed before restore/clone (`targetLayout` /
 CLI `--layout P:OFF[:SIZE]`), and a *larger* size grows NTFS in place
@@ -1111,11 +1126,11 @@ from (say) a 500 GB disk restores onto a 256 GB drive.
   boundary; bitmap/MFT disagreement; same-disk restore (serial match) —
   shrink never runs against the source disk. Every refusal surfaces the
   reason through preflight and the CLI.
-- **Surfaces.** Phase 1: restore only, CLI `--layout` with a smaller SIZE
-  (plus `--preflight` printing "minimum shrink target: X"). Phase 2:
-  clone-to-smaller-disk, engine preflight integration (shrink plan computed
-  and summarized before anything is written), RestoreWizard per-partition
-  size entry with live min/refusal feedback. Later: auto-shrink-to-fit in
+- **Surfaces.** Done: restore (CLI `--layout` with a smaller SIZE plus
+  `--preflight` printing "minimum shrink target: X"), clone-to-smaller-disk
+  (feasibility checked helper-side — the engine has no disk-read access), and
+  the RestoreWizard per-partition size entry with live min/refusal feedback
+  (`shrinkInfo` on the preflight result). Later: auto-shrink-to-fit in
   PartitionCopy (explicit sizes only until then — no silent auto-scaling),
   FAT32 shrink.
 - **Tests**: planner fixtures extending `ntfs-resize-fixture.ts`
