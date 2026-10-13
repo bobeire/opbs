@@ -19,7 +19,8 @@ export interface CloneJobConfig {
   /** Capture block granularity (bytes). */
   blockSize?: number;
   /** Dissimilar layout: override the on-disk offset (and optionally the size)
-   *  for a partition. A larger size grows the filesystem on clone. */
+   *  for a partition. A larger size grows the filesystem on clone; a smaller
+   *  size shrinks it (NTFS, feasibility checked helper-side). */
   targetLayout?: Array<{ partitionIndex: number; offset: number; size?: number }>;
   /** Required when targetLayout moves a partition: a fresh GPT/MBR partition
    *  table is written and the target disk's current layout is destroyed. */
@@ -87,12 +88,11 @@ export class CloneEngine implements CloneCoordinator {
       const layout = layoutByPartition.get(part.partitionIndex);
       const offset = layout?.offset ?? part.offset;
       const size = layout?.size;
-      if (size !== undefined && size < part.size) {
-        throw new Error(
-          `Cannot shrink partition ${part.partitionIndex} from ${part.size} to ${size} bytes ` +
-            '(grow-on-restore only supports larger targets)'
-        );
-      }
+      // A smaller size shrinks the NTFS filesystem on the target after the
+      // data write (shrink-on-clone). The engine has no source-disk read
+      // access, so the minimum-size and movability checks are enforced
+      // helper-side (elevated) before any write; an infeasible shrink fails
+      // the job there with the numbers in the message.
       targets.push({
         partitionIndex: part.partitionIndex,
         diskIndex: config.targetDiskIndex,

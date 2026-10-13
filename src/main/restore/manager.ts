@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import { RestoreCoordinator, RestoreJobConfig, mapRestoreJobProgress, summarizeImage, ImageSummary } from '../imaging/restore-engine';
-import { RestoreJobProgress, RestoreJobResult } from '../imaging/imaging-job';
+import { RestoreJob, RestoreJobProgress, RestoreJobResult } from '../imaging/imaging-job';
 import { DiskEnumerator, querySystemDiskIndex } from '../utils/disk-enumerator';
 import { listBitlockerStatus } from '../utils/bitlocker';
 import { sidecarPathFor } from '../utils/bitlocker-capture';
@@ -27,6 +27,9 @@ export interface RestorePreflightResult {
   /** Existing partitions on the target disk that the restore will overwrite. */
   targetDiskPartitionCount?: number;
   targets?: Array<{ partitionIndex: number; offset: number; size: number }>;
+  /** Shrink-on-restore feasibility per smaller target (NTFS), so the UI can
+   *  show the minimum size next to the partition it applies to. */
+  shrinkInfo?: RestoreJob['shrinkInfo'];
   /** Partition-table scheme the restore would write when the layout deviates. */
   writeTableScheme?: string | null;
   /** Engine warnings from the layout/same-disk safety gates. */
@@ -246,6 +249,7 @@ export class RestoreManager extends EventEmitter {
           targetDiskPartitionCount: 0,
           targetFileExists,
           targets,
+          shrinkInfo: job.shrinkInfo,
           writeTableScheme: job.writeTable?.scheme ?? null,
           warnings,
           sameDisk: false,
@@ -277,6 +281,7 @@ export class RestoreManager extends EventEmitter {
         targetDiskModel: targetDisk?.model,
         targetDiskPartitionCount: targetDisk?.partitions.length ?? 0,
         targets,
+        shrinkInfo: job.shrinkInfo,
         writeTableScheme: job.writeTable?.scheme ?? null,
         warnings,
         sameDisk: (job.warnings ?? []).some((w) => w.includes('same disk the image')),

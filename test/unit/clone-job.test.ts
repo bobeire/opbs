@@ -6,6 +6,16 @@ import { runCloneJob, runBackupJob } from '../../src/main/helper/job-runner';
 import { readImageInfo } from '../../src/main/imaging/image-format';
 import { CloneJob, JobResult, CloneJobResult, NativeImagingApi } from '../../src/main/imaging/imaging-job';
 import { buildCanonicalNtfsVolumeData, GR_CLUSTER } from '../helpers/ntfs-resize-fixture';
+import {
+  buildShrinkVolumeData,
+  clusterPattern,
+  SK_CLUSTER,
+  SK_TOTAL_CLUSTERS,
+  SK_TARGET_CLUSTERS,
+  SK_TARGET_SECTORS,
+  SK_USER_LCN,
+  SK_USER_CLUSTERS
+} from '../helpers/ntfs-shrink-fixture';
 
 const TOTAL_CLUSTERS = 64;
 const VOLUME_SIZE = TOTAL_CLUSTERS * GR_CLUSTER;
@@ -92,6 +102,87 @@ describe('runCloneJob', () => {
     expect(result.warnings).toEqual([]);
     // Every byte of the source made it to the target.
     expect(reconstruct(native, VOLUME_SIZE).equals(vol)).toBe(true);
+  });
+
+  it('shrinks an NTFS filesystem onto a smaller target and relocates the tail', async () => {
+    writeJob({
+      type: 'clone',
+      sourceDiskIndex: 0,
+      blockSize: SK_CLUSTER,
+      partitions: [
+        {
+          diskIndex: 0,
+          partitionIndex: 0,
+          size: SK_TOTAL_CLUSTERS * SK_CLUSTER,
+          offset: 0,
+          label: 'P0',
+          readSource: 'physical'
+        }
+      ],
+      targets: [{ partitionIndex: 0, diskIndex: 1, offset: 0, size: SK_TARGET_CLUSTERS * SK_CLUSTER, label: 'P0' }]
+    });
+
+    const vol = buildShrinkVolumeData();
+    const native = bufferNative(vol);
+    await runCloneJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = readResult();
+    expect(result.ok).toBe(true);
+    expect(
+      result.warnings.some((w) => new RegExp(`Shrank filesystem .* to ${SK_TARGET_CLUSTERS * SK_CLUSTER} bytes`).test(w))
+    ).toBe(true);
+
+    // Boot sector: new total sector count written at the partition start.
+    const boot = native.writes.find((w) => w.offset === 0n && w.data.length === 512);
+    expect(boot).toBeDefined();
+    expect(boot!.data.readBigUInt64LE(0x28)).toBe(BigInt(SK_TARGET_SECTORS));
+
+    // Backup boot sector at the new last sector.
+    const backupBoot = native.writes.find(
+      (w) => w.offset === BigInt((SK_TARGET_SECTORS - 1) * 512) && w.data.length === 512
+    );
+    expect(backupBoot).toBeDefined();
+    expect(backupBoot!.data.readBigUInt64LE(0x28)).toBe(BigInt(SK_TARGET_SECTORS));
+
+    // The tail user data is relocated to the free LCN 17 below the boundary.
+    const relocated = Buffer.concat(
+      Array.from({ length: SK_USER_CLUSTERS }, (_v, k) => clusterPattern(SK_USER_LCN + k))
+    );
+    const relocate = native.writes.find((w) => w.offset === BigInt(17 * SK_CLUSTER) && w.data.equals(relocated));
+    expect(relocate).toBeDefined();
+
+    // The tail is NOT written at its original (now out-of-bounds) location.
+    const tailAtOriginal = native.writes.find(
+      (w) => w.offset === BigInt(SK_USER_LCN * SK_CLUSTER) && w.data.equals(relocated)
+    );
+    expect(tailAtOriginal).toBeUndefined();
+  });
+
+  it('fails the clone when the shrink target is below the minimum', async () => {
+    writeJob({
+      type: 'clone',
+      sourceDiskIndex: 0,
+      blockSize: SK_CLUSTER,
+      partitions: [
+        {
+          diskIndex: 0,
+          partitionIndex: 0,
+          size: SK_TOTAL_CLUSTERS * SK_CLUSTER,
+          offset: 0,
+          label: 'P0',
+          readSource: 'physical'
+        }
+      ],
+      targets: [{ partitionIndex: 0, diskIndex: 1, offset: 0, size: 128 * SK_CLUSTER, label: 'P0' }]
+    });
+
+    const vol = buildShrinkVolumeData();
+    const native = bufferNative(vol);
+    await runCloneJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = readResult();
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/cannot shrink/i);
   });
 
   it('skips free-space blocks when usedBlocksOnly is set', async () => {

@@ -95,16 +95,18 @@ describe('CloneEngine.buildJob', () => {
     expect(job.targets[0].offset).toBe(9999999);
   });
 
-  it('refuses to shrink a partition', async () => {
+  it('accepts a smaller target size (shrink-on-clone, feasibility checked helper-side)', async () => {
     const engine = new CloneEngine(createFakeEnumerator());
-    await expect(
-      engine.buildJob({
-        sourceDiskIndex: 0,
-        sourcePartitions: [0],
-        targetDiskIndex: 1,
-        targetLayout: [{ partitionIndex: 0, offset: 1048576, size: 4096 }]
-      })
-    ).rejects.toThrow(/cannot shrink/i);
+    const job = await engine.buildJob({
+      sourceDiskIndex: 0,
+      sourcePartitions: [0],
+      targetDiskIndex: 1,
+      targetLayout: [{ partitionIndex: 0, offset: 1048576, size: 4096 }],
+      acknowledgeLayout: true
+    });
+    // The engine cannot read the source disk, so it only records the smaller
+    // size; the minimum-size and movability checks run in the elevated helper.
+    expect(job.targets[0].size).toBe(4096);
   });
 
   it('guards against cloning onto the source disk (by index) with a custom layout', async () => {

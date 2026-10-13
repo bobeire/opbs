@@ -31,6 +31,15 @@ declare global {
         targetDiskModel?: string;
         targetDiskPartitionCount?: number;
         targets?: Array<{ partitionIndex: number; offset: number; size: number }>;
+        shrinkInfo?: Array<{
+          partitionIndex: number;
+          currentBytes: number;
+          targetBytes: number;
+          minTargetBytes: number;
+          minTargetClusters: number;
+          usedClusters: number;
+          clusterSize: number;
+        }>;
         writeTableScheme?: string | null;
         warnings?: string[];
         sameDisk?: boolean;

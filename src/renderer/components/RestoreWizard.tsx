@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 
 /** VHD/VHDX target state shared by the target step, preflight and start. */
 function virtualDiskFormatFromPath(p: string): 'vhd' | 'vhdx' {
@@ -47,6 +47,15 @@ interface PreflightResult {
   targetDiskModel?: string;
   targetDiskPartitionCount?: number;
   targets?: Array<{ partitionIndex: number; offset: number; size: number }>;
+  shrinkInfo?: Array<{
+    partitionIndex: number;
+    currentBytes: number;
+    targetBytes: number;
+    minTargetBytes: number;
+    minTargetClusters: number;
+    usedClusters: number;
+    clusterSize: number;
+  }>;
   writeTableScheme?: string | null;
   warnings?: string[];
   sameDisk?: boolean;
@@ -113,6 +122,9 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   const [vhdType, setVhdType] = useState<'dynamic' | 'fixed'>('dynamic');
   const vhdSizeEdited = useRef(false);
   const [targetPartitions, setTargetPartitions] = useState<number[]>([]);
+  // Per-partition target size in GB (string so an empty field means "keep the
+  // captured size"). A smaller value shrinks the NTFS filesystem on restore.
+  const [partitionSizesGb, setPartitionSizesGb] = useState<Record<number, string>>({});
   const [applyDeltas, setApplyDeltas] = useState(true);
   const [clearFreeSpace, setClearFreeSpace] = useState(true);
   const [passphrase, setPassphrase] = useState('');
@@ -207,6 +219,26 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
       .catch(() => setImageInfo(null));
   }, [imagePath]);
 
+  // Per-partition target sizes (GB) become a targetLayout override: an entry
+  // is emitted only for a partition whose size field was actually filled in.
+  // Offsets come from the image's captured on-disk offsets so only the size
+  // deviates. Returns undefined when no size was customized (no override).
+  const buildTargetLayout = useCallback(
+    (): Array<{ partitionIndex: number; offset: number; size?: number }> | undefined => {
+      const layout: Array<{ partitionIndex: number; offset: number; size?: number }> = [];
+      for (const p of imageInfo?.partitions ?? []) {
+        if (!targetPartitions.includes(p.index)) continue;
+        const gb = partitionSizesGb[p.index];
+        if (gb === undefined || gb.trim() === '') continue;
+        const bytes = Math.round(Number(gb) * 1024 ** 3);
+        if (!Number.isFinite(bytes) || bytes <= 0) continue;
+        layout.push({ partitionIndex: p.index, offset: p.offsetOnDisk ?? 0, size: bytes });
+      }
+      return layout.length > 0 ? layout : undefined;
+    },
+    [imageInfo, targetPartitions, partitionSizesGb]
+  );
+
   // Dry-run the restore whenever the target selection changes so the user sees
   // the data-loss warning and passphrase requirement BEFORE anything starts.
   useEffect(() => {
@@ -218,11 +250,16 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
         setAcknowledge(false);
         setUnlockNotice(null);
         setUnlockError(null);
+        const targetLayout = buildTargetLayout();
         window.electronAPI
           .restorePreflight({
             imagePath,
             targetPartitions,
             applyDeltas,
+            // A customized per-partition size resizes the filesystem (grow or
+            // shrink) and moves the partition table, so the layout must be
+            // acknowledged — the wizard surfaces that as the destructive ack.
+            ...(targetLayout ? { targetLayout, acknowledgeLayout: true } : {}),
             ...(targetKind === 'vhd'
               ? {
                   targetVirtualDisk: {
@@ -256,7 +293,8 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   }, [
     imagePath,
     targetDiskIndex,
-    targetPartitions.join(','),
+    targetPartitions,
+    buildTargetLayout,
     applyDeltas,
     preflightNonce,
     targetKind,
@@ -343,12 +381,14 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     setRestoreError(null);
 
     try {
+      const targetLayout = buildTargetLayout();
       const result = (await window.electronAPI.startRestore({
         imagePath,
         targetPartitions,
         verifyBeforeWrite: true,
         applyDeltas,
         clearFreeSpace,
+        ...(targetLayout ? { targetLayout, acknowledgeLayout: true } : {}),
         ...(targetKind === 'vhd'
           ? {
               targetVirtualDisk: {
@@ -592,31 +632,69 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                 <div className="partition-selection">
                   <h3>Select Partitions to Restore</h3>
                   <div className="partition-list">
-                    {imageInfo?.partitions.map((partition: any) => (
-                      <label key={partition.index} className="partition-item">
-                        <input
-                          type="checkbox"
-                          checked={targetPartitions.includes(partition.index)}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setTargetPartitions([...targetPartitions, partition.index]);
-                            } else {
-                              setTargetPartitions(
-                                targetPartitions.filter((p) => p !== partition.index)
-                              );
-                            }
-                          }}
-                        />
-                        <span className="partition-info">
-                          Partition {partition.index}
-                          {' - '}
-                          {formatSize(partition.size)}
-                          {' ('}
-                          {partition.fsType}
-                          {')'}
-                        </span>
-                      </label>
-                    ))}
+                    {imageInfo?.partitions.map((partition: any) => {
+                      const selected = targetPartitions.includes(partition.index);
+                      const shrink = preflight?.shrinkInfo?.find(
+                        (s) => s.partitionIndex === partition.index
+                      );
+                      return (
+                        <div key={partition.index} className="partition-item">
+                          <label className="partition-select">
+                            <input
+                              type="checkbox"
+                              checked={selected}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setTargetPartitions([...targetPartitions, partition.index]);
+                                } else {
+                                  setTargetPartitions(
+                                    targetPartitions.filter((p) => p !== partition.index)
+                                  );
+                                  // Drop the size override with the selection.
+                                  setPartitionSizesGb((prev) => {
+                                    const next = { ...prev };
+                                    delete next[partition.index];
+                                    return next;
+                                  });
+                                }
+                              }}
+                            />
+                            <span className="partition-info">
+                              Partition {partition.index}
+                              {' - '}
+                              {formatSize(partition.size)}
+                              {' ('}
+                              {partition.fsType}
+                              {')'}
+                            </span>
+                          </label>
+                          {selected && partition.fsType === 'NTFS' && (
+                            <span className="partition-size">
+                              <input
+                                type="number"
+                                min={0}
+                                step="any"
+                                placeholder={formatSize(partition.size)}
+                                title="Target size in GB. Leave empty to keep the captured size; a smaller value shrinks the NTFS filesystem."
+                                value={partitionSizesGb[partition.index] ?? ''}
+                                onChange={(e) =>
+                                  setPartitionSizesGb((prev) => ({
+                                    ...prev,
+                                    [partition.index]: e.target.value
+                                  }))
+                                }
+                              />
+                              <span className="field-hint">GB</span>
+                              {shrink && (
+                                <span className="field-hint">
+                                  (min {formatSize(shrink.minTargetBytes)})
+                                </span>
+                              )}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}

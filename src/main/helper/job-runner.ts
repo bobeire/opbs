@@ -2262,7 +2262,17 @@ export async function runCloneJob(
 
   const warnings: string[] = [...(job.warnings ?? [])];
   const blockSize = job.blockSize > 0 ? job.blockSize : DEFAULT_BLOCK_SIZE;
-  const totalBytes = job.partitions.reduce((sum, p) => sum + p.size, 0);
+  // Progress denominator: a shrunk target writes fewer bytes than its source
+  // partition (the tail beyond the new boundary is skipped), so count the
+  // clamped size for those targets.
+  const effectiveSizeByPartition = new Map(job.partitions.map((p) => [p.partitionIndex, p.size]));
+  for (const t of job.targets) {
+    const sourceSize = effectiveSizeByPartition.get(t.partitionIndex);
+    if (sourceSize !== undefined && t.size !== undefined && t.size < sourceSize) {
+      effectiveSizeByPartition.set(t.partitionIndex, t.size);
+    }
+  }
+  const totalBytes = [...effectiveSizeByPartition.values()].reduce((sum, size) => sum + size, 0);
 
   let bytesWritten = 0;
   let blocksWritten = 0;
@@ -2353,6 +2363,50 @@ export async function runCloneJob(
   }
 
   try {
+    // NTFS shrink-on-clone: plan every smaller target against the live source
+    // before writing anything, so an infeasible shrink (too small, unmovable
+    // streams, dirty bitmap) fails fast with the numbers in the message. The
+    // reader is a structural PartitionReader over the source device (physical
+    // drive or VSS snapshot) — the same shape the used-blocks scan uses.
+    const shrinkPlans = new Map<number, { plan: NtfsShrinkPlan; reader: PartitionReader }>();
+    for (const target of job.targets) {
+      if (target.size === undefined) {
+        continue;
+      }
+      const part = job.partitions.find((p) => p.partitionIndex === target.partitionIndex);
+      if (!part || target.size >= part.size) {
+        continue;
+      }
+      const src = resolveSource(part);
+      const reader: PartitionReader = {
+        size: part.size,
+        read: (offset: number, length: number) =>
+          Buffer.from(native.readBlocks(src.device, src.baseOffset + BigInt(offset), BigInt(length)))
+      };
+      try {
+        const plan = planNtfsShrink(reader, Math.floor(target.size / SECTOR_SIZE));
+        shrinkPlans.set(target.partitionIndex, { plan, reader });
+      } catch (error) {
+        throw new Error(`Cannot shrink ${target.label} to ${target.size} bytes: ${errorMessage(error)}`, {
+          cause: error
+        });
+      }
+    }
+
+    const writeRaw = async (devicePath: string, offset: bigint, data: Buffer, what: string): Promise<void> => {
+      try {
+        await writeRawWithRetry(() => {
+          if (native.writeBlocksAsync) {
+            return native.writeBlocksAsync(devicePath, offset, data);
+          }
+          native.writeBlocks(devicePath, offset, data);
+          return undefined;
+        });
+      } catch (error) {
+        throw new Error(`${what}: ${errorMessage(error)}`, { cause: error });
+      }
+    };
+
     // Dissimilar clone: lay the fresh partition table before writing contents.
     if (job.writeTable && native.buildPartitionTable) {
       if (isCancelled()) {
@@ -2424,6 +2478,7 @@ export async function runCloneJob(
         }
       }
 
+      const shrinkBoundaryBytes = target.size !== undefined && target.size < part.size ? target.size : undefined;
       const blockCount = Math.ceil(part.size / blockSize);
       for (let b = 0; b < blockCount; b++) {
         if (isCancelled()) {
@@ -2431,6 +2486,15 @@ export async function runCloneJob(
         }
 
         const offset = BigInt(b * blockSize);
+        const blockStart = b * blockSize;
+        // Shrink clamp: blocks at or beyond the new boundary are never written
+        // here (the captured tail is either free space or relocated below the
+        // boundary by the post-write shrink apply). A straddling block is
+        // truncated to the boundary below.
+        if (shrinkBoundaryBytes !== undefined && blockStart >= shrinkBoundaryBytes) {
+          continue;
+        }
+
         const remaining = part.size - b * blockSize;
         const readLength = BigInt(Math.min(blockSize, remaining));
 
@@ -2450,6 +2514,12 @@ export async function runCloneJob(
           continue;
         }
 
+        // Shrink clamp: a block straddling the boundary writes only up to it.
+        let buf = raw;
+        if (shrinkBoundaryBytes !== undefined && blockStart + raw.length > shrinkBoundaryBytes) {
+          buf = raw.subarray(0, shrinkBoundaryBytes - blockStart);
+        }
+
         // A transient write failure (device re-enumeration right after the
         // early table rescan, USB hiccup) must not silently drop a block:
         // retry before giving up, and always surface it as a warning.
@@ -2462,7 +2532,7 @@ export async function runCloneJob(
             }
           }
           try {
-            native.writeBlocks(targetDevice, BigInt(target.offset) + offset, raw);
+            native.writeBlocks(targetDevice, BigInt(target.offset) + offset, buf);
             writeError = null;
             break;
           } catch (error) {
@@ -2477,8 +2547,8 @@ export async function runCloneJob(
         }
 
         blocksWritten++;
-        bytesWritten += raw.length;
-        progress.bytesDone += raw.length;
+        bytesWritten += buf.length;
+        progress.bytesDone += buf.length;
         const elapsedSec = (Date.now() - start) / 1000;
         progress.speed = elapsedSec > 0 ? progress.bytesDone / elapsedSec : 0;
 
@@ -2517,6 +2587,88 @@ export async function runCloneJob(
         } catch (error) {
           warnings.push(`Could not grow filesystem on ${target.label} to ${target.size} bytes: ${errorMessage(error)}`);
         }
+      } else if (target.size !== undefined && target.size < part.size) {
+        // NTFS shrink-on-clone: the plan was computed (and validated) before
+        // the partition table was written, so an infeasible shrink already
+        // failed fast. Apply order is crash-safe: boot sector first (the
+        // volume never advertises a size larger than the partition), then the
+        // relocated data clusters (read from the live source), then the
+        // patched MFT records, then the $Bitmap regions. Unlike grow, a
+        // failed shrink fails the clone.
+        const shrink = shrinkPlans.get(target.partitionIndex);
+        if (!shrink) {
+          throw new Error(`Internal: missing shrink plan for ${target.label}`);
+        }
+        const { plan, reader } = shrink;
+        if (isCancelled()) {
+          throw new CancelledError();
+        }
+        progress.currentPartition = `${target.label}: shrinking`;
+        writeProgress('writing');
+        // 1. Boot sector, plus NTFS's backup copy at the new last sector.
+        await writeRaw(
+          targetDevice,
+          BigInt(target.offset),
+          plan.bootSector,
+          `Shrink boot-sector write failed on ${target.label}`
+        );
+        await writeRaw(
+          targetDevice,
+          BigInt(target.offset) + BigInt((plan.newTotalSectors - 1) * SECTOR_SIZE),
+          plan.bootSector,
+          `Shrink backup boot-sector write failed on ${target.label}`
+        );
+        // 2. Relocate data clusters that lived at/above the old boundary down
+        //    into their planned destinations, reading each from the live source
+        //    (the data phase skipped them, so the source is the only copy).
+        for (const move of plan.moves) {
+          if (isCancelled()) {
+            throw new CancelledError();
+          }
+          const bytes = reader.read(move.srcCluster * plan.clusterSize, move.clusterCount * plan.clusterSize);
+          await writeRaw(
+            targetDevice,
+            BigInt(target.offset) + BigInt(move.dstCluster * plan.clusterSize),
+            bytes,
+            `Shrink relocation write failed on ${target.label} (LCN ${move.srcCluster} -> ${move.dstCluster})`
+          );
+          bytesWritten += bytes.length;
+          progress.bytesDone += bytes.length;
+          const elapsedSec = (Date.now() - start) / 1000;
+          progress.speed = elapsedSec > 0 ? progress.bytesDone / elapsedSec : 0;
+          if (Date.now() - lastProgressWrite > 100) {
+            writeProgress('writing');
+          }
+        }
+        // 3. Patched MFT records (runlists now point at the relocated clusters).
+        for (const patch of plan.recordPatches) {
+          if (isCancelled()) {
+            throw new CancelledError();
+          }
+          await writeRaw(
+            targetDevice,
+            BigInt(target.offset) + BigInt(patch.relativeOffset),
+            patch.data,
+            `Shrink MFT patch write failed on ${target.label} (record ${patch.recordNumber})`
+          );
+        }
+        // 4. $Bitmap regions: destination clusters marked used, sizes truncated.
+        for (const region of plan.bitmapRegions) {
+          if (isCancelled()) {
+            throw new CancelledError();
+          }
+          await writeRaw(
+            targetDevice,
+            BigInt(target.offset) + BigInt(region.relativeOffset),
+            region.data,
+            `Shrink $Bitmap write failed on ${target.label}`
+          );
+        }
+        warnings.push(
+          `Shrank filesystem on ${target.label} from ${part.size} to ${target.size} bytes ` +
+            `(${plan.oldTotalClusters} -> ${plan.newTotalClusters} clusters, ${plan.moves.length} relocation(s), ` +
+            `${plan.relocatedBytes} bytes moved)`
+        );
       }
 
       targetsRestored++;

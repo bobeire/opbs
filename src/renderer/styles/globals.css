@@ -486,6 +486,27 @@ body {
   font-size: 0.9rem;
 }
 
+.partition-select {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.partition-size {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.partition-size input[type="number"] {
+  width: 110px;
+  padding: 4px 6px;
+}
+
 /* Destination Selector */
 .destination-selector {
   margin-bottom: 20px;
