@@ -208,7 +208,7 @@ Commands:
                                          base image must still be present. Missing delta
                                          bases (silent deletes) are reported per chain and
                                          the command exits 1 when any chain is broken.
-  compact <image> [--remove-source] [--dry-run]
+  compact <image> [--remove-source] [--dry-run] [--repo-keyfile <file>] [--repo-passphrase <p>]
                                          Compact a delta chain into a single new image.
                                          Any chain member names the whole chain. The
                                          composed (newest-wins) blocks are relocated into
@@ -1583,17 +1583,24 @@ async function cmdCompact(ctx: CommandContext): Promise<number> {
   const imagePath = ctx.argv[0];
   if (!imagePath) {
     console.error(
-      'Usage: compact <image> [--remove-source] [--dry-run] [--json] [--passphrase-file <file>]'
+      'Usage: compact <image> [--remove-source] [--dry-run] [--json] [--passphrase-file <file>] ' +
+        '[--repo-keyfile <file>] [--repo-passphrase <p>]'
     );
     return 1;
   }
   const removeSource = ctx.argv.includes('--remove-source');
   const dryRun = ctx.argv.includes('--dry-run');
   const passphrase = resolvePassphrase(ctx.argv).value;
+  const repoKey: { passphrase?: string; keyfile?: string } = {};
+  const repoPassphrase = flagValue(ctx.argv, '--repo-passphrase');
+  if (repoPassphrase) repoKey.passphrase = repoPassphrase;
+  const repoKeyfile = flagValue(ctx.argv, '--repo-keyfile');
+  if (repoKeyfile) repoKey.keyfile = repoKeyfile;
 
   const result = await compactChain({
     imagePath,
     passphrase,
+    ...(Object.keys(repoKey).length > 0 ? { repoKey } : {}),
     removeSource,
     dryRun,
     onProgress: ctx.opts.json

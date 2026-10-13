@@ -260,8 +260,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     };
   },
   // Chain compaction
-  compactChain: (imagePath: string, options?: { removeSource?: boolean; dryRun?: boolean; passphrase?: string }) =>
-    ipcRenderer.invoke('compact-chain', imagePath, options),
+  compactChain: (
+    imagePath: string,
+    options?: {
+      removeSource?: boolean;
+      dryRun?: boolean;
+      passphrase?: string;
+      repoKey?: { passphrase?: string; keyfile?: string };
+    }
+  ) => ipcRenderer.invoke('compact-chain', imagePath, options),
   cancelCompact: () => ipcRenderer.invoke('cancel-compact'),
   onCompactProgress: (callback: (progress: {
     phase: 'composing' | 'copying' | 'verifying' | 'finalizing';

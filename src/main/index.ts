@@ -1128,7 +1128,12 @@ function setupIpcHandlers(): void {
     async (
       event,
       imagePath: string,
-      options?: { removeSource?: boolean; dryRun?: boolean; passphrase?: string }
+      options?: {
+        removeSource?: boolean;
+        dryRun?: boolean;
+        passphrase?: string;
+        repoKey?: { passphrase?: string; keyfile?: string };
+      }
     ) => {
       if (!imagePath) {
         throw new Error('No image given');
@@ -1139,6 +1144,8 @@ function setupIpcHandlers(): void {
         passphrase: options?.passphrase,
         removeSource: options?.removeSource,
         dryRun: options?.dryRun,
+        repoKey: options?.repoKey,
+        s3Profile: s3ProfileFromSettings() ?? undefined,
         shouldCancel: () => compactCancelRequested,
         onProgress: (progress) => {
           try {

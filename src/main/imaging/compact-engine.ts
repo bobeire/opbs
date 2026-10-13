@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import * as os from 'os';
 import {
   ImageHeader,
   ImageInfo,
@@ -29,7 +30,20 @@ import {
 } from './image-format';
 import { frameLength, buildParityAsync, paritySidecarPath } from './parity';
 import { detectMacriumFormat } from './mrimg';
-import { isRepository } from './repository';
+import {
+  isRepository,
+  loadHeader,
+  loadJournal,
+  verifyChain,
+  verifySignatures,
+  resolveRepoKey,
+  repoImageStates,
+  recordImageCreate,
+  pruneSpecificImages,
+  RepoHeader,
+  RepoKeyOptions
+} from './repository';
+import type { S3Config } from '../utils/s3';
 import { writeManifest } from '../backup/retention';
 import { detectFilesystemType, getMaxVolumeSizeForFs } from '../utils/location';
 import {
@@ -117,6 +131,14 @@ export interface CompactOptions {
    * 0 forces a single file.
    */
   maxVolumeSize?: number;
+  /**
+   * Repository journal signing key for chains inside a repository's
+   * `images/` directory (passphrase-keyed repos, or a keyfile outside the
+   * default key dir). Keyfile repos in the default dir resolve automatically.
+   */
+  repoKey?: RepoKeyOptions;
+  /** S3 profile for the repository's remote mirror (create upload / prune delete). */
+  s3Profile?: Partial<S3Config>;
 }
 
 export interface ComposedBlock {
@@ -175,9 +197,6 @@ function chainRefusal(
   if (detectMacriumFormat(members[0].path)) {
     return 'Macrium Reflect containers cannot be compacted';
   }
-  if (isRepositoryMember(members[0].path)) {
-    return 'repository images are compacted through the repository journal (not supported yet)';
-  }
   if (members.length < 2) {
     return 'this chain has a single member; nothing to compact';
   }
@@ -201,6 +220,116 @@ function chainRefusal(
     return 'this chain is encrypted; a passphrase is required';
   }
   return undefined;
+}
+
+/** Signed-journal context for a repository chain (prepared by the gate). */
+interface RepositoryCompactContext {
+  repoDir: string;
+  header: RepoHeader;
+  /** Journal signing key; null on dry runs (no key needed to report a plan). */
+  key: Buffer | null;
+}
+
+/** Cache root used for S3-hosted repositories (see repo-s3.ts). */
+function s3RepoCacheRoot(): string {
+  return process.env.OPBS_REPO_CACHE_DIR || path.join(os.homedir(), '.opbs', 'cache', 'repos');
+}
+
+/**
+ * Repository gate: chain members inside a repository's `images/` directory are
+ * compacted as a signed journal operation — a `create` record for the new
+ * image plus (with remove-source) one `prune` record per old member, using
+ * the same eligibility rules and deltas-first ordering as `repo prune`.
+ * Returns a refusal message when the journal, key, chain links or lock
+ * windows do not allow the operation.
+ */
+function prepareRepositoryCompaction(
+  members: Array<{ path: string; info: ImageInfo }>,
+  options: CompactOptions,
+  needKey: boolean
+): { refusal?: string; ctx?: RepositoryCompactContext } {
+  const first = path.resolve(members[0].path);
+  const repoDir = path.dirname(path.dirname(first));
+  if (!isRepository(repoDir)) {
+    return { refusal: 'chain members are not inside a repository images/ directory' };
+  }
+  // S3-hosted repositories work against a hydrated cache whose journal is
+  // flushed by the session — appending from here would never reach the bucket,
+  // and staged volumes are deleted on flush.
+  const cacheRoot = path.resolve(s3RepoCacheRoot());
+  if (path.resolve(repoDir).startsWith(cacheRoot + path.sep)) {
+    return {
+      refusal: 'S3-hosted repository images are compacted through a repository session (not supported yet)'
+    };
+  }
+  for (const member of members) {
+    const resolved = path.resolve(member.path);
+    if (!isRepositoryMember(resolved) || path.dirname(path.dirname(resolved)) !== repoDir) {
+      return { refusal: 'every chain member must live in the same repository images/ directory' };
+    }
+  }
+
+  let header: RepoHeader;
+  let records: ReturnType<typeof loadJournal>;
+  try {
+    header = loadHeader(repoDir);
+    records = loadJournal(repoDir);
+  } catch (e) {
+    return { refusal: `unreadable repository journal: ${errText(e)}` };
+  }
+  const chainError = verifyChain(records);
+  if (chainError) {
+    return { refusal: `repository journal chain is broken: ${chainError}` };
+  }
+
+  let key: Buffer | null = null;
+  if (needKey) {
+    try {
+      key = resolveRepoKey(header, options.repoKey ?? {});
+    } catch (e) {
+      return { refusal: `repository key unavailable: ${errText(e)}` };
+    }
+    const sigError = verifySignatures(records, key);
+    if (sigError) {
+      return { refusal: `repository journal signature check failed: ${sigError}` };
+    }
+  }
+
+  // Every member must be an active journal image whose base links match the
+  // file chain (root first, each delta linked to its predecessor).
+  const active = new Map(repoImageStates(records).filter((s) => s.active).map((s) => [s.name, s]));
+  for (let i = 0; i < members.length; i++) {
+    const name = path.basename(members[i].path);
+    const state = active.get(name);
+    if (!state) {
+      return { refusal: `${name} is not an active image in the repository journal` };
+    }
+    if (i === 0) {
+      if (state.base) {
+        return { refusal: `journal says ${name} is a delta of ${state.base}, but the file chain starts there` };
+      }
+    } else if (state.base !== path.basename(members[i - 1].path)) {
+      return {
+        refusal: `journal base mismatch for ${name} (expected ${path.basename(members[i - 1].path)}, journal says ${state.base ?? 'no base'})`
+      };
+    }
+  }
+
+  // Remove-source is a prune of the whole chain: every member must satisfy
+  // the same eligibility rule as `repo prune` (expired lock or unlocked).
+  if (options.removeSource) {
+    const locked = [...active.values()].filter(
+      (s) => members.some((m) => path.basename(m.path) === s.name) && !s.expired && !s.unlocked
+    );
+    if (locked.length > 0) {
+      const hint = locked.map((s) => `${s.name} (locked until ${s.lockUntil ?? 'unknown'})`).join(', ');
+      return {
+        refusal: `repository images are immutable until unlocked or expired: ${hint} — run 'repo unlock' first`
+      };
+    }
+  }
+
+  return { ctx: { repoDir, header, key } };
 }
 
 function memberOwnFrameBytes(members: Array<{ path: string; info: ImageInfo }>): number[] {
@@ -353,13 +482,32 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
   emit('composing', 0, 1, 0, 1);
   const rootHeader = members[0].info.header;
   const encrypted = rootHeader.cipherId !== CIPHER_NONE;
-  const refusal = chainRefusal(members, encrypted, options.passphrase);
+  // The repository gate runs first: it decides where the output may live and
+  // whether the journal can be appended at all, before chain-level checks.
+  let refusal: string | undefined;
+  let repoCtx: RepositoryCompactContext | null = null;
+  if (isRepositoryMember(members[0].path)) {
+    const gate = prepareRepositoryCompaction(members, options, !options.dryRun);
+    refusal = gate.refusal;
+    repoCtx = gate.ctx ?? null;
+  }
+  if (!refusal) {
+    refusal = chainRefusal(members, encrypted, options.passphrase);
+  }
   const composed = refusal ? new Map<string, ComposedBlock>() : composeChainBlocks(members);
   const plan = buildPlan(members, composed, encrypted, refusal);
 
   const finalPath = options.outputPath ?? defaultCompactPath(members[0].path);
-  if (!refusal && path.resolve(finalPath) === path.resolve(members[0].path)) {
+  if (!plan.refusal && path.resolve(finalPath) === path.resolve(members[0].path)) {
     plan.refusal = 'the output path must not be a chain member';
+  }
+  if (!plan.refusal && repoCtx) {
+    // The journal only knows about files in images/ — an output anywhere
+    // else could never be recorded (or pruned) correctly.
+    const imagesDirPath = path.resolve(path.join(repoCtx.repoDir, 'images'));
+    if (path.resolve(path.dirname(finalPath)) !== imagesDirPath) {
+      plan.refusal = `repository compaction output must stay inside ${imagesDirPath}`;
+    }
   }
   if (!plan.refusal && !options.dryRun) {
     const existing = existingOutputVolumes(finalPath);
@@ -691,6 +839,34 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
       }
     }
 
+    if (repoCtx) {
+      // Journal the new image before parity/prune: recordImageCreate mirrors
+      // any remote copy first, then appends the signed `create` record and
+      // protects the files (mirror-first ordering — a failed upload must
+      // never leave a journaled image without its remote copy). If nothing
+      // reached the journal, roll the renamed files back out.
+      if (!repoCtx.key) {
+        throw new Error('repository key missing for journal write');
+      }
+      try {
+        await recordImageCreate(repoCtx.repoDir, repoCtx.header, repoCtx.key, finalPath, {
+          ...(options.s3Profile ? { s3Profile: options.s3Profile } : {})
+        });
+      } catch (e) {
+        const journaled = loadJournal(repoCtx.repoDir).some(
+          (r) => r.type === 'create' && r.image === path.basename(finalPath)
+        );
+        if (!journaled) {
+          const rollback = [...volumeFilesOf(finalPath), `${finalPath}.usn`, sidecarPathFor(finalPath)];
+          for (const file of rollback) {
+            try { fs.rmSync(file, { force: true }); } catch { /* best-effort rollback */ }
+          }
+          throw new Error(`could not record the compacted image in the repository journal: ${errText(e)}`, { cause: e });
+        }
+        warnings.push(`compacted image journaled but post-record setup failed: ${errText(e)}`);
+      }
+    }
+
     // Fresh parity for the new image, best-effort (same as post-backup).
     try {
       await buildParityAsync(finalPath);
@@ -700,7 +876,37 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
 
     // Source removal: newest-delta-first, root last (leaf-first like retention).
     const sourcesRemoved: string[] = [];
-    if (options.removeSource) {
+    if (options.removeSource && repoCtx) {
+      // One signed prune record per member through the repository journal,
+      // deltas first — the same ordering and per-image sequence as
+      // `repo prune`. Stop at the first failure so no live delta is ever
+      // left without its base.
+      if (!repoCtx.key) {
+        throw new Error('repository key missing for prune records');
+      }
+      const repoKey = repoCtx.key;
+      const removeOpts = { ...(options.s3Profile ? { s3Profile: options.s3Profile } : {}) };
+      for (const member of [...members].reverse()) {
+        const name = path.basename(member.path);
+        try {
+          await pruneSpecificImages(repoCtx.repoDir, [name], repoKey, removeOpts);
+        } catch (e) {
+          warnings.push(`could not remove source ${name}: ${errText(e)} — removal stopped`);
+          break;
+        }
+        // Journaled volumes (.usn, BitLocker sidecar, volumes) are already
+        // gone; unjournaled leftovers (parity, resume metadata) are not in
+        // the journal, so clear them best-effort.
+        for (const file of [
+          ...volumeFilesOf(member.path),
+          `${member.path}.volumes.json`,
+          paritySidecarPath(member.path)
+        ]) {
+          try { fs.rmSync(file, { force: true }); } catch { /* best-effort */ }
+        }
+        sourcesRemoved.push(member.path);
+      }
+    } else if (options.removeSource) {
       for (const memberPath of [...members].reverse().map((m) => m.path)) {
         try {
           for (const volume of volumeFilesOf(memberPath)) {
@@ -725,11 +931,14 @@ export async function compactChain(options: CompactOptions): Promise<CompactResu
 
     // Record the new image (and the removed sources) so the tamper manifest
     // stays accurate — same write the CLI backup and retention do. Runs after
-    // remove-source so deleted members are not listed.
-    try {
-      await writeManifest(path.dirname(finalPath));
-    } catch (e) {
-      warnings.push(`could not update the backup manifest: ${errText(e)}`);
+    // remove-source so deleted members are not listed. Repository images are
+    // covered by the signed journal instead; retention never touches repos.
+    if (!repoCtx) {
+      try {
+        await writeManifest(path.dirname(finalPath));
+      } catch (e) {
+        warnings.push(`could not update the backup manifest: ${errText(e)}`);
+      }
     }
 
     logger.info(

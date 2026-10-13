@@ -1166,9 +1166,10 @@ implemented; **Investigate** items need spike work first.
   a Dashboard "Compact chains" action (Backup Integrity panel, keeps
   sources — retention ages them out) complete the GUI surface; concurrent
   compactions are refused cleanly.
-- **Refused in v1**: Macrium containers, repository members (immutable
-  signed journal — Phase 2), cloud destinations (Phase 2: stage via the new
-  `cloud-restore`, compact locally, upload, prune).
+- **Refused in v1**: Macrium containers, cloud destinations (Phase 2: stage
+  via the new `cloud-restore`, compact locally, upload, prune). Repository
+  members were refused until Phase 2; they now compact through the signed
+  journal (see below).
 - **Phase 2**: multi-volume output — ✅ done 2026-10-12: the compaction
   writer rolls frames into `.001`/`.002`… volumes at the destination
   filesystem's per-file limit (FAT32 → 3.9 GB auto-detected, same helper as
@@ -1179,25 +1180,44 @@ implemented; **Investigate** items need spike work first.
   (readImageInfo redirects to the last); FLAG_VERIFIED is patched on every
   volume because readImageInfo returns the last volume's header; side volumes
   are renamed before the base so the base file marks a complete set; and the
-  output-collision refusal also catches orphan `.001` leftovers. Also:
-  repository compaction as a signed
-  journal operation (create-compact + prune records, using the repository's
-  existing root-eligibility ordering); S3/SFTP/FTP chains end-to-end; and the
-  parity/scrub multi-volume gap this design pass noticed (`.opar` building
-  and `classifyImage` open only `imagePath` while multi-volume
-  `BlockRecord.fileOffset` is volume-relative — verify/restore volume-route
-  correctly, parity does not) — ✅ fixed 2026-10-12: sidecar v2 stores each
-  member's `volumeIndex` (v1 sidecars still parse), and `buildParity`,
-  `verifyParity`, `repairParityBlock` and `classifyImage` route every frame
-  read through the volume file the block lives in — repair rewrites the
-  recovered frame inside its own volume, never the base file.
+  output-collision refusal also catches orphan `.001` leftovers.
+  - ✅ **Repository compaction as a signed journal operation (done
+    2026-10-13)**: `compactChain` routes repository members through a
+    structured gate before any chain check — same repository, readable +
+    signature-verified journal, every member active with base links matching
+    the file chain, and (for `--remove-source`) every member eligible under
+    the same expired-or-unlocked rule as `repo prune`. Output must stay
+    inside `images/`, the compacted image is journaled with a signed create
+    (mirror-first when an S3 profile is present, rolled back if the journal
+    write fails), sources are removed via per-member signed prune records
+    deltas-first stopping at the first failure, and the tamper manifest is
+    skipped for repositories (the journal is the authority). CLI
+    `--repo-keyfile`/`--repo-passphrase` (separate from the image
+    passphrase), IPC passes the repo key + S3 profile; cache-hydrated S3
+    repositories are refused (their journal lives with the session).
+  - ☐ **S3/SFTP/FTP chains end-to-end** (pending — stage via `cloud-restore`,
+    compact locally, upload, prune).
+  - ✅ **parity/scrub multi-volume gap (fixed 2026-10-12)**: `.opar` building
+    and `classifyImage` opened only `imagePath` while multi-volume
+    `BlockRecord.fileOffset` is volume-relative (verify/restore volume-route
+    correctly, parity did not) — sidecar v2 stores each member's
+    `volumeIndex` (v1 sidecars still parse), and `buildParity`,
+    `verifyParity`, `repairParityBlock` and `classifyImage` route every
+    frame read through the volume the block lives in — repair rewrites the
+    recovered frame inside its own volume, never the base file.
 - **Tests**: composition map (newest-wins, sparse gaps, multi-hop),
   copy-mode round-trip (per-block equality against `ChainPartitionReader`
   over the original chain), encrypted re-encode with per-member salts,
   refusal matrix, remove-source ordering + sidecar carry, USN continuity
   (next delta after compaction still skips unchanged blocks), free-space and
   crash-simulation (mid-write kill leaves no final artifact, sweep cleans
-  the temp dir), plus a restore-to-VHD byte-compare of pre- vs
+  the temp dir), multi-volume output (frame-boundary rolls, cross-volume
+  verify, orphan-side refusal), repository journal flow (`repo-compact`:
+  signed create alongside a locked chain, lock/eligibility refusal, unlock →
+  deltas-first signed prunes with signature-chain re-verification, output
+  outside `images/` and missing-key refusals), multi-volume parity/scrub
+  (build → corrupt `.001` → repair → exact-byte compare, v1 sidecar parse),
+  plus a restore-to-VHD byte-compare of pre- vs
   post-compaction chains.
 
 ### Self-healing verification / read-scrub

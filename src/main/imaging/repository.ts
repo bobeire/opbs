@@ -1019,45 +1019,87 @@ export async function pruneRepository(
   // Delete deltas before roots so partial failure never orphans a live delta.
   const ordered = [...eligible].sort((a, b) => (byName.get(a.name)?.base ? 0 : 1) - (byName.get(b.name)?.base ? 0 : 1));
   for (const entry of ordered) {
-    const creates = records.filter((r) => r.type === 'create' && r.image === entry.name);
-    const volumes = creates[creates.length - 1]?.volumes ?? [];
-    // Remote copy first: if Object Lock still refuses the delete, the image
-    // stays fully intact (local files untouched, journal record untouched).
-    if (header.remote && volumes.length > 0) {
-      const store = remoteStore(header.remote, opts.s3Profile);
-      await deleteRemoteVolumes(
-        store,
-        volumes.map((v) => v.name)
-      );
-    }
-    // S3-hosted repositories have no local copies to remove — the remote
-    // delete above already was the real one.
-    if (!opts.remoteOnly) {
-      const files = volumes.map((v) => path.join(imagesDir(repoDir), v.name));
-      await unprotectFiles(files);
-      for (const file of files) {
-        try {
-          fs.unlinkSync(file);
-        } catch (error) {
-          throw new Error(`Failed to delete ${file}`, { cause: error });
-        }
-      }
-    }
-    const current = loadJournal(repoDir);
-    appendJournalRecord(
-      repoDir,
-      {
-        seq: nextSeq(current),
-        type: 'prune',
-        at: new Date().toISOString(),
-        image: entry.name,
-        prev: prevSig(current)
-      },
-      keyBuf
-    );
+    await removeImageFilesAndRecord(repoDir, header, records, entry.name, keyBuf, opts);
     removed.push(entry);
   }
   return { dryRun: false, eligible, skipped, removed };
+}
+
+/**
+ * Remove one image: remote delete (mirrored repos), OS-protection removal,
+ * file unlink, then one signed prune record. `records` is the journal
+ * snapshot used to look up the image's volume list; the prune record itself
+ * is appended against a freshly reloaded journal (same ordering as the prune
+ * command). Throws on local unlink failure so the journal never claims a
+ * prune whose files remain.
+ */
+async function removeImageFilesAndRecord(
+  repoDir: string,
+  header: RepoHeader,
+  records: JournalRecord[],
+  name: string,
+  key: Buffer,
+  opts: { s3Profile?: Partial<S3Config>; remoteOnly?: boolean } = {}
+): Promise<void> {
+  const creates = records.filter((r) => r.type === 'create' && r.image === name);
+  const volumes = creates[creates.length - 1]?.volumes ?? [];
+  // Remote copy first: if Object Lock still refuses the delete, the image
+  // stays fully intact (local files untouched, journal record untouched).
+  if (header.remote && volumes.length > 0) {
+    const store = remoteStore(header.remote, opts.s3Profile);
+    await deleteRemoteVolumes(
+      store,
+      volumes.map((v) => v.name)
+    );
+  }
+  // S3-hosted repositories have no local copies to remove — the remote
+  // delete above already was the real one.
+  if (!opts.remoteOnly) {
+    const files = volumes.map((v) => path.join(imagesDir(repoDir), v.name));
+    await unprotectFiles(files);
+    for (const file of files) {
+      try {
+        fs.unlinkSync(file);
+      } catch (error) {
+        throw new Error(`Failed to delete ${file}`, { cause: error });
+      }
+    }
+  }
+  const current = loadJournal(repoDir);
+  appendJournalRecord(
+    repoDir,
+    {
+      seq: nextSeq(current),
+      type: 'prune',
+      at: new Date().toISOString(),
+      image: name,
+      prev: prevSig(current)
+    },
+    key
+  );
+}
+
+/**
+ * Remove specific images from the repository (one signed prune record each).
+ * Callers are responsible for chain/signature verification and for passing
+ * only images that are already eligible to go; order names deltas-first so a
+ * partial run never leaves a live delta without its base — the same ordering
+ * `pruneRepository` uses.
+ */
+export async function pruneSpecificImages(
+  repoDir: string,
+  names: string[],
+  key: Buffer,
+  opts: { s3Profile?: Partial<S3Config>; remoteOnly?: boolean } = {}
+): Promise<string[]> {
+  const header = loadHeader(repoDir);
+  const records = loadJournal(repoDir);
+  const removed: string[] = [];
+  for (const name of names) {
+    await removeImageFilesAndRecord(repoDir, header, records, name, key, opts);
+    removed.push(name);
+  }
+  return removed;
 }
 
 /** Explicitly unlock image(s): audited journal record + remove OS protection. */

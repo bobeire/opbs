@@ -395,7 +395,12 @@ declare global {
       onRepoProgress: (callback: (progress: { message: string }) => void) => () => void;
       compactChain: (
         imagePath: string,
-        options?: { removeSource?: boolean; dryRun?: boolean; passphrase?: string }
+        options?: {
+          removeSource?: boolean;
+          dryRun?: boolean;
+          passphrase?: string;
+          repoKey?: { passphrase?: string; keyfile?: string };
+        }
       ) => Promise<CompactResult>;
       cancelCompact: () => Promise<{ ok: boolean }>;
       onCompactProgress: (callback: (progress: CompactProgress) => void) => () => void;
