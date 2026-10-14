@@ -11,7 +11,9 @@ import {
   CIPHER_NONE
 } from './image-format';
 import { detectPartitionFilesystem, inferMbrTypes, inferTableTypeGuids } from './fs/file-browse';
-import { ntfsShrinkMinimum } from './fs/ntfs-shrink';
+import { ntfsShrinkMinimum, type NtfsShrinkMinimum } from './fs/ntfs-shrink';
+import { fat32ShrinkMinimum, type Fat32ShrinkMinimum } from './fs/fat32-shrink';
+import { detectFatType } from './fs/fat32';
 import { partitionReaderForChain } from './image-browse';
 import {
   detectMacriumFormat,
@@ -304,10 +306,13 @@ export class RestoreEngine implements RestoreCoordinator {
         // before anything is written, and surface the feasibility numbers on
         // the job so `--preflight` can print them. The helper computes the
         // full relocation plan (and every other refusal) itself.
-        let min;
+        let min: NtfsShrinkMinimum | Fat32ShrinkMinimum;
         try {
           const { reader } = partitionReaderForChain(chain, partitionIndex, config.passphrase);
-          min = ntfsShrinkMinimum(reader);
+          const bpb = reader.read(0, 512);
+          min = detectFatType(bpb) === 'FAT32'
+            ? fat32ShrinkMinimum(reader)
+            : ntfsShrinkMinimum(reader);
         } catch (error) {
           throw new Error(
             `Cannot shrink partition ${partitionIndex} to ${size} bytes: ` +

@@ -1073,8 +1073,17 @@ implemented; **Investigate** items need spike work first.
   target (1 MiB–aligned, never below a per-partition `minSize`; `noShrink`
   partitions keep their source size and the plan errors if the set can't
   fit). PartitionCopy exposes a "Scale partitions down to fit" checkbox and
-  passes NTFS-only `minSize`/`noShrink` (shrink-on-clone is NTFS-only for
-  now). `test/unit/clone-layout.test.ts`. Later: FAT32 shrink.
+  passes `minSize`/`noShrink` for every shrinkable filesystem (NTFS, FAT32).
+  `test/unit/clone-layout.test.ts`.
+- ✅ **FAT32 shrink**: `planFat32Shrink`/`fat32ShrinkMinimum`
+  (`fat32-shrink.ts`) mirror the NTFS planner — relocates clusters at/above
+  the boundary into free space below it, re-links the FAT, patches moved
+  directory entries (split start-cluster) and the BPB root, and writes a
+  patched boot + fixed backup boot + FSInfo. The helper sniffs the boot
+  sector and branches NTFS/FAT32 at every shrink site (restore + clone);
+  the restore engine does the same for the preflight minimum. Refusals: not
+  FAT32, below minimum, bad cluster at/above the boundary, not enough free
+  space below the boundary, cycle. `test/unit/fat32-shrink.test.ts`.
 
 Partitions can already be re-placed before restore/clone (`targetLayout` /
 CLI `--layout P:OFF[:SIZE]`), and a *larger* size grows NTFS in place
@@ -1136,9 +1145,11 @@ from (say) a 500 GB disk restores onto a 256 GB drive.
   (feasibility checked helper-side — the engine has no disk-read access), and
   the RestoreWizard per-partition size entry with live min/refusal feedback
   (`shrinkInfo` on the preflight result), and auto-shrink-to-fit in
-  PartitionCopy (`planTargetLayout` `shrinkToFit` — scales NTFS partitions
-  down to a smaller target via the same helper-side plan). Later: FAT32
-  shrink.
+  PartitionCopy (`planTargetLayout` `shrinkToFit` — scales NTFS/FAT32
+  partitions down to a smaller target via the same helper-side plan). FAT32
+  is handled alongside NTFS everywhere: the helper sniffs the boot sector and
+  picks `planFat32Shrink`/`planNtfsShrink` at each restore/clone shrink site,
+  and the restore engine does the same for the preflight minimum.
 - **Tests**: planner fixtures extending `ntfs-resize-fixture.ts`
   (fragmented runs, sparse, front free space, refusal matrix, min-size math,
   bitmap-prefix-only reads); plan-application round-trip — apply to a buffer

@@ -106,17 +106,20 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
     const parts = placed
       .map((d) => partitionOf(sourceDiskIndex, d.partitionIndex))
       .filter((p) => p !== null)
-      .map((p) => ({
-        partitionIndex: p.partitionIndex,
-        offset: p.offset,
-        size: p.size,
-        label: partitionLabel(p),
-        // Auto-scale only NTFS partitions: shrink-on-clone is NTFS-only for now,
-        // so a FAT32/exFAT partition that would shrink keeps its source size and
-        // the planner errors instead of emitting a size the helper can't honour.
-        noShrink: p.fsType !== 'NTFS',
-        minSize: p.fsType === 'NTFS' ? alignUpMiB((p.usedSpace ?? 0) + MiB) : undefined
-      }));
+      .map((p) => {
+        // Auto-scale NTFS and FAT32 partitions (the filesystems shrink-on-clone
+        // supports); any other filesystem keeps its source size and the planner
+        // errors instead of emitting a size the helper can't honour.
+        const shrinkable = p.fsType === 'NTFS' || p.fsType === 'FAT32';
+        return {
+          partitionIndex: p.partitionIndex,
+          offset: p.offset,
+          size: p.size,
+          label: partitionLabel(p),
+          noShrink: !shrinkable,
+          minSize: shrinkable ? alignUpMiB((p.usedSpace ?? 0) + MiB) : undefined
+        };
+      });
     if (parts.length === 0) return null;
     return planTargetLayout(parts, targetDisk.size, { growLast, shrinkToFit });
   }, [placed, targetDiskIndex, sourceDiskIndex, targetDisk, disks, growLast, shrinkToFit]);

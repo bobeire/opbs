@@ -48,6 +48,10 @@ import { validateRestoredFilesystem, FsValidation } from '../imaging/drill-valid
 import { computeChangedBlockIndices } from '../imaging/usn-tracking';
 import { planNtfsGrow, MAX_METADATA_BYTES } from '../imaging/fs/ntfs-resize';
 import { planNtfsShrink, NtfsShrinkPlan } from '../imaging/fs/ntfs-shrink';
+import { planFat32Shrink, Fat32ShrinkPlan } from '../imaging/fs/fat32-shrink';
+import { detectFatType } from '../imaging/fs/fat32';
+
+type AnyShrinkPlan = NtfsShrinkPlan | Fat32ShrinkPlan;
 import { readUsedBlockIndexes } from '../imaging/fs/used-blocks';
 import { mountImage, winfspAvailable } from '../imaging/mount-manager';
 import { PartitionReader, ChainPartitionReader } from '../imaging/image-browse';
@@ -1302,12 +1306,13 @@ export async function runRestoreJob(
       }
     };
 
-    // Shrink-on-restore: compute the NTFS shrink plan for every target smaller
-    // than its captured partition BEFORE laying down the partition table, so an
-    // infeasible shrink (below minimum, compressed/EFS streams, dirty volume)
-    // fails fast without touching the disk. The plan is applied after the data
-    // phase; unlike grow, a failed shrink fails the restore.
-    const shrinkPlans = new Map<number, { plan: NtfsShrinkPlan; reader: ChainPartitionReader }>();
+    // Shrink-on-restore: compute the shrink plan (NTFS or FAT32) for every
+    // target smaller than its captured partition BEFORE laying down the
+    // partition table, so an infeasible shrink (below minimum, compressed/EFS
+    // streams, dirty volume, bad clusters) fails fast without touching the
+    // disk. The plan is applied after the data phase; unlike grow, a failed
+    // shrink fails the restore.
+    const shrinkPlans = new Map<number, { plan: AnyShrinkPlan; reader: ChainPartitionReader }>();
     for (const target of job.targets) {
       const partition = infos[0].partitions.find((p) => p.partitionIndex === target.partitionIndex);
       if (!partition || target.size === undefined || target.size >= partition.size) continue;
@@ -1317,7 +1322,10 @@ export async function runRestoreJob(
         sourceKeys
       );
       try {
-        const plan = planNtfsShrink(reader, Math.floor(target.size / SECTOR_SIZE));
+        const isFat32 = detectFatType(reader.read(0, 512)) === 'FAT32';
+        const plan = isFat32
+          ? planFat32Shrink(reader, Math.floor(target.size / SECTOR_SIZE))
+          : planNtfsShrink(reader, Math.floor(target.size / SECTOR_SIZE));
         shrinkPlans.set(target.partitionIndex, { plan, reader });
       } catch (error) {
         throw new Error(
@@ -1566,12 +1574,13 @@ export async function runRestoreJob(
           warnings.push(`Could not grow filesystem on ${target.label} to ${target.size} bytes: ${errorMessage(error)}`);
         }
       } else if (target.size !== undefined && target.size < capturedPartition.size) {
-        // NTFS shrink-on-restore: the plan was computed (and validated) before
-        // the partition table was written, so an infeasible shrink already
-        // failed fast. Apply order is crash-safe: boot sector first (the
-        // volume never advertises a size larger than the partition), then the
-        // relocated data clusters, then the patched MFT records, then the
-        // $Bitmap regions. Unlike grow, a failed shrink fails the restore.
+        // Shrink-on-restore (NTFS or FAT32): the plan was computed (and
+        // validated) before the partition table was written, so an infeasible
+        // shrink already failed fast. Apply order is crash-safe: boot sector
+        // first (the volume never advertises a size larger than the
+        // partition), then the relocated data clusters, then the filesystem
+        // metadata (MFT/$Bitmap for NTFS, FAT/directory entries/FSInfo for
+        // FAT32). Unlike grow, a failed shrink fails the restore.
         const shrink = shrinkPlans.get(target.partitionIndex);
         if (!shrink) {
           throw new Error(`Internal: missing shrink plan for ${target.label}`);
@@ -1580,30 +1589,46 @@ export async function runRestoreJob(
         if (isCancelled()) {
           throw new CancelledError();
         }
-        // 1. Boot sector, plus NTFS's backup copy at the new last sector.
+        // 1. Boot sector. NTFS keeps a backup at the new last sector; FAT32
+        //    keeps one at a fixed BPB slot inside the retained metadata area.
         await writeRaw(
           devicePath,
           BigInt(target.offset),
           plan.bootSector,
           `Shrink boot-sector write failed on ${target.label}`
         );
-        await writeRaw(
-          devicePath,
-          BigInt(target.offset) + BigInt((plan.newTotalSectors - 1) * SECTOR_SIZE),
-          plan.bootSector,
-          `Shrink backup boot-sector write failed on ${target.label}`
-        );
+        if ('backupBootRegion' in plan) {
+          if (plan.backupBootRegion) {
+            await writeRaw(
+              devicePath,
+              BigInt(target.offset) + BigInt(plan.backupBootRegion.relativeOffset),
+              plan.bootSector,
+              `Shrink backup boot-sector write failed on ${target.label}`
+            );
+          }
+        } else {
+          await writeRaw(
+            devicePath,
+            BigInt(target.offset) + BigInt((plan.newTotalSectors - 1) * SECTOR_SIZE),
+            plan.bootSector,
+            `Shrink backup boot-sector write failed on ${target.label}`
+          );
+        }
         // 2. Relocate data clusters that lived at/above the old boundary down
         //    into their planned destinations, reading each from the image chain
         //    (the data phase skipped them, so the image is the only source).
+        //    NTFS runs are LCN-based; FAT32 carries explicit partition-relative
+        //    offsets because its clusters start after the metadata area.
         for (const move of plan.moves) {
           if (isCancelled()) {
             throw new CancelledError();
           }
-          const bytes = reader.read(move.srcCluster * plan.clusterSize, move.clusterCount * plan.clusterSize);
+          const srcOffset = 'srcOffset' in move ? move.srcOffset : move.srcCluster * plan.clusterSize;
+          const dstOffset = 'dstOffset' in move ? move.dstOffset : move.dstCluster * plan.clusterSize;
+          const bytes = reader.read(srcOffset, move.clusterCount * plan.clusterSize);
           await writeRaw(
             devicePath,
-            BigInt(target.offset) + BigInt(move.dstCluster * plan.clusterSize),
+            BigInt(target.offset) + BigInt(dstOffset),
             bytes,
             `Shrink relocation write failed on ${target.label} (LCN ${move.srcCluster} -> ${move.dstCluster})`
           );
@@ -1615,29 +1640,65 @@ export async function runRestoreJob(
             writeProgress('writing');
           }
         }
-        // 3. Patched MFT records (runlists now point at the relocated clusters).
-        for (const patch of plan.recordPatches) {
-          if (isCancelled()) {
-            throw new CancelledError();
+        // 3. Metadata: FAT32 re-links the FAT and patches moved directory
+        //    entries + FSInfo; NTFS patches MFT runlists and the $Bitmap.
+        if ('fatRegions' in plan) {
+          for (const patch of plan.dirPatches) {
+            if (isCancelled()) {
+              throw new CancelledError();
+            }
+            await writeRaw(
+              devicePath,
+              BigInt(target.offset) + BigInt(patch.relativeOffset),
+              patch.data,
+              `Shrink directory patch write failed on ${target.label}`
+            );
           }
-          await writeRaw(
-            devicePath,
-            BigInt(target.offset) + BigInt(patch.relativeOffset),
-            patch.data,
-            `Shrink MFT patch write failed on ${target.label} (record ${patch.recordNumber})`
-          );
-        }
-        // 4. $Bitmap regions: destination clusters marked used, sizes truncated.
-        for (const region of plan.bitmapRegions) {
-          if (isCancelled()) {
-            throw new CancelledError();
+          for (const region of plan.fatRegions) {
+            if (isCancelled()) {
+              throw new CancelledError();
+            }
+            await writeRaw(
+              devicePath,
+              BigInt(target.offset) + BigInt(region.relativeOffset),
+              region.data,
+              `Shrink FAT write failed on ${target.label}`
+            );
           }
-          await writeRaw(
-            devicePath,
-            BigInt(target.offset) + BigInt(region.relativeOffset),
-            region.data,
-            `Shrink $Bitmap write failed on ${target.label}`
-          );
+          if (plan.fsInfoRegion) {
+            if (isCancelled()) {
+              throw new CancelledError();
+            }
+            await writeRaw(
+              devicePath,
+              BigInt(target.offset) + BigInt(plan.fsInfoRegion.relativeOffset),
+              plan.fsInfoRegion.data,
+              `Shrink FSInfo write failed on ${target.label}`
+            );
+          }
+        } else {
+          for (const patch of plan.recordPatches) {
+            if (isCancelled()) {
+              throw new CancelledError();
+            }
+            await writeRaw(
+              devicePath,
+              BigInt(target.offset) + BigInt(patch.relativeOffset),
+              patch.data,
+              `Shrink MFT patch write failed on ${target.label} (record ${patch.recordNumber})`
+            );
+          }
+          for (const region of plan.bitmapRegions) {
+            if (isCancelled()) {
+              throw new CancelledError();
+            }
+            await writeRaw(
+              devicePath,
+              BigInt(target.offset) + BigInt(region.relativeOffset),
+              region.data,
+              `Shrink $Bitmap write failed on ${target.label}`
+            );
+          }
         }
         warnings.push(
           `Shrank filesystem on ${target.label} from ${capturedPartition.size} to ${target.size} bytes ` +
@@ -2363,12 +2424,13 @@ export async function runCloneJob(
   }
 
   try {
-    // NTFS shrink-on-clone: plan every smaller target against the live source
-    // before writing anything, so an infeasible shrink (too small, unmovable
-    // streams, dirty bitmap) fails fast with the numbers in the message. The
-    // reader is a structural PartitionReader over the source device (physical
-    // drive or VSS snapshot) — the same shape the used-blocks scan uses.
-    const shrinkPlans = new Map<number, { plan: NtfsShrinkPlan; reader: PartitionReader }>();
+    // Shrink-on-clone: plan every smaller target (NTFS or FAT32) against the
+    // live source before writing anything, so an infeasible shrink (too small,
+    // unmovable streams, dirty bitmap, bad clusters) fails fast with the
+    // numbers in the message. The reader is a structural PartitionReader over
+    // the source device (physical drive or VSS snapshot) — the same shape the
+    // used-blocks scan uses.
+    const shrinkPlans = new Map<number, { plan: AnyShrinkPlan; reader: PartitionReader }>();
     for (const target of job.targets) {
       if (target.size === undefined) {
         continue;
@@ -2384,7 +2446,10 @@ export async function runCloneJob(
           Buffer.from(native.readBlocks(src.device, src.baseOffset + BigInt(offset), BigInt(length)))
       };
       try {
-        const plan = planNtfsShrink(reader, Math.floor(target.size / SECTOR_SIZE));
+        const isFat32 = detectFatType(reader.read(0, 512)) === 'FAT32';
+        const plan = isFat32
+          ? planFat32Shrink(reader, Math.floor(target.size / SECTOR_SIZE))
+          : planNtfsShrink(reader, Math.floor(target.size / SECTOR_SIZE));
         shrinkPlans.set(target.partitionIndex, { plan, reader });
       } catch (error) {
         throw new Error(`Cannot shrink ${target.label} to ${target.size} bytes: ${errorMessage(error)}`, {
@@ -2588,13 +2653,14 @@ export async function runCloneJob(
           warnings.push(`Could not grow filesystem on ${target.label} to ${target.size} bytes: ${errorMessage(error)}`);
         }
       } else if (target.size !== undefined && target.size < part.size) {
-        // NTFS shrink-on-clone: the plan was computed (and validated) before
-        // the partition table was written, so an infeasible shrink already
-        // failed fast. Apply order is crash-safe: boot sector first (the
-        // volume never advertises a size larger than the partition), then the
-        // relocated data clusters (read from the live source), then the
-        // patched MFT records, then the $Bitmap regions. Unlike grow, a
-        // failed shrink fails the clone.
+        // Shrink-on-clone (NTFS or FAT32): the plan was computed (and
+        // validated) before the partition table was written, so an infeasible
+        // shrink already failed fast. Apply order is crash-safe: boot sector
+        // first (the volume never advertises a size larger than the
+        // partition), then the relocated data clusters (read from the live
+        // source), then the filesystem metadata (MFT/$Bitmap for NTFS,
+        // FAT/directory entries/FSInfo for FAT32). Unlike grow, a failed
+        // shrink fails the clone.
         const shrink = shrinkPlans.get(target.partitionIndex);
         if (!shrink) {
           throw new Error(`Internal: missing shrink plan for ${target.label}`);
@@ -2605,30 +2671,46 @@ export async function runCloneJob(
         }
         progress.currentPartition = `${target.label}: shrinking`;
         writeProgress('writing');
-        // 1. Boot sector, plus NTFS's backup copy at the new last sector.
+        // 1. Boot sector. NTFS keeps a backup at the new last sector; FAT32
+        //    keeps one at a fixed BPB slot inside the retained metadata area.
         await writeRaw(
           targetDevice,
           BigInt(target.offset),
           plan.bootSector,
           `Shrink boot-sector write failed on ${target.label}`
         );
-        await writeRaw(
-          targetDevice,
-          BigInt(target.offset) + BigInt((plan.newTotalSectors - 1) * SECTOR_SIZE),
-          plan.bootSector,
-          `Shrink backup boot-sector write failed on ${target.label}`
-        );
+        if ('backupBootRegion' in plan) {
+          if (plan.backupBootRegion) {
+            await writeRaw(
+              targetDevice,
+              BigInt(target.offset) + BigInt(plan.backupBootRegion.relativeOffset),
+              plan.bootSector,
+              `Shrink backup boot-sector write failed on ${target.label}`
+            );
+          }
+        } else {
+          await writeRaw(
+            targetDevice,
+            BigInt(target.offset) + BigInt((plan.newTotalSectors - 1) * SECTOR_SIZE),
+            plan.bootSector,
+            `Shrink backup boot-sector write failed on ${target.label}`
+          );
+        }
         // 2. Relocate data clusters that lived at/above the old boundary down
         //    into their planned destinations, reading each from the live source
         //    (the data phase skipped them, so the source is the only copy).
+        //    NTFS runs are LCN-based; FAT32 carries explicit partition-relative
+        //    offsets because its clusters start after the metadata area.
         for (const move of plan.moves) {
           if (isCancelled()) {
             throw new CancelledError();
           }
-          const bytes = reader.read(move.srcCluster * plan.clusterSize, move.clusterCount * plan.clusterSize);
+          const srcOffset = 'srcOffset' in move ? move.srcOffset : move.srcCluster * plan.clusterSize;
+          const dstOffset = 'dstOffset' in move ? move.dstOffset : move.dstCluster * plan.clusterSize;
+          const bytes = reader.read(srcOffset, move.clusterCount * plan.clusterSize);
           await writeRaw(
             targetDevice,
-            BigInt(target.offset) + BigInt(move.dstCluster * plan.clusterSize),
+            BigInt(target.offset) + BigInt(dstOffset),
             bytes,
             `Shrink relocation write failed on ${target.label} (LCN ${move.srcCluster} -> ${move.dstCluster})`
           );
@@ -2640,29 +2722,65 @@ export async function runCloneJob(
             writeProgress('writing');
           }
         }
-        // 3. Patched MFT records (runlists now point at the relocated clusters).
-        for (const patch of plan.recordPatches) {
-          if (isCancelled()) {
-            throw new CancelledError();
+        // 3. Metadata: FAT32 re-links the FAT and patches moved directory
+        //    entries + FSInfo; NTFS patches MFT runlists and the $Bitmap.
+        if ('fatRegions' in plan) {
+          for (const patch of plan.dirPatches) {
+            if (isCancelled()) {
+              throw new CancelledError();
+            }
+            await writeRaw(
+              targetDevice,
+              BigInt(target.offset) + BigInt(patch.relativeOffset),
+              patch.data,
+              `Shrink directory patch write failed on ${target.label}`
+            );
           }
-          await writeRaw(
-            targetDevice,
-            BigInt(target.offset) + BigInt(patch.relativeOffset),
-            patch.data,
-            `Shrink MFT patch write failed on ${target.label} (record ${patch.recordNumber})`
-          );
-        }
-        // 4. $Bitmap regions: destination clusters marked used, sizes truncated.
-        for (const region of plan.bitmapRegions) {
-          if (isCancelled()) {
-            throw new CancelledError();
+          for (const region of plan.fatRegions) {
+            if (isCancelled()) {
+              throw new CancelledError();
+            }
+            await writeRaw(
+              targetDevice,
+              BigInt(target.offset) + BigInt(region.relativeOffset),
+              region.data,
+              `Shrink FAT write failed on ${target.label}`
+            );
           }
-          await writeRaw(
-            targetDevice,
-            BigInt(target.offset) + BigInt(region.relativeOffset),
-            region.data,
-            `Shrink $Bitmap write failed on ${target.label}`
-          );
+          if (plan.fsInfoRegion) {
+            if (isCancelled()) {
+              throw new CancelledError();
+            }
+            await writeRaw(
+              targetDevice,
+              BigInt(target.offset) + BigInt(plan.fsInfoRegion.relativeOffset),
+              plan.fsInfoRegion.data,
+              `Shrink FSInfo write failed on ${target.label}`
+            );
+          }
+        } else {
+          for (const patch of plan.recordPatches) {
+            if (isCancelled()) {
+              throw new CancelledError();
+            }
+            await writeRaw(
+              targetDevice,
+              BigInt(target.offset) + BigInt(patch.relativeOffset),
+              patch.data,
+              `Shrink MFT patch write failed on ${target.label} (record ${patch.recordNumber})`
+            );
+          }
+          for (const region of plan.bitmapRegions) {
+            if (isCancelled()) {
+              throw new CancelledError();
+            }
+            await writeRaw(
+              targetDevice,
+              BigInt(target.offset) + BigInt(region.relativeOffset),
+              region.data,
+              `Shrink $Bitmap write failed on ${target.label}`
+            );
+          }
         }
         warnings.push(
           `Shrank filesystem on ${target.label} from ${part.size} to ${target.size} bytes ` +
