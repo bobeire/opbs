@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { planTargetLayout } from '../../main/utils/clone-layout';
 
 const MiB = 1024 * 1024;
+const GiB = 1024 * MiB;
 
 function alignUpMiB(bytes: number): number {
   return Math.ceil(bytes / MiB) * MiB;
@@ -35,6 +36,10 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
   const [placed, setPlaced] = useState<PlacedDrop[]>([]);
   const [growLast, setGrowLast] = useState(true);
   const [shrinkToFit, setShrinkToFit] = useState(true);
+  // Per-partition target size in GB (string so an empty field means "keep the
+  // source size"). A smaller value shrinks the filesystem on the copy; only
+  // NTFS can grow, so FAT32 entries are capped at the source size.
+  const [sizeGb, setSizeGb] = useState<Record<number, string>>({});
 
   const [dragOver, setDragOver] = useState<number | null>(null);
   const [dragSource, setDragSource] = useState<DragSource | null>(null);
@@ -101,6 +106,16 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
     return p.label ?? `Partition ${p.partitionIndex}`;
   };
 
+  // Filesystem capabilities for per-partition sizing: NTFS can both grow and
+  // shrink on clone; FAT32 can only shrink; anything else is fixed at its
+  // source size (the helper could not honour a different one).
+  const sizingBounds = (p: any): { minBytes: number; maxBytes: number } => {
+    const used = alignUpMiB((p.usedSpace ?? 0) + MiB);
+    if (p.fsType === 'NTFS') return { minBytes: used, maxBytes: Number.MAX_SAFE_INTEGER };
+    if (p.fsType === 'FAT32') return { minBytes: used, maxBytes: p.size };
+    return { minBytes: p.size, maxBytes: p.size };
+  };
+
   const plan = useMemo(() => {
     if (targetDiskIndex === null || sourceDiskIndex === null || placed.length === 0 || !targetDisk) return null;
     const parts = placed
@@ -111,18 +126,34 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
         // supports); any other filesystem keeps its source size and the planner
         // errors instead of emitting a size the helper can't honour.
         const shrinkable = p.fsType === 'NTFS' || p.fsType === 'FAT32';
+        const { minBytes, maxBytes } = sizingBounds(p);
+        // An explicit user size wins: clamp it to what the filesystem supports
+        // and pin it (fixedSize) so growLast / shrinkToFit never override it.
+        const raw = sizeGb[p.partitionIndex];
+        let size = p.size;
+        let fixedSize = false;
+        if (raw !== undefined && raw.trim() !== '') {
+          const parsed = Number(raw);
+          if (Number.isFinite(parsed) && parsed > 0) {
+            size = alignUpMiB(Math.min(Math.max(parsed * GiB, minBytes), maxBytes));
+            // Pinned whenever the user entered a value — even the source size —
+            // so growLast / shrinkToFit never override an explicit choice.
+            fixedSize = true;
+          }
+        }
         return {
           partitionIndex: p.partitionIndex,
           offset: p.offset,
-          size: p.size,
+          size,
           label: partitionLabel(p),
           noShrink: !shrinkable,
-          minSize: shrinkable ? alignUpMiB((p.usedSpace ?? 0) + MiB) : undefined
+          minSize: shrinkable ? minBytes : undefined,
+          fixedSize
         };
       });
     if (parts.length === 0) return null;
     return planTargetLayout(parts, targetDisk.size, { growLast, shrinkToFit });
-  }, [placed, targetDiskIndex, sourceDiskIndex, targetDisk, disks, growLast, shrinkToFit]);
+  }, [placed, targetDiskIndex, sourceDiskIndex, targetDisk, disks, growLast, shrinkToFit, sizeGb]);
 
   const cloneConfig = useMemo(() => {
     if (!plan || !plan.ok || sourceDiskIndex === null || targetDiskIndex === null) return null;
@@ -165,6 +196,7 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
   const selectTarget = (diskIndex: number) => {
     if (targetDiskIndex !== null && targetDiskIndex !== diskIndex && placed.length > 0) {
       setPlaced([]);
+      setSizeGb({});
       setSourceDiskIndex(null);
       setPreflightState(null);
       setAck(false);
@@ -226,6 +258,12 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
   };
 
   const removeDrop = (partitionIndex: number) => {
+    setSizeGb((prev) => {
+      if (!(partitionIndex in prev)) return prev;
+      const next = { ...prev };
+      delete next[partitionIndex];
+      return next;
+    });
     setPlaced((prev) => {
       const next = prev.filter((d) => d.partitionIndex !== partitionIndex);
       if (next.length === 0) {
@@ -251,6 +289,7 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
     setTargetDiskIndex(null);
     setSourceDiskIndex(null);
     setPlaced([]);
+    setSizeGb({});
     setPreflightState(null);
     setAck(false);
     setNote(null);
@@ -361,7 +400,9 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
       <h1>Partition Copy</h1>
       <p className="copy-intro">
         Copy partitions from one physical disk to another. Drag a partition onto a target disk, or use
-        “Copy all partitions”. The target receives a fresh partition table — everything on it is erased.
+        “Copy all partitions”. Set a partition's size in GB to control how much free space it ends up
+        with — NTFS partitions can grow or shrink, FAT32 can shrink. The target receives a fresh
+        partition table — everything on it is erased.
       </p>
 
       {note && (
@@ -489,10 +530,44 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
                       <div className="copy-placed-list">
                         {placed.map((d) => {
                           const p = partitionOf(sourceDiskIndex!, d.partitionIndex);
+                          const shrinkable = p && (p.fsType === 'NTFS' || p.fsType === 'FAT32');
+                          const bounds = p ? sizingBounds(p) : null;
+                          const target = plan?.ok ? plan.targets.find((t) => t.partitionIndex === d.partitionIndex) : null;
                           return (
                             <div key={d.partitionIndex} className="copy-placed-item">
-                              <span>{partitionLabel(p)}</span>
-                              <span>{p ? formatSize(p.size) : ''}</span>
+                              <span className="copy-placed-name">{partitionLabel(p)}</span>
+                              {p && bounds ? (
+                                <span className="copy-size-field">
+                                  <input
+                                    type="number"
+                                    min={Math.max(0.001, bounds.minBytes / GiB)}
+                                    max={bounds.maxBytes === Number.MAX_SAFE_INTEGER ? undefined : bounds.maxBytes / GiB}
+                                    step="any"
+                                    placeholder={(p.size / GiB).toFixed(1)}
+                                    title={
+                                      p.fsType === 'FAT32'
+                                        ? `FAT32 can shrink but not grow: ${(bounds.minBytes / GiB).toFixed(2)}–${(p.size / GiB).toFixed(2)} GB`
+                                        : p.fsType === 'NTFS'
+                                          ? `Minimum ${(bounds.minBytes / GiB).toFixed(2)} GB (used space + 1 MiB); can grow or shrink`
+                                          : `${p.fsType} cannot be resized on copy`
+                                    }
+                                    value={sizeGb[d.partitionIndex] ?? ''}
+                                    onChange={(e) =>
+                                      setSizeGb((prev) => ({
+                                        ...prev,
+                                        [d.partitionIndex]: e.target.value
+                                      }))
+                                    }
+                                    disabled={phase !== 'config' || !shrinkable}
+                                  />
+                                  <span className="copy-size-unit">GB</span>
+                                </span>
+                              ) : (
+                                <span>{p ? formatSize(p.size) : ''}</span>
+                              )}
+                              <span className="copy-placed-planned">
+                                {target ? formatSize(target.size) : p ? formatSize(p.size) : ''}
+                              </span>
                               <button className="btn-small btn-danger" onClick={() => removeDrop(d.partitionIndex)}>
                                 ×
                               </button>

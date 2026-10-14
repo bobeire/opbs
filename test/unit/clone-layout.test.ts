@@ -147,3 +147,86 @@ describe('planTargetLayout (shrink-to-fit)', () => {
     expect(plan.error).toMatch(/cannot shrink below/);
   });
 });
+
+describe('planTargetLayout (fixedSize — user-pinned partition sizes)', () => {
+  it('honours a pinned size and leaves the rest as free space', () => {
+    const plan = planTargetLayout(
+      [{ ...part(2, 20 * GiB), fixedSize: true }, part(3, 30 * GiB)],
+      100 * GiB,
+      { growLast: false, shrinkToFit: false }
+    );
+
+    expect(plan.ok).toBe(true);
+    expect(plan.targets[0].size).toBe(20 * GiB);
+    expect(plan.targets[1].size).toBe(30 * GiB);
+    expect(plan.freeBytes).toBeGreaterThan(40 * GiB);
+  });
+
+  it('grows a pinned partition down to an explicit smaller size', () => {
+    const plan = planTargetLayout(
+      [{ ...part(2, 20 * GiB), size: 10 * GiB, fixedSize: true }, part(3, 30 * GiB)],
+      100 * GiB,
+      { growLast: false, shrinkToFit: false }
+    );
+
+    expect(plan.ok).toBe(true);
+    expect(plan.targets[0].size).toBe(10 * GiB);
+    expect(plan.freeBytes).toBeGreaterThan(50 * GiB);
+  });
+
+  it('does not grow the last partition when it is pinned, even with growLast', () => {
+    const plan = planTargetLayout(
+      [part(2, 20 * GiB), { ...part(3, 30 * GiB), fixedSize: true }],
+      100 * GiB,
+      { growLast: true, shrinkToFit: false }
+    );
+
+    expect(plan.ok).toBe(true);
+    expect(plan.targets[1].size).toBe(30 * GiB);
+    expect(plan.freeBytes).toBeGreaterThan(40 * GiB);
+    expect(plan.growBytes).toBe(0);
+  });
+
+  it('keeps a pinned size during shrink-to-fit while others scale', () => {
+    const plan = planTargetLayout(
+      [
+        { ...part(2, 40 * GiB), fixedSize: true },
+        { ...part(3, 40 * GiB), minSize: 5 * GiB }
+      ],
+      60 * GiB,
+      { growLast: false, shrinkToFit: true }
+    );
+
+    expect(plan.ok).toBe(true);
+    expect(plan.targets[0].size).toBe(40 * GiB);
+    expect(plan.targets[1].size).toBeLessThan(40 * GiB);
+    expect(plan.targets[1].size).toBeGreaterThanOrEqual(5 * GiB);
+    expect(plan.shrunk).toBe(true);
+  });
+
+  it('errors when a pinned size alone exceeds the target', () => {
+    const plan = planTargetLayout(
+      [{ ...part(2, 70 * GiB), fixedSize: true }, part(3, 50 * GiB)],
+      60 * GiB,
+      { growLast: false, shrinkToFit: true }
+    );
+
+    expect(plan.ok).toBe(false);
+    expect(plan.error).toMatch(/Partition 2/);
+    expect(plan.error).toMatch(/explicitly set to/);
+  });
+
+  it('rejects a non-last partition that overflows even with growLast on', () => {
+    // growLast only grows the last partition; a non-last overflow must still
+    // error immediately (previously it slipped through and surfaced later as
+    // a confusing negative-remaining message on the next partition).
+    const plan = planTargetLayout(
+      [part(2, 110 * GiB), part(3, 1 * GiB)],
+      100 * GiB,
+      { growLast: true, shrinkToFit: false }
+    );
+
+    expect(plan.ok).toBe(false);
+    expect(plan.error).toMatch(/Partition 2/);
+  });
+});

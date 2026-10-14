@@ -13,6 +13,10 @@ export interface CloneLayoutPartition {
   /** Refuse to scale this partition down (e.g. a filesystem whose shrink is
    *  not supported). The planner errors instead of emitting a smaller size. */
   noShrink?: boolean;
+  /** Use this size exactly: never auto-grown by growLast and never scaled by
+   *  shrink-to-fit. Lets a user pin a partition's target size (e.g. to control
+   *  its free space) while the remaining partitions still flow. */
+  fixedSize?: boolean;
 }
 
 export interface TargetPlacement {
@@ -86,22 +90,26 @@ export function planTargetLayout(
   if (shrinkToFit) {
     const totalSource = sourceSizes.reduce((sum, s) => sum + s, 0);
     if (totalSource > available) {
-      // Partitions flagged noShrink keep their source size. The rest are scaled
+      // Partitions flagged noShrink (unsupported filesystem) or fixedSize
+      // (user-pinned) keep their size. The rest are scaled
       // down into the remaining budget, never below their per-partition floor
       // (minSize, or 1 MiB by default). Budget above the floors is shared out
       // proportionally to each partition's headroom, 1 MiB-aligned.
       const floors = partitions.map((p, i) => {
-        if (p.noShrink) return sourceSizes[i];
+        if (p.noShrink || p.fixedSize) return sourceSizes[i];
         const aligned = Math.ceil(Math.max(p.minSize ?? ALIGN_BYTES, ALIGN_BYTES) / ALIGN_BYTES) * ALIGN_BYTES;
         return Math.min(sourceSizes[i], aligned);
       });
-      const fixedTotal = partitions.reduce((sum, p, i) => sum + (p.noShrink ? sourceSizes[i] : 0), 0);
-      const scalableFloorsTotal = floors.reduce((sum, f, i) => sum + (partitions[i].noShrink ? 0 : f), 0);
+      const fixedTotal = partitions.reduce((sum, p, i) => sum + (p.noShrink || p.fixedSize ? sourceSizes[i] : 0), 0);
+      const scalableFloorsTotal = floors.reduce((sum, f, i) => sum + (partitions[i].noShrink || partitions[i].fixedSize ? 0 : f), 0);
 
       if (fixedTotal + scalableFloorsTotal > available) {
-        const noShrinkIdx = partitions.findIndex((p) => p.noShrink);
-        if (noShrinkIdx >= 0) {
-          const part = partitions[noShrinkIdx];
+        const rigidIdx = partitions.findIndex((p) => p.noShrink || p.fixedSize);
+        if (rigidIdx >= 0) {
+          const part = partitions[rigidIdx];
+          const why = part.fixedSize
+            ? `was explicitly set to ${fmtBytes(sourceSizes[rigidIdx])}`
+            : 'cannot be scaled down (unsupported filesystem)';
           return {
             ok: false,
             targets: [],
@@ -109,12 +117,11 @@ export function planTargetLayout(
             freeBytes: 0,
             growBytes: 0,
             error:
-              `Partition ${part.partitionIndex} (${part.label ?? 'P' + part.partitionIndex}) cannot be scaled ` +
-              `down (unsupported filesystem) but needs ${fmtBytes(sourceSizes[noShrinkIdx])} and only ` +
+              `Partition ${part.partitionIndex} (${part.label ?? 'P' + part.partitionIndex}) ${why} but only ` +
               `${fmtBytes(available)} fit on the target disk`
           };
         }
-        const idx = partitions.findIndex((p) => !p.noShrink);
+        const idx = partitions.findIndex((p) => !p.noShrink && !p.fixedSize);
         const part = partitions[idx];
         return {
           ok: false,
@@ -129,9 +136,9 @@ export function planTargetLayout(
       }
 
       const slack = available - fixedTotal - scalableFloorsTotal;
-      const totalExtra = floors.reduce((sum, f, i) => sum + (partitions[i].noShrink ? 0 : sourceSizes[i] - f), 0);
+      const totalExtra = floors.reduce((sum, f, i) => sum + (partitions[i].noShrink || partitions[i].fixedSize ? 0 : sourceSizes[i] - f), 0);
       sizes = partitions.map((p, i) => {
-        if (p.noShrink) return sourceSizes[i];
+        if (p.noShrink || p.fixedSize) return sourceSizes[i];
         const extra = sourceSizes[i] - floors[i];
         const share = totalExtra > 0 ? Math.floor((extra * slack) / totalExtra / ALIGN_BYTES) * ALIGN_BYTES : 0;
         return floors[i] + share;
@@ -151,7 +158,9 @@ export function planTargetLayout(
     const effectiveSize = sizes[i];
     const fit = budget - alignedOffset;
 
-    if (fit < effectiveSize && (!growLast || i === partitions.length - 1)) {
+    // growLast only ever grows the last partition; nothing rescues a partition
+    // that does not fit at its effective size.
+    if (fit < effectiveSize) {
       return {
         ok: false,
         targets: [],
@@ -165,7 +174,8 @@ export function planTargetLayout(
     }
 
     const isLast = i === partitions.length - 1;
-    const size = isLast && growLast ? fit : effectiveSize;
+    // A user-pinned size is never overridden by grow-to-fill.
+    const size = isLast && growLast && !part.fixedSize ? fit : effectiveSize;
 
     targets.push({ partitionIndex: part.partitionIndex, offset: alignedOffset, size });
     cursor = alignedOffset + size;

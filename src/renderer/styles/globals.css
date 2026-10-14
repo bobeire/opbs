@@ -2075,6 +2075,34 @@ body {
   padding: 1px 7px;
 }
 
+.copy-placed-name {
+  min-width: 52px;
+}
+
+.copy-size-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.copy-size-field input[type="number"] {
+  width: 84px;
+  padding: 2px 5px;
+  font-size: 12px;
+}
+
+.copy-size-unit {
+  color: var(--muted-color, #9ca3af);
+  font-size: 11px;
+}
+
+.copy-placed-planned {
+  color: var(--muted-color, #9ca3af);
+  font-size: 11px;
+  min-width: 70px;
+  text-align: right;
+}
+
 .copy-grow-row {
   display: flex;
   align-items: center;
