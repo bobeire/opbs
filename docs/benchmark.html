@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Measured throughput of OPBS reading real Macrium Reflect 7/8 and Reflect X images — decompress plus per-block MD5 verification, the hard part of a restore. Reproducible with a script in the repo." />
+  <title>Macrium restore benchmark — OPBS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont,
+                   "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0c1220; color: #d0d7e3; line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: #61d0ff; text-decoration: none; transition: color .15s; }
+    a:hover { color: #9be2ff; }
+    code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      background: #152238; border-radius: 4px; padding: 1px 6px; font-size: 0.88em;
+    }
+    .wrapper { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+    section { padding: 72px 0; }
+    section.alt { background: #111b2c; }
+    h1, h2, h3 { color: #fff; font-weight: 700; line-height: 1.25; }
+    h1 { font-size: clamp(2rem, 4vw, 3rem); }
+    h2 { font-size: clamp(1.5rem, 2.5vw, 2rem); margin-bottom: 24px; }
+    h3 { font-size: 1.05rem; margin-bottom: 8px; }
+    p.lead { font-size: 1.1rem; color: #8fa5c0; max-width: 680px; }
+
+    header {
+      position: sticky; top: 0; z-index: 20;
+      background: rgba(12, 18, 32, 0.88); backdrop-filter: blur(10px);
+      border-bottom: 1px solid #1e2d44;
+    }
+    nav { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+    .logo { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 1.15rem; color: #fff; }
+    .logo img { height: 34px; border-radius: 6px; }
+    nav ul { list-style: none; display: flex; gap: 22px; }
+    nav ul li a { color: #a3b1c6; font-size: 0.88rem; font-weight: 500; }
+    nav ul li a:hover, nav ul li a.active { color: #fff; }
+
+    .hero {
+      padding: 88px 0 72px;
+      background: radial-gradient(ellipse at 30% 60%, #152238 0%, #0c1220 70%);
+    }
+    .hero-badge {
+      display: inline-block; background: #1a2d4a; border: 1px solid #2a4467;
+      border-radius: 24px; padding: 6px 16px; font-size: 0.82rem;
+      color: #61d0ff; margin-bottom: 18px;
+    }
+    .hero h1 { margin-bottom: 16px; }
+    .hero p { font-size: 1.15rem; color: #8fa5c0; max-width: 640px; margin-bottom: 32px; }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 12px 28px; border-radius: 8px; font-size: 0.95rem;
+      font-weight: 600; cursor: pointer; border: none; transition: background .2s;
+    }
+    .btn-primary { background: #1d8cf8; color: #fff; }
+    .btn-primary:hover { background: #3aa1ff; color: #fff; }
+    .btn-secondary { background: transparent; border: 1px solid #2a4467; color: #a3b1c6; }
+    .btn-secondary:hover { background: #182840; color: #fff; }
+    .btn-group { display: flex; flex-wrap: wrap; gap: 12px; }
+
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-top: 8px; }
+    .stat {
+      background: #0f1929; border: 1px solid #1e2d44; border-radius: 14px;
+      padding: 24px; text-align: center;
+    }
+    section.alt .stat { background: #0c1524; }
+    .stat .num { font-size: 2rem; font-weight: 700; color: #fff; display: block; }
+    .stat .label { font-size: 0.85rem; color: #8fa5c0; margin-top: 4px; }
+
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid #1e2d44; }
+    th { color: #8fa5c0; font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    td { color: #d0d7e3; }
+    td code { font-size: 0.82em; }
+    .table-wrap { overflow-x: auto; border: 1px solid #1e2d44; border-radius: 12px; background: #0f1929; }
+    section.alt .table-wrap { background: #0c1524; }
+    .table-wrap table { margin: 0; }
+    .table-wrap th:first-child, .table-wrap td:first-child { padding-left: 20px; }
+    .hl { color: #3ecf8e; font-weight: 600; }
+
+    .note {
+      background: #0f1929; border: 1px solid #1e2d44; border-left: 3px solid #1d8cf8;
+      border-radius: 0 10px 10px 0; padding: 18px 22px; margin-top: 28px;
+      font-size: 0.92rem; color: #8fa5c0; max-width: 780px;
+    }
+    .note strong { color: #d0d7e3; }
+    pre {
+      background: #111b2c; border: 1px solid #1e2d44; border-radius: 8px;
+      padding: 14px 16px; white-space: pre-wrap; word-break: break-word;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.85rem; color: #a3b1c6; margin: 10px 0 0; max-width: 780px;
+    }
+    ul.plain { list-style: none; margin-top: 12px; max-width: 740px; }
+    ul.plain li { position: relative; padding: 6px 0 6px 28px; color: #a3b1c6; font-size: 0.95rem; }
+    ul.plain li::before { content: "✓"; position: absolute; left: 0; color: #3ecf8e; font-weight: 700; }
+
+    .download-box {
+      background: linear-gradient(135deg, #152238, #0f1929);
+      border: 1px solid #2a4467; border-radius: 16px; padding: 48px;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 36px; justify-content: space-between;
+    }
+    .download-box h2 { margin-bottom: 8px; flex: 1 1 320px; }
+    .download-box .meta { color: #8fa5c0; font-size: 0.9rem; margin-top: 6px; }
+
+    footer {
+      text-align: center; padding: 48px 0; font-size: 0.82rem; color: #586a82;
+      border-top: 1px solid #1e2d44;
+    }
+
+    @media (max-width: 720px) {
+      .hero { padding-top: 56px; text-align: center; }
+      .hero p { margin-inline: auto; }
+      .btn-group { justify-content: center; }
+      .download-box { flex-direction: column; text-align: center; }
+      nav ul { gap: 14px; }
+      nav ul li a { font-size: 0.8rem; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="wrapper">
+    <nav>
+      <a href="index.html" class="logo">
+        <img src="https://raw.githubusercontent.com/bobeire/opbs/master/resources/icon.png" alt="OPBS icon" />
+        OPBS
+      </a>
+      <ul>
+        <li><a href="index.html#features">Features</a></li>
+        <li><a href="macrium.html">Macrium</a></li>
+        <li><a href="benchmark.html" class="active">Benchmarks</a></li>
+        <li><a href="prove-your-restore.html">Prove It</a></li>
+        <li><a href="index.html#download">Download</a></li>
+        <li><a href="releases.html">Releases</a></li>
+        <li><a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrapper">
+    <span class="hero-badge">Measured on real images &middot; Reproducible</span>
+    <h1>How fast does OPBS read<br />your Macrium images?</h1>
+    <p>
+      Restoring a Macrium image is mostly one job: decompress every block and
+      check it against the MD5 Macrium stored inside the image. We measured
+      that exact path — every block, every hash — on real
+      <code>.mrimg</code> and <code>.mrimgx</code> files. The script that
+      produced these numbers is in the repo, so you can rerun it yourself.
+    </p>
+    <div class="btn-group">
+      <a href="#results" class="btn btn-primary">Jump to results</a>
+      <a href="macrium.html" class="btn btn-secondary">Macrium migration guide</a>
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="headline">
+  <div class="wrapper">
+    <h2>The headline numbers</h2>
+    <p class="lead">
+      Median of 3 full read+verify passes. Single-threaded decompress + MD5,
+      laptop CPU, no disks written.
+    </p>
+    <div class="stats" style="margin-top:32px">
+      <div class="stat">
+        <span class="num">152–210</span>
+        <span class="label">MB/s — Reflect X <code>.mrimgx</code> (zstd)</span>
+      </div>
+      <div class="stat">
+        <span class="num">167</span>
+        <span class="label">MB/s — Reflect 7/8 <code>.mrimg</code> (QuickLZ), 859 MB NTFS</span>
+      </div>
+      <div class="stat">
+        <span class="num">100%</span>
+        <span class="label">of blocks MD5-verified against Macrium's own digests</span>
+      </div>
+      <div class="stat">
+        <span class="num">100 ms</span>
+        <span class="label">to parse a full 1.25 GB disk image (<code>mrimg info</code>)</span>
+      </div>
+    </div>
+    <div class="note">
+      <strong>What "read+verify" means here.</strong> The benchmark streams
+      every block of the partition through the same
+      <code>MacriumPartitionReader</code> a restore uses: each block is
+      decompressed (zstd for <code>.mrimgx</code>, QuickLZ for
+      <code>.mrimg</code>) and its MD5 is compared against the digest Macrium
+      wrote into the image. A single decode error fails the read. This is the
+      hard, CPU-bound part of a restore — writing the result to disk is
+      bounded by your target drive on top of this.
+    </div>
+  </div>
+</section>
+
+<section id="results">
+  <div class="wrapper">
+    <h2>Full results</h2>
+    <p class="lead">
+      Five real-world samples: three Reflect X images, one small Reflect 7/8
+      image, and a 1.25 GB Reflect 7/8 full-disk image of a real machine
+      (931.5 GB GPT disk, NTFS partitions).
+    </p>
+    <div class="table-wrap" style="margin-top:28px">
+      <table>
+        <thead>
+          <tr>
+            <th>Image</th>
+            <th>Format</th>
+            <th>Compress</th>
+            <th>File size</th>
+            <th>Partition read</th>
+            <th>Parse</th>
+            <th>Read+verify</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>EA9A…D76F</code></td>
+            <td>Reflect X <code>.mrimgx</code></td>
+            <td>zstd medium</td>
+            <td>17.8 MB</td>
+            <td>100 MB FAT32</td>
+            <td>3 ms</td>
+            <td class="hl">210 MB/s</td>
+          </tr>
+          <tr>
+            <td><code>8DB9…986A</code></td>
+            <td>Reflect X <code>.mrimgx</code></td>
+            <td>zstd medium</td>
+            <td>17.8 MB</td>
+            <td>100 MB FAT32</td>
+            <td>5 ms</td>
+            <td class="hl">195 MB/s</td>
+          </tr>
+          <tr>
+            <td><code>0EDC…131</code></td>
+            <td>Reflect X <code>.mrimgx</code></td>
+            <td>zstd medium</td>
+            <td>17.8 MB</td>
+            <td>100 MB FAT32</td>
+            <td>16 ms</td>
+            <td class="hl">152 MB/s</td>
+          </tr>
+          <tr>
+            <td><code>6D88…845</code></td>
+            <td>Reflect 7/8 <code>.mrimg</code></td>
+            <td>QuickLZ high</td>
+            <td>1.17 GB</td>
+            <td>859 MB NTFS</td>
+            <td>42 ms</td>
+            <td class="hl">167 MB/s</td>
+          </tr>
+          <tr>
+            <td><code>14CC…036</code></td>
+            <td>Reflect 7/8 <code>.mrimg</code></td>
+            <td>QuickLZ high</td>
+            <td>5.6 MB</td>
+            <td>16 MB (small)</td>
+            <td>8 ms</td>
+            <td>62 MB/s *</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note">
+      <strong>* Small-sample noise.</strong> The 16 MB partition is dominated
+      by fixed per-call overhead; its number understates steady-state
+      throughput. The 859 MB NTFS partition is the meaningful
+      <code>.mrimg</code> figure.
+    </div>
+    <div class="note">
+      <strong>Machine.</strong> Intel Core i7-8665U @ 1.90 GHz (4 cores / 8
+      threads, laptop), 34 GB RAM, Windows 11, Node 24, OPBS 0.6.87 build.
+      Decode is single-threaded in this path — faster CPUs scale linearly;
+      the QuickLZ decoder is a clean-room TypeScript implementation, the
+      zstd path uses the native codec.
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="method">
+  <div class="wrapper">
+    <h2>Method &amp; reproduction</h2>
+    <p class="lead">
+      No vendor claims, no cherry-picked workloads. Drop real Macrium images
+      in the folder, run one script, read the JSON.
+    </p>
+    <ul class="plain">
+      <li>Samples are real files — including a full-disk image of an actual machine, not synthetic data.</li>
+      <li>Every iteration re-opens the image (cold parser cache); the median of 3 runs is reported.</li>
+      <li>Each block's MD5 is checked against Macrium's stored digest — a decode bug would throw, not skew the timing.</li>
+      <li>No disks are written; this measures the read/verify path only.</li>
+    </ul>
+    <pre>git clone https://github.com/bobeire/opbs && cd opbs
+npm install && npm run build && npm run build:native
+# copy your .mrimg / .mrimgx files into imagefilesamples/ (or the repo root)
+node tools/benchmark-mrimg.js 3</pre>
+    <p style="margin-top:16px;color:#8fa5c0;font-size:0.95rem;max-width:740px">
+      The script prints one JSON line per run plus a median summary — the
+      same format shown in the table above.
+      <a href="https://github.com/bobeire/opbs/blob/master/tools/benchmark-mrimg.js" target="_blank">benchmark-mrimg.js on GitHub ↗</a>
+    </p>
+  </div>
+</section>
+
+<section id="context">
+  <div class="wrapper">
+    <h2>What this means in practice</h2>
+    <ul class="plain" style="margin-top:8px">
+      <li><strong style="color:#d0d7e3">A typical system partition reads back in minutes.</strong> At a sustained ~167 MB/s of verified decompression, 100 GB of used space is ~10 minutes of pure read — before disk-write time, which depends on your target drive.</li>
+      <li><strong style="color:#d0d7e3">Verification is not optional here.</strong> Every number above includes a full MD5 check per block against Macrium's own digests. OPBS will not write a byte it couldn't verify.</li>
+      <li><strong style="color:#d0d7e3">Parsing is instant.</strong> <code>mrimg info</code> on the 1.25 GB disk image completes in ~100 ms — the browse/extract/restore UI never waits on a slow index.</li>
+      <li><strong style="color:#d0d7e3">Chains resolve in place.</strong> Differential and incremental members browse and restore without merging first; unchanged blocks resolve against the base chain on demand.</li>
+    </ul>
+    <div class="note">
+      <strong>Honest scope.</strong> These numbers cover reading Macrium
+      images. OPBS-native <code>.opbs</code> images use a different codec
+      pipeline (multithreaded zstd) and aren't measured here. Restores to
+      disk also write at your disk's speed on top of the read numbers.
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="download">
+  <div class="wrapper">
+    <div class="download-box">
+      <div>
+        <h2>Restore your Macrium images</h2>
+        <p class="meta">Free &middot; GPL-3.0 &middot; Every block verified before it lands on disk</p>
+      </div>
+      <div class="btn-group">
+        <a id="dl-installer" href="https://github.com/bobeire/opbs/releases/latest" class="btn btn-primary" target="_blank">⬇ Download OPBS</a>
+        <a href="macrium.html" class="btn btn-secondary">Migration guide</a>
+        <a href="prove-your-restore.html" class="btn btn-secondary">Prove your restore</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrapper">
+    &copy; 2026 RHITCS &middot;
+    <a href="https://github.com/bobeire/opbs/blob/master/LICENSE" target="_blank">GPL-3.0</a> &middot;
+    <a href="index.html">Home</a> &middot;
+    <a href="macrium.html">Macrium</a> &middot;
+    <a href="releases.html">Releases</a> &middot;
+    <a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a>
+  </div>
+</footer>
+
+<script>
+  (async () => {
+    try {
+      const res = await fetch('https://api.github.com/repos/bobeire/opbs/releases/latest');
+      if (!res.ok) return;
+      const rel = await res.json();
+      const installer = (rel.assets || []).find(a => /^OPBS-Setup-.*\.exe$/.test(a.name));
+      if (installer) document.getElementById('dl-installer').href = installer.browser_download_url;
+    } catch (_) { /* keep fallback */ }
+  })();
+</script>
+
+</body>
+</html>

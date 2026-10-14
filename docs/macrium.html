@@ -156,6 +156,8 @@
       <ul>
         <li><a href="index.html#features">Features</a></li>
         <li><a href="macrium.html" class="active">Macrium</a></li>
+        <li><a href="benchmark.html">Benchmarks</a></li>
+        <li><a href="prove-your-restore.html">Prove It</a></li>
         <li><a href="index.html#download">Download</a></li>
         <li><a href="releases.html">Releases</a></li>
         <li><a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a></li>
@@ -285,6 +287,12 @@
       block-level decode against stored MD5s — and skips cleanly when no
       samples are present, so the suite stays honest.
     </div>
+    <div class="note">
+      <strong>And it's fast.</strong> Measured on real images: 152–210&nbsp;MB/s
+      reading Reflect&nbsp;X and 167&nbsp;MB/s on a 1.25&nbsp;GB Reflect&nbsp;7/8
+      disk image — with every block MD5-verified against Macrium's own digests.
+      <a href="benchmark.html">See the benchmark and reproduce it ↗</a>
+    </div>
     <div class="note warn">
       <strong>Refused up front, never mid-restore:</strong> password-protected
       images, split multi-part sets, and file-and-folder (File Backup) images
@@ -332,6 +340,7 @@ OPBS.exe --cli browse "D:\Images\win11-01-01.mrimg" --partition 2</pre>
       open <code>.opbs</code> format — encrypted incremental chains, scheduled
       restore drills, bit-rot scrubbing — but keep your Macrium images
       around as long as you like: OPBS will still restore them.
+      <a href="prove-your-restore.html">How OPBS proves restores work ↗</a>
     </div>
   </div>
 </section>

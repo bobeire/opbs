@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="A backup you've never restored is a hope, not a plan. OPBS proves restores with scheduled drills, self-healing bit-rot scrubbing, and rollback-detecting immutable repositories — all free." />
+  <title>Prove your restore — OPBS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont,
+                   "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0c1220; color: #d0d7e3; line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: #61d0ff; text-decoration: none; transition: color .15s; }
+    a:hover { color: #9be2ff; }
+    code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      background: #152238; border-radius: 4px; padding: 1px 6px; font-size: 0.88em;
+    }
+    .wrapper { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+    section { padding: 72px 0; }
+    section.alt { background: #111b2c; }
+    h1, h2, h3 { color: #fff; font-weight: 700; line-height: 1.25; }
+    h1 { font-size: clamp(2rem, 4vw, 3rem); }
+    h2 { font-size: clamp(1.5rem, 2.5vw, 2rem); margin-bottom: 24px; }
+    h3 { font-size: 1.05rem; margin-bottom: 8px; }
+    p.lead { font-size: 1.1rem; color: #8fa5c0; max-width: 680px; }
+    p.body { color: #a3b1c6; font-size: 0.97rem; max-width: 740px; margin-top: 14px; }
+
+    header {
+      position: sticky; top: 0; z-index: 20;
+      background: rgba(12, 18, 32, 0.88); backdrop-filter: blur(10px);
+      border-bottom: 1px solid #1e2d44;
+    }
+    nav { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+    .logo { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 1.15rem; color: #fff; }
+    .logo img { height: 34px; border-radius: 6px; }
+    nav ul { list-style: none; display: flex; gap: 22px; }
+    nav ul li a { color: #a3b1c6; font-size: 0.88rem; font-weight: 500; }
+    nav ul li a:hover, nav ul li a.active { color: #fff; }
+
+    .hero {
+      padding: 88px 0 72px;
+      background: radial-gradient(ellipse at 30% 60%, #152238 0%, #0c1220 70%);
+    }
+    .hero-badge {
+      display: inline-block; background: #1a2d4a; border: 1px solid #2a4467;
+      border-radius: 24px; padding: 6px 16px; font-size: 0.82rem;
+      color: #61d0ff; margin-bottom: 18px;
+    }
+    .hero h1 { margin-bottom: 16px; }
+    .hero p { font-size: 1.15rem; color: #8fa5c0; max-width: 640px; margin-bottom: 32px; }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 12px 28px; border-radius: 8px; font-size: 0.95rem;
+      font-weight: 600; cursor: pointer; border: none; transition: background .2s;
+    }
+    .btn-primary { background: #1d8cf8; color: #fff; }
+    .btn-primary:hover { background: #3aa1ff; color: #fff; }
+    .btn-secondary { background: transparent; border: 1px solid #2a4467; color: #a3b1c6; }
+    .btn-secondary:hover { background: #182840; color: #fff; }
+    .btn-group { display: flex; flex-wrap: wrap; gap: 12px; }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; margin-top: 8px; }
+    .card {
+      background: #0f1929; border: 1px solid #1e2d44; border-radius: 14px;
+      padding: 26px; transition: border-color .25s;
+    }
+    section.alt .card { background: #0c1524; }
+    .card:hover { border-color: #2a5a9a; }
+    .card p { font-size: 0.9rem; color: #8fa5c0; }
+
+    .layer {
+      display: flex; gap: 24px; align-items: flex-start;
+      background: #0f1929; border: 1px solid #1e2d44; border-radius: 14px;
+      padding: 28px; margin-top: 20px; max-width: 820px;
+    }
+    section.alt .layer { background: #0c1524; }
+    .layer .icon { font-size: 1.8rem; flex: 0 0 48px; text-align: center; }
+    .layer h3 { margin-bottom: 6px; }
+    .layer p { font-size: 0.93rem; color: #8fa5c0; }
+    .layer .tag {
+      display: inline-block; background: #1a2d4a; border-radius: 6px;
+      padding: 1px 10px; font-size: 0.75rem; color: #61d0ff; margin-left: 8px;
+      vertical-align: middle;
+    }
+
+    pre {
+      background: #111b2c; border: 1px solid #1e2d44; border-radius: 8px;
+      padding: 14px 16px; white-space: pre-wrap; word-break: break-word;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.85rem; color: #a3b1c6; margin: 10px 0 0; max-width: 780px;
+    }
+    .note {
+      background: #0f1929; border: 1px solid #1e2d44; border-left: 3px solid #1d8cf8;
+      border-radius: 0 10px 10px 0; padding: 18px 22px; margin-top: 28px;
+      font-size: 0.92rem; color: #8fa5c0; max-width: 780px;
+    }
+    .note strong { color: #d0d7e3; }
+
+    ul.plain { list-style: none; margin-top: 12px; max-width: 740px; }
+    ul.plain li { position: relative; padding: 6px 0 6px 28px; color: #a3b1c6; font-size: 0.95rem; }
+    ul.plain li::before { content: "✓"; position: absolute; left: 0; color: #3ecf8e; font-weight: 700; }
+    ul.plain.other li::before { content: "—"; color: #586a82; }
+
+    .quote {
+      max-width: 720px; margin: 36px auto 0; text-align: center;
+      font-size: 1.35rem; color: #fff; font-weight: 600; line-height: 1.4;
+    }
+    .quote .sub { display: block; font-size: 0.9rem; color: #8fa5c0; font-weight: 400; margin-top: 10px; }
+
+    .download-box {
+      background: linear-gradient(135deg, #152238, #0f1929);
+      border: 1px solid #2a4467; border-radius: 16px; padding: 48px;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 36px; justify-content: space-between;
+    }
+    .download-box h2 { margin-bottom: 8px; flex: 1 1 320px; }
+    .download-box .meta { color: #8fa5c0; font-size: 0.9rem; margin-top: 6px; }
+
+    footer {
+      text-align: center; padding: 48px 0; font-size: 0.82rem; color: #586a82;
+      border-top: 1px solid #1e2d44;
+    }
+
+    @media (max-width: 720px) {
+      .hero { padding-top: 56px; text-align: center; }
+      .hero p { margin-inline: auto; }
+      .btn-group { justify-content: center; }
+      .download-box { flex-direction: column; text-align: center; }
+      .layer { flex-direction: column; gap: 12px; }
+      nav ul { gap: 14px; }
+      nav ul li a { font-size: 0.8rem; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="wrapper">
+    <nav>
+      <a href="index.html" class="logo">
+        <img src="https://raw.githubusercontent.com/bobeire/opbs/master/resources/icon.png" alt="OPBS icon" />
+        OPBS
+      </a>
+      <ul>
+        <li><a href="index.html#features">Features</a></li>
+        <li><a href="macrium.html">Macrium</a></li>
+        <li><a href="benchmark.html">Benchmarks</a></li>
+        <li><a href="prove-your-restore.html" class="active">Prove It</a></li>
+        <li><a href="index.html#download">Download</a></li>
+        <li><a href="releases.html">Releases</a></li>
+        <li><a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrapper">
+    <span class="hero-badge">Drills &middot; Scrub &middot; Anchors &middot; Free</span>
+    <h1>A backup you've never restored<br />is a hope, not a plan.</h1>
+    <p>
+      Most backup tools — free or paid — write your images and wish you luck.
+      OPBS closes the loop: it <strong style="color:#d0d7e3">actually restores
+      your backups on a schedule and checks the result</strong>, repairs silent
+      bit-rot before it becomes a failed restore, and keeps an off-box witness
+      that catches ransomware rolling your history back. None of this is a
+      paid tier.
+    </p>
+    <div class="btn-group">
+      <a href="#layers" class="btn btn-primary">How it works</a>
+      <a href="benchmark.html" class="btn btn-secondary">Restore speed benchmarks</a>
+    </div>
+  </div>
+</section>
+
+<section id="layers">
+  <div class="wrapper">
+    <h2>Three layers of proof</h2>
+    <p class="lead">
+      Each layer catches what the one before it can't. Together they turn
+      "the backup finished" into "the restore is known to work."
+    </p>
+
+    <div class="layer" style="margin-top:32px">
+      <div class="icon">🪂</div>
+      <div>
+        <h3>1. Scheduled restore drills <span class="tag">nobody else ships this free</span></h3>
+        <p>
+          OPBS periodically takes your newest backup, <strong style="color:#d0d7e3">restores it
+          onto a scratch disk you dedicate</strong> (its data gets overwritten),
+          then <strong style="color:#d0d7e3">reads the filesystems back from the physical disk</strong>
+          and validates them: boot-sector <code>0x55AA</code> signature, OEM id,
+          NTFS <code>$MFT</code> record 0 <code>FILE</code> magic and in-use
+          flag, FAT sector/cluster geometry. A restore that completes but
+          fails validation is a failed drill — surfaced, not swallowed.
+          Encrypted images are included when you configure the passphrase.
+        </p>
+        <pre>OPBS.exe --cli drill --dir D:\OPBS --disk 2 --verify</pre>
+        <p style="margin-top:10px">
+          Each drill records a per-image timestamp
+          (<code>opbs-drill-history.json</code>); the Dashboard shows a
+          "drill-tested" badge. Failures alert only after N consecutive misses
+          (default 2) — no toast spam, but never a silent pass on a broken
+          chain. Drills always run with delta application and
+          pre-write verification enabled.
+        </p>
+      </div>
+    </div>
+
+    <div class="layer">
+      <div class="icon">🧩</div>
+      <div>
+        <h3>2. Self-healing scrub <span class="tag">bit-rot repair</span></h3>
+        <p>
+          Hard drives corrupt themselves quietly. Every OPBS backup gets an
+          XOR-parity sidecar (<code>.opar</code>) — PAR2-style groups of 31
+          blocks over the stored frame bytes. A scheduled or idle scrub
+          re-reads every block, re-checks frame and raw CRCs, and
+          <strong style="color:#d0d7e3">rebuilds any single corrupted block in place</strong>
+          from its parity group. It works on encrypted images too — no
+          passphrase needed to verify or repair.
+        </p>
+        <pre>OPBS.exe --cli scrub --dir D:\OPBS --repair</pre>
+        <p style="margin-top:10px">
+          Scheduled under Settings → Scheduled Scrub, with a Dashboard
+          "Scrub Health" panel and per-image history in
+          <code>opbs-scrub.json</code>. Rot is fixed on the next scrub —
+          not discovered at restore time.
+        </p>
+      </div>
+    </div>
+
+    <div class="layer">
+      <div class="icon">🔒</div>
+      <div>
+        <h3>3. Immutable repositories &amp; off-box anchors <span class="tag">rollback detection</span></h3>
+        <p>
+          An OPBS repository keeps backups append-only behind an HMAC-SHA256
+          chained journal — the signing key never lives inside the repository.
+          Images are locked for N days; pruning only ever touches expired
+          ones, and unlocking is an audited, signed event. But a tamper-evident
+          journal alone can't catch an attacker who <em>rolls the whole thing
+          back</em>. So every repository backup can write an
+          <strong style="color:#d0d7e3">off-box anchor</strong> — a snapshot of the exact
+          journal bytes to a local directory, S3 or SFTP that the attacker on
+          the backup machine cannot also rewrite.
+        </p>
+        <pre>OPBS.exe --cli repo init D:\BackupRepo --lock-days 30
+OPBS.exe --cli repo anchor D:\BackupRepo --to s3://my-witness/backups
+OPBS.exe --cli repo verify D:\BackupRepo --anchor s3://my-witness/backups</pre>
+        <p style="margin-top:10px">
+          <code>repo verify --anchor</code> byte-compares the live journal
+          against the witness: a truncated journal (rollback), rewritten
+          records, a swapped header or a missing anchor all fail with
+          <code>anchor-mismatch</code>/<code>anchor-missing</code>. Pair it
+          with an S3 bucket under Object Lock and the images themselves are
+          WORM-protected in the cloud.
+        </p>
+      </div>
+    </div>
+
+    <p class="quote">
+      "The backup finished" is a status.<br />
+      "The restore was tested last night" is a fact.
+      <span class="sub">Drills make it a fact. Scrub keeps the data restorable. Anchors keep the history honest.</span>
+    </p>
+  </div>
+</section>
+
+<section class="alt" id="stack">
+  <div class="wrapper">
+    <h2>The rest of the integrity stack</h2>
+    <p class="lead">
+      The three headline layers sit on a base that's standard in OPBS — also free.
+    </p>
+    <div class="grid" style="margin-top:28px">
+      <div class="card">
+        <h3>✅ Per-block verification</h3>
+        <p>
+          Every written block is CRC-checked, and scheduled verification
+          re-reads images end to end, stamping a <code>FLAG_VERIFIED</code>
+          the Dashboard shows per image.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🛡 Tamper detection</h3>
+        <p>
+          A manifest of the backup directory is rewritten after every backup
+          and prune; drift detection flags missing delta bases, rewritten
+          files and chain breaks before they bite.
+        </p>
+      </div>
+      <div class="card">
+        <h3>📊 Storage health score</h3>
+        <p>
+          A 0–100 reliability score per destination combining free space,
+          chain integrity, verification, scrub and drill coverage, and SMART
+          health — so weak drives are flagged before they fail you.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🌐 Fleet check-ins</h3>
+        <p>
+          Run the free fleet server; each machine posts backup health,
+          drill results and staleness. One green/amber/red row per machine —
+          and webhook alerts the moment something turns critical.
+        </p>
+      </div>
+    </div>
+    <div class="note">
+      <strong>How this compares, honestly.</strong> Enterprise products charge
+      for immutability (Veeam, Datto) and some paid consumer tools offer
+      partial variants — local "image guard" style protection, cloud-only
+      versions. The combination OPBS ships free — real scheduled restore
+      drills with filesystem validation, self-healing parity scrub, and
+      rollback-detecting off-box anchors — isn't offered as a bundle at any
+      price we've found. It's the reason this page exists.
+    </div>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrapper">
+    <h2>Turn it on in five minutes</h2>
+    <ul class="plain" style="margin-top:8px">
+      <li>Settings → Scheduled Restore Drills: pick the scratch disk (its data is overwritten) and a cadence.</li>
+      <li>Settings → Scheduled Scrub: pick an interval; idle scrub runs automatically when the machine is otherwise quiet.</li>
+      <li><code>repo init</code> a repository directory, set an anchor target (S3/SFTP/local-off-box), and every repository backup re-anchors itself.</li>
+      <li>Optional: run <code>fleet serve</code> on any one machine and point the others' check-ins at it — the "did my fleet back up last night?" dashboard.</li>
+    </ul>
+    <div class="note">
+      <strong>Start where you are.</strong> Even without the repository and
+      anchor layers, scheduled drills + scrub already move you from "backup
+      exists" to "restore proven, data repaired." The anchors add the
+      ransomware-history story on top.
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="download">
+  <div class="wrapper">
+    <div class="download-box">
+      <div>
+        <h2>Get OPBS</h2>
+        <p class="meta">Free &middot; GPL-3.0 &middot; Drills, scrub and anchors included — no tier, no upsell</p>
+      </div>
+      <div class="btn-group">
+        <a id="dl-installer" href="https://github.com/bobeire/opbs/releases/latest" class="btn btn-primary" target="_blank">⬇ Download OPBS</a>
+        <a href="macrium.html" class="btn btn-secondary">Coming from Macrium?</a>
+        <a href="benchmark.html" class="btn btn-secondary">Benchmarks</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrapper">
+    &copy; 2026 RHITCS &middot;
+    <a href="https://github.com/bobeire/opbs/blob/master/LICENSE" target="_blank">GPL-3.0</a> &middot;
+    <a href="index.html">Home</a> &middot;
+    <a href="macrium.html">Macrium</a> &middot;
+    <a href="releases.html">Releases</a> &middot;
+    <a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a>
+  </div>
+</footer>
+
+<script>
+  (async () => {
+    try {
+      const res = await fetch('https://api.github.com/repos/bobeire/opbs/releases/latest');
+      if (!res.ok) return;
+      const rel = await res.json();
+      const installer = (rel.assets || []).find(a => /^OPBS-Setup-.*\.exe$/.test(a.name));
+      if (installer) document.getElementById('dl-installer').href = installer.browser_download_url;
+    } catch (_) { /* keep fallback */ }
+  })();
+</script>
+
+</body>
+</html>
