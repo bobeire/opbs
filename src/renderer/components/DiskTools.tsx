@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 
 type Tab = 'mbr' | 'check' | 'trim' | 'smart' | 'bitlocker';
 
-function DiskTools({ onComplete }: { onComplete: () => void }) {
+function DiskTools({ onComplete: _onComplete }: { onComplete: () => void }) {
   const [tab, setTab] = useState<Tab>('mbr');
   const [disks, setDisks] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);

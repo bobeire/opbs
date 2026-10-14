@@ -51,7 +51,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
   const [nodes, setNodes] = useState<BrowseNode[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [_expanded, setExpanded] = useState<Set<number>>(new Set());
   const [extracting, setExtracting] = useState<string | null>(null);
   const [notice, setNotice] = useState('');
   const [winfspOk, setWinfspOk] = useState(false);

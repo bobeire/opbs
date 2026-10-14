@@ -1204,10 +1204,12 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                     <p>Current Partition: {progress.currentPartition}</p>
                   )
                 )}
-                {progress?.estimatedTimeRemaining > 0 && progress?.estimatedTimeRemaining < Infinity && (
-                  <p>ETA: {formatDuration(progress.estimatedTimeRemaining)}</p>
-                )}
-                {progress?.speed > 0 && (
+                {progress?.estimatedTimeRemaining !== undefined &&
+                  progress.estimatedTimeRemaining > 0 &&
+                  progress.estimatedTimeRemaining < Infinity && (
+                    <p>ETA: {formatDuration(progress.estimatedTimeRemaining)}</p>
+                  )}
+                {progress?.speed !== undefined && progress.speed > 0 && (
                   <p>Speed: {formatSpeed(progress.speed)}</p>
                 )}
               </div>

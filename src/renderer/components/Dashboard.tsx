@@ -437,7 +437,8 @@ function Dashboard({ onNavigate, onLoaded }: DashboardProps) {
             </thead>
             <tbody>
               {analytics.destinations.map((dest) => {
-                const bestChain = (dest.chains ?? []).reduce<{ chainEfficiency: number } | null>(
+                const chains: Array<{ chainEfficiency: number }> = dest.chains ?? [];
+                const bestChain = chains.reduce<{ chainEfficiency: number } | null>(
                   (best, c) => (best === null || c.chainEfficiency > best.chainEfficiency ? c : best),
                   null
                 );
@@ -561,17 +562,17 @@ function Dashboard({ onNavigate, onLoaded }: DashboardProps) {
                     </td>
                     <td>
                       {tamper.diff?.missing?.length > 0 && (
-                        <span title={(tamper.diff.missing ?? []).map((m) => m.name).join(', ')}>
+                        <span title={(tamper.diff.missing ?? []).map((m: { name: string }) => m.name).join(', ')}>
                           {`${tamper.diff.missing.length} deleted, `}
                         </span>
                       )}
                       {tamper.diff?.sizeChanged?.length > 0 && (
-                        <span title={(tamper.diff.sizeChanged ?? []).map((m) => m.name).join(', ')}>
+                        <span title={(tamper.diff.sizeChanged ?? []).map((m: { name: string }) => m.name).join(', ')}>
                           {`${tamper.diff.sizeChanged.length} modified, `}
                         </span>
                       )}
                       {tamper.diff?.unexpected?.length > 0 && (
-                        <span title={(tamper.diff.unexpected ?? []).map((m) => m.name).join(', ')}>
+                        <span title={(tamper.diff.unexpected ?? []).map((m: { name: string }) => m.name).join(', ')}>
                           {`${tamper.diff.unexpected.length} unexpected`}
                         </span>
                       )}

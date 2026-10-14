@@ -87,16 +87,6 @@ function VssView({ onComplete }: VssViewProps) {
     }
   };
 
-  const loadVolumes = async () => {
-    try {
-      const vols = await window.electronAPI.getVssVolumes();
-      setVolumes(vols);
-      setSelectedVolume((prev) => (prev && vols.includes(prev) ? prev : vols[0] ?? ''));
-    } catch {
-      /* leave empty */
-    }
-  };
-
   useEffect(() => {
     void (async () => {
       try {
