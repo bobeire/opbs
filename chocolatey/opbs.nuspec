@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>opbs</id>
+    <version>0.6.87</version>
+    <title>OPBS - Open Pickle Backup System</title>
+    <authors>RHITCS</authors>
+    <projectUrl>https://github.com/bobeire/opbs</projectUrl>
+    <projectSourceUrl>https://github.com/bobeire/opbs</projectSourceUrl>
+    <docsUrl>https://github.com/bobeire/opbs#readme</docsUrl>
+    <bugTrackerUrl>https://github.com/bobeire/opbs/issues</bugTrackerUrl>
+    <packageSourceUrl>https://github.com/bobeire/opbs/tree/master/chocolatey</packageSourceUrl>
+    <licenseUrl>https://github.com/bobeire/opbs/blob/master/COPYING</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <iconUrl>https://raw.githubusercontent.com/bobeire/opbs/master/resources/icon.png</iconUrl>
+    <copyright>Copyright 2026 RHITCS</copyright>
+    <tags>backup disk-imaging imaging restore macrium recovery foss ntfs windows</tags>
+    <summary>Free open-source disk imaging backup for Windows with Macrium image restore.</summary>
+    <description>
+OPBS (Open Pickle Backup System) is a free, open-source disk imaging backup
+tool for Windows.
+
+- Back up entire disks or partitions with differential chains, AES-256-GCM
+  encryption and zstd compression
+- Restores native `.opbs` images as well as Macrium Reflect 7/8 (`.mrimg`)
+  and Reflect X (`.mrimgx`) images, including differential and incremental
+  chains
+- Read-only WinFsp mounts, file-level browse/extract, disk-to-disk clone
+- Scheduled restore drills, bit-rot scrubbing with XOR parity
+  self-healing, immutable repositories with off-box anchors
+- Headless CLI for scripted environments
+
+Installs per-user (no admin rights required, no machine-wide changes).
+Silent install: `choco install opbs` (installer runs with `/S /currentuser`).
+    </description>
+    <releaseNotes>https://github.com/bobeire/opbs/releases/tag/0.6.87</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

@@ -1,0 +1,12 @@
+Automatic package downloaded from the official GitHub release.
+
+1. URL:
+   https://github.com/bobeire/opbs/releases/download/0.6.87/OPBS-Setup-0.6.87.exe
+2. Obtain the SHA256 of the file from the URL above, e.g.:
+   curl -sL -o OPBS-Setup.exe "<URL>"
+   sha256sum OPBS-Setup.exe        (Linux / Git Bash)
+   certutil -hashfile OPBS-Setup.exe SHA256   (cmd)
+3. The computed hash must equal the checksum in tools\chocolateyInstall.ps1:
+   5018cf4a573b83635d886f0ef938efe079a2ac3db36a903d1b6034751adc7d95
+4. The installer is published on the GitHub Releases page of the official
+   repository: https://github.com/bobeire/opbs/releases
