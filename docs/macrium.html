@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Macrium Reflect Free is gone. OPBS reads, browses, mounts and restores your existing .mrimg and .mrimgx images — including differential and incremental chains — free and open source." />
+  <title>Restore Macrium Reflect images for free — OPBS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont,
+                   "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0c1220; color: #d0d7e3; line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: #61d0ff; text-decoration: none; transition: color .15s; }
+    a:hover { color: #9be2ff; }
+    code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      background: #152238; border-radius: 4px; padding: 1px 6px; font-size: 0.88em;
+    }
+    .wrapper { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+    section { padding: 72px 0; }
+    section.alt { background: #111b2c; }
+    h1, h2, h3 { color: #fff; font-weight: 700; line-height: 1.25; }
+    h1 { font-size: clamp(2rem, 4vw, 3rem); }
+    h2 { font-size: clamp(1.5rem, 2.5vw, 2rem); margin-bottom: 24px; }
+    h3 { font-size: 1.05rem; margin-bottom: 8px; }
+    p.lead { font-size: 1.1rem; color: #8fa5c0; max-width: 640px; }
+
+    header {
+      position: sticky; top: 0; z-index: 20;
+      background: rgba(12, 18, 32, 0.88); backdrop-filter: blur(10px);
+      border-bottom: 1px solid #1e2d44;
+    }
+    nav { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+    .logo { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 1.15rem; color: #fff; }
+    .logo img { height: 34px; border-radius: 6px; }
+    nav ul { list-style: none; display: flex; gap: 28px; }
+    nav ul li a { color: #a3b1c6; font-size: 0.92rem; font-weight: 500; }
+    nav ul li a:hover, nav ul li a.active { color: #fff; }
+
+    .hero {
+      padding: 88px 0 72px;
+      background: radial-gradient(ellipse at 30% 60%, #152238 0%, #0c1220 70%);
+    }
+    .hero-badge {
+      display: inline-block; background: #1a2d4a; border: 1px solid #2a4467;
+      border-radius: 24px; padding: 6px 16px; font-size: 0.82rem;
+      color: #61d0ff; margin-bottom: 18px;
+    }
+    .hero h1 { margin-bottom: 16px; }
+    .hero p { font-size: 1.15rem; color: #8fa5c0; max-width: 620px; margin-bottom: 32px; }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 12px 28px; border-radius: 8px; font-size: 0.95rem;
+      font-weight: 600; cursor: pointer; border: none; transition: background .2s;
+    }
+    .btn-primary { background: #1d8cf8; color: #fff; }
+    .btn-primary:hover { background: #3aa1ff; color: #fff; }
+    .btn-secondary { background: transparent; border: 1px solid #2a4467; color: #a3b1c6; }
+    .btn-secondary:hover { background: #182840; color: #fff; }
+    .btn-group { display: flex; flex-wrap: wrap; gap: 12px; }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; margin-top: 8px; }
+    .card {
+      background: #0f1929; border: 1px solid #1e2d44; border-radius: 14px;
+      padding: 26px; transition: border-color .25s;
+    }
+    section.alt .card { background: #0c1524; }
+    .card:hover { border-color: #2a5a9a; }
+    .card p { font-size: 0.9rem; color: #8fa5c0; }
+
+    .timeline { list-style: none; margin-top: 8px; max-width: 680px; }
+    .timeline li {
+      position: relative; padding: 0 0 22px 28px;
+      border-left: 2px solid #1e2d44; margin-left: 8px;
+    }
+    .timeline li:last-child { padding-bottom: 0; }
+    .timeline li::before {
+      content: ""; position: absolute; left: -7px; top: 6px;
+      width: 12px; height: 12px; border-radius: 50%;
+      background: #1d8cf8; border: 2px solid #0c1220;
+    }
+    .timeline .when { color: #61d0ff; font-weight: 600; font-size: 0.9rem; }
+    .timeline .what { color: #a3b1c6; font-size: 0.95rem; }
+
+    ol.steps { list-style: none; counter-reset: step; margin-top: 8px; }
+    ol.steps li {
+      counter-increment: step; position: relative;
+      padding: 0 0 28px 56px; max-width: 720px;
+    }
+    ol.steps li:last-child { padding-bottom: 0; }
+    ol.steps li::before {
+      content: counter(step); position: absolute; left: 0; top: 0;
+      width: 36px; height: 36px; border-radius: 50%;
+      background: #1a2d4a; border: 1px solid #2a4467; color: #61d0ff;
+      font-weight: 700; display: flex; align-items: center; justify-content: center;
+    }
+    ol.steps h3 { margin-bottom: 4px; }
+    ol.steps p { color: #8fa5c0; font-size: 0.95rem; }
+    pre {
+      background: #111b2c; border: 1px solid #1e2d44; border-radius: 8px;
+      padding: 14px 16px; white-space: pre-wrap; word-break: break-word;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.85rem; color: #a3b1c6; margin: 10px 0 0;
+    }
+
+    .note {
+      background: #0f1929; border: 1px solid #1e2d44; border-left: 3px solid #1d8cf8;
+      border-radius: 0 10px 10px 0; padding: 18px 22px; margin-top: 28px;
+      font-size: 0.92rem; color: #8fa5c0; max-width: 760px;
+    }
+    .note strong { color: #d0d7e3; }
+    .note.warn { border-left-color: #e0a030; }
+
+    ul.plain { list-style: none; margin-top: 8px; max-width: 720px; }
+    ul.plain li {
+      position: relative; padding: 6px 0 6px 28px; color: #a3b1c6; font-size: 0.95rem;
+    }
+    ul.plain li::before { content: "✓"; position: absolute; left: 0; color: #3ecf8e; font-weight: 700; }
+    ul.plain.limit li::before { content: "—"; color: #e0a030; }
+
+    .download-box {
+      background: linear-gradient(135deg, #152238, #0f1929);
+      border: 1px solid #2a4467; border-radius: 16px; padding: 48px;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 36px; justify-content: space-between;
+    }
+    .download-box h2 { margin-bottom: 8px; flex: 1 1 320px; }
+    .download-box .meta { color: #8fa5c0; font-size: 0.9rem; margin-top: 6px; }
+
+    footer {
+      text-align: center; padding: 48px 0; font-size: 0.82rem; color: #586a82;
+      border-top: 1px solid #1e2d44;
+    }
+
+    @media (max-width: 720px) {
+      .hero { padding-top: 56px; text-align: center; }
+      .hero p { margin-inline: auto; }
+      .btn-group { justify-content: center; }
+      .download-box { flex-direction: column; text-align: center; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="wrapper">
+    <nav>
+      <a href="index.html" class="logo">
+        <img src="https://raw.githubusercontent.com/bobeire/opbs/master/resources/icon.png" alt="OPBS icon" />
+        OPBS
+      </a>
+      <ul>
+        <li><a href="index.html#features">Features</a></li>
+        <li><a href="macrium.html" class="active">Macrium</a></li>
+        <li><a href="index.html#download">Download</a></li>
+        <li><a href="releases.html">Releases</a></li>
+        <li><a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrapper">
+    <span class="hero-badge">For Macrium Reflect users</span>
+    <h1>Your Macrium images still work.<br />Keep them free.</h1>
+    <p>
+      Macrium Reflect Free is discontinued. OPBS is a free, open-source
+      Windows imaging tool that reads, browses, mounts and
+      <strong style="color:#d0d7e3">restores your existing
+      <code>.mrimg</code> and <code>.mrimgx</code> images</strong> — including
+      differential and incremental chains. No subscription, no account, no
+      removal date.
+    </p>
+    <div class="btn-group">
+      <a href="https://github.com/bobeire/opbs/releases/latest" class="btn btn-primary" target="_blank">
+        ⬇ Download OPBS
+      </a>
+      <a href="#migrate" class="btn btn-secondary">How to migrate</a>
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="story">
+  <div class="wrapper">
+    <h2>What happened to Macrium Reflect Free?</h2>
+    <p class="lead">
+      The images on your disk never expired — only the free tool that read
+      them did.
+    </p>
+    <ul class="timeline" style="margin-top:32px">
+      <li>
+        <div class="when">January 1, 2024</div>
+        <div class="what">Final security patches for Macrium Reflect Free. No further fixes were promised.</div>
+      </li>
+      <li>
+        <div class="when">2024 – 2025</div>
+        <div class="what">The official free download was removed from macrium.com. Existing installs kept working, unsupported.</div>
+      </li>
+      <li>
+        <div class="when">February 2026</div>
+        <div class="what">Extended support for Reflect 8 ended.</div>
+      </li>
+      <li>
+        <div class="when">Today</div>
+        <div class="what">Macrium Reflect X Home is a paid subscription. There is no free edition anymore.</div>
+      </li>
+    </ul>
+    <div class="note">
+      <strong>Nothing is wrong with your old backups.</strong> A
+      <code>.mrimg</code> or <code>.mrimgx</code> file is just a file — it
+      doesn't phone home or stop working. What you lost was a free way to
+      open it again. That's the gap OPBS fills.
+    </div>
+  </div>
+</section>
+
+<section id="read">
+  <div class="wrapper">
+    <h2>OPBS reads the images you already have</h2>
+    <p class="lead">
+      Both containers, both chain styles, from the GUI, the CLI and the
+      Config Builder.
+    </p>
+    <div class="grid">
+      <div class="card">
+        <h3>💿 Reflect 7 / 8 <code>.mrimg</code></h3>
+        <p>
+          A clean-room decoder for Macrium's QuickLZ 1.31 container, validated
+          against the per-block MD5s stored inside the image itself. Full,
+          differential and incremental backups all open.
+        </p>
+      </div>
+      <div class="card">
+        <h3>💽 Reflect X <code>.mrimgx</code></h3>
+        <p>
+          Parsed from the official layout — footer, metadata, <code>$INDEX</code>
+          zstd blocks — validated against the official Macrium demo image.
+          <code>mrimg info</code> reports disk geometry and backup type.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🔗 Differential &amp; incremental chains</h3>
+        <p>
+          Open any member and OPBS resolves its base automatically: v7/8 chains
+          via the <code>&lt;id&gt;-&lt;inc&gt;-&lt;inc&gt;.mrimg</code> naming,
+          Reflect X delta sets via the backup-set manifest. You always see and
+          restore the full logical volume state.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🔍 Browse &amp; extract files</h3>
+        <p>
+          Pull a single file out of a decade-old Macrium image without
+          restoring a whole disk. NTFS sparse runs, LZNT1 compression, alternate
+          data streams — the works.
+        </p>
+      </div>
+      <div class="card">
+        <h3>💾 Mount read-only</h3>
+        <p>
+          Attach a partition from a Macrium image as a real drive letter via
+          WinFsp, with zero extra disk usage — reads are served on demand by
+          decompressing only the needed blocks.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🛠 Restore full disks</h3>
+        <p>
+          Placement is read from the image's own geometry and partition table.
+          Every block is decompressed and MD5-verified before it lands on the
+          target. Works from the restore wizard, the CLI and the Config Builder.
+        </p>
+      </div>
+    </div>
+
+    <div class="note">
+      <strong>Validated on real images.</strong> The Macrium reader is covered
+      by a real-sample test suite (Reflect 8 <code>.mrimg</code> and Reflect X
+      <code>.mrimgx</code> images, plus the official Macrium demo) that checks
+      block-level decode against stored MD5s — and skips cleanly when no
+      samples are present, so the suite stays honest.
+    </div>
+    <div class="note warn">
+      <strong>Refused up front, never mid-restore:</strong> password-protected
+      images, split multi-part sets, and file-and-folder (File Backup) images
+      are not supported. OPBS detects them from the file contents and refuses
+      with a clear message before touching the disk, instead of failing
+      halfway through with a confusing parse error.
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="migrate">
+  <div class="wrapper">
+    <h2>Migrate in three steps</h2>
+    <ol class="steps" style="margin-top:32px">
+      <li>
+        <h3>Install OPBS</h3>
+        <p>
+          Free, GPL-3.0, Windows 10 / 11. No account, no phone-home, no
+          nags. The installer and a portable exe are on the
+          <a href="https://github.com/bobeire/opbs/releases/latest" target="_blank">releases page</a>.
+        </p>
+      </li>
+      <li>
+        <h3>Point it at your Macrium images</h3>
+        <p>
+          In the restore wizard, just pick the <code>.mrimg</code> /
+          <code>.mrimgx</code> file — the pickers list them alongside native
+          <code>.opbs</code> images. Prefer the command line?
+        </p>
+        <pre>OPBS.exe --cli mrimg info "D:\Images\win11-00-00.mrimg"
+OPBS.exe --cli browse "D:\Images\win11-01-01.mrimg" --partition 2</pre>
+      </li>
+      <li>
+        <h3>Restore, mount, or extract</h3>
+        <p>
+          Full-disk restore to any target, a read-only WinFsp mount to pull
+          single files, or a targeted extract — your old backups become
+          ordinary, usable files again.
+        </p>
+        <pre>OPBS.exe --cli extract "D:\Images\win11-00-00.mrimg" --partition 1 --path "Users\me\notes.txt" --out D:\restored\notes.txt</pre>
+      </li>
+    </ol>
+    <div class="note">
+      <strong>Then take new backups with OPBS.</strong> New backups use the
+      open <code>.opbs</code> format — encrypted incremental chains, scheduled
+      restore drills, bit-rot scrubbing — but keep your Macrium images
+      around as long as you like: OPBS will still restore them.
+    </div>
+  </div>
+</section>
+
+<section id="free">
+  <div class="wrapper">
+    <h2>Free means free — and provable</h2>
+    <p class="lead">
+      OPBS doesn't just replace the Reflect Free you lost. It includes
+      integrity features that even most paid tools charge for.
+    </p>
+    <div class="grid">
+      <div class="card">
+        <h3>🪂 Scheduled restore drills</h3>
+        <p>
+          OPBS periodically restores your newest backup onto a scratch disk
+          you dedicate and validates the result — including encrypted images.
+          A backup you've never restored is a hope, not a plan.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🧩 Bit-rot scrubbing &amp; self-healing</h3>
+        <p>
+          Every backup gets an XOR-parity sidecar. A scheduled or idle scrub
+          re-reads every block and rebuilds any single corrupted block in
+          place — silently fixing rot before it becomes a failed restore.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🔒 Immutable repositories</h3>
+        <p>
+          Append-only repositories with an HMAC-chained journal and optional
+          off-box anchor that detects rollback — plus S3 Object Lock WORM
+          support. Ransomware that finds your NAS still can't rewrite your
+          history.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🔓 No strings attached</h3>
+        <p>
+          GPL-3.0, open source, no subscription, no account, no telemetry,
+          no "free" tier that expires. Read the code, build it yourself, or
+          just use the installer.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="limits">
+  <div class="wrapper">
+    <h2>Honest limits</h2>
+    <p class="lead">
+      A quick word on what OPBS is not — because a backup tool that oversells
+      itself is worse than one that doesn't.
+    </p>
+    <ul class="plain" style="margin-top:24px">
+      <li><strong style="color:#d0d7e3">Not a Macrium clone.</strong> OPBS reads and restores Macrium images, but writes new backups in its own open <code>.opbs</code> format.</li>
+      <li><strong style="color:#d0d7e3">Refuses what it can't do safely:</strong> password-protected, split, and file-and-folder Macrium images (see above).</li>
+      <li><strong style="color:#d0d7e3">Windows-only</strong>, and young: OPBS is at v0.6.x. It has a real test suite and real-sample validation, but it has not been in the field for 20 years.</li>
+    </ul>
+    <ul class="plain limit" style="margin-top:8px">
+      <li>If you need enterprise support contracts or certified compliance, a paid vendor is the right call.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="download">
+  <div class="wrapper">
+    <div class="download-box">
+      <div>
+        <h2>Get OPBS</h2>
+        <p class="meta">Free &middot; GPL-3.0 &middot; Windows 10 / 11 &middot; Restores Macrium 7/8/X images</p>
+      </div>
+      <div class="btn-group">
+        <a id="dl-installer"
+           href="https://github.com/bobeire/opbs/releases/latest"
+           class="btn btn-primary" target="_blank">
+          ⬇ Installer (.exe)
+        </a>
+        <a id="dl-portable"
+           href="https://github.com/bobeire/opbs/releases/latest"
+           class="btn btn-secondary" target="_blank">
+          Portable (.exe)
+        </a>
+        <a href="index.html#features" class="btn btn-secondary">
+          All features
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrapper">
+    &copy; 2026 RHITCS &middot;
+    <a href="https://github.com/bobeire/opbs/blob/master/LICENSE" target="_blank">GPL-3.0</a> &middot;
+    <a href="index.html">Home</a> &middot;
+    <a href="releases.html">Releases</a> &middot;
+    <a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a>
+  </div>
+</footer>
+
+<script>
+  // Point the download buttons at the newest release's assets.
+  // Falls back to the releases page if the API is unreachable.
+  (async () => {
+    try {
+      const res = await fetch('https://api.github.com/repos/bobeire/opbs/releases/latest');
+      if (!res.ok) return;
+      const rel = await res.json();
+      const installer = (rel.assets || []).find(a => /^OPBS-Setup-.*\.exe$/.test(a.name));
+      const portable  = (rel.assets || []).find(a => /^OPBS-[0-9].*\.exe$/.test(a.name));
+      if (installer) document.getElementById('dl-installer').href = installer.browser_download_url;
+      if (portable)  document.getElementById('dl-portable').href  = portable.browser_download_url;
+    } catch (_) { /* keep releases/latest fallback */ }
+  })();
+</script>
+
+</body>
+</html>

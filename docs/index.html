@@ -148,6 +148,7 @@
       </a>
       <ul>
         <li><a href="#features">Features</a></li>
+        <li><a href="macrium.html">Macrium</a></li>
         <li><a href="#download">Download</a></li>
         <li><a href="releases.html">Releases</a></li>
         <li><a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a></li>
@@ -162,7 +163,7 @@
 <section class="hero" id="home">
   <div class="wrapper" style="display:flex;align-items:center;gap:48px;flex-wrap:wrap">
     <div class="hero-text">
-      <span class="hero-badge">GPL-3.0 &middot; Windows</span>
+      <span class="hero-badge">GPL-3.0 &middot; Windows &middot; <a href="macrium.html" style="color:#61d0ff">Restores Macrium images ↗</a></span>
       <h1>Disk imaging backup you can actually trust</h1>
       <p>
         Open Pickle Backup System brings block-level imaging, differential
@@ -247,9 +248,10 @@
       <div class="card">
         <h3><span class="icon">💿</span> Macrium image support</h3>
         <p>
-          Read and browse Macrium Reflect 7/8 (.mrimg) and Reflect X (.mrimgx)
-          images directly — including QuickLZ container decoding validated
-          against stored block MD5s.
+          Read, browse, mount and restore Macrium Reflect 7/8 (.mrimg) and
+          Reflect X (.mrimgx) images directly — including differential and
+          incremental chains. Coming from Macrium Reflect Free?
+          <a href="macrium.html">Migration guide ↗</a>
         </p>
       </div>
 
@@ -347,11 +349,13 @@
         <p class="meta">Free &middot; GPL-3.0 &middot; Windows 10 / 11</p>
       </div>
       <div class="btn-group">
-        <a href="https://github.com/bobeire/opbs/releases/latest/download/OPBS%20Setup%200.1.0.exe"
+        <a id="dl-installer"
+           href="https://github.com/bobeire/opbs/releases/latest"
            class="btn btn-primary" target="_blank">
           ⬇ Installer (.exe)
         </a>
-        <a href="https://github.com/bobeire/opbs/releases/latest/download/OPBS%200.1.0.exe"
+        <a id="dl-portable"
+           href="https://github.com/bobeire/opbs/releases/latest"
            class="btn btn-secondary" target="_blank">
           Portable (.exe)
         </a>
@@ -377,6 +381,22 @@
     <a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a>
   </div>
 </footer>
+
+<script>
+  // Point the download buttons at the newest release's assets.
+  // Falls back to the releases page if the API is unreachable.
+  (async () => {
+    try {
+      const res = await fetch('https://api.github.com/repos/bobeire/opbs/releases/latest');
+      if (!res.ok) return;
+      const rel = await res.json();
+      const installer = (rel.assets || []).find(a => /^OPBS-Setup-.*\.exe$/.test(a.name));
+      const portable  = (rel.assets || []).find(a => /^OPBS-[0-9].*\.exe$/.test(a.name));
+      if (installer) document.getElementById('dl-installer').href = installer.browser_download_url;
+      if (portable)  document.getElementById('dl-portable').href  = portable.browser_download_url;
+    } catch (_) { /* keep releases/latest fallback */ }
+  })();
+</script>
 
 </body>
 </html>
