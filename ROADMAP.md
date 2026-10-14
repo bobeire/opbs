@@ -1,10 +1,55 @@
 # Roadmap
 
-Prioritized backlog for OPBS (Open Pickle Backup System). Items in **Planned**
-are designed but not
-implemented; **Investigate** items need spike work first.
+Prioritized backlog for OPBS (Open Pickle Backup System). Everything designed
+to date has shipped; **Investigate** items need spike work first.
 
 ## Shipped
+
+### Shrink-on-restore (restore/clone onto a smaller drive)
+- ✅ **NTFS planner** (`imaging/fs/ntfs-shrink.ts`): `planNtfsShrink` +
+  `ntfsShrinkMinimum` walk the MFT with their own raw attribute walker, read
+  the `$Bitmap` **prefix only** (bounded by the new size, not the volume),
+  cross-check bitmap vs MFT (dirty volume → refuse), and pack vacated runs
+  first-fit into free clusters below the boundary (splitting across
+  fragmentation). Unmovable content above the boundary refuses: OS metadata /
+  `$Extend` children / compressed / EFS / attribute-listed / shared clusters /
+  `$BadClus`. Emits a serializable `NtfsShrinkPlan` (moves, on-disk MFT record
+  patches with fixups planted, `$Bitmap` byte regions, shrunken boot sector,
+  `$MFTMirr`). Minimum = used + 1 MiB margin, 1 MiB aligned. Crash-safe apply
+  — a failed shrink FAILS the restore/clone: shrunken boot sector first (a
+  crash never leaves a volume advertising a too-large size) → data blocks
+  routed through the move map (blocks straddling the boundary split at cluster
+  granularity; free blocks above it skipped entirely) → MFT patches /
+  `$MFTMirr` → `$Bitmap`.
+- ✅ **Surfaces**: restore accepts a smaller `--layout P:OFF:SIZE`
+  (`buildJob` attaches `shrinkInfo`, refuses a target below the minimum,
+  `--preflight` prints "minimum shrink target: X"); clones check feasibility
+  helper-side against the live source before any write (the engine has no
+  disk-read access) with the same crash-safe apply; the RestoreWizard's
+  per-partition size field (GB) shows the minimum and surfaces refusals live
+  via `shrinkInfo` on the preflight result.
+- ✅ **Auto-shrink-to-fit (PartitionCopy)**: `planTargetLayout` gains a
+  `shrinkToFit` option that scales scalable partitions down into a smaller
+  target (1 MiB–aligned, never below a per-partition `minSize`; `noShrink`
+  partitions keep their source size and the plan errors if the set can't
+  fit), exposed as a "Scale partitions down to fit" checkbox.
+- ✅ **FAT32 shrink** (`imaging/fs/fat32-shrink.ts`): `planFat32Shrink` /
+  `fat32ShrinkMinimum` mirror the NTFS planner — relocate clusters at/above
+  the boundary into free space below it (cluster→byte offset is
+  `dataStart + (c−2)·clusterSize`, so moves carry partition-relative
+  offsets), re-link the FAT, patch moved directory entries (split
+  start-cluster) and the BPB root, and write a patched boot + fixed backup
+  boot + FSInfo. The helper and the restore engine sniff the boot sector
+  (`detectFatType`) and branch NTFS/FAT32 at every shrink site. Refusals: not
+  FAT32, below minimum, bad cluster at/above the boundary, not enough free
+  space below it, chain cycle.
+- ✅ **Tests**: `ntfs-shrink.test.ts` (14 — planner fixtures: fragmented
+  runs, sparse, front free space, refusal matrix, min-size math,
+  bitmap-prefix-only reads; plan/apply round-trip re-parsed via `ntfs.ts`),
+  `restore-shrink.test.ts`, `clone-job`/`clone-engine` shrink cases,
+  `clone-layout.test.ts` (12, incl. 6 auto-shrink-to-fit),
+  `fat32-shrink.test.ts` (7) with the synthetic FAT32 fixture in
+  `test/helpers/fat32-shrink-fixture.ts`.
 
 ### Restore directly from cloud (0.6.83)
 - ✅ `restore` accepts cloud URIs (`s3://`, `sftp://`, `ftp://`, `ftps://`):
@@ -463,7 +508,8 @@ implemented; **Investigate** items need spike work first.
   `windows-latest` — `npm ci` (+ electron's binary invoked explicitly, since
   npm's allow-scripts guard leaves its postinstall pending), main/preload tsc
   (must be clean), renderer tsc (fails if error count exceeds the 16-error
-  baseline), eslint parsed from JSON output (fails above the 9-error /
+  baseline — raised to a hard zero gate once that baseline was cleared in
+  `b217f09`), eslint parsed from JSON output (fails above the 9-error /
   195-problem baseline), `npm run build`, the native addon, and the entire
   vitest suite — Electron integration test included. Two real bugs surfaced
   getting there: `build:native` ran `node-gyp rebuild` at the repo root where
@@ -1037,131 +1083,6 @@ implemented; **Investigate** items need spike work first.
   different target offsets; placements are validated against target disk size.
 - ✅ Partition-table builder + disk-identity guards + filesystem resize: see the
   "Native partition-table builder" section.
-
-## Planned
-
-### Shrink-on-restore (restore an image onto a smaller drive)
-- ✅ **Phase 0 — planner (read-only)**: `imaging/fs/ntfs-shrink.ts`
-  (`planNtfsShrink` + `ntfsShrinkMinimum`) walks the MFT with its own raw
-  attribute walker, reads the `$Bitmap` prefix only, cross-checks bitmap vs
-  MFT, refuses unmovable streams above the boundary (OS metadata / `$Extend`
-  children / compressed / EFS / attribute-listed / shared clusters /
-  unsupported `$BadClus`), packs vacated runs first-fit into free space below
-  the boundary (splitting across fragmentation), and emits a serializable
-  `NtfsShrinkPlan` (moves, on-disk record patches with fixups planted,
-  `$Bitmap` byte regions, boot sector with the new total-sector count,
-  `$MFTMirr` info). Fixture `test/helpers/ntfs-shrink-fixture.ts` +
-  `test/unit/ntfs-shrink.test.ts` (14 tests incl. plan/apply round-trip
-  re-parsed via `ntfs.ts`). Minimum = used + 1 MiB margin, 1 MiB aligned.
-- ✅ **Phase 1 — restore apply (elevated helper + CLI)**: restore jobs accept
-  a smaller target (`--layout P:OFF:SIZE`). `buildJob` attaches `shrinkInfo`
-  and refuses a target below the minimum; the helper computes the full plan
-  against the image chain before the partition table write, clamps the data
-  loop to the new boundary and applies crash-safe (boot → relocated tail →
-  MFT patches/`$MFTMirr` → `$Bitmap`). A failed shrink FAILS the restore.
-  `--preflight` prints "minimum shrink target: X". `test/unit/restore-shrink.test.ts`.
-- ✅ **Phase 2 — clone + wizard**: clones accept a smaller target (the engine
-  has no disk-read access, so the helper computes min + plan against the live
-  source before any write and fails the job if infeasible) with the same
-  crash-safe apply. The RestoreWizard gains a per-partition size field (GB)
-  whose value becomes a `targetLayout` override + `acknowledgeLayout`; the
-  preflight result carries `shrinkInfo` so a feasible shrink shows its
-  minimum and a too-small size surfaces the refusal live.   `test/unit/clone-job.test.ts`,
-  `test/unit/clone-engine.test.ts`.
-- ✅ **Auto-shrink-to-fit (PartitionCopy)**: `planTargetLayout` gains a
-  `shrinkToFit` option that scales scalable partitions down into a smaller
-  target (1 MiB–aligned, never below a per-partition `minSize`; `noShrink`
-  partitions keep their source size and the plan errors if the set can't
-  fit). PartitionCopy exposes a "Scale partitions down to fit" checkbox and
-  passes `minSize`/`noShrink` for every shrinkable filesystem (NTFS, FAT32).
-  `test/unit/clone-layout.test.ts`.
-- ✅ **FAT32 shrink**: `planFat32Shrink`/`fat32ShrinkMinimum`
-  (`fat32-shrink.ts`) mirror the NTFS planner — relocates clusters at/above
-  the boundary into free space below it, re-links the FAT, patches moved
-  directory entries (split start-cluster) and the BPB root, and writes a
-  patched boot + fixed backup boot + FSInfo. The helper sniffs the boot
-  sector and branches NTFS/FAT32 at every shrink site (restore + clone);
-  the restore engine does the same for the preflight minimum. Refusals: not
-  FAT32, below minimum, bad cluster at/above the boundary, not enough free
-  space below the boundary, cycle. `test/unit/fat32-shrink.test.ts`.
-
-Partitions can already be re-placed before restore/clone (`targetLayout` /
-CLI `--layout P:OFF[:SIZE]`), and a *larger* size grows NTFS in place
-(`planNtfsGrow` — boot sector, `$Bitmap`, `$BadClus` metadata patch, applied
-in the elevated helper after the data write). A *smaller* size is refused in
-both engines because shrink requires relocating data clusters, not just
-patching metadata. This design adds native NTFS shrink so an image captured
-from (say) a 500 GB disk restores onto a 256 GB drive.
-
-- **Architecture — plan from the image, apply on the target.** The planner
-  runs engine-side against the image chain (`ChainPartitionReader` +
-  `imaging/fs/ntfs.ts`: boot parse, full MFT walk with attribute-list
-  resolution, runlists, `$Bitmap`) and produces a serializable
-  `NtfsShrinkPlan`. The plan travels in the job JSON to the elevated helper,
-  which interleaves it with the existing partition write (see below).
-- **Planning algorithm (ntfsresize-style, conservative).**
-  1. Parse boot + walk every MFT record; collect all non-resident runs.
-  2. Read `$Bitmap` **prefix only** (bytes up to the requested new cluster
-     count — bounded by newSize/8, not volume/8) and cross-check used
-     clusters against MFT runs; disagreement (dirty volume) → refuse.
-  3. New size: explicit from `targetLayout`, or auto = align-up of
-     used-bytes + metadata + 1 MiB slack; requested < min → refuse with the
-     numbers. Boundary = new cluster count.
-  4. Clusters ≥ boundary must be vacated. Ordinary file-data runs are
-     movable; sparse holes need no move; resident data lives in the MFT
-     (front) and is fine. Refuse (v1) when anything unmovable crosses the
-     boundary: compressed or EFS streams, streams with attribute lists,
-     or any extent of `$MFT`, `$MFTMirr`, `$LogFile`, `$Bitmap`, `$BadClus`,
-     `$Secure`, `$UpCase`, `$AttrDef`, `$Extend/*`.
-  5. Pack vacated runs into free clusters below the boundary (first-fit,
-     coalescing adjacent mappings); emit sparse `moves`
-     `[{srcCluster, dstCluster, clusterCount}]` + patched MFT record bytes
-     for every record whose runlist changed (also mirrored to `$MFTMirr`
-     for the first mirrored records). Cap the plan (moves / rewrite bytes);
-     over the cap → refuse with a fragmentation message.
-- **Apply order (crash-safe, unlike grow this FAILS the restore).**
-  1. *Before the data phase*: write the shrunken boot sector (masked out of
-     block 0's normal write while the plan is active), so a crash mid-restore
-     leaves a volume that advertises the correct, smaller size — never one
-     that reads past the partition end.
-  2. *During the data phase*: blocks below the boundary write normally;
-     used blocks at/above it are routed through the move map to their
-     relocation targets; free-space blocks above the boundary are skipped
-     entirely (the captured tail never reaches the target). Blocks straddling
-     the boundary split at cluster granularity.
-  3. *After the data phase*: patched MFT records (+ `$MFTMirr`), then the
-     truncated/updated `$Bitmap` regions and the `$BadClus` sparse run
-     re-encoded to the new cluster count (the grow record-rebuild helper
-     generalizes to any run length).
-  4. Verify: read boot + sample records + bitmap head back from the target
-     and re-run the planner's validators; later a `chkdsk /scan` opt-in.
-- **Refusal matrix (v1)**: non-NTFS; requested < minimum; compressed/EFS/
-  attribute-listed streams above the boundary; OS-metadata extents above the
-  boundary; bitmap/MFT disagreement; same-disk restore (serial match) —
-  shrink never runs against the source disk. Every refusal surfaces the
-  reason through preflight and the CLI.
-- **Surfaces.** Done: restore (CLI `--layout` with a smaller SIZE plus
-  `--preflight` printing "minimum shrink target: X"), clone-to-smaller-disk
-  (feasibility checked helper-side — the engine has no disk-read access), and
-  the RestoreWizard per-partition size entry with live min/refusal feedback
-  (`shrinkInfo` on the preflight result), and auto-shrink-to-fit in
-  PartitionCopy (`planTargetLayout` `shrinkToFit` — scales NTFS/FAT32
-  partitions down to a smaller target via the same helper-side plan). FAT32
-  is handled alongside NTFS everywhere: the helper sniffs the boot sector and
-  picks `planFat32Shrink`/`planNtfsShrink` at each restore/clone shrink site,
-  and the restore engine does the same for the preflight minimum.
-- **Tests**: planner fixtures extending `ntfs-resize-fixture.ts`
-  (fragmented runs, sparse, front free space, refusal matrix, min-size math,
-  bitmap-prefix-only reads); plan-application round-trip — apply to a buffer
-  volume, re-parse with `ntfs.ts`, compare file contents; restore-to-VHD
-  integration (shrink500→256 layout, attach, compare extracted files);
-  crash-mid-apply simulation (kill between data and MFT phases — volume
-  mounts at the new size, below-boundary data intact, chkdsk-repairable
-  tail).
-- Honest scope: this is the hardest filesystem feature in the repo to date —
-  grow was ~460 lines because it is metadata-only; shrink adds data
-  movement, a write-loop remap in the helper, and engine/UI gates. Phases
-  are cut so each ships independently behind the existing layout flags.
 
 ## Investigate
 

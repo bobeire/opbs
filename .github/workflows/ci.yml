@@ -26,16 +26,8 @@ jobs:
           echo "electron.exe present"
       - name: Typecheck (main/preload)
         run: npx tsc --noEmit -p tsconfig.main.json
-      - name: Typecheck (renderer, baseline 16)
-        shell: bash
-        run: |
-          npx tsc --noEmit > tsc-renderer.log 2>&1 || true
-          count=$(grep -c "error TS" tsc-renderer.log || true)
-          echo "renderer tsc errors: $count (baseline 16)"
-          if [ "$count" -gt 16 ]; then
-            cat tsc-renderer.log
-            exit 1
-          fi
+      - name: Typecheck (renderer)
+        run: npx tsc --noEmit
       - name: Lint (baseline 9 errors / 195 problems)
         shell: bash
         run: |
