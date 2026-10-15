@@ -7,6 +7,17 @@ created by **RHITCS** — named in honour of a certain well-preserved pickle.
 
 Website: https://opbs.rhitcs.com
 
+## Install
+
+Installer and portable exe: [GitHub Releases](https://github.com/bobeire/opbs/releases/latest).
+
+Via [Scoop](https://scoop.sh):
+
+```bash
+scoop bucket add opbs https://github.com/bobeire/opbs
+scoop install opbs
+```
+
 ## Features
 
 - **Disk & partition imaging** with per-block CRC-32 integrity checking
