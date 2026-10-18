@@ -9,12 +9,11 @@ installer itself; `choco` still runs elevated as usual.
 ## Updating for a new release
 
 1. Download the new `OPBS-Setup-<version>.exe` and compute its SHA256
-   (see `tools/VERIFICATION.txt` for commands).
+   (e.g. `certutil -hashfile OPBS-Setup-<version>.exe SHA256` in cmd).
 2. In `opbs.nuspec`: bump `<version>` and the `releaseNotes` URL.
 3. In `tools/chocolateyInstall.ps1`: update `url`, `checksum`,
    `silentArgs` stay as-is.
-4. In `tools/VERIFICATION.txt`: update the URL and hash lines.
-5. Pack and sanity-check:
+4. Pack and sanity-check:
 
    ```bash
    choco pack opbs.nuspec

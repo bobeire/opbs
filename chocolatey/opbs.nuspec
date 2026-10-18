@@ -12,7 +12,7 @@
     <packageSourceUrl>https://github.com/bobeire/opbs/tree/master/chocolatey</packageSourceUrl>
     <licenseUrl>https://github.com/bobeire/opbs/blob/master/COPYING</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
-    <iconUrl>https://raw.githubusercontent.com/bobeire/opbs/master/resources/icon.png</iconUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/bobeire/opbs@3ef813147a1cdd9136875163adc13ac9a432f1dd/resources/icon.png</iconUrl>
     <copyright>Copyright 2026 RHITCS</copyright>
     <tags>backup disk-imaging imaging restore macrium recovery foss ntfs windows</tags>
     <summary>Free open-source disk imaging backup for Windows with Macrium image restore.</summary>
