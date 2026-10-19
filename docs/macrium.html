@@ -87,6 +87,27 @@
     .timeline .when { color: #61d0ff; font-weight: 600; font-size: 0.9rem; }
     .timeline .what { color: #a3b1c6; font-size: 0.95rem; }
 
+    table.compat {
+      width: 100%; max-width: 780px; border-collapse: collapse;
+      margin-top: 24px; font-size: 0.95rem;
+    }
+    table.compat th, table.compat td {
+      padding: 11px 14px; text-align: left;
+      border-bottom: 1px solid #1e2d44;
+    }
+    table.compat th {
+      color: #d0d7e3; font-weight: 600; font-size: 0.85rem;
+      text-transform: uppercase; letter-spacing: 0.04em;
+      background: #131c2e;
+    }
+    table.compat td { color: #a3b1c6; }
+    table.compat td.container { color: #8fa5c0; font-family: ui-monospace, monospace; font-size: 0.88rem; }
+    table.compat .ok { color: #3fb950; font-weight: 700; }
+    table.compat .no { color: #f0883e; font-weight: 700; }
+    table.compat .note {
+      color: #8fa5c0; font-size: 0.88rem; margin-top: 14px; max-width: 720px;
+    }
+
     ol.steps { list-style: none; counter-reset: step; margin-top: 8px; }
     ol.steps li {
       counter-increment: step; position: relative;
@@ -184,6 +205,62 @@
       </a>
       <a href="#migrate" class="btn btn-secondary">How to migrate</a>
     </div>
+  </div>
+</section>
+
+<section id="compat">
+  <div class="wrapper">
+    <h2>Compatibility at a glance</h2>
+    <p class="lead">
+      What restores today — answered once, up front.
+    </p>
+    <table class="compat">
+      <thead>
+        <tr>
+          <th>Macrium version</th>
+          <th>Container</th>
+          <th>Full</th>
+          <th>Differential</th>
+          <th>Incremental</th>
+          <th>Password-protected</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Reflect 7</td>
+          <td class="container">.mrimg</td>
+          <td class="ok">&#10003;</td>
+          <td class="ok">&#10003;</td>
+          <td class="ok">&#10003;</td>
+          <td class="no">not yet</td>
+        </tr>
+        <tr>
+          <td>Reflect 8</td>
+          <td class="container">.mrimg</td>
+          <td class="ok">&#10003;</td>
+          <td class="ok">&#10003;</td>
+          <td class="ok">&#10003;</td>
+          <td class="no">not yet</td>
+        </tr>
+        <tr>
+          <td>Reflect X</td>
+          <td class="container">.mrimgx</td>
+          <td class="ok">&#10003;</td>
+          <td class="ok">&#10003; (delta)</td>
+          <td class="ok">&#10003; (delta)</td>
+          <td class="no">not yet</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="note">
+      Every block is decompressed and MD5-verified against the checksums
+      stored inside the image before it reaches the target. File-and-folder
+      backups, split multi-part sets and images whose chain members are
+      missing from disk are detected and refused with a clear error before
+      any target byte is written — a refusal you can plan around, not a
+      half-finished restore. Reflect 7/8 images are validated against their
+      own per-block MD5s; Reflect X against Macrium's official demo image.
+    </p>
   </div>
 </section>
 
