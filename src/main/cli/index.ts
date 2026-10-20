@@ -40,6 +40,7 @@ import { flagValue, flagValues } from './flags';
 import { resolvePassphrase } from './passphrase';
 import { cmdRepo, finalizeBackupRepo, parseLockDays } from './repo';
 import { cmdFleet } from './fleet';
+import { cmdMigrate } from './migrate';
 import { isRepository } from '../imaging/repository';
 import { openRepoSession, type RepoSession } from '../imaging/repo-s3';
 import { compactChain } from '../imaging/compact-engine';
@@ -126,6 +127,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdMedia(ctx);
       case 'mrimg':
         return await cmdMrimg(ctx);
+      case 'migrate':
+        return await cmdMigrate(ctx);
       case 'browse':
         return await cmdBrowse(ctx);
       case 'extract':
@@ -373,6 +376,17 @@ Commands:
   mrimg info <image.mrimgx|image.mrimg>
                                          Show the structure of a Macrium Reflect image
                                          (both .mrimgx and .mrimg Reflect 7/8 containers).
+  migrate inventory [--live|image] [--partition N] [--passphrase p] [--apps-db file] [--json]
+                                         Phase-0 user-state migration spike: inventory user
+                                         profiles, standard folders and known app data stores
+                                         on a live system drive or an image partition.
+                                         Read-only.
+  migrate plan [--live|image] [--partition N] --profile <name|all> [--target DIR]
+               [--folder NAME]... [--apps-db file] [--json]
+                                         Dry-run migration plan for a profile: tier-1 file
+                                         data, registry keys listed for a future tier 2,
+                                         winget reinstall hints, and refusals with reasons.
+                                         Exits 1 when refusals exist. Read-only.
 store put <s3://bucket/prefix|sftp://user@host/path|ftp://user@host/path> <file> [--region R]
                                          Upload a file to the object store (AWS_* / SFTP_* env vars).
   store get <s3://bucket/prefix|sftp://user@host/path|ftp://user@host/path> <file> [--region R]

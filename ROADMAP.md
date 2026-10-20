@@ -1095,9 +1095,16 @@ to date has shipped; **Investigate** items need spike work first.
   `winget export`-based reinstall manifest. Installed binaries are
   deliberately never copied; device-bound and driver-level software is
   refused up front with reasons, following the same dry-run/refuse/
-  verify contract as the Macrium reader. Next step is the Phase 0 spike
-  (mount → inventory → dry-run plan, no writes) using only shipped
-  OPBS.
+  verify contract as the Macrium reader.
+- ✅ **Phase 0 spike (2026-10-20)**: `migrate inventory` and
+  `migrate plan` CLI verbs (read-only) over a `MigrateSource`
+  abstraction (`LiveSource` / `ImageSource` via the browse session).
+  Directory-based profile enumeration, standard-folder sizing with temp
+  excludes, seed app knowledge base (`src/main/imaging/migrate/apps-db.ts`,
+  extensible via `--apps-db`), dry-run `MigratePlan` with registry keys
+  listed-not-executed, winget reinstall hints, refusals with reasons
+  (empty/unknown profile, missing `--target`), `--json` everywhere.
+  Next: phase 1 (execute tier-1 file data with ACL rewrite + verify).
 
 ### Changed-block tracking via NTFS USN journal
 - ✅ Native addon `queryUsnJournal` + `getUsnJournalInfo` read the NTFS USN

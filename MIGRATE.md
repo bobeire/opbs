@@ -1,6 +1,7 @@
 # Design: User-State Migration (`migrate`)
 
-**Status**: Design — not implemented. Spikes welcome.
+**Status**: Phase 0 spike shipped — `migrate inventory` / `migrate plan`
+CLI verbs are read-only and live; execution tiers are design-only.
 **Date**: 2026-10-20
 **Related**: [ROADMAP.md](ROADMAP.md) (Investigate), [README.md](README.md)
 (imaging, mounts, VHD restore)
