@@ -1086,6 +1086,19 @@ to date has shipped; **Investigate** items need spike work first.
 
 ## Investigate
 
+### User-state migration (`migrate`)
+- **Design complete (2026-10-20)** — full write-up in [MIGRATE.md](MIGRATE.md).
+  Turns an existing image (OPBS or Macrium), attached volume or
+  `targetVirtualDisk` VHD into a migrated user environment on a live
+  Windows install: profile data with ACL rewrite, curated per-user
+  registry transplants from an open app knowledge base, and a
+  `winget export`-based reinstall manifest. Installed binaries are
+  deliberately never copied; device-bound and driver-level software is
+  refused up front with reasons, following the same dry-run/refuse/
+  verify contract as the Macrium reader. Next step is the Phase 0 spike
+  (mount → inventory → dry-run plan, no writes) using only shipped
+  OPBS.
+
 ### Changed-block tracking via NTFS USN journal
 - ✅ Native addon `queryUsnJournal` + `getUsnJournalInfo` read the NTFS USN
   journal (FSCTL_QUERY/READ_USN_JOURNAL); exposed via the CLI
