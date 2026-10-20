@@ -344,7 +344,10 @@
         <p>
           Attach a partition from a Macrium image as a real drive letter via
           WinFsp, with zero extra disk usage — reads are served on demand by
-          decompressing only the needed blocks.
+          decompressing only the needed blocks. Reflect 7/8's own mount
+          feature relies on a driver that current Windows 11 blocks, so
+          users hit that wall; WinFsp is properly signed and mounts old
+          images on modern Windows.
         </p>
       </div>
       <div class="card">
