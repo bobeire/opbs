@@ -7,6 +7,8 @@ created by **RHITCS** — named in honour of a certain well-preserved pickle.
 
 Website: https://opbs.rhitcs.com
 
+<img width="741" height="496" alt="Screenshot 2026-10-16 143703" src="https://github.com/user-attachments/assets/fb6b8a8c-5d32-451e-bcf5-f75be10493b2" />
+
 ## Install
 
 Installer and portable exe: [GitHub Releases](https://github.com/bobeire/opbs/releases/latest).
