@@ -11,6 +11,12 @@ Website: https://opbs.rhitcs.com
 
 Installer and portable exe: [GitHub Releases](https://github.com/bobeire/opbs/releases/latest).
 
+Via [Chocolatey](https://chocolatey.org):
+
+```bash
+choco install opbs
+```
+
 Via [Scoop](https://scoop.sh):
 
 ```bash
