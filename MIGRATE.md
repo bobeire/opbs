@@ -3,8 +3,10 @@
 **Status**: Phase 2 shipped — `migrate inventory` / `migrate plan` /
 `migrate run` (tier-1 execute, verify, report) plus tier 2 (curated
 registry transplants with `--registry`, owner/SID rewrite) are live.
-Phase 3+ are design-only.
-**Date**: 2026-10-20 (design), 2026-10-21 (phase 1 + phase 2)
+Phase 3 shipped — knowledge base expanded to 43 seed apps with
+validated schema + contribution docs (§7); `--apps-db` files merge over
+the seed. Phase 4+ are design-only.
+**Date**: 2026-10-20 (design), 2026-10-21 (phases 1 + 2 + 3)
 **Related**: [ROADMAP.md](ROADMAP.md) (Investigate), [README.md](README.md)
 (imaging, mounts, VHD restore)
 
@@ -144,27 +146,60 @@ prove-your-restore thesis.
 
 ## 7. App knowledge base
 
-An open, versioned JSON dataset (shipped in-repo, user-extendable via
+An open, versioned JSON dataset (shipped in-repo as
+`src/main/imaging/migrate/apps-db.ts`, user-extendable via
 `--apps-db <file>`), one entry per app:
 
 ```json
 {
   "id": "google-chrome",
   "name": "Google Chrome",
-  "data": ["%LOCALAPPDATA%\\Google\\Chrome\\User Data"],
-  "registry": ["HKCU\\Software\\Google\\Chrome"],
+  "data": ["%LOCALAPPDATA%/Google/Chrome/User Data"],
+  "registry": ["HKCU/Software/Google/Chrome"],
   "winget": "Google.Chrome",
   "class": "data+settings"
 }
 ```
 
-`class` ∈ `data` | `data+settings` | `reinstall-only` (AV, Office
-suites, anything COM/service heavy) | `ignore`.
+| Field | Required | Semantics |
+|---|---|---|
+| `id` | yes | kebab-case, unique — keys JSON output and `--include/--exclude` |
+| `name` | yes | display name |
+| `data` | yes (may be `[]`) | profile-relative data locations; tokens `%USERPROFILE%`, `%APPDATA%`, `%LOCALAPPDATA%` resolve per profile (backslashes or slashes accepted) |
+| `registry` | no | per-user subtrees planned for the tier-2 transplant — **HKCU only** |
+| `winget` | no | `Publisher.Package` id for the reinstall manifest; omit when unknown |
+| `class` | yes | `data` \| `data+settings` \| `reinstall-only` (AV, Office suites, anything COM/service heavy — `data` paths ignored) \| `ignore` (skipped entirely) |
 
-v1 seeds with the high-traffic set (browsers, mail, chat, game stores,
-dev tools, media players); growth is a community-maintenance problem, not
-an engineering one — same shape as USMT's migration.xml, but open and
-diffable.
+**Loader validation** (applies to the seed and every `--apps-db` file;
+errors name the entry and the file): required fields present, kebab-case
+unique ids, class from the enum, registry keys under `HKCU` (HKLM is never
+written — §8), data paths free of unknown `%TOKENS%` and not
+drive-absolute, winget ids shaped `Publisher.Package`.
+
+**Merge semantics**: the file is a JSON array of entries that merges *over*
+the seed by `id` (same id overrides the seed entry; new ids are added;
+`migrate plan --apps-db` runs the full validation on load).
+
+### Contributing entries
+
+The seed currently carries 43 apps across browsers, mail, chat, dev tools,
+media, utilities and game launchers — growth is a community-maintenance
+problem, same shape as USMT's migration.xml, but open and diffable:
+
+1. Copy a seed entry as your template; keep paths to the smallest
+   meaningful directory (prefer real user files over regenerable caches).
+2. Verify the winget id before adding it: `winget show --id Publisher.Package --exact`.
+   No confident id? Leave `winget` out — the app then falls back to the
+   manual-install list instead of a broken import.
+3. Only well-known per-user `HKCU` keys; if you can't confirm the key
+   exists (`reg query`), leave `registry` out — a missing key merely
+   skips in the report, but noise erodes trust in the tier.
+4. Test against a real profile: `migrate plan --live --profile <you>
+   --apps-db my.json` must load the file without validation errors and
+   list your stores.
+5. Open a PR against `apps-db.ts` (or attach the JSON in an issue) —
+   entries land with the next release.
+
 
 ## 8. Registry strategy (the hard part, scoped)
 
@@ -289,8 +324,18 @@ scripted fleets.
   ACL inheritance. Both tiers are injectable (fake `reg`/`icacls`/identity
   runners) and fully unit-tested without admin rights; failures mark the
   settings tier failed in the report without touching verified file data.
-- **Phase 3**: knowledge-base expansion drive + `--apps-db` extension
-  point documented for contributions.
+- ✅ **Phase 3 — shipped 2026-10-21**: knowledge base expanded 18 → 43
+  apps (browsers, chat, dev tools, media, utilities, game launchers —
+  every winget id verified against winget-pkgs; three seed ids fixed or
+  added where the old ones didn't resolve, FileZilla ships without a
+  winget id since it's no longer in the source). Schema hardening:
+  `validateAppsDbEntries` runs over the seed *and* every `--apps-db`
+  file — kebab-case unique ids, enum class, HKCU-only registry keys
+  (the §8 promise enforced at load time), known `%TOKENS%` only, no
+  drive-absolute paths, `Publisher.Package` winget shape.
+  §7 is now the contribution reference: field table, merge semantics,
+  validation errors, and a 5-step recipe for testing a file against a
+  real profile before PR.
 - **Phase 4**: GUI wizard, migration "drill" scheduling (dry-run against
   a periodic image — the migration analogue of restore drills).
 

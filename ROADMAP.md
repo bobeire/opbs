@@ -1160,9 +1160,26 @@ to date has shipped; **Investigate** items need spike work first.
   - All three process surfaces (`reg.exe`, `icacls.exe`, identity:
     elevation/`whoami`/`ProfileList`) sit behind injectable runners —
     the tier is unit-tested end-to-end without administrator rights
-    (`test/unit/migrate-registry.test.ts`, 15 tests).
-  Next: phase 3 (knowledge-base expansion + `--apps-db` contribution
-  docs), channel watch (winget #452913), phase 4 (GUI wizard).
+    (`test/unit/migrate-registry.test.ts`, 18 tests), and was validated
+    live/elevated against real hives (loaded-source fast path, count-
+    verified cross-hive copies, clean unloads).
+  Next: channel watch (winget #452913), HN retry, phase 4 (GUI wizard).
+- ✅ **Phase 3 — knowledge base + contribution docs (2026-10-21)**:
+  - Seed apps-db expanded 18 → 43 entries (browsers Brave/Vivaldi/Opera,
+    chat Zoom/Teams, dev Git/PuTTY, media VLC, utilities Everything/
+    WinRAR/ShareX/PowerToys, cloud Dropbox, games GOG/Ubisoft/EA/Rockstar,
+    password managers Bitwarden/1Password/KeePass, …). Every winget id
+    verified live against winget-pkgs (`winget show`): fixed
+    `Slack.Slack` → `SlackTechnologies.Slack`, added Telegram/Signal ids
+    (`Telegram.TelegramDesktop`, `OpenWhisperSystems.Signal`), FileZilla
+    ships winget-less (removed from the source).
+  - `validateAppsDbEntries` hardens the schema at load time for seed and
+    `--apps-db` files alike: kebab-case unique ids, class enum, HKCU-only
+    registry keys (MIGRATE.md §8 enforced), known `%TOKENS%`, no
+    drive-absolute paths, `Publisher.Package` winget shape — contribution
+    mistakes fail loudly with the entry and file named.
+  - MIGRATE.md §7 rewritten as the contribution reference (field table,
+    merge semantics, validation rules, 5-step test/PR recipe).
 
 ### Changed-block tracking via NTFS USN journal
 - ✅ Native addon `queryUsnJournal` + `getUsnJournalInfo` read the NTFS USN

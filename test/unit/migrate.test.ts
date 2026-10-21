@@ -5,7 +5,7 @@ import * as path from 'path';
 import { LiveSource, walkSource, sourcePathExists } from '../../src/main/imaging/migrate/source';
 import { buildInventory, listProfileNames } from '../../src/main/imaging/migrate/inventory';
 import { buildPlan } from '../../src/main/imaging/migrate/plan';
-import { loadAppsDb, resolveKbPath, SEED_APPS_DB } from '../../src/main/imaging/migrate/apps-db';
+import { loadAppsDb, resolveKbPath, SEED_APPS_DB, validateAppsDbEntries } from '../../src/main/imaging/migrate/apps-db';
 
 let root: string;
 
@@ -201,5 +201,44 @@ describe('apps db', () => {
     const bad = path.join(root, 'apps-bad.json');
     fs.writeFileSync(bad, JSON.stringify({ id: 'nope' }));
     expect(() => loadAppsDb(bad)).toThrow(/JSON array/);
+  });
+
+  it('seed knowledge base passes its own schema invariants', () => {
+    expect(() => validateAppsDbEntries(SEED_APPS_DB, 'seed knowledge base')).not.toThrow();
+    const ids = SEED_APPS_DB.map((e) => e.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(SEED_APPS_DB.length).toBeGreaterThanOrEqual(40);
+    for (const entry of SEED_APPS_DB) {
+      for (const key of entry.registry ?? []) expect(key).toMatch(/^HKCU[\\/]/i);
+      expect(['data', 'data+settings', 'reinstall-only', 'ignore']).toContain(entry.class);
+    }
+    expect(SEED_APPS_DB.find((e) => e.id === 'slack')?.winget).toBe('SlackTechnologies.Slack');
+    expect(SEED_APPS_DB.find((e) => e.id === 'signal')?.winget).toBe('OpenWhisperSystems.Signal');
+    expect(SEED_APPS_DB.find((e) => e.id === 'filezilla')?.winget).toBeUndefined();
+  });
+
+  it('rejects HKLM registry keys (HKLM is never written)', () => {
+    const entries = [{ id: 'foo', name: 'Foo', data: [], registry: ['HKLM/Software/Foo'], class: 'data' as const }];
+    expect(() => validateAppsDbEntries(entries, 'test.json')).toThrow(/HKCU/);
+  });
+
+  it('rejects unknown path tokens and drive-absolute data paths', () => {
+    expect(() => validateAppsDbEntries([{ id: 'foo', name: 'Foo', data: ['%APPDATA%/Foo'], class: 'data' as const }], 't')).not.toThrow();
+    expect(() => validateAppsDbEntries([{ id: 'foo', name: 'Foo', data: ['%PROGRAMDATA%/Foo'], class: 'data' as const }], 't')).toThrow(/unknown path token/);
+    expect(() => validateAppsDbEntries([{ id: 'foo', name: 'Foo', data: ['C:/Users/Shared'], class: 'data' as const }], 't')).toThrow(/drive-absolute/);
+  });
+
+  it('rejects bad classes, non-kebab ids, duplicate ids and malformed winget ids', () => {
+    expect(() => validateAppsDbEntries([{ id: 'foo', name: 'Foo', data: [], class: 'best' as never }], 't')).toThrow(/class must be one of/);
+    expect(() => validateAppsDbEntries([{ id: 'Foo_Bar', name: 'Foo', data: [], class: 'data' as const }], 't')).toThrow(/kebab-case/);
+    expect(() => validateAppsDbEntries([{ id: 'foo', name: 'Foo', data: [], class: 'data' as const }, { id: 'foo', name: 'Foo 2', data: [], class: 'data' as const }], 't')).toThrow(/duplicate/);
+    expect(() => validateAppsDbEntries([{ id: 'foo', name: 'Foo', data: [], winget: 'NoDotId', class: 'data' as const }], 't')).toThrow(/Publisher\.Package/);
+  });
+
+  it('rejects a bad extra db before merging and loads the seed when valid', () => {
+    const hkld = path.join(root, 'apps-hklm.json');
+    fs.writeFileSync(hkld, JSON.stringify([{ id: 'evil', name: 'Evil', data: [], registry: ['HKLM/Software/Evil'], class: 'data' }]));
+    expect(() => loadAppsDb(hkld)).toThrow(/HKCU/);
+    expect(loadAppsDb().length).toBe(SEED_APPS_DB.length);
   });
 });
