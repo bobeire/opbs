@@ -31,6 +31,8 @@ export interface ExecuteOptions {
   verify?: boolean;
   /** Tier 2: transplant the curated per-user registry keys after the file copy (needs `elevated`). */
   registry?: boolean;
+  /** Absolute source profile dir (live mode) — lets the registry tier read the already-loaded source hive. */
+  sourceProfileDir?: string;
   /** Tier 2: rewrite ownership of the copied tree to the target profile SID. Default false — the CLI passes this unless `--no-owner`. */
   ownerRewrite?: boolean;
   /** Whether this process holds administrator rights (the CLI detects once and passes it in). */
@@ -352,6 +354,7 @@ export function executePlan(source: MigrateSource, plan: MigratePlan, options: E
     registryOutcomes = transplantRegistry({
       source,
       profileRelPath: plan.profileRelPath,
+      ...(options.sourceProfileDir ? { sourceProfileDir: options.sourceProfileDir } : {}),
       targetProfileDir: target,
       keys: registryKeys,
       elevated,

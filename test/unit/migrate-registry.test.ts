@@ -362,6 +362,68 @@ describe('migrate registry transplants (tier 2)', () => {
       source.close();
     }
   });
+
+  it('reads a logged-on source through its already-loaded hive instead of extracting', () => {
+    const srcRoot = tempDir('opbs-reg-live-');
+    fs.mkdirSync(path.join(srcRoot, 'Users', 'Alice'), { recursive: true });
+    const target = mkTargetWithHive();
+    const state = mkState();
+    state.templates = [new Map()];
+    const SID = 'S-1-5-21-777-888-999-1001';
+    const loadedChrome = `HKU\\${SID}\\SOFTWARE\\GOOGLE\\CHROME`;
+    state.keys.set(loadedChrome, values({ First: ['REG_SZ', 'run'] }));
+    state.keys.set(`${loadedChrome}\\PROFILES`, values({ Count: ['REG_DWORD', '0x2'] }));
+    const source = new LiveSource(srcRoot);
+    try {
+      const outcomes = transplantRegistry({
+        source,
+        profileRelPath: 'Users/Alice',
+        sourceProfileDir: srcRoot,
+        targetProfileDir: target,
+        keys: [chromeKey],
+        elevated: true,
+        identity: fakeIdentity({ sidForProfileDir: (dir) => (dir === srcRoot ? SID : null) }),
+        run: fakeReg(state)
+      });
+      // No NTUSER.DAT exists in the fixture — extraction would have failed.
+      expect(outcomes[0].status).toBe('copied');
+      expect(state.loads).toHaveLength(1);
+      expect(state.loads[0].mount.toUpperCase()).not.toBe(`HKU\\${SID}`);
+      expect(state.unloads).toHaveLength(1);
+      expect(state.keys.has(`${state.loads[0].mount.toUpperCase()}\\SOFTWARE\\GOOGLE\\CHROME`)).toBe(true);
+      expect(state.keys.has(loadedChrome)).toBe(true);
+    } finally {
+      source.close();
+    }
+  });
+
+  it('does nothing when source and target resolve to the same loaded hive', () => {
+    const srcRoot = tempDir('opbs-reg-self-');
+    fs.mkdirSync(path.join(srcRoot, 'Users', 'Alice'), { recursive: true });
+    const state = mkState();
+    const SID = 'S-1-5-21-777-888-999-1001';
+    state.keys.set(`HKU\\${SID}\\SOFTWARE\\GOOGLE\\CHROME`, values({ First: ['REG_SZ', 'run'] }));
+    const source = new LiveSource(srcRoot);
+    try {
+      const outcomes = transplantRegistry({
+        source,
+        profileRelPath: 'Users/Alice',
+        sourceProfileDir: srcRoot,
+        targetProfileDir: srcRoot,
+        keys: [chromeKey],
+        elevated: true,
+        identity: fakeIdentity({ sidForProfileDir: () => SID }),
+        run: fakeReg(state)
+      });
+      expect(outcomes).toHaveLength(1);
+      expect(outcomes[0].status).toBe('not-run');
+      expect(outcomes[0].detail).toContain('same loaded hive');
+      expect(state.loads).toHaveLength(0);
+      expect(state.unloads).toHaveLength(0);
+    } finally {
+      source.close();
+    }
+  });
 });
 
 describe('migrate execute tier 2 integration', () => {

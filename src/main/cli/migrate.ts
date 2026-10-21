@@ -8,7 +8,7 @@ import { executePlan } from '../imaging/migrate/execute';
 import { isElevatedSync } from '../imaging/migrate/identity';
 import { buildInventory, listProfileNames } from '../imaging/migrate/inventory';
 import { buildPlan, computePlanHash } from '../imaging/migrate/plan';
-import { openMigrateSource } from '../imaging/migrate/source';
+import { defaultLiveRoot, openMigrateSource } from '../imaging/migrate/source';
 import type { MigrateInventory, MigratePlan, MigrationReport } from '../imaging/migrate/types';
 
 function fmtBytes(bytes: number): string {
@@ -151,9 +151,10 @@ export async function cmdMigrate(ctx: CommandContext): Promise<number> {
     return 1;
   }
 
+  const sourceOpts = parseSource(ctx);
   let source;
   try {
-    source = openMigrateSource(parseSource(ctx));
+    source = openMigrateSource(sourceOpts);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     return 1;
@@ -262,6 +263,7 @@ export async function cmdMigrate(ctx: CommandContext): Promise<number> {
         resume: ctx.argv.includes('--resume'),
         verify: !ctx.argv.includes('--no-verify'),
         registry: wantRegistry,
+        ...(sourceOpts.live ? { sourceProfileDir: path.join(sourceOpts.liveRoot ?? defaultLiveRoot(), plan.profileRelPath) } : {}),
         ownerRewrite: !ctx.argv.includes('--no-owner'),
         elevated
       });

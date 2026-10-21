@@ -37,6 +37,8 @@ export interface RegistryTransplantRequest {
   source: MigrateSource;
   /** Source profile relative to the volume root (`Users/<name>`). */
   profileRelPath: string;
+  /** Absolute source profile dir (live mode) — enables the already-loaded-hive fast path. */
+  sourceProfileDir?: string;
   targetProfileDir: string;
   /** Curated knowledge-base keys (HKCU-style), deduplicated by the caller or here. */
   keys: { appId?: string; appName?: string; key: string }[];
@@ -114,13 +116,23 @@ export function transplantRegistry(req: RegistryTransplantRequest): MigrateRegis
   };
 
   try {
-    try {
-      req.source.copyFileTo(`${req.profileRelPath}/NTUSER.DAT`, tmpHive);
-    } catch (error) {
-      return notRun(`source NTUSER.DAT unreadable: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    if (!load(srcMount, tmpHive)) {
-      return notRun(`reg load of the source hive failed — run elevated (extracted to ${tmpHive})`);
+    // Source root: the profile's already-loaded hive when reachable (live, logged-on
+    // profile — its NTUSER.DAT file is locked, extraction would fail), else extract
+    // and load (image sources, offline profiles).
+    let srcRoot: string;
+    const loadedSrcSid = req.sourceProfileDir ? req.identity.sidForProfileDir(req.sourceProfileDir) : null;
+    if (loadedSrcSid && run(['query', `HKU\\${loadedSrcSid}`]).status === 0) {
+      srcRoot = `HKU\\${loadedSrcSid}`;
+    } else {
+      try {
+        req.source.copyFileTo(`${req.profileRelPath}/NTUSER.DAT`, tmpHive);
+      } catch (error) {
+        return notRun(`source NTUSER.DAT unreadable: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (!load(srcMount, tmpHive)) {
+        return notRun(`reg load of the source hive failed — run elevated (extracted to ${tmpHive})`);
+      }
+      srcRoot = srcMount;
     }
 
     // Target root: the profile's already-loaded hive when reachable, else load in place.
@@ -146,11 +158,15 @@ export function transplantRegistry(req: RegistryTransplantRequest): MigrateRegis
       }
     }
 
+    if (srcRoot === tgtRoot) {
+      return notRun('source and target resolve to the same loaded hive — nothing to transplant');
+    }
+
     const outcomes: MigrateRegistryOutcome[] = [];
     for (const key of keys) {
       const rel = hiveRelativeKey(key.key);
       const base = { ...(key.appId !== undefined ? { appId: key.appId } : {}), ...(key.appName !== undefined ? { appName: key.appName } : {}), key: key.key };
-      const srcKey = `${srcMount}\\${rel}`;
+      const srcKey = `${srcRoot}\\${rel}`;
       const dstKey = `${tgtRoot}\\${rel}`;
       const srcQuery = run(['query', srcKey]);
       if (srcQuery.status !== 0) {
