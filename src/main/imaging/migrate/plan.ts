@@ -13,7 +13,7 @@ export interface BuildPlanOptions {
 
 const PHASE_NOTES = [
   'Phase 0 spike: plans tier-1 file data only — nothing is written.',
-  'Registry transplant keys (tier 2) are listed per store and NOT executed; planned for phase 2.',
+  'Registry transplant keys (tier 2) are planned per store; `migrate run --execute --registry` from an elevated shell transplants them after the file copy.',
   'Installed program binaries are never copied — reinstall via the winget list on the target.',
   'App inventory from uninstall registry keys needs an offline SOFTWARE-hive scan — not in the spike; reinstall-only apps on the source are therefore not auto-detected.'
 ];

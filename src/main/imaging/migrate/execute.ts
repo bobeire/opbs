@@ -2,10 +2,15 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { hashFileMd5 } from './source';
 import { EXCLUDED_PROFILE_SUBTREES } from './types';
+import { realIdentity, rewriteCopiedOwner } from './identity';
+import type { IdentityOps, IcaclsRun, RegArgRun } from './identity';
+import { transplantRegistry } from './registry';
 import type {
   MigrateCopyOutcome,
+  MigrateOwnerRewrite,
   MigratePlan,
   MigratePlanEntry,
+  MigrateRegistryOutcome,
   MigrationReport,
   MigrateSource,
   MigrateSourceEntry
@@ -24,6 +29,18 @@ export interface ExecuteOptions {
   resume?: boolean;
   /** Verify content (hash) after copy. Default true. */
   verify?: boolean;
+  /** Tier 2: transplant the curated per-user registry keys after the file copy (needs `elevated`). */
+  registry?: boolean;
+  /** Tier 2: rewrite ownership of the copied tree to the target profile SID. Default false — the CLI passes this unless `--no-owner`. */
+  ownerRewrite?: boolean;
+  /** Whether this process holds administrator rights (the CLI detects once and passes it in). */
+  elevated?: boolean;
+  /** Identity/elevation primitives — injected by tests; defaults to the live Windows implementations. */
+  identity?: IdentityOps;
+  /** `reg.exe` argument runner — injected by tests. */
+  registryRun?: RegArgRun;
+  /** `icacls.exe` argument runner — injected by tests. */
+  icaclsRun?: IcaclsRun;
 }
 
 const JOURNAL_DIR_NAME = '.opbs-migrate';
@@ -68,8 +85,12 @@ export function executePlan(source: MigrateSource, plan: MigratePlan, options: E
     failed: 0,
     bytesCopied: 0,
     verifyChecked: 0,
-    verifyMismatches: 0
+    verifyMismatches: 0,
+    registryCopied: 0,
+    registryFailed: 0
   };
+  let registryOutcomes: MigrateRegistryOutcome[] | undefined;
+  let ownerResult: MigrateOwnerRewrite | undefined;
 
   const standardEntries = plan.entries.filter((e) => e.category === 'standard-folder');
   summary.plannedFiles = standardEntries.reduce((sum, e) => sum + e.itemCount, 0);
@@ -86,6 +107,8 @@ export function executePlan(source: MigrateSource, plan: MigratePlan, options: E
     summary,
     outcomes,
     stores: plan.stores,
+    ...(registryOutcomes ? { registry: registryOutcomes } : {}),
+    ...(ownerResult ? { owner: ownerResult } : {}),
     refusals: plan.refusals,
     reinstallHints: plan.reinstallHints,
     artifacts: {},
@@ -226,9 +249,16 @@ export function executePlan(source: MigrateSource, plan: MigratePlan, options: E
     }
   };
 
+  const destRootFor = (entry: MigratePlanEntry): string => {
+    const folderName = entry.sourceRelPath.slice(entry.sourceRelPath.lastIndexOf('/') + 1);
+    return path.join(target, folderName);
+  };
+  const touchedRoots: string[] = [];
   for (const entry of standardEntries) {
     if (aborted) break;
+    const before = summary.copied + summary.skippedResume;
     walkEntry(entry);
+    if (summary.copied + summary.skippedResume > before) touchedRoots.push(destRootFor(entry));
   }
   if (aborted) notes.push(aborted);
 
@@ -275,6 +305,73 @@ export function executePlan(source: MigrateSource, plan: MigratePlan, options: E
   }
   if (summary.skippedDepth > 0) {
     notes.push(`${summary.skippedDepth} subtree(s) beyond the depth cap skipped — excluded from plan counts too.`);
+  }
+
+  // ── Tier 2 (phase 2): owner/SID rewrite, then curated registry transplants ──
+  const identity = options.registry === true || options.ownerRewrite === true ? (options.identity ?? realIdentity) : null;
+  const elevated = options.elevated ?? (identity ? identity.elevated() : false);
+
+  if (identity && options.ownerRewrite === true) {
+    // SID resolution (ProfileList/whoami) works unelevated — only the
+    // actual setowner of a *foreign* profile needs admin rights.
+    const targetSid = identity.sidForProfileDir(target);
+    const processSid = identity.currentSid();
+    if (!targetSid) {
+      ownerResult = { status: 'skipped', roots: 0, detail: 'target directory has no Windows profile SID mapping' };
+      notes.push('Owner rewrite skipped — target is not a registered Windows profile (no SID mapping).');
+    } else if (processSid && targetSid === processSid) {
+      ownerResult = { status: 'not-needed', sid: targetSid, roots: touchedRoots.length, detail: 'target profile is the account running OPBS — ownership already correct' };
+    } else if (!elevated) {
+      ownerResult = { status: 'skipped', sid: targetSid, roots: 0, detail: 'owner rewrite requires an elevated shell' };
+      notes.push(`Owner rewrite skipped — target profile ${targetSid} differs from the migrating account; needs an elevated shell (--no-owner to silence).`);
+    } else {
+      ownerResult = rewriteCopiedOwner(touchedRoots, targetSid, options.icaclsRun);
+      if (ownerResult.status === 'ok') {
+        notes.push(`Owner rewritten to ${targetSid} on ${ownerResult.roots} copied folder root(s) — rights come from target-profile ACL inheritance.`);
+      } else {
+        notes.push(`Owner rewrite ${ownerResult.status}: ${ownerResult.detail ?? 'unknown error'}`);
+      }
+    }
+  }
+
+  if (identity && options.registry === true) {
+    const seenKeys = new Set<string>();
+    const registryKeys: { appId?: string; appName?: string; key: string }[] = [];
+    for (const store of plan.stores) {
+      for (const key of store.registry ?? []) {
+        const norm = key.toLowerCase().replace(/\//g, '\\');
+        if (seenKeys.has(norm)) continue;
+        seenKeys.add(norm);
+        registryKeys.push({
+          ...(store.appId !== undefined ? { appId: store.appId } : {}),
+          ...(store.appName !== undefined ? { appName: store.appName } : {}),
+          key
+        });
+      }
+    }
+    registryOutcomes = transplantRegistry({
+      source,
+      profileRelPath: plan.profileRelPath,
+      targetProfileDir: target,
+      keys: registryKeys,
+      elevated,
+      identity,
+      ...(options.registryRun ? { run: options.registryRun } : {})
+    });
+    for (const outcome of registryOutcomes) {
+      if (outcome.status === 'copied') summary.registryCopied += 1;
+      else if (outcome.status === 'failed') summary.registryFailed += 1;
+    }
+    if (registryOutcomes.length === 0) {
+      notes.push('Registry tier: no curated keys matched this profile — nothing to transplant.');
+    } else if (registryOutcomes.every((o) => o.status === 'not-run')) {
+      notes.push(`Registry tier not executed — ${registryOutcomes[0]?.detail ?? 'requires an elevated shell'}.`);
+    } else {
+      const missing = registryOutcomes.filter((o) => o.status === 'skipped-source-missing').length;
+      if (missing > 0) notes.push(`${missing} curated key(s) absent from the source hive — skipped.`);
+      if (summary.registryFailed > 0) notes.push(`${summary.registryFailed} registry transplant(s) failed — see registry outcomes.`);
+      if (summary.registryCopied > 0 && summary.registryFailed === 0) notes.push(`Registry tier complete: ${summary.registryCopied} key(s) transplanted and count-verified.`);
+    }
   }
 
   const reportPath = path.join(journalDir, 'report.json');

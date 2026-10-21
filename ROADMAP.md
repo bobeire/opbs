@@ -1138,7 +1138,31 @@ to date has shipped; **Investigate** items need spike work first.
   - Known issue: the test/runner wrapper's `ChildProcess.kill` kills
     only its direct child (`npx`), orphaning electron grandchildren —
     long CLI runs must be launched detached (`nohup … &`) and reaped.
-  Next: phase 2 (registry transplants + owner rewrite).
+- ✅ **Phase 2 — user-state migration tier 2 (2026-10-21)**:
+  - Registry transplants: `migrate run --execute --registry` (elevated
+    shell required — `reg load`/`unload` of NTUSER.DAT needs admin).
+    Source hive is extracted through the migrate source (same path for
+    live disks and image partitions) and mounted under a temporary `HKU`
+    key; curated knowledge-base keys move key-level via `reg copy /s /f`
+    (never a wholesale hive replacement, HKLM never written — MIGRATE.md
+    §8), each count-verified (direct subkeys/values) after copy. Target
+    hive is written through its loaded root when the profile is logged
+    on, else loaded in place; temp mounts always unloaded, extracted hive
+    always deleted. Missing source keys skip (not fail); failures land in
+    `report.registry` + `summary.registryFailed` and exit 1 without
+    touching verified file data.
+  - Owner/SID rewrite (§9): on by default when elevated (`--no-owner`
+    skips). Resolves the target profile's SID via `ProfileList` (fast
+    path: OPBS runs as the target account → `not-needed`), then
+    `icacls /setowner <SID> /T /C` per copied folder root; rights arrive
+    from target-profile ACL inheritance. Unelevated + foreign SID →
+    skipped with an explicit report note.
+  - All three process surfaces (`reg.exe`, `icacls.exe`, identity:
+    elevation/`whoami`/`ProfileList`) sit behind injectable runners —
+    the tier is unit-tested end-to-end without administrator rights
+    (`test/unit/migrate-registry.test.ts`, 15 tests).
+  Next: phase 3 (knowledge-base expansion + `--apps-db` contribution
+  docs), channel watch (winget #452913), phase 4 (GUI wizard).
 
 ### Changed-block tracking via NTFS USN journal
 - ✅ Native addon `queryUsnJournal` + `getUsnJournalInfo` read the NTFS USN

@@ -1,8 +1,11 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { flagValue } from './flags';
 import { resolvePassphrase } from './passphrase';
 import type { CommandContext } from './index';
 import { loadAppsDb } from '../imaging/migrate/apps-db';
 import { executePlan } from '../imaging/migrate/execute';
+import { isElevatedSync } from '../imaging/migrate/identity';
 import { buildInventory, listProfileNames } from '../imaging/migrate/inventory';
 import { buildPlan, computePlanHash } from '../imaging/migrate/plan';
 import { openMigrateSource } from '../imaging/migrate/source';
@@ -68,7 +71,7 @@ function renderPlan(plan: MigratePlan): void {
   }
   if (plan.stores.length > 0) {
     console.log('');
-    console.log('Registry transplants (tier 2 — planned, NOT executed in this spike):');
+    console.log('Registry transplants (tier 2 — planned; executed with --execute --registry from an elevated shell):');
     for (const store of plan.stores) {
       for (const key of store.registry ?? []) {
         console.log(`  ${store.appName}: ${key}`);
@@ -103,6 +106,18 @@ function renderReport(report: MigrationReport): void {
   console.log(`Planned: ${s.plannedFiles} files, ${fmtBytes(s.plannedBytes)}`);
   console.log(`Copied: ${s.copied} (${fmtBytes(s.bytesCopied)})  resume-skipped: ${s.skippedResume}  reparse-skipped: ${s.skippedReparse}  depth-skipped: ${s.skippedDepth}  failed: ${s.failed}`);
   console.log(`Verify: ${s.verifyChecked} checked, ${s.verifyMismatches} mismatch(es)`);
+  if (report.registry) {
+    console.log(`Registry tier: ${s.registryCopied} transplanted, ${s.registryFailed} failed, ${report.registry.length} planned`);
+    if (report.registry.length > 0) {
+      for (const outcome of report.registry) {
+        const who = outcome.appName ?? outcome.appId ?? 'app';
+        console.log(`  [${outcome.status}] ${who}: ${outcome.key}${outcome.detail ? ` — ${outcome.detail}` : ''}`);
+      }
+    }
+  }
+  if (report.owner) {
+    console.log(`Owner rewrite: ${report.owner.status}${report.owner.sid ? ` (sid ${report.owner.sid}, ${report.owner.roots} root(s))` : ''}${report.owner.detail ? ` — ${report.owner.detail}` : ''}`);
+  }
   if (report.outcomes.length > 0) {
     console.log('');
     console.log(`Outcomes needing attention (${report.outcomes.length}):`);
@@ -118,7 +133,7 @@ function renderReport(report: MigrationReport): void {
   }
   if (report.stores.length > 0) {
     console.log('');
-    console.log(`Stores inventoried (registry tier-2 data, not yet executed): ${report.stores.length}`);
+    console.log(`Stores inventoried: ${report.stores.length}${report.registry ? '' : ' (registry transplants run with --execute --registry from an elevated shell)'}`);
   }
   console.log('');
   console.log('Notes:');
@@ -132,7 +147,7 @@ function renderReport(report: MigrationReport): void {
 export async function cmdMigrate(ctx: CommandContext): Promise<number> {
   const action = ctx.argv[0];
   if (action !== 'inventory' && action !== 'plan' && action !== 'run') {
-    console.error('Usage: migrate inventory|plan|run [--live] [image] [--partition N] [--passphrase p] [--profile name] [--target DIR] [--folder name] [--apps-db file] [--execute --plan-hash H] [--merge] [--resume] [--no-verify] [--json]');
+    console.error('Usage: migrate inventory|plan|run [--live] [image] [--partition N] [--passphrase p] [--profile name] [--target DIR] [--folder name] [--apps-db file] [--execute --plan-hash H] [--merge] [--resume] [--no-verify] [--registry] [--no-owner] [--json]');
     return 1;
   }
 
@@ -227,19 +242,37 @@ export async function cmdMigrate(ctx: CommandContext): Promise<number> {
         console.error('The source or options changed since the plan was printed. Re-run the plan.');
         return 1;
       }
+      const wantRegistry = ctx.argv.includes('--registry');
+      if (wantRegistry) {
+        if (!fs.existsSync(path.join(target, 'NTUSER.DAT'))) {
+          console.error(`migrate run --registry needs the target profile's NTUSER.DAT — not a Windows profile? (${target})`);
+          return 1;
+        }
+      }
+      const elevated = isElevatedSync();
+      if (wantRegistry && !elevated) {
+        console.error('migrate run --registry requires an elevated shell: loading the source/target NTUSER.DAT hives (reg load) needs administrator rights.');
+        console.error('Re-run from an elevated terminal, or drop --registry to copy files only.');
+        return 1;
+      }
       const report = executePlan(source, plan, {
         targetProfileDir: target,
         planHash: plan.planHash,
         merge: ctx.argv.includes('--merge'),
         resume: ctx.argv.includes('--resume'),
-        verify: !ctx.argv.includes('--no-verify')
+        verify: !ctx.argv.includes('--no-verify'),
+        registry: wantRegistry,
+        ownerRewrite: !ctx.argv.includes('--no-owner'),
+        elevated
       });
       if (ctx.opts.json) {
         console.log(JSON.stringify(report, null, 2));
       } else {
         renderReport(report);
       }
-      return report.summary.failed > 0 || report.summary.verifyMismatches > 0 ? 1 : 0;
+      const registryFailed = report.registry?.some((o) => o.status === 'failed') ?? false;
+      const ownerFailed = report.owner?.status === 'failed' || report.owner?.status === 'partial';
+      return report.summary.failed > 0 || report.summary.verifyMismatches > 0 || registryFailed || ownerFailed ? 1 : 0;
     }
 
     if (ctx.opts.json) {

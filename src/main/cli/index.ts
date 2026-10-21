@@ -384,17 +384,21 @@ Commands:
    migrate plan [--live|image] [--partition N] --profile <name|all> [--target DIR]
                 [--folder NAME]... [--apps-db file] [--json]
                                           Dry-run migration plan for a profile: tier-1 file
-                                          data, registry keys listed for a future tier 2,
+                                          data, registry keys planned for tier 2 execution,
                                           winget reinstall hints, and refusals with reasons.
                                           Prints the plan hash. Exits 1 when refusals exist.
                                           Read-only.
    migrate run [--live|image] [--partition N] --profile <name> --target DIR [--folder NAME]...
-               [--execute --plan-hash H] [--merge] [--resume] [--no-verify] [--json]
-                                          Execute a tier-1 migration: copy file data into the
+               [--execute --plan-hash H] [--merge] [--resume] [--no-verify] [--registry] [--no-owner] [--json]
+                                          Execute a migration: copy file data into the
                                           existing target profile, journal every file, verify
                                           content, and write report.json + winget-import.json
                                           under .opbs-migrate/. Dry-run by default; --execute
                                           requires the hash printed by the plan/dry run.
+                                          --registry also transplants the curated per-user
+                                          registry keys (elevated shell required);
+                                          --no-owner skips the owner/SID rewrite of the
+                                          copied tree (done by default when elevated).
                                           Exits 1 on any failure or verify mismatch.
 store put <s3://bucket/prefix|sftp://user@host/path|ftp://user@host/path> <file> [--region R]
                                          Upload a file to the object store (AWS_* / SFTP_* env vars).

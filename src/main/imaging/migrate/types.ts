@@ -135,6 +135,30 @@ export interface MigratePlan {
 export type MigrateCopyAction = 'copied' | 'skipped-resume' | 'skipped-reparse' | 'skipped-depth' | 'failed';
 export type MigrateVerifyState = 'ok' | 'mismatch' | 'size-only-ok' | 'not-checked' | 'failed';
 
+/** Tier-2 registry transplant result for one curated knowledge-base key. */
+export interface MigrateRegistryOutcome {
+  appId?: string;
+  appName?: string;
+  /** Knowledge-base key as written (HKCU-style). */
+  key: string;
+  status: 'copied' | 'skipped-source-missing' | 'failed' | 'not-run';
+  detail?: string;
+  sourceSubkeys?: number;
+  sourceValues?: number;
+  targetSubkeys?: number;
+  targetValues?: number;
+}
+
+/** Tier-2 owner/SID rewrite result for the copied tree (MIGRATE.md §9). */
+export interface MigrateOwnerRewrite {
+  status: 'ok' | 'partial' | 'failed' | 'skipped' | 'not-needed';
+  /** Target profile SID the copied tree was handed to. */
+  sid?: string;
+  /** Number of copied folder roots rewritten. */
+  roots: number;
+  detail?: string;
+}
+
 /** Per-file outcome for everything that is not a plain successful copy+verify. */
 export interface MigrateCopyOutcome {
   sourceRelPath: string;
@@ -165,11 +189,17 @@ export interface MigrationReport {
     bytesCopied: number;
     verifyChecked: number;
     verifyMismatches: number;
+    registryCopied: number;
+    registryFailed: number;
   };
   /** Non-success outcomes only (plain copies are recorded in the journal). */
   outcomes: MigrateCopyOutcome[];
   /** App-store entries: data lives under AppData (already copied); registry/winget info carried for tier 2/3. */
   stores: MigrateStoreMatch[];
+  /** Tier-2 registry transplant outcomes — present only when the run requested `--registry`. */
+  registry?: MigrateRegistryOutcome[];
+  /** Tier-2 owner rewrite result — present only when owner rewriting was requested. */
+  owner?: MigrateOwnerRewrite;
   refusals: MigrateRefusal[];
   reinstallHints: MigrateReinstallHint[];
   artifacts: { reportPath?: string; wingetPath?: string; journalPath?: string };

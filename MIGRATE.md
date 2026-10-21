@@ -1,9 +1,10 @@
 # Design: User-State Migration (`migrate`)
 
-**Status**: Phase 1 shipped — `migrate inventory` / `migrate plan` /
-`migrate run` (tier-1 execute, verify, report) are live. Tier 2
-(registry) and beyond are design-only.
-**Date**: 2026-10-20 (design), 2026-10-21 (phase 1)
+**Status**: Phase 2 shipped — `migrate inventory` / `migrate plan` /
+`migrate run` (tier-1 execute, verify, report) plus tier 2 (curated
+registry transplants with `--registry`, owner/SID rewrite) are live.
+Phase 3+ are design-only.
+**Date**: 2026-10-20 (design), 2026-10-21 (phase 1 + phase 2)
 **Related**: [ROADMAP.md](ROADMAP.md) (Investigate), [README.md](README.md)
 (imaging, mounts, VHD restore)
 
@@ -274,8 +275,20 @@ scripted fleets.
   target Windows profile, which grants access by inheritance; live
   copies carry content and timestamps only (no ADS/EFS metadata — the
   report says so per run). Owner rewriting lands with tier 2.
-- **Phase 2**: tier 2 registry transplants for the top-N curated apps,
-  owner/SID rewrite on the copied tree.
+- ✅ **Phase 2 — shipped 2026-10-21**: tier 2 registry transplants for the
+  curated knowledge-base keys (`migrate run --execute --registry`,
+  elevated shell): the source `NTUSER.DAT` is extracted through the
+  migrate source (one path for live disks and image partitions), loaded
+  under a temporary `HKU` mount, keys moved key-level with `reg copy /s
+  /f` (never a wholesale hive replacement), count-verified after copy,
+  mounts always unloaded. Target hive is written through its loaded root
+  when the profile is logged on, otherwise loaded in place. Owner/SID
+  rewrite on the copied tree is on by default when elevated
+  (`--no-owner` to skip): the copied folder roots get
+  `icacls /setowner <target-SID> /T`, rights arrive via target-profile
+  ACL inheritance. Both tiers are injectable (fake `reg`/`icacls`/identity
+  runners) and fully unit-tested without admin rights; failures mark the
+  settings tier failed in the report without touching verified file data.
 - **Phase 3**: knowledge-base expansion drive + `--apps-db` extension
   point documented for contributions.
 - **Phase 4**: GUI wizard, migration "drill" scheduling (dry-run against
