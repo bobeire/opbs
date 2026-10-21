@@ -56,7 +56,7 @@ export function inventoryProfile(source: MigrateSource, profileName: string, app
     if (!sourcePathExists(source, rel)) continue;
     const stats = walkSource(source, rel, walkOptionsForProfile(profileRelPath));
     if (stats.itemCount === 0 && stats.totalBytes === 0) continue;
-    standardFolders.push({ name: folder, bytes: stats.totalBytes, itemCount: stats.itemCount });
+    standardFolders.push({ name: folder, bytes: stats.totalBytes, itemCount: stats.itemCount, ...(stats.capped ? { capped: true } : {}) });
   }
   return {
     name: profileName,

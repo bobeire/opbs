@@ -64,6 +64,7 @@ export function executePlan(source: MigrateSource, plan: MigratePlan, options: E
     copied: 0,
     skippedResume: 0,
     skippedReparse: 0,
+    skippedDepth: 0,
     failed: 0,
     bytesCopied: 0,
     verifyChecked: 0,
@@ -175,8 +176,9 @@ export function executePlan(source: MigrateSource, plan: MigratePlan, options: E
             continue;
           }
           if (frame.depth + 1 > MAX_DEPTH) {
-            outcomes.push({ sourceRelPath: childRel, destPath: childDest, action: 'failed', error: 'depth cap exceeded' });
-            summary.failed += 1;
+            // Same boundary the plan's sizing walk skips — aligned, not a failure (drill F4).
+            outcomes.push({ sourceRelPath: childRel, destPath: childDest, action: 'skipped-depth' });
+            summary.skippedDepth += 1;
             continue;
           }
           stack.push({ srcDir: childRel, destDir: childDest, depth: frame.depth + 1 });
@@ -270,6 +272,9 @@ export function executePlan(source: MigrateSource, plan: MigratePlan, options: E
   }
   if (summary.skippedReparse > 0) {
     notes.push('Reparse points/legacy junctions were skipped (never followed).');
+  }
+  if (summary.skippedDepth > 0) {
+    notes.push(`${summary.skippedDepth} subtree(s) beyond the depth cap skipped — excluded from plan counts too.`);
   }
 
   const reportPath = path.join(journalDir, 'report.json');

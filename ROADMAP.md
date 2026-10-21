@@ -1119,6 +1119,25 @@ to date has shipped; **Investigate** items need spike work first.
   rewrite is deferred to phase 2 with the registry transplants.
   Tests: `test/unit/migrate-execute.test.ts` (12) incl. CLI smoke of
   the plan-hash handshake.
+- ✅ **Real-machine drill (2026-10-21)** — ran the verbs against a live
+  `C:` profile onto an exFAT USB target; findings:
+  - Fixed: plan hash included volatile per-store bytes/counts — live
+    Chrome churn broke the `--execute` handshake on every real machine
+    (`ec8591e`; hash now covers structure only).
+  - Fixed: `walkSource`'s depth cap abandoned the *entire* walk at the
+    first deep branch and folder rows silently truncated (plan said
+    4,915 files for Documents; source holds 201,211 — same bug caused
+    `7.1 GiB [capped]` profile totals and `AppData < Chrome store`).
+    Cap now skips only the deep subtree, keeps siblings, and marks
+    folder rows/plan entries `[capped]`; executor skips (not fails)
+    past the same boundary, so plan counts and execution agree.
+  - Verified: end-to-end copy+verify on real data (23 files/1.6 GiB to
+    exFAT USB: 0 mismatches, independent MD5 spot-check match, mtimes
+    preserved, artifacts written, clean process exit); journal/resume
+    held up under three concurrent interrupted runs (unique, untorn).
+  - Known issue: the test/runner wrapper's `ChildProcess.kill` kills
+    only its direct child (`npx`), orphaning electron grandchildren —
+    long CLI runs must be launched detached (`nohup … &`) and reaped.
   Next: phase 2 (registry transplants + owner rewrite).
 
 ### Changed-block tracking via NTFS USN journal

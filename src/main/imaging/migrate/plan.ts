@@ -64,6 +64,7 @@ export function buildPlan(source: MigrateSource, profileName: string, appsDb: Ap
       category: 'standard-folder',
       bytes: hit.bytes,
       itemCount: hit.itemCount,
+      ...(hit.capped ? { capped: true } : {}),
       registryExecuted: false
     });
   }

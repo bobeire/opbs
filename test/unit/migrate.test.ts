@@ -57,6 +57,37 @@ describe('migrate source (live)', () => {
     source.close();
   });
 
+  it('depth cap excludes only the deep subtree and flags the folder as capped (drill F3)', () => {
+    const deepRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-deep-'));
+    try {
+      let chain = path.join(deepRoot, 'Users', 'Alice', 'Documents');
+      fs.mkdirSync(chain, { recursive: true });
+      fs.writeFileSync(path.join(chain, 'shallow.txt'), 'shallow');
+      for (let i = 1; i <= 15; i++) {
+        chain = path.join(chain, `d${i}`);
+        fs.mkdirSync(chain);
+        if (i === 14) fs.writeFileSync(path.join(chain, 'mid.txt'), 'mid');
+        if (i === 15) fs.writeFileSync(path.join(chain, 'deep.txt'), 'deep');
+      }
+      const source = new LiveSource(deepRoot);
+      try {
+        const stats = walkSource(source, 'Users/Alice/Documents');
+        // shallow.txt + d14/mid.txt counted; the d15 subtree excluded; siblings NOT abandoned
+        expect(stats.itemCount).toBe(2);
+        expect(stats.capped).toBe(true);
+        const inv = buildInventory(source, SEED_APPS_DB);
+        const docs = inv.profiles[0].standardFolders.find((f) => f.name === 'Documents');
+        expect(docs?.capped).toBe(true);
+        expect(docs?.itemCount).toBe(2);
+        expect(inv.profiles[0].capped).toBe(true);
+      } finally {
+        source.close();
+      }
+    } finally {
+      fs.rmSync(deepRoot, { recursive: true, force: true });
+    }
+  });
+
   it('checks path existence', () => {
     const source = new LiveSource(root);
     expect(sourcePathExists(source, 'Users/Alice/Documents')).toBe(true);

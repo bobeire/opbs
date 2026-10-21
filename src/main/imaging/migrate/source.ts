@@ -158,10 +158,13 @@ export function walkSource(source: MigrateSource, relPath: string, options: Walk
   const base = relPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
 
   const recurse = (rel: string, depth: number): void => {
-    if (stats.capped) return;
+    if (stats.itemCount >= maxFiles) {
+      stats.capped = true;
+      return; // global file cap: stop the whole walk
+    }
     if (depth > maxDepth) {
       stats.capped = true;
-      return;
+      return; // deep subtree excluded — siblings keep walking (drill F3)
     }
     let entries: MigrateSourceEntry[];
     try {
@@ -175,12 +178,12 @@ export function walkSource(source: MigrateSource, relPath: string, options: Walk
       if (entry.isDirectory) {
         recurse(childRel, depth + 1);
       } else {
-        stats.totalBytes += entry.size;
-        stats.itemCount += 1;
         if (stats.itemCount >= maxFiles) {
           stats.capped = true;
           return;
         }
+        stats.totalBytes += entry.size;
+        stats.itemCount += 1;
       }
     }
   };

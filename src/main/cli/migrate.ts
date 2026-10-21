@@ -44,7 +44,8 @@ function renderInventory(inv: MigrateInventory): void {
     const cap = profile.capped ? ' [capped]' : '';
     console.log(`  ${profile.name}  ${fmtBytes(profile.totalBytes)}  ${profile.itemCount} files${cap}`);
     for (const folder of profile.standardFolders) {
-      console.log(`    ${folder.name.padEnd(12)} ${fmtBytes(folder.bytes).padStart(10)}  ${folder.itemCount} files`);
+      const cap = folder.capped ? ' [capped]' : '';
+      console.log(`    ${folder.name.padEnd(12)} ${fmtBytes(folder.bytes).padStart(10)}  ${folder.itemCount} files${cap}`);
     }
     for (const store of profile.stores) {
       console.log(`    store: ${store.appName} (${store.relPath}) — ${fmtBytes(store.bytes)}`);
@@ -63,7 +64,7 @@ function renderPlan(plan: MigratePlan): void {
   console.log('Entries:');
   for (const entry of plan.entries) {
     const tag = entry.category === 'app-store' ? ` [${entry.appId}]` : '';
-    console.log(`  ${entry.sourceRelPath}${tag}  ${fmtBytes(entry.bytes)}  ${entry.itemCount} files`);
+    console.log(`  ${entry.sourceRelPath}${tag}  ${fmtBytes(entry.bytes)}  ${entry.itemCount} files${entry.capped ? '  [capped]' : ''}`);
   }
   if (plan.stores.length > 0) {
     console.log('');
@@ -100,7 +101,7 @@ function renderReport(report: MigrationReport): void {
   console.log('');
   const s = report.summary;
   console.log(`Planned: ${s.plannedFiles} files, ${fmtBytes(s.plannedBytes)}`);
-  console.log(`Copied: ${s.copied} (${fmtBytes(s.bytesCopied)})  resume-skipped: ${s.skippedResume}  reparse-skipped: ${s.skippedReparse}  failed: ${s.failed}`);
+  console.log(`Copied: ${s.copied} (${fmtBytes(s.bytesCopied)})  resume-skipped: ${s.skippedResume}  reparse-skipped: ${s.skippedReparse}  depth-skipped: ${s.skippedDepth}  failed: ${s.failed}`);
   console.log(`Verify: ${s.verifyChecked} checked, ${s.verifyMismatches} mismatch(es)`);
   if (report.outcomes.length > 0) {
     console.log('');

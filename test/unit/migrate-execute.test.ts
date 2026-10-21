@@ -231,6 +231,40 @@ describe('migrate execute (tier 1)', () => {
     }
   });
 
+  it('plan and execute agree on the depth cap: skip, do not fail (drill F4)', () => {
+    const deepSrc = tempDir('opbs-exec-depth-');
+    const target = mkTarget();
+    let chain = path.join(deepSrc, 'Users', 'Bob', 'Documents');
+    fs.mkdirSync(chain, { recursive: true });
+    fs.writeFileSync(path.join(chain, 'shallow.txt'), 'shallow');
+    for (let i = 1; i <= 15; i++) {
+      chain = path.join(chain, `d${i}`);
+      fs.mkdirSync(chain);
+      if (i === 14) fs.writeFileSync(path.join(chain, 'mid.txt'), 'mid');
+      if (i === 15) fs.writeFileSync(path.join(chain, 'deep.txt'), 'deep');
+    }
+    const source = new LiveSource(deepSrc);
+    try {
+      const plan = buildPlan(source, 'Bob', SEED_APPS_DB, { targetProfileDir: target });
+      const docsEntry = plan.entries.find((e) => e.category === 'standard-folder');
+      expect(docsEntry?.itemCount).toBe(2);
+      expect(docsEntry?.capped).toBe(true);
+      const report = executePlan(source, plan, { targetProfileDir: target, planHash: computePlanHash(plan) });
+      expect(report.executed).toBe(true);
+      expect(report.summary.copied).toBe(2);
+      expect(report.summary.skippedDepth).toBe(1);
+      expect(report.summary.failed).toBe(0);
+      expect(fs.existsSync(path.join(target, 'Documents', 'shallow.txt'))).toBe(true);
+      let midDir = path.join(target, 'Documents');
+      for (let i = 1; i <= 14; i++) midDir = path.join(midDir, `d${i}`);
+      expect(fs.existsSync(path.join(midDir, 'mid.txt'))).toBe(true);
+      expect(fs.existsSync(path.join(midDir, 'd15'))).toBe(false);
+      expect(report.notes.some((n) => n.includes('depth cap'))).toBe(true);
+    } finally {
+      source.close();
+    }
+  });
+
   it('skips directory junctions as reparse points when the source reports them', () => {
     const jSrc = tempDir('opbs-exec-jsrc-');
     const jTarget = mkTarget();

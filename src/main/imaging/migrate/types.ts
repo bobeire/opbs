@@ -77,7 +77,7 @@ export interface MigrateProfileInventory {
   totalBytes: number;
   itemCount: number;
   capped: boolean;
-  standardFolders: { name: string; bytes: number; itemCount: number }[];
+  standardFolders: { name: string; bytes: number; itemCount: number; capped?: boolean }[];
   stores: MigrateStoreMatch[];
 }
 
@@ -97,6 +97,8 @@ export interface MigratePlanEntry {
   appName?: string;
   bytes: number;
   itemCount: number;
+  /** Set when the sizing walk excluded deep subtrees or hit the file cap (plan counts are then partial). */
+  capped?: boolean;
   registry?: string[];
   registryExecuted: boolean;
 }
@@ -130,7 +132,7 @@ export interface MigratePlan {
   planHash?: string;
 }
 
-export type MigrateCopyAction = 'copied' | 'skipped-resume' | 'skipped-reparse' | 'failed';
+export type MigrateCopyAction = 'copied' | 'skipped-resume' | 'skipped-reparse' | 'skipped-depth' | 'failed';
 export type MigrateVerifyState = 'ok' | 'mismatch' | 'size-only-ok' | 'not-checked' | 'failed';
 
 /** Per-file outcome for everything that is not a plain successful copy+verify. */
@@ -158,6 +160,7 @@ export interface MigrationReport {
     copied: number;
     skippedResume: number;
     skippedReparse: number;
+    skippedDepth: number;
     failed: number;
     bytesCopied: number;
     verifyChecked: number;
