@@ -2427,7 +2427,7 @@ async function cmdMrimg(ctx: CommandContext): Promise<number> {
   const action = ctx.argv[0];
   const file = ctx.argv[1];
   if (action !== 'info' || !file) {
-    console.error('Usage: mrimg info <image.mrimgx>');
+    console.error('Usage: mrimg info <image.mrimgx|image.mrimg>');
     return 1;
   }
   try {
