@@ -373,9 +373,9 @@ Commands:
                                          Accepts .opbs, .mrimgx, and .mrimg (Reflect 7/8).
   extract <image> --partition N --path DIR --out DEST [--passphrase p]
                                          Extract a file/folder from an image (no elevation).
-  mrimg info <image.mrimgx|image.mrimg>
-                                         Show the structure of a Macrium Reflect image
-                                         (both .mrimgx and .mrimg Reflect 7/8 containers).
+   mrimg info <image.mrimgx|image.mrimg>
+                                          Show the structure of a Macrium Reflect image
+                                          (.mrimgx = Reflect X; .mrimg = Reflect 7/8).
    migrate inventory [--live|image] [--partition N] [--passphrase p] [--apps-db file] [--json]
                                           User-state migration: inventory user
                                           profiles, standard folders and known app data stores
