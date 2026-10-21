@@ -116,23 +116,37 @@ export function buildPlan(source: MigrateSource, profileName: string, appsDb: Ap
 export const PLAN_EXCLUDES = EXCLUDED_PROFILE_SUBTREES;
 
 /**
- * sha256 over the plan's decision-relevant content — stable across runs
- * (excludes `generatedAt` and `planHash` itself). `migrate run --execute`
- * requires this hash, so scripted flows run `plan` first, then `run`.
+ * sha256 over the plan's decision-relevant *structure* — paths, categories,
+ * store identities with their registry keys, reinstall hint ids and
+ * refusals. Stable across runs and across live size churn (browser caches
+ * change bytes between plan and run on any real machine — caught by the
+ * 2026-10-21 drill), so `migrate run --execute` can require this hash.
+ * Byte/file counts are deliberately excluded: they are advisory (the
+ * report records what was actually copied; verify guarantees content).
  */
 export function computePlanHash(plan: MigratePlan): string {
-  const byPath = <T extends { key: string }>(a: T, b: T): number => a.key.localeCompare(b.key);
+  const byKey = <T extends { key: string }>(a: T, b: T): number => a.key.localeCompare(b.key);
   const payload = JSON.stringify({
     sourceKind: plan.sourceKind,
     sourceLabel: plan.sourceLabel,
     profile: plan.profile,
     profileRelPath: plan.profileRelPath,
-    totalBytes: plan.totalBytes,
-    totalItems: plan.totalItems,
-    entries: [...plan.entries].sort((a, b) => a.sourceRelPath.localeCompare(b.sourceRelPath)),
-    stores: [...plan.stores].map((s) => ({ key: s.relPath, s })).sort(byPath).map(({ s }) => s),
-    reinstallHints: [...plan.reinstallHints].map((h) => ({ key: h.appId, h })).sort(byPath).map(({ h }) => h),
-    refusals: [...plan.refusals].map((r) => ({ key: r.reason + r.detail, r })).sort(byPath).map(({ r }) => r)
+    entries: [...plan.entries]
+      .map((e) => ({ key: e.sourceRelPath, sourceRelPath: e.sourceRelPath, category: e.category, appId: e.appId, registry: e.registry }))
+      .sort(byKey)
+      .map(({ key: _key, ...e }) => e),
+    stores: [...plan.stores]
+      .map((s) => ({ key: s.relPath, relPath: s.relPath, appId: s.appId, registry: s.registry, winget: s.winget }))
+      .sort(byKey)
+      .map(({ key: _key, ...s }) => s),
+    reinstallHints: [...plan.reinstallHints]
+      .map((h) => ({ key: h.appId, appId: h.appId, winget: h.winget }))
+      .sort(byKey)
+      .map(({ key: _key, ...h }) => h),
+    refusals: [...plan.refusals]
+      .map((r) => ({ key: r.reason + r.detail, reason: r.reason, detail: r.detail }))
+      .sort(byKey)
+      .map(({ key: _key, ...r }) => r)
   });
   return crypto.createHash('sha256').update(payload).digest('hex');
 }

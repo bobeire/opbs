@@ -113,6 +113,26 @@ describe('migrate execute (tier 1)', () => {
     expect(computePlanHash(planRestricted)).not.toBe(computePlanHash(planA));
   });
 
+  it('keeps the plan hash stable under live size churn (2026-10-21 drill finding)', () => {
+    const target = mkTarget();
+    const plan = mkPlan(target);
+    const baseline = computePlanHash(plan);
+    const churned: MigratePlan = {
+      ...plan,
+      totalBytes: plan.totalBytes + 123_456,
+      totalItems: plan.totalItems + 7,
+      entries: plan.entries.map((e) => ({ ...e, bytes: e.bytes + 999, itemCount: e.itemCount + 1 })),
+      stores: plan.stores.map((s) => ({ ...s, bytes: s.bytes + 111, itemCount: s.itemCount + 1 })),
+      generatedAt: new Date().toISOString()
+    };
+    expect(computePlanHash(churned)).toBe(baseline);
+    const moved: MigratePlan = {
+      ...churned,
+      entries: plan.entries.map((e, i) => (i === 0 ? { ...e, sourceRelPath: `${e.sourceRelPath}/other` } : e))
+    };
+    expect(computePlanHash(moved)).not.toBe(baseline);
+  });
+
   it('refuses plans that carry refusals and writes nothing', () => {
     const target = mkTarget();
     const source = new LiveSource(srcRoot);
