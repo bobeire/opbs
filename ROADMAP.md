@@ -1104,7 +1104,22 @@ to date has shipped; **Investigate** items need spike work first.
   extensible via `--apps-db`), dry-run `MigratePlan` with registry keys
   listed-not-executed, winget reinstall hints, refusals with reasons
   (empty/unknown profile, missing `--target`), `--json` everywhere.
-  Next: phase 1 (execute tier-1 file data with ACL rewrite + verify).
+- ✅ **Phase 1 tier-1 execute (2026-10-21)**: `migrate run` — dry-run by
+  default; `--execute --plan-hash <sha256>` two-phase gate
+  (`computePlanHash` hashes only decision-relevant plan content, so the
+  hash is stable across rebuilds). Per-file copy into the existing
+  target profile with `.opbs-migrate/journal.jsonl` + `--resume`,
+  `--merge` collision policy, symlink/legacy-junction skip (never
+  followed), post-copy verify (streamed MD5 live, buffer-capped
+  image-side with size-only fallback above 512 MiB), and
+  `report.json` + `winget-import.json` artifacts under
+  `.opbs-migrate/`. Any refusal blocks all writes; exits 1 on any
+  failure or verify mismatch. ACLs come from Windows inheritance into
+  the already-existing profile (documented in report notes); owner/SID
+  rewrite is deferred to phase 2 with the registry transplants.
+  Tests: `test/unit/migrate-execute.test.ts` (12) incl. CLI smoke of
+  the plan-hash handshake.
+  Next: phase 2 (registry transplants + owner rewrite).
 
 ### Changed-block tracking via NTFS USN journal
 - ✅ Native addon `queryUsnJournal` + `getUsnJournalInfo` read the NTFS USN

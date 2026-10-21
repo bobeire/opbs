@@ -376,17 +376,26 @@ Commands:
   mrimg info <image.mrimgx|image.mrimg>
                                          Show the structure of a Macrium Reflect image
                                          (both .mrimgx and .mrimg Reflect 7/8 containers).
-  migrate inventory [--live|image] [--partition N] [--passphrase p] [--apps-db file] [--json]
-                                         Phase-0 user-state migration spike: inventory user
-                                         profiles, standard folders and known app data stores
-                                         on a live system drive or an image partition.
-                                         Read-only.
-  migrate plan [--live|image] [--partition N] --profile <name|all> [--target DIR]
-               [--folder NAME]... [--apps-db file] [--json]
-                                         Dry-run migration plan for a profile: tier-1 file
-                                         data, registry keys listed for a future tier 2,
-                                         winget reinstall hints, and refusals with reasons.
-                                         Exits 1 when refusals exist. Read-only.
+   migrate inventory [--live|image] [--partition N] [--passphrase p] [--apps-db file] [--json]
+                                          User-state migration: inventory user
+                                          profiles, standard folders and known app data stores
+                                          on a live system drive or an image partition.
+                                          Read-only.
+   migrate plan [--live|image] [--partition N] --profile <name|all> [--target DIR]
+                [--folder NAME]... [--apps-db file] [--json]
+                                          Dry-run migration plan for a profile: tier-1 file
+                                          data, registry keys listed for a future tier 2,
+                                          winget reinstall hints, and refusals with reasons.
+                                          Prints the plan hash. Exits 1 when refusals exist.
+                                          Read-only.
+   migrate run [--live|image] [--partition N] --profile <name> --target DIR [--folder NAME]...
+               [--execute --plan-hash H] [--merge] [--resume] [--no-verify] [--json]
+                                          Execute a tier-1 migration: copy file data into the
+                                          existing target profile, journal every file, verify
+                                          content, and write report.json + winget-import.json
+                                          under .opbs-migrate/. Dry-run by default; --execute
+                                          requires the hash printed by the plan/dry run.
+                                          Exits 1 on any failure or verify mismatch.
 store put <s3://bucket/prefix|sftp://user@host/path|ftp://user@host/path> <file> [--region R]
                                          Upload a file to the object store (AWS_* / SFTP_* env vars).
   store get <s3://bucket/prefix|sftp://user@host/path|ftp://user@host/path> <file> [--region R]

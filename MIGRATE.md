@@ -1,8 +1,9 @@
 # Design: User-State Migration (`migrate`)
 
-**Status**: Phase 0 spike shipped — `migrate inventory` / `migrate plan`
-CLI verbs are read-only and live; execution tiers are design-only.
-**Date**: 2026-10-20
+**Status**: Phase 1 shipped — `migrate inventory` / `migrate plan` /
+`migrate run` (tier-1 execute, verify, report) are live. Tier 2
+(registry) and beyond are design-only.
+**Date**: 2026-10-20 (design), 2026-10-21 (phase 1)
 **Related**: [ROADMAP.md](ROADMAP.md) (Investigate), [README.md](README.md)
 (imaging, mounts, VHD restore)
 
@@ -260,13 +261,21 @@ scripted fleets.
 
 ## 14. Phasing
 
-- **Phase 0 (spike)**: mount an existing image → inventory users/apps →
-  emit a dry-run plan. No writes. Validates the knowledge base and the
-  inventory scanner against real machines. *Uses only shipped OPBS.*
-- **Phase 1 (v1)**: tier 1 (file data) + ACL rewrite + verify + report +
-  winget manifest synthesis. CLI only.
+- **Phase 0 (spike) — shipped 2026-10-20**: mount an existing image →
+  inventory users/apps → emit a dry-run plan. No writes. Validates the
+  knowledge base and the inventory scanner against real machines.
+  *Uses only shipped OPBS.*
+- **Phase 1 (v1) — shipped 2026-10-21**: tier 1 (file data) execute via
+  `migrate run`: dry-run by default, `--execute` gated on the printed
+  plan hash, per-file journal + `--resume`, `--merge` collision policy,
+  reparse/legacy-junction skips, post-copy verify (MD5; size-only
+  fallback for large image reads), `report.json` + `winget-import.json`
+  artifacts. ACL policy: files are copied into the *existing*
+  target Windows profile, which grants access by inheritance; live
+  copies carry content and timestamps only (no ADS/EFS metadata — the
+  report says so per run). Owner rewriting lands with tier 2.
 - **Phase 2**: tier 2 registry transplants for the top-N curated apps,
-  per-profile resume journal.
+  owner/SID rewrite on the copied tree.
 - **Phase 3**: knowledge-base expansion drive + `--apps-db` extension
   point documented for contributions.
 - **Phase 4**: GUI wizard, migration "drill" scheduling (dry-run against

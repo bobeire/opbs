@@ -1,4 +1,4 @@
-/** User-state migration — Phase 0 spike types (see MIGRATE.md). */
+/** User-state migration types (design: MIGRATE.md; phases 0-1 shipped). */
 
 export type AppClass = 'data' | 'data+settings' | 'reinstall-only' | 'ignore';
 
@@ -23,6 +23,10 @@ export interface MigrateSourceEntry {
   name: string;
   isDirectory: boolean;
   size: number;
+  /** True when the entry is a symlink/reparse point (live NTFS) — never followed on copy. */
+  isSymlink?: boolean;
+  /** True when the entry is EFS-encrypted (image sources). */
+  isEncrypted?: boolean;
 }
 
 /**
@@ -35,6 +39,14 @@ export interface MigrateSource {
   /** Human-readable source label for reports (e.g. `live:C:` or `image:… (partition 0)`). */
   label: string;
   list(relPath: string): MigrateSourceEntry[];
+  /** Copies one source file to an absolute destination path (content only). */
+  copyFileTo(relPath: string, destAbsPath: string): void;
+  /**
+   * MD5 hex of the source file's content, or `null` when not feasible
+   * (image sources buffer whole files — callers fall back to a size check
+   * above the buffer limit).
+   */
+  hashFile(relPath: string, size: number): string | null;
   close(): void;
 }
 
@@ -114,6 +126,51 @@ export interface MigratePlan {
   reinstallHints: MigrateReinstallHint[];
   refusals: MigrateRefusal[];
   phaseNotes: string[];
+  /** sha256 over the plan's decision-relevant content (computed at CLI level, excluded from its own hash). */
+  planHash?: string;
+}
+
+export type MigrateCopyAction = 'copied' | 'skipped-resume' | 'skipped-reparse' | 'failed';
+export type MigrateVerifyState = 'ok' | 'mismatch' | 'size-only-ok' | 'not-checked' | 'failed';
+
+/** Per-file outcome for everything that is not a plain successful copy+verify. */
+export interface MigrateCopyOutcome {
+  sourceRelPath: string;
+  destPath: string;
+  action: MigrateCopyAction;
+  bytes?: number;
+  error?: string;
+  verify?: MigrateVerifyState;
+}
+
+/** Result of a `migrate run` — the migration report (tier 1). */
+export interface MigrationReport {
+  profile: string;
+  sourceLabel: string;
+  targetProfileDir: string;
+  planHash: string;
+  executed: boolean;
+  startedAt: string;
+  finishedAt: string;
+  summary: {
+    plannedFiles: number;
+    plannedBytes: number;
+    copied: number;
+    skippedResume: number;
+    skippedReparse: number;
+    failed: number;
+    bytesCopied: number;
+    verifyChecked: number;
+    verifyMismatches: number;
+  };
+  /** Non-success outcomes only (plain copies are recorded in the journal). */
+  outcomes: MigrateCopyOutcome[];
+  /** App-store entries: data lives under AppData (already copied); registry/winget info carried for tier 2/3. */
+  stores: MigrateStoreMatch[];
+  refusals: MigrateRefusal[];
+  reinstallHints: MigrateReinstallHint[];
+  artifacts: { reportPath?: string; wingetPath?: string; journalPath?: string };
+  notes: string[];
 }
 
 /** Profile directories on a Windows volume that are never user profiles. */

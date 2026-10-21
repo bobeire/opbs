@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import type { AppKnowledgeEntry, MigrateInventory, MigratePlan, MigratePlanEntry, MigrateRefusal, MigrateReinstallHint, MigrateSource } from './types';
 import { EXCLUDED_PROFILE_SUBTREES, STANDARD_FOLDERS } from './types';
@@ -113,3 +114,25 @@ export function buildPlan(source: MigrateSource, profileName: string, appsDb: Ap
 
 /** Excluded subtrees exported for CLI text rendering/tests. */
 export const PLAN_EXCLUDES = EXCLUDED_PROFILE_SUBTREES;
+
+/**
+ * sha256 over the plan's decision-relevant content — stable across runs
+ * (excludes `generatedAt` and `planHash` itself). `migrate run --execute`
+ * requires this hash, so scripted flows run `plan` first, then `run`.
+ */
+export function computePlanHash(plan: MigratePlan): string {
+  const byPath = <T extends { key: string }>(a: T, b: T): number => a.key.localeCompare(b.key);
+  const payload = JSON.stringify({
+    sourceKind: plan.sourceKind,
+    sourceLabel: plan.sourceLabel,
+    profile: plan.profile,
+    profileRelPath: plan.profileRelPath,
+    totalBytes: plan.totalBytes,
+    totalItems: plan.totalItems,
+    entries: [...plan.entries].sort((a, b) => a.sourceRelPath.localeCompare(b.sourceRelPath)),
+    stores: [...plan.stores].map((s) => ({ key: s.relPath, s })).sort(byPath).map(({ s }) => s),
+    reinstallHints: [...plan.reinstallHints].map((h) => ({ key: h.appId, h })).sort(byPath).map(({ h }) => h),
+    refusals: [...plan.refusals].map((r) => ({ key: r.reason + r.detail, r })).sort(byPath).map(({ r }) => r)
+  });
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}

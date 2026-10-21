@@ -1,7 +1,27 @@
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { openAnyBrowse, listDirectory, type BrowseSession } from '../fs/file-browse';
+import { openAnyBrowse, listDirectory, extractPath, readPath, type BrowseSession } from '../fs/file-browse';
 import type { MigrateSource, MigrateSourceEntry, WalkStats } from './types';
+
+/** Image-source verify buffers whole files — above this size, verify falls back to size-only. */
+export const IMAGE_VERIFY_BUFFER_LIMIT = 512 * 1024 * 1024;
+
+/** MD5 hex of a local file, streamed. */
+export function hashFileMd5(absPath: string): string {
+  const hash = crypto.createHash('md5');
+  const fd = fs.openSync(absPath, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(1024 * 1024);
+    let bytesRead = 0;
+    while ((bytesRead = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
+      hash.update(buf.subarray(0, bytesRead));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest('hex');
+}
 
 /** Default live-system root (the system drive). */
 export function defaultLiveRoot(): string {
@@ -53,9 +73,24 @@ export class LiveSource implements MigrateSource {
       } else if (!dirent.isDirectory()) {
         continue; // sockets/pipes/devices
       }
-      out.push({ name: dirent.name, isDirectory, size });
+      out.push({ name: dirent.name, isDirectory, size, isSymlink: dirent.isSymbolicLink() || undefined });
     }
     return out;
+  }
+
+  copyFileTo(relPath: string, destAbsPath: string): void {
+    fs.copyFileSync(this.toFs(relPath), destAbsPath);
+    // Best-effort mtime preservation; failures (ACLs) never fail the copy.
+    try {
+      const st = fs.statSync(this.toFs(relPath));
+      fs.utimesSync(destAbsPath, st.atime, st.mtime);
+    } catch {
+      /* keep default timestamps */
+    }
+  }
+
+  hashFile(relPath: string, _size: number): string | null {
+    return hashFileMd5(this.toFs(relPath));
   }
 
   close(): void {
@@ -78,8 +113,19 @@ export class ImageSource implements MigrateSource {
     return listDirectory(this.session, relPath).map((node) => ({
       name: node.name,
       isDirectory: node.isDirectory,
-      size: node.size
+      size: node.size,
+      isEncrypted: node.isEncrypted || undefined
     }));
+  }
+
+  copyFileTo(relPath: string, destAbsPath: string): void {
+    extractPath(this.session, relPath, destAbsPath);
+  }
+
+  hashFile(relPath: string, size: number): string | null {
+    if (size > IMAGE_VERIFY_BUFFER_LIMIT) return null;
+    const buf = readPath(this.session, relPath);
+    return crypto.createHash('md5').update(buf).digest('hex');
   }
 
   close(): void {

@@ -2,10 +2,11 @@ import { flagValue } from './flags';
 import { resolvePassphrase } from './passphrase';
 import type { CommandContext } from './index';
 import { loadAppsDb } from '../imaging/migrate/apps-db';
+import { executePlan } from '../imaging/migrate/execute';
 import { buildInventory, listProfileNames } from '../imaging/migrate/inventory';
-import { buildPlan } from '../imaging/migrate/plan';
+import { buildPlan, computePlanHash } from '../imaging/migrate/plan';
 import { openMigrateSource } from '../imaging/migrate/source';
-import type { MigrateInventory, MigratePlan } from '../imaging/migrate/types';
+import type { MigrateInventory, MigratePlan, MigrationReport } from '../imaging/migrate/types';
 
 function fmtBytes(bytes: number): string {
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
@@ -21,7 +22,7 @@ function fmtBytes(bytes: number): string {
 function parseSource(ctx: CommandContext): { live: boolean; liveRoot?: string; imagePath?: string; partitionIndex: number; passphrase?: string } {
   const live = ctx.argv.includes('--live');
   const liveRoot = flagValue(ctx.argv, '--live-root');
-  const positional = ctx.argv.filter((a, i) => i > 0 && !a.startsWith('-') && ctx.argv[i - 1] !== '--partition' && ctx.argv[i - 1] !== '--live-root' && ctx.argv[i - 1] !== '--profile' && ctx.argv[i - 1] !== '--target' && ctx.argv[i - 1] !== '--apps-db' && ctx.argv[i - 1] !== '--folder');
+  const positional = ctx.argv.filter((a, i) => i > 0 && !a.startsWith('-') && ctx.argv[i - 1] !== '--partition' && ctx.argv[i - 1] !== '--live-root' && ctx.argv[i - 1] !== '--profile' && ctx.argv[i - 1] !== '--target' && ctx.argv[i - 1] !== '--apps-db' && ctx.argv[i - 1] !== '--folder' && ctx.argv[i - 1] !== '--plan-hash');
   const imagePath = live ? undefined : positional[0];
   const partitionRaw = flagValue(ctx.argv, '--partition');
   const partitionIndex = partitionRaw === undefined ? 0 : Number.parseInt(partitionRaw, 10);
@@ -55,6 +56,7 @@ function renderPlan(plan: MigratePlan): void {
   console.log(`Source: ${plan.sourceLabel}`);
   console.log(`Profile: ${plan.profile} (${plan.profileRelPath})`);
   console.log(`Generated: ${plan.generatedAt}`);
+  console.log(`Plan hash: ${plan.planHash ?? '(not computed)'}`);
   console.log('');
   console.log(`Planned file data: ${fmtBytes(plan.totalBytes)} across ${plan.totalItems} files`);
   console.log('');
@@ -91,10 +93,45 @@ function renderPlan(plan: MigratePlan): void {
   for (const note of plan.phaseNotes) console.log(`  - ${note}`);
 }
 
+function renderReport(report: MigrationReport): void {
+  console.log(`Migration ${report.executed ? 'executed' : 'NOT executed'} — plan ${report.planHash.slice(0, 16)}…`);
+  console.log(`Source: ${report.sourceLabel}`);
+  console.log(`Profile: ${report.profile} -> ${report.targetProfileDir}`);
+  console.log('');
+  const s = report.summary;
+  console.log(`Planned: ${s.plannedFiles} files, ${fmtBytes(s.plannedBytes)}`);
+  console.log(`Copied: ${s.copied} (${fmtBytes(s.bytesCopied)})  resume-skipped: ${s.skippedResume}  reparse-skipped: ${s.skippedReparse}  failed: ${s.failed}`);
+  console.log(`Verify: ${s.verifyChecked} checked, ${s.verifyMismatches} mismatch(es)`);
+  if (report.outcomes.length > 0) {
+    console.log('');
+    console.log(`Outcomes needing attention (${report.outcomes.length}):`);
+    for (const outcome of report.outcomes.slice(0, 50)) {
+      const verifyTag = outcome.verify && outcome.verify !== 'ok' ? ` [verify: ${outcome.verify}]` : '';
+      console.log(`  [${outcome.action}] ${outcome.sourceRelPath}${outcome.error ? ` — ${outcome.error}` : ''}${verifyTag}`);
+    }
+    if (report.outcomes.length > 50) console.log(`  … ${report.outcomes.length - 50} more (see report.json)`);
+  }
+  if (report.artifacts.wingetPath) {
+    console.log('');
+    console.log(`Winget import list: ${report.artifacts.wingetPath}`);
+  }
+  if (report.stores.length > 0) {
+    console.log('');
+    console.log(`Stores inventoried (registry tier-2 data, not yet executed): ${report.stores.length}`);
+  }
+  console.log('');
+  console.log('Notes:');
+  for (const note of report.notes) console.log(`  - ${note}`);
+  if (report.artifacts.reportPath) {
+    console.log('');
+    console.log(`Report written: ${report.artifacts.reportPath}`);
+  }
+}
+
 export async function cmdMigrate(ctx: CommandContext): Promise<number> {
   const action = ctx.argv[0];
-  if (action !== 'inventory' && action !== 'plan') {
-    console.error('Usage: migrate inventory|plan [--live] [image] [--partition N] [--passphrase p] [--profile name] [--target DIR] [--apps-db file] [--json]');
+  if (action !== 'inventory' && action !== 'plan' && action !== 'run') {
+    console.error('Usage: migrate inventory|plan|run [--live] [image] [--partition N] [--passphrase p] [--profile name] [--target DIR] [--folder name] [--apps-db file] [--execute --plan-hash H] [--merge] [--resume] [--no-verify] [--json]');
     return 1;
   }
 
@@ -121,19 +158,24 @@ export async function cmdMigrate(ctx: CommandContext): Promise<number> {
 
     const profile = flagValue(ctx.argv, '--profile');
     if (!profile) {
-      console.error('migrate plan requires --profile <name|all>');
+      console.error(`migrate ${action} requires --profile <name|all>`);
       return 1;
     }
     const onlyFolders = flagValuesForFolder(ctx.argv);
     const target = flagValue(ctx.argv, '--target');
 
     if (profile === 'all') {
+      if (action === 'run') {
+        console.error('migrate run works on a single --profile (run one profile at a time).');
+        return 1;
+      }
       const names = listProfileNames(source);
       if (names.length === 0) {
         console.error('No user profiles found under Users/.');
         return 1;
       }
       const plans = names.map((name) => buildPlan(source, name, appsDb, { targetProfileDir: undefined, onlyFolders: onlyFolders.length > 0 ? onlyFolders : undefined }));
+      for (const plan of plans) plan.planHash = computePlanHash(plan);
       if (ctx.opts.json) {
         console.log(JSON.stringify(plans, null, 2));
       } else {
@@ -149,6 +191,56 @@ export async function cmdMigrate(ctx: CommandContext): Promise<number> {
       targetProfileDir: target,
       onlyFolders: onlyFolders.length > 0 ? onlyFolders : undefined
     });
+    plan.planHash = computePlanHash(plan);
+
+    if (action === 'run') {
+      if (!target) {
+        console.error('migrate run requires --target <existing target profile directory>');
+        return 1;
+      }
+      if (!ctx.argv.includes('--execute')) {
+        if (ctx.opts.json) {
+          console.log(JSON.stringify(plan, null, 2));
+        } else {
+          renderPlan(plan);
+          console.log('');
+          console.log('Dry run — nothing written.');
+          console.log(`Execute with: migrate run <source> --profile ${profile} --target "${target}" --execute --plan-hash ${plan.planHash}`);
+        }
+        return plan.refusals.length > 0 ? 1 : 0;
+      }
+      if (plan.refusals.length > 0) {
+        console.error('Plan has refusals — refusing to execute:');
+        for (const refusal of plan.refusals) console.error(`  [${refusal.reason}] ${refusal.detail}`);
+        return 1;
+      }
+      const wantHash = flagValue(ctx.argv, '--plan-hash');
+      if (!wantHash) {
+        console.error('migrate run --execute requires --plan-hash <hash> — run without --execute to print it.');
+        return 1;
+      }
+      if (wantHash !== plan.planHash) {
+        console.error('Plan hash mismatch:');
+        console.error(`  provided: ${wantHash}`);
+        console.error(`  current:  ${plan.planHash}`);
+        console.error('The source or options changed since the plan was printed. Re-run the plan.');
+        return 1;
+      }
+      const report = executePlan(source, plan, {
+        targetProfileDir: target,
+        planHash: plan.planHash,
+        merge: ctx.argv.includes('--merge'),
+        resume: ctx.argv.includes('--resume'),
+        verify: !ctx.argv.includes('--no-verify')
+      });
+      if (ctx.opts.json) {
+        console.log(JSON.stringify(report, null, 2));
+      } else {
+        renderReport(report);
+      }
+      return report.summary.failed > 0 || report.summary.verifyMismatches > 0 ? 1 : 0;
+    }
+
     if (ctx.opts.json) {
       console.log(JSON.stringify(plan, null, 2));
     } else {
