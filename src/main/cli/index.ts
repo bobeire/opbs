@@ -376,20 +376,20 @@ Commands:
    mrimg info <image.mrimgx|image.mrimg>
                                           Show the structure of a Macrium Reflect image
                                           (.mrimgx = Reflect X; .mrimg = Reflect 7/8).
-   migrate inventory [--live|image] [--partition N] [--passphrase p] [--apps-db file] [--json]
+   migrate inventory [--live|image] [--partition N] [--passphrase p] [--apps-db file] [--json] [--json-out FILE]
                                           User-state migration: inventory user
                                           profiles, standard folders and known app data stores
                                           on a live system drive or an image partition.
                                           Read-only.
    migrate plan [--live|image] [--partition N] --profile <name|all> [--target DIR]
-                [--folder NAME]... [--apps-db file] [--json]
+                [--folder NAME]... [--apps-db file] [--json] [--json-out FILE]
                                           Dry-run migration plan for a profile: tier-1 file
                                           data, registry keys planned for tier 2 execution,
                                           winget reinstall hints, and refusals with reasons.
                                           Prints the plan hash. Exits 1 when refusals exist.
                                           Read-only.
    migrate run [--live|image] [--partition N] --profile <name> --target DIR [--folder NAME]...
-               [--execute --plan-hash H] [--merge] [--resume] [--no-verify] [--registry] [--no-owner] [--json]
+               [--execute --plan-hash H] [--merge] [--resume] [--no-verify] [--registry] [--no-owner] [--json] [--json-out FILE]
                                           Execute a migration: copy file data into the
                                           existing target profile, journal every file, verify
                                           content, and write report.json + winget-import.json

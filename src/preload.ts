@@ -40,6 +40,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   cancelClone: () => ipcRenderer.invoke('cancel-clone'),
   clonePreflight: (config: any) => ipcRenderer.invoke('clone-preflight', config),
 
+  // User-state migration (wizard)
+  migratePlan: (payload: any) => ipcRenderer.invoke('migrate-plan', payload),
+  migrateRun: (payload: any) => ipcRenderer.invoke('migrate-run', payload),
+  migrateCancel: () => ipcRenderer.invoke('migrate-cancel'),
+  migrateProfiles: (source: any) => ipcRenderer.invoke('migrate-profiles', source),
+  migrateDrillStatus: (dir: string) => ipcRenderer.invoke('migrate-drill-status', dir),
+  onMigrateProgress: (callback: (event: any) => void) => {
+    const handler = (_event: any, progress: any) => callback(progress);
+    ipcRenderer.on('migrate-progress', handler);
+    return () => {
+      ipcRenderer.removeListener('migrate-progress', handler);
+    };
+  },
+
   // Settings
   getSettings: () => ipcRenderer.invoke('get-settings'),
   updateSettings: (updates: any) => ipcRenderer.invoke('update-settings', updates),

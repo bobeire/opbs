@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { BackupManager, BackupConfig } from '../backup/manager';
-import { ScheduledBackup, ScheduledVerification, ScheduledRestoreDrill, ScheduledScrub, SettingsManager } from '../utils/settings-manager';
+import { ScheduledBackup, ScheduledVerification, ScheduledRestoreDrill, ScheduledMigrateDrill, ScheduledScrub, SettingsManager } from '../utils/settings-manager';
 import { applyRetention, findNewestImage, pickDrillImage, resolveScheduledRetention, scanBackupDirectory, type BackupImageEntry } from './retention';
 import { cloudImageEntries } from './retention-s3';
 import { isCloudImageLocation, materializeImageFromCloud, type StagedCloudImage } from '../imaging/cloud-restore';
@@ -12,6 +12,8 @@ import { cloudStoreFromLocation } from '../utils/cloud-store';
 import { cloudStoreOptionsFrom } from '../utils/cloud-profiles';
 import { summarizeImage } from '../imaging/restore-engine';
 import { recordDrillResult } from '../utils/drill-history';
+import { recordMigrateDrillResult } from '../utils/migrate-drill-history';
+import { buildMigrateArgs } from '../imaging/migrate/cli-runner';
 import { tryNotify } from '../utils/notify';
 import { ConsecutiveFailureTracker } from '../utils/failure-tracker';
 import { logger } from '../utils/logger';
@@ -36,6 +38,7 @@ function electronApp(): { isPackaged: boolean; getAppPath: () => string } | null
 const VERIFY_TASK_ID = 'scheduled-verify';
 const SCRUB_TASK_ID = 'idle-scrub';
 const DRILL_TASK_ID = 'scheduled-drill';
+const MIGRATE_DRILL_TASK_ID = 'scheduled-migrate-drill';
 
 interface RetryState {
   /** Number of retries already attempted after the original failure. */
@@ -68,6 +71,7 @@ export class BackupScheduler {
   private settingsManager: SettingsManager;
   private verifyFailures = new ConsecutiveFailureTracker();
   private drillFailures = new ConsecutiveFailureTracker();
+  private migrateDrillFailures = new ConsecutiveFailureTracker();
   private scrubFailures = new ConsecutiveFailureTracker();
   private retries: Map<string, RetryState> = new Map();
 
@@ -91,6 +95,14 @@ export class BackupScheduler {
 
     if (settings.scheduledDrill.enabled && settings.scheduledDrill.destinationPath) {
       this.scheduleDrill(settings.scheduledDrill);
+    }
+
+    if (
+      settings.scheduledMigrateDrill?.enabled &&
+      settings.scheduledMigrateDrill.destinationPath &&
+      settings.scheduledMigrateDrill.profile
+    ) {
+      this.scheduleMigrateDrill(settings.scheduledMigrateDrill);
     }
 
     if (settings.scrubWhileIdle && settings.backupLocation) {
@@ -444,6 +456,163 @@ export class BackupScheduler {
         /* best-effort */
       }
     }
+  }
+
+  /** Periodic migration drill: prove the newest image still yields a complete plan. */
+  scheduleMigrateDrill(config: ScheduledMigrateDrill): boolean {
+    const existing = this.tasks.get(MIGRATE_DRILL_TASK_ID);
+    if (existing) {
+      existing.stop();
+      this.tasks.delete(MIGRATE_DRILL_TASK_ID);
+    }
+
+    if (!getCron().validate(config.cronExpression)) {
+      logger.error(`Invalid cron expression for migration drill: ${config.cronExpression}`);
+      return false;
+    }
+
+    const task = getCron().schedule(config.cronExpression, () => {
+      void this.runMigrateDrill(config);
+    });
+    this.tasks.set(MIGRATE_DRILL_TASK_ID, task);
+    logger.info(`Migration drill scheduled at ${config.cronExpression} (profile ${config.profile})`);
+    return true;
+  }
+
+  /**
+   * Run a migration drill in a detached child (`--cli migrate plan --json-out`):
+   * build a dry-run plan against the newest image's largest partition for the
+   * configured profile. Nothing is ever written — the drill passes when the
+   * plan builds cleanly (JSON produced, no refusals). Results land in
+   * `opbs-migrate-drill-history.json` next to the image.
+   */
+  private async runMigrateDrill(config: ScheduledMigrateDrill): Promise<void> {
+    const dir = config.destinationPath;
+    let found: string | undefined;
+    try {
+      found = findNewestImage(dir);
+    } catch (error) {
+      logger.error(`Migration drill could not scan ${dir}:`, error);
+      return;
+    }
+    if (!found) {
+      logger.warn(`Migration drill: no images in ${dir}; skipping`);
+      return;
+    }
+    const imagePath = found;
+    let partitionIndex = 0;
+    try {
+      const partitions = summarizeImage(imagePath).partitions;
+      if (partitions.length > 0) {
+        // The Windows volume is the largest partition in an OPBS disk image.
+        partitionIndex = partitions.reduce((best, p, i) => (p.size > partitions[best].size ? i : best), 0);
+      }
+    } catch (error) {
+      logger.error(`Migration drill could not read ${imagePath}:`, error);
+      return;
+    }
+
+    const started = Date.now();
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-migrate-drill-'));
+    const outPath = path.join(tmpDir, 'plan.json');
+    const args = buildMigrateArgs({
+      action: 'plan',
+      source: { imagePath, partitionIndex },
+      profile: config.profile
+    });
+    args.push('--json-out', outPath);
+    if (config.passphrase) {
+      // Same convention as the wizard runner: the secret travels in a
+      // short-lived file, never on argv (other processes read argv).
+      try {
+        const passFile = path.join(tmpDir, 'passphrase.txt');
+        fs.writeFileSync(passFile, config.passphrase, { encoding: 'utf-8', mode: 0o600 });
+        args.push(`--passphrase-file=${passFile}`);
+      } catch (error) {
+        logger.warn(`Migration drill could not stage the passphrase file: ${error}`);
+      }
+    }
+
+    const app = electronApp();
+    if (!app?.isPackaged) args.unshift(app ? app.getAppPath() : process.cwd());
+
+    const child = spawn(process.execPath, args, {
+      windowsHide: true,
+      detached: true,
+      stdio: 'ignore'
+    });
+    child.unref();
+    child.on('error', (error) => {
+      logger.error(`Migration drill could not start:`, error);
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
+    });
+    child.on('close', async () => {
+      try {
+        let plan: {
+          planHash?: string;
+          totalItems?: number;
+          totalBytes?: number;
+          stores?: unknown[];
+          refusals?: Array<{ reason: string; detail: string }>;
+        } | null = null;
+        try {
+          plan = JSON.parse(fs.readFileSync(outPath, 'utf-8'));
+        } catch {
+          plan = null;
+        }
+        const refusals = plan?.refusals ?? [];
+        const ok = !!plan && refusals.length === 0;
+        const errorDetail = ok
+          ? undefined
+          : !plan
+            ? 'migrate plan produced no result (child exited without JSON)'
+            : refusals.map((r) => `[${r.reason}] ${r.detail}`).join('; ');
+        recordMigrateDrillResult(imagePath, {
+          ok,
+          profile: config.profile,
+          ...(plan?.planHash ? { planHash: plan.planHash } : {}),
+          plannedFiles: plan?.totalItems,
+          plannedBytes: plan?.totalBytes,
+          storesMatched: plan?.stores?.length ?? 0,
+          refusals: refusals.length,
+          durationMs: Date.now() - started,
+          ...(errorDetail ? { error: errorDetail } : {})
+        });
+        if (ok) {
+          logger.info(
+            `Migration drill PASSED for ${path.basename(imagePath)} ` +
+              `(${plan?.totalItems} file(s) planned, ${plan?.stores?.length ?? 0} store(s) matched)`
+          );
+        } else {
+          logger.warn(`Migration drill FAILED for ${path.basename(imagePath)}: ${errorDetail}`);
+        }
+
+        this.migrateDrillFailures.record(ok);
+        if (!ok && config.notifyOnFailure && this.migrateDrillFailures.shouldAlert(config.alertAfter ?? 2)) {
+          await tryNotify(
+            {
+              title: 'OPBS migration drill FAILED',
+              body: `Migration plan drill for ${path.basename(imagePath)} failed: ${errorDetail}`,
+              severity: 'error'
+            },
+            this.settingsManager.getSettings().notifications.webhookUrl || ''
+          );
+          this.migrateDrillFailures.reset();
+        }
+      } catch (error) {
+        logger.error(`Migration drill result handling failed:`, error);
+      } finally {
+        try {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        } catch {
+          /* best-effort */
+        }
+      }
+    });
   }
 
   /**

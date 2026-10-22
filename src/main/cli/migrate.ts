@@ -25,7 +25,7 @@ function fmtBytes(bytes: number): string {
 function parseSource(ctx: CommandContext): { live: boolean; liveRoot?: string; imagePath?: string; partitionIndex: number; passphrase?: string } {
   const live = ctx.argv.includes('--live');
   const liveRoot = flagValue(ctx.argv, '--live-root');
-  const positional = ctx.argv.filter((a, i) => i > 0 && !a.startsWith('-') && ctx.argv[i - 1] !== '--partition' && ctx.argv[i - 1] !== '--live-root' && ctx.argv[i - 1] !== '--profile' && ctx.argv[i - 1] !== '--target' && ctx.argv[i - 1] !== '--apps-db' && ctx.argv[i - 1] !== '--folder' && ctx.argv[i - 1] !== '--plan-hash');
+  const positional = ctx.argv.filter((a, i) => i > 0 && !a.startsWith('-') && ctx.argv[i - 1] !== '--partition' && ctx.argv[i - 1] !== '--live-root' && ctx.argv[i - 1] !== '--profile' && ctx.argv[i - 1] !== '--target' && ctx.argv[i - 1] !== '--apps-db' && ctx.argv[i - 1] !== '--folder' && ctx.argv[i - 1] !== '--plan-hash' && ctx.argv[i - 1] !== '--json-out');
   const imagePath = live ? undefined : positional[0];
   const partitionRaw = flagValue(ctx.argv, '--partition');
   const partitionIndex = partitionRaw === undefined ? 0 : Number.parseInt(partitionRaw, 10);
@@ -144,12 +144,24 @@ function renderReport(report: MigrationReport): void {
   }
 }
 
+/**
+ * JSON output for machine consumers: always to stdout, plus `--json-out FILE`
+ * when given (the wizard/drill child processes parse the file — immune to any
+ * stray stdout noise from the runtime).
+ */
+function emitJson(value: unknown, jsonOutPath?: string): void {
+  const text = JSON.stringify(value, null, 2);
+  if (jsonOutPath) fs.writeFileSync(jsonOutPath, text);
+  console.log(text);
+}
+
 export async function cmdMigrate(ctx: CommandContext): Promise<number> {
   const action = ctx.argv[0];
   if (action !== 'inventory' && action !== 'plan' && action !== 'run') {
-    console.error('Usage: migrate inventory|plan|run [--live] [image] [--partition N] [--passphrase p] [--profile name] [--target DIR] [--folder name] [--apps-db file] [--execute --plan-hash H] [--merge] [--resume] [--no-verify] [--registry] [--no-owner] [--json]');
+    console.error('Usage: migrate inventory|plan|run [--live] [image] [--partition N] [--passphrase p] [--profile name] [--target DIR] [--folder name] [--apps-db file] [--execute --plan-hash H] [--merge] [--resume] [--no-verify] [--registry] [--no-owner] [--json] [--json-out FILE]');
     return 1;
   }
+  const jsonOutPath = flagValue(ctx.argv, '--json-out');
 
   const sourceOpts = parseSource(ctx);
   let source;
@@ -166,7 +178,7 @@ export async function cmdMigrate(ctx: CommandContext): Promise<number> {
     if (action === 'inventory') {
       const inv = buildInventory(source, appsDb);
       if (ctx.opts.json) {
-        console.log(JSON.stringify(inv, null, 2));
+        emitJson(inv, jsonOutPath);
       } else {
         renderInventory(inv);
       }
@@ -194,7 +206,7 @@ export async function cmdMigrate(ctx: CommandContext): Promise<number> {
       const plans = names.map((name) => buildPlan(source, name, appsDb, { targetProfileDir: undefined, onlyFolders: onlyFolders.length > 0 ? onlyFolders : undefined }));
       for (const plan of plans) plan.planHash = computePlanHash(plan);
       if (ctx.opts.json) {
-        console.log(JSON.stringify(plans, null, 2));
+        emitJson(plans, jsonOutPath);
       } else {
         for (const plan of plans) {
           renderPlan(plan);
@@ -217,7 +229,7 @@ export async function cmdMigrate(ctx: CommandContext): Promise<number> {
       }
       if (!ctx.argv.includes('--execute')) {
         if (ctx.opts.json) {
-          console.log(JSON.stringify(plan, null, 2));
+          emitJson(plan, jsonOutPath);
         } else {
           renderPlan(plan);
           console.log('');
@@ -268,7 +280,7 @@ export async function cmdMigrate(ctx: CommandContext): Promise<number> {
         elevated
       });
       if (ctx.opts.json) {
-        console.log(JSON.stringify(report, null, 2));
+        emitJson(report, jsonOutPath);
       } else {
         renderReport(report);
       }
@@ -278,7 +290,7 @@ export async function cmdMigrate(ctx: CommandContext): Promise<number> {
     }
 
     if (ctx.opts.json) {
-      console.log(JSON.stringify(plan, null, 2));
+      emitJson(plan, jsonOutPath);
     } else {
       renderPlan(plan);
     }

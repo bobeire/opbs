@@ -28,6 +28,16 @@ interface ScheduledRestoreDrill {
   passphrase?: string;
 }
 
+interface ScheduledMigrateDrill {
+  enabled: boolean;
+  cronExpression: string;
+  destinationPath: string;
+  profile: string;
+  notifyOnFailure: boolean;
+  alertAfter?: number;
+  passphrase?: string;
+}
+
 interface ScheduledScrub {
   enabled: boolean;
   cronExpression: string;
@@ -106,6 +116,7 @@ interface Settings {
   notifications: NotificationSettings;
   scheduledVerification: ScheduledVerification;
   scheduledDrill: ScheduledRestoreDrill;
+  scheduledMigrateDrill: ScheduledMigrateDrill;
   scheduledScrub: ScheduledScrub;
   cloud: CloudSettings;
   errorReporting: { enabled: boolean; endpoint: string };
@@ -145,6 +156,14 @@ const DEFAULT_SETTINGS: Settings = {
     targetDiskIndex: 0,
     notifyOnFailure: true,
     verifyBeforeWrite: true,
+    alertAfter: 2
+  },
+  scheduledMigrateDrill: {
+    enabled: false,
+    cronExpression: '0 5 * * 0',
+    destinationPath: '',
+    profile: '',
+    notifyOnFailure: true,
     alertAfter: 2
   },
   scheduledScrub: {
@@ -207,6 +226,7 @@ function Settings() {
   const [helperTaskRegistered, setHelperTaskRegistered] = useState(false);
   const [helperTaskLoading, setHelperTaskLoading] = useState(false);
   const [helperTaskError, setHelperTaskError] = useState<string | null>(null);
+  const [migrateDrillLast, setMigrateDrillLast] = useState<MigrateDrillRecord | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -223,6 +243,32 @@ function Settings() {
       alive = false;
     };
   }, []);
+
+  // Last migration-drill result for the configured directory (history lives
+  // next to the images: opbs-migrate-drill-history.json). Deferred so no
+  // state is set synchronously inside the effect body.
+  useEffect(() => {
+    const dir = settings.scheduledMigrateDrill?.destinationPath;
+    let alive = true;
+    const timer = setTimeout(() => {
+      if (!dir) {
+        setMigrateDrillLast(null);
+        return;
+      }
+      window.electronAPI
+        .migrateDrillStatus(dir)
+        .then((res) => {
+          if (alive) setMigrateDrillLast(res?.last ?? null);
+        })
+        .catch(() => {
+          /* history simply not present yet */
+        });
+    }, 0);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [settings.scheduledMigrateDrill?.destinationPath]);
 
   const registerHelperTask = async () => {
     setHelperTaskLoading(true);
@@ -243,6 +289,7 @@ function Settings() {
     notifications: { ...DEFAULT_SETTINGS.notifications, ...(loaded?.notifications || {}) },
     scheduledVerification: { ...DEFAULT_SETTINGS.scheduledVerification, ...(loaded?.scheduledVerification || {}) },
     scheduledDrill: { ...DEFAULT_SETTINGS.scheduledDrill, ...(loaded?.scheduledDrill || {}) },
+    scheduledMigrateDrill: { ...DEFAULT_SETTINGS.scheduledMigrateDrill, ...(loaded?.scheduledMigrateDrill || {}) },
     scheduledScrub: { ...DEFAULT_SETTINGS.scheduledScrub, ...(loaded?.scheduledScrub || {}) },
     cloud: {
       s3: { ...DEFAULT_SETTINGS.cloud.s3, ...(loaded?.cloud?.s3 || {}) },
@@ -270,6 +317,13 @@ function Settings() {
     const dir = await window.electronAPI.selectDirectory();
     if (dir) {
       handleChange('scheduledDrill', { ...settings.scheduledDrill, destinationPath: dir });
+    }
+  };
+
+  const handleSelectMigrateDrillDir = async () => {
+    const dir = await window.electronAPI.selectDirectory();
+    if (dir) {
+      handleChange('scheduledMigrateDrill', { ...settings.scheduledMigrateDrill, destinationPath: dir });
     }
   };
 
@@ -771,6 +825,119 @@ function Settings() {
                 Notify when a drill fails
               </label>
             </div>
+          </>
+        )}
+      </div>
+
+      <div className="settings-section">
+        <h2>Scheduled Migration Drills</h2>
+        <p className="field-hint">
+          Periodically builds a dry-run migration plan (<code>migrate plan</code> — the
+          same thing the Migrate wizard runs) against the newest backup image in a
+          directory, for the profile you name below. <strong>Read-only:</strong> nothing
+          is ever written — the drill only proves the image still yields a complete,
+          refusal-free plan while it is still a backup you could migrate from.
+        </p>
+
+        <div className="setting-item">
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={settings.scheduledMigrateDrill.enabled}
+              onChange={(e) =>
+                handleChange('scheduledMigrateDrill', {
+                  ...settings.scheduledMigrateDrill,
+                  enabled: e.target.checked
+                })
+              }
+            />
+            Enable scheduled migration drills
+          </label>
+        </div>
+
+        {settings.scheduledMigrateDrill.enabled && (
+          <>
+            <div className="setting-item">
+              <label>Cron expression:</label>
+              <input
+                type="text"
+                value={settings.scheduledMigrateDrill.cronExpression}
+                onChange={(e) =>
+                  handleChange('scheduledMigrateDrill', {
+                    ...settings.scheduledMigrateDrill,
+                    cronExpression: e.target.value
+                  })
+                }
+                placeholder="0 5 * * 0 (weekly Sunday at 05:00)"
+              />
+            </div>
+            <div className="setting-item">
+              <label>Backup directory:</label>
+              <div className="path-input">
+                <input
+                  type="text"
+                  value={settings.scheduledMigrateDrill.destinationPath}
+                  readOnly
+                  placeholder="Select the folder with the image to drill..."
+                />
+                <button onClick={handleSelectMigrateDrillDir}>Browse</button>
+              </div>
+            </div>
+            <div className="setting-item">
+              <label>Profile to plan for:</label>
+              <input
+                type="text"
+                value={settings.scheduledMigrateDrill.profile}
+                onChange={(e) =>
+                  handleChange('scheduledMigrateDrill', {
+                    ...settings.scheduledMigrateDrill,
+                    profile: e.target.value
+                  })
+                }
+                placeholder="e.g. rober (a user under Users/ in the image)"
+              />
+            </div>
+            <div className="setting-item">
+              <label>Image passphrase (leave empty if images are not encrypted):</label>
+              <input
+                type="password"
+                value={settings.scheduledMigrateDrill.passphrase ?? ''}
+                onChange={(e) =>
+                  handleChange('scheduledMigrateDrill', {
+                    ...settings.scheduledMigrateDrill,
+                    passphrase: e.target.value
+                  })
+                }
+                autoComplete="off"
+                placeholder="Lets drills plan against encrypted images"
+              />
+            </div>
+            <div className="setting-item">
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={settings.scheduledMigrateDrill.notifyOnFailure}
+                  onChange={(e) =>
+                    handleChange('scheduledMigrateDrill', {
+                      ...settings.scheduledMigrateDrill,
+                      notifyOnFailure: e.target.checked
+                    })
+                  }
+                />
+                Notify when a drill fails
+              </label>
+            </div>
+            {settings.scheduledMigrateDrill.destinationPath && (
+              <p className="field-hint">
+                {migrateDrillLast
+                  ? `Last drill: ${migrateDrillLast.ok ? 'PASSED' : 'FAILED'} — ${new Date(migrateDrillLast.at).toLocaleString()}`
+                  : 'No migration drills recorded yet.'}
+                {migrateDrillLast && migrateDrillLast.ok && typeof migrateDrillLast.plannedFiles === 'number' && (
+                  <> — {migrateDrillLast.plannedFiles} file(s) planned</>
+                )}
+                {migrateDrillLast && !migrateDrillLast.ok && migrateDrillLast.error ? ` — ${migrateDrillLast.error}` : ''}
+              </p>
+            )}
           </>
         )}
       </div>

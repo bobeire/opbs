@@ -1180,6 +1180,35 @@ to date has shipped; **Investigate** items need spike work first.
     mistakes fail loudly with the entry and file named.
   - MIGRATE.md §7 rewritten as the contribution reference (field table,
     merge semantics, validation rules, 5-step test/PR recipe).
+- ✅ **Phase 4 — GUI wizard + migration drills (2026-10-21)**:
+  - Sidebar **Migrate** page (`MigrateWizard.tsx`, five steps: source →
+    target → plan → options → run/report): live or image source
+    (partition + passphrase), in-process profile listing
+    (`migrate-profiles`, Users/ only — no store walk), plan review
+    (totals, plan hash, registry keys, winget hints, refusals with
+    execution blocked while any exist), options (`--execute`,
+    `--registry` gated on elevation, owner rewrite default on,
+    merge/resume/no-verify in advanced), live run progress (copy-journal
+    polling + streamed CLI stderr) and the full report (summary,
+    registry outcomes, owner status, artifacts with open buttons).
+  - Main-process bridge `src/main/imaging/migrate/cli-runner.ts`: pure
+    argv builder + spawn/stream/cancel for `--cli migrate plan|run` in
+    a child process (`executePlan` is synchronous — never on the main
+    loop), parsing results from a new `migrate --json-out FILE` flag
+    (plan/run/inventory, also in help); passphrases reach the child as
+    short-lived `--passphrase-file` temp files, never argv; one
+    concurrent operation enforced, `migrate-cancel` kills the child.
+  - **Scheduled migration drills**: `scheduledMigrateDrill` settings
+    (cron + directory + profile + passphrase encrypted at rest) run a
+    detached `migrate plan --json-out` against the newest image's
+    largest partition — strictly read-only. Results recorded per image
+    in `opbs-migrate-drill-history.json` (last run shown in the
+    Settings section); failure alerts only after `alertAfter`
+    consecutive failures (`ConsecutiveFailureTracker`).
+  - Tests: 11 new — `buildMigrateArgs` contract (flag forms, run-flag
+    scoping, folders repeat, no secrets on argv), `migrate plan
+    --json-out` end-to-end on a fixture profile, drill-history
+    round-trip + corruption + best-effort writes.
 
 ### Changed-block tracking via NTFS USN journal
 - ✅ Native addon `queryUsnJournal` + `getUsnJournalInfo` read the NTFS USN

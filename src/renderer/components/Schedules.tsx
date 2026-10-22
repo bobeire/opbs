@@ -474,7 +474,7 @@ function Schedules() {
         backup). For unattended backups that run without a UAC prompt, register
         a Windows Task Scheduler task from the CLI:
         <code> opbs schedule install-backup &lt;name&gt; --config config.json</code>.
-        Verification, restore-drill and scrub schedules are managed in Settings.
+        Verification, restore-drill, migration-drill and scrub schedules are managed in Settings.
       </p>
 
       {scheduleMsg && (

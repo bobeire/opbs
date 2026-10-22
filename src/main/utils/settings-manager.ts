@@ -27,6 +27,9 @@ export interface AppSettings {
    *  scratch disk and validate the filesystems so "restores work" is proven,
    *  not assumed. */
   scheduledDrill: ScheduledRestoreDrill;
+  /** Migration drills: periodically build a `migrate plan` dry run against the
+   *  newest image in a directory. Never writes anything. */
+  scheduledMigrateDrill: ScheduledMigrateDrill;
   scheduledBackups: ScheduledBackup[];
   /** Reusable named backup configurations loaded into the backup wizard. */
   backupProfiles: BackupProfile[];
@@ -104,6 +107,20 @@ export interface ScheduledRestoreDrill {
   notifyOnFailure: boolean;
   /** Verify every chain image before writing (default true). */
   verifyBeforeWrite?: boolean;
+  /** Alert (webhook/toast) only after this many consecutive failures. */
+  alertAfter?: number;
+  /** Passphrase for encrypted images in the drill directory (encrypted at rest). */
+  passphrase?: string;
+}
+
+export interface ScheduledMigrateDrill {
+  enabled: boolean;
+  cronExpression: string;
+  /** Directory scanned for the image to drill (the newest one). */
+  destinationPath: string;
+  /** Profile name the dry-run plan is built for (the target machine's user). */
+  profile: string;
+  notifyOnFailure: boolean;
   /** Alert (webhook/toast) only after this many consecutive failures. */
   alertAfter?: number;
   /** Passphrase for encrypted images in the drill directory (encrypted at rest). */
@@ -222,6 +239,14 @@ const DEFAULT_SETTINGS: AppSettings = {
     verifyBeforeWrite: true,
     alertAfter: 2
   },
+  scheduledMigrateDrill: {
+    enabled: false,
+    cronExpression: '0 5 * * 0',
+    destinationPath: '',
+    profile: '',
+    notifyOnFailure: true,
+    alertAfter: 2
+  },
   scheduledScrub: {
     enabled: false,
     cronExpression: '0 4 * * 1',
@@ -282,6 +307,9 @@ function forEachSecret(settings: AppSettings, fn: (value: string) => string): vo
   }
   if (settings.scheduledDrill.passphrase) {
     settings.scheduledDrill.passphrase = fn(settings.scheduledDrill.passphrase);
+  }
+  if (settings.scheduledMigrateDrill?.passphrase) {
+    settings.scheduledMigrateDrill.passphrase = fn(settings.scheduledMigrateDrill.passphrase);
   }
   for (const profile of settings.backupProfiles) {
     if (profile.passphrase) profile.passphrase = fn(profile.passphrase);

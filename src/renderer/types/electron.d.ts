@@ -62,10 +62,18 @@ declare global {
         targetDiskModel?: string;
         targetDiskPartitionCount?: number;
         targets?: Array<{ partitionIndex: number; offset: number; size: number }>;
-        writeTableScheme?: string | null;
+        writeTableScheme?: string;
         warnings?: string[];
         sameDisk?: boolean;
       }>;
+
+      // User-state migration (wizard)
+      migratePlan: (payload: MigrateRequest) => Promise<MigratePlanResult>;
+      migrateRun: (payload: MigrateRequest) => Promise<MigrateRunResult>;
+      migrateCancel: () => Promise<{ cancelled: boolean }>;
+      migrateProfiles: (source: MigrateSourceSpec) => Promise<{ ok: boolean; profiles: string[]; error?: string }>;
+      migrateDrillStatus: (dir: string) => Promise<{ ok: boolean; last: MigrateDrillRecord | null; error?: string }>;
+      onMigrateProgress: (callback: (event: MigrateProgressEvent) => void) => () => void;
       getSettings: () => Promise<any>;
       updateSettings: (updates: any) => Promise<any>;
       addScheduledBackup: (config: any) => Promise<any>;
@@ -543,5 +551,164 @@ declare global {
     ok: boolean;
     error?: string;
     unlocked?: string[];
+  }
+
+  // User-state migration (wizard)
+  interface MigrateSourceSpec {
+    live?: boolean;
+    liveRoot?: string;
+    imagePath?: string;
+    partitionIndex?: number;
+    passphrase?: string;
+  }
+
+  interface MigrateRequest {
+    source: MigrateSourceSpec;
+    profile: string;
+    target?: string;
+    folders?: string[];
+    appsDbPath?: string;
+    planHash?: string;
+    execute?: boolean;
+    registry?: boolean;
+    noOwner?: boolean;
+    merge?: boolean;
+    resume?: boolean;
+    noVerify?: boolean;
+  }
+
+  interface MigratePlanResult {
+    ok: boolean;
+    plan?: MigratePlanInfo;
+    /** Number of refusals in the plan (execute is blocked while > 0). */
+    refusals?: number;
+    /** True when OPBS is running as administrator (registry transplants available). */
+    elevated: boolean;
+    cancelled?: boolean;
+    exitCode?: number | null;
+    error?: string;
+  }
+
+  interface MigratePlanEntryInfo {
+    profile: string;
+    sourceRelPath: string;
+    category: 'standard-folder' | 'app-store';
+    appId?: string;
+    appName?: string;
+    bytes: number;
+    itemCount: number;
+    capped?: boolean;
+    registry?: string[];
+    registryExecuted: boolean;
+  }
+
+  interface MigrateStoreMatchInfo {
+    appId: string;
+    appName: string;
+    class: string;
+    relPath: string;
+    bytes: number;
+    itemCount: number;
+    registry?: string[];
+    winget?: string;
+  }
+
+  interface MigrateRefusalInfo {
+    reason: string;
+    detail: string;
+  }
+
+  interface MigrateReinstallHintInfo {
+    appId: string;
+    name: string;
+    winget?: string;
+    class: string;
+  }
+
+  interface MigratePlanInfo {
+    sourceKind: 'live' | 'image';
+    sourceLabel: string;
+    generatedAt: string;
+    profile: string;
+    profileRelPath: string;
+    entries: MigratePlanEntryInfo[];
+    totalBytes: number;
+    totalItems: number;
+    stores: MigrateStoreMatchInfo[];
+    reinstallHints: MigrateReinstallHintInfo[];
+    refusals: MigrateRefusalInfo[];
+    phaseNotes: string[];
+    planHash?: string;
+  }
+
+  interface MigrateRunResult {
+    ok: boolean;
+    /** 'report' after --execute; 'plan' for a dry run; 'none' when nothing was produced. */
+    kind: 'report' | 'plan' | 'none';
+    result?: MigrateReportInfo | MigratePlanInfo;
+    exitCode?: number | null;
+    cancelled?: boolean;
+    stderr?: string;
+    error?: string;
+  }
+
+  interface MigrateReportInfo {
+    profile: string;
+    sourceLabel: string;
+    targetProfileDir: string;
+    planHash: string;
+    executed: boolean;
+    startedAt: string;
+    finishedAt: string;
+    summary: {
+      plannedFiles: number;
+      plannedBytes: number;
+      copied: number;
+      skippedResume: number;
+      skippedReparse: number;
+      skippedDepth: number;
+      failed: number;
+      bytesCopied: number;
+      verifyChecked: number;
+      verifyMismatches: number;
+      registryCopied: number;
+      registryFailed: number;
+    };
+    outcomes: Array<{ sourceRelPath: string; destPath: string; action: string; bytes?: number; error?: string; verify?: string }>;
+    stores: MigrateStoreMatchInfo[];
+    registry?: Array<{
+      appId?: string;
+      appName?: string;
+      key: string;
+      status: 'copied' | 'skipped-source-missing' | 'failed' | 'not-run';
+      detail?: string;
+      sourceSubkeys?: number;
+      sourceValues?: number;
+      targetSubkeys?: number;
+      targetValues?: number;
+    }>;
+    owner?: { status: 'ok' | 'partial' | 'failed' | 'skipped' | 'not-needed'; sid?: string; roots: number; detail?: string };
+    refusals: MigrateRefusalInfo[];
+    reinstallHints: MigrateReinstallHintInfo[];
+    artifacts: { reportPath?: string; wingetPath?: string; journalPath?: string };
+    notes: string[];
+  }
+
+  type MigrateProgressEvent =
+    | { kind: 'log'; line: string }
+    | { kind: 'journal'; copied: number; bytes: number };
+
+  interface MigrateDrillRecord {
+    imagePath: string;
+    at: number;
+    ok: boolean;
+    profile: string;
+    planHash?: string;
+    plannedFiles?: number;
+    plannedBytes?: number;
+    storesMatched?: number;
+    refusals?: number;
+    durationMs?: number;
+    error?: string;
   }
 }

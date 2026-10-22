@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, Menu, Notification, nativeTheme } from 'electron';
 import path from 'path';
+import * as os from 'os';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import { DiskEnumerator } from './utils/disk-enumerator';
@@ -24,6 +25,11 @@ import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains, wr
 import { checkDiskHealth } from './utils/disk-health';
 import { toDiskIndex, toChkdskVolume } from './utils/input-guard';
 import { runCli } from './cli';
+import { runMigrateCli, cancelMigrateCli, type MigrateCliSource } from './imaging/migrate/cli-runner';
+import { openMigrateSource } from './imaging/migrate/source';
+import { listProfileNames } from './imaging/migrate/inventory';
+import { isElevatedSync } from './imaging/migrate/identity';
+import { readMigrateDrillHistory } from './utils/migrate-drill-history';
 import { readImageInfo, verifyImage, CIPHER_NONE, clearImageInfoCache } from './imaging/image-format';
 import { openAnyBrowse as fsOpenBrowseAny, listDirectory, extractPath, detectPartitionFilesystem, BrowseSession } from './imaging/fs/file-browse';
 import { detectMacriumFormat, readMacriumImage, closeImageFds, clearMacriumInfoCache } from './imaging/mrimg';
@@ -802,6 +808,204 @@ function setupIpcHandlers(): void {
 
   ipcMain.handle('clone-preflight', async (_, config) => {
     return cloneManager.preflight(config);
+  });
+
+  // User-state migration (wizard): plan/run through the same CLI surface the
+  // docs describe, in a child process (executePlan is synchronous — it must
+  // never block this loop), parsed from --json-out rather than stdout.
+  interface MigrateSourcePayload {
+    live?: boolean;
+    liveRoot?: string;
+    imagePath?: string;
+    partitionIndex?: number;
+    passphrase?: string;
+  }
+  interface MigratePayload {
+    source?: MigrateSourcePayload;
+    profile?: string;
+    target?: string;
+    folders?: string[];
+    appsDbPath?: string;
+    planHash?: string;
+    execute?: boolean;
+    registry?: boolean;
+    noOwner?: boolean;
+    merge?: boolean;
+    resume?: boolean;
+    noVerify?: boolean;
+  }
+  const toCliSource = (s: MigrateSourcePayload | undefined): MigrateCliSource => {
+    if (s?.live) return { live: true, ...(s.liveRoot ? { liveRoot: s.liveRoot } : {}) };
+    return {
+      imagePath: String(s?.imagePath ?? ''),
+      partitionIndex: Number.isInteger(s?.partitionIndex) ? Number(s?.partitionIndex) : 0,
+      ...(s?.passphrase ? { passphrase: s.passphrase } : {})
+    };
+  };
+  const cliRequestFrom = (payload: MigratePayload | undefined, action: 'plan' | 'run') => {
+    const source = toCliSource(payload?.source);
+    return {
+      action,
+      source,
+      profile: String(payload?.profile ?? '').trim(),
+      ...(payload?.target ? { target: payload.target } : {}),
+      ...(payload?.folders && payload.folders.length > 0 ? { folders: payload.folders } : {}),
+      ...(payload?.appsDbPath ? { appsDbPath: payload.appsDbPath } : {}),
+      ...(payload?.planHash ? { planHash: payload.planHash } : {}),
+      ...(payload?.execute ? { execute: true } : {}),
+      ...(payload?.registry ? { registry: true } : {}),
+      ...(payload?.noOwner ? { noOwner: true } : {}),
+      ...(payload?.merge ? { merge: true } : {}),
+      ...(payload?.resume ? { resume: true } : {}),
+      ...(payload?.noVerify ? { noVerify: true } : {})
+    };
+  };
+  const migratePayloadError = (payload: MigratePayload | undefined, requireTarget: boolean): string | undefined => {
+    if (!String(payload?.profile ?? '').trim()) return 'Select a user profile first.';
+    const source = toCliSource(payload?.source);
+    if (!source.live && !source.imagePath) return 'Choose a source (live system or backup image).';
+    if (requireTarget && !payload?.target) return 'Choose a target profile directory first.';
+    if (payload?.execute && !payload?.planHash) return 'Plan hash missing — build the plan first.';
+    return undefined;
+  };
+
+  ipcMain.handle('migrate-plan', async (_, payload: MigratePayload) => {
+    const invalid = migratePayloadError(payload, false);
+    if (invalid) return { ok: false, elevated: isElevatedSync(), error: invalid };
+    const jsonOutPath = path.join(os.tmpdir(), `opbs-migrate-plan-${Date.now()}-${process.pid}.json`);
+    try {
+      const result = await runMigrateCli(cliRequestFrom(payload, 'plan'), {
+        jsonOutPath,
+        onStderrLine: (line) => mainWindow?.webContents.send('migrate-progress', { kind: 'log', line })
+      });
+      let plan: unknown = null;
+      try {
+        plan = JSON.parse(fs.readFileSync(jsonOutPath, 'utf-8'));
+      } catch {
+        plan = null;
+      }
+      if (!plan || typeof plan !== 'object') {
+        return {
+          ok: false,
+          elevated: isElevatedSync(),
+          cancelled: result.cancelled,
+          exitCode: result.exitCode,
+          error: result.cancelled
+            ? 'Planning was cancelled.'
+            : result.stderr.trim() || `migrate plan failed (exit ${result.exitCode ?? 'signal'}).`
+        };
+      }
+      const refusals = Array.isArray((plan as { refusals?: unknown[] }).refusals)
+        ? (plan as { refusals: unknown[] }).refusals.length
+        : 0;
+      return { ok: true, plan, refusals, elevated: isElevatedSync(), cancelled: result.cancelled, exitCode: result.exitCode };
+    } catch (error) {
+      return { ok: false, elevated: isElevatedSync(), error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      fs.rmSync(jsonOutPath, { force: true });
+    }
+  });
+
+  ipcMain.handle('migrate-run', async (_, payload: MigratePayload) => {
+    const invalid = migratePayloadError(payload, true);
+    if (invalid) return { ok: false, error: invalid };
+    const target = String(payload?.target ?? '');
+    const jsonOutPath = path.join(os.tmpdir(), `opbs-migrate-run-${Date.now()}-${process.pid}.json`);
+    const journalPath = path.join(target, '.opbs-migrate', 'journal.jsonl');
+    // The CLI's journal is the only live progress signal while executePlan
+    // runs (it is synchronous inside the child) — poll it for the wizard.
+    const tickJournal = (): void => {
+      try {
+        const raw = fs.readFileSync(journalPath, 'utf-8');
+        let copied = 0;
+        let bytes = 0;
+        for (const line of raw.split('\n')) {
+          if (!line) continue;
+          try {
+            const entry = JSON.parse(line) as { b?: number };
+            copied += 1;
+            if (typeof entry.b === 'number') bytes += entry.b;
+          } catch {
+            /* partial line mid-append */
+          }
+        }
+        mainWindow?.webContents.send('migrate-progress', { kind: 'journal', copied, bytes });
+      } catch {
+        /* journal not started yet */
+      }
+    };
+    tickJournal();
+    const journalTimer = setInterval(tickJournal, 750);
+    try {
+      const result = await runMigrateCli(cliRequestFrom(payload, 'run'), {
+        jsonOutPath,
+        onStderrLine: (line) => mainWindow?.webContents.send('migrate-progress', { kind: 'log', line })
+      });
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(fs.readFileSync(jsonOutPath, 'utf-8'));
+      } catch {
+        parsed = null;
+      }
+      if (!parsed || typeof parsed !== 'object') {
+        return {
+          ok: false,
+          kind: 'none',
+          cancelled: result.cancelled,
+          exitCode: result.exitCode,
+          stderr: result.stderr,
+          error: result.cancelled
+            ? 'Migration cancelled.'
+            : result.stderr.trim() || `migrate run failed (exit ${result.exitCode ?? 'signal'}).`
+        };
+      }
+      const kind = (parsed as { summary?: unknown }).summary ? 'report' : 'plan';
+      const ok = !result.cancelled && result.exitCode === 0;
+      return {
+        ok,
+        kind,
+        result: parsed,
+        exitCode: result.exitCode,
+        cancelled: result.cancelled,
+        stderr: result.stderr,
+        ...(ok ? {} : { error: result.stderr.trim() || undefined })
+      };
+    } catch (error) {
+      return { ok: false, kind: 'none', error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      clearInterval(journalTimer);
+      fs.rmSync(jsonOutPath, { force: true });
+    }
+  });
+
+  ipcMain.handle('migrate-cancel', async () => {
+    return { cancelled: cancelMigrateCli() };
+  });
+
+  // Cheap profile-name listing (Users/ only — no store walk), in-process: the
+  // wizard needs it before the expensive plan child is ever spawned.
+  ipcMain.handle('migrate-profiles', async (_, source: MigrateSourcePayload) => {
+    try {
+      const src = openMigrateSource(toCliSource(source));
+      try {
+        return { ok: true, profiles: listProfileNames(src) };
+      } finally {
+        try {
+          src.close();
+        } catch {
+          /* best-effort */
+        }
+      }
+    } catch (error) {
+      return { ok: false, profiles: [] as string[], error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle('migrate-drill-status', async (_, dir: string) => {
+    const clean = String(dir ?? '');
+    if (!clean) return { ok: false, last: null, error: 'No directory configured' };
+    const records = Object.values(readMigrateDrillHistory(clean)).sort((a, b) => b.at - a.at);
+    return { ok: true, last: records[0] ?? null };
   });
 
   // Settings

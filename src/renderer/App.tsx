@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import Dashboard from './components/Dashboard';
 import BackupWizard from './components/BackupWizard';
 import RestoreWizard from './components/RestoreWizard';
+import MigrateWizard from './components/MigrateWizard';
 import Settings from './components/Settings';
 import Schedules from './components/Schedules';
 import ConfigBuilder from './components/ConfigBuilder';
@@ -22,6 +23,7 @@ type Page =
   | 'dashboard'
   | 'backup'
   | 'restore'
+  | 'migrate'
   | 'copy'
   | 'disks'
   | 'repositories'
@@ -129,6 +131,8 @@ function App() {
             mode={restoreIntent?.mode ?? 'restore'}
           />
         );
+      case 'migrate':
+        return <MigrateWizard onComplete={() => setCurrentPage('dashboard')} />;
       case 'copy':
         return <PartitionCopy onComplete={() => setCurrentPage('dashboard')} />;
       case 'disks':
@@ -213,6 +217,15 @@ function App() {
             >
               <span className="nav-icon">♻️</span>
               Restore
+            </button>
+          </li>
+          <li>
+            <button
+              className={`nav-item ${currentPage === 'migrate' ? 'active' : ''}`}
+              onClick={() => setCurrentPage('migrate')}
+            >
+              <span className="nav-icon">🚚</span>
+              Migrate
             </button>
           </li>
           <li>

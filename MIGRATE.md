@@ -1,12 +1,15 @@
 # Design: User-State Migration (`migrate`)
 
-**Status**: Phase 2 shipped — `migrate inventory` / `migrate plan` /
+**Status**: Phases 1–3 shipped — `migrate inventory` / `migrate plan` /
 `migrate run` (tier-1 execute, verify, report) plus tier 2 (curated
-registry transplants with `--registry`, owner/SID rewrite) are live.
-Phase 3 shipped — knowledge base expanded to 43 seed apps with
-validated schema + contribution docs (§7); `--apps-db` files merge over
-the seed. Phase 4+ are design-only.
-**Date**: 2026-10-20 (design), 2026-10-21 (phases 1 + 2 + 3)
+registry transplants with `--registry`, owner/SID rewrite) are live;
+knowledge base expanded to 43 seed apps with validated schema +
+contribution docs (§7); `--apps-db` files merge over the seed.
+Phase 4 shipped — GUI wizard (the **Migrate** page, a thin shell over
+the same CLI verbs in a child process) and scheduled migration drills
+(read-only `migrate plan` against the newest image, history next to the
+images). Phase 5+ design-only.
+**Date**: 2026-10-20 (design), 2026-10-21 (phases 1–4)
 **Related**: [ROADMAP.md](ROADMAP.md) (Investigate), [README.md](README.md)
 (imaging, mounts, VHD restore)
 
@@ -262,10 +265,22 @@ opbs migrate run       --from ... --profile <name|all> [--execute] [--resume]
 opbs migrate report    <plan-file>
 ```
 
-GUI (phase 4): a wizard that is a thin shell over the same CLI verbs —
-source picker (image/disk/VHD), profile checkboxes with sizes, plan
-review, progress, report. Config-builder JSON gains a `migrate` block for
-scripted fleets.
+GUI (phase 4, shipped): the **Migrate** wizard (`MigrateWizard.tsx`) is
+a thin shell over the same CLI verbs — source picker (live or image +
+partition/passphrase), profile picker (cheap in-process profile
+listing), plan review (entries, registry keys, winget hints, refusals,
+plan hash), options (execute gated on zero refusals; `--registry` only
+when elevated; owner rewrite on by default), live progress from the
+copy journal, and the report with artifacts. The child process is
+spawned from `cli-runner.ts` (`--cli migrate plan|run --json
+--json-out <file>`), so the main loop never blocks and JSON is read
+from a file rather than stdout; passphrases travel as short-lived
+`--passphrase-file` temp files, never on argv. Scheduled migration
+drills (Settings → Scheduled Migration Drills) reuse the same
+`migrate plan --json-out` surface against the newest image and record
+results in `opbs-migrate-drill-history.json` next to the image.
+Config-builder JSON gaining a `migrate` block for scripted fleets is
+still future work.
 
 ## 12. Prior art
 
@@ -336,8 +351,29 @@ scripted fleets.
   §7 is now the contribution reference: field table, merge semantics,
   validation errors, and a 5-step recipe for testing a file against a
   real profile before PR.
-- **Phase 4**: GUI wizard, migration "drill" scheduling (dry-run against
-  a periodic image — the migration analogue of restore drills).
+- ✅ **Phase 4 — shipped 2026-10-21**: GUI wizard + migration drills.
+  The **Migrate** sidebar page (`MigrateWizard.tsx`, five steps: source
+  → target → plan → options → run/report) executes the CLI verbs in a
+  child process via `src/main/imaging/migrate/cli-runner.ts` (pure argv
+  builder + spawn/stream/cancel; `executePlan` is synchronous and never
+  runs on the main loop). JSON comes from a new `--json-out FILE` flag
+  (plan/run/inventory) rather than stdout; passphrases are handed to
+  the child as short-lived `--passphrase-file` temp files, never on
+  argv. Profile listing is a cheap in-process `migrate-profiles`
+  (Users/ only — no store walk); plan review shows totals, plan hash,
+  registry keys, winget reinstall hints and refusals (execution is
+  blocked while any exist); options cover `--execute`, `--registry`
+  (gated on elevation), owner rewrite (default on), merge/resume/
+  no-verify; the run step streams CLI stderr and polls the copy journal
+  (`.opbs-migrate/journal.jsonl`) for copied-count progress, ending in
+  the full report (summary, registry outcomes, owner status, artifacts
+  with open buttons). Scheduled migration drills
+  (`scheduledMigrateDrill` in Settings: cron + directory + profile +
+  passphrase, encrypted at rest) run a detached `migrate plan
+  --json-out` against the newest image's largest partition — strictly
+  read-only — and record results per image in
+  `opbs-migrate-drill-history.json` (surfaced in Settings); failure
+  notifications only after `alertAfter` consecutive failures.
 
 Rough effort: phase 0 is days; phase 1 is the first multi-week block
 (copy/ACL/verify hardening); phase 2 adds a focused registry workstream
