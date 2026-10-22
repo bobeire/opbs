@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="OPBS user-state migration: move your files, per-user settings and app reinstall manifest from an old disk image or drive onto a new Windows install. Dry-run by default, refuses up front, verifies after. Free, GPL-3.0." />
+  <title>New PC, same you — user migration with OPBS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont,
+                   "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0c1220; color: #d0d7e3; line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: #61d0ff; text-decoration: none; transition: color .15s; }
+    a:hover { color: #9be2ff; }
+    code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      background: #152238; border-radius: 4px; padding: 1px 6px; font-size: 0.88em;
+    }
+    .wrapper { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+    section { padding: 72px 0; }
+    section.alt { background: #111b2c; }
+    h1, h2, h3 { color: #fff; font-weight: 700; line-height: 1.25; }
+    h1 { font-size: clamp(2rem, 4vw, 3rem); }
+    h2 { font-size: clamp(1.5rem, 2.5vw, 2rem); margin-bottom: 24px; }
+    h3 { font-size: 1.05rem; margin-bottom: 8px; }
+    p.lead { font-size: 1.1rem; color: #8fa5c0; max-width: 640px; }
+
+    header {
+      position: sticky; top: 0; z-index: 20;
+      background: rgba(12, 18, 32, 0.88); backdrop-filter: blur(10px);
+      border-bottom: 1px solid #1e2d44;
+    }
+    nav { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+    .logo { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 1.15rem; color: #fff; }
+    .logo img { height: 34px; border-radius: 6px; }
+    nav ul { list-style: none; display: flex; gap: 28px; }
+    nav ul li a { color: #a3b1c6; font-size: 0.92rem; font-weight: 500; }
+    nav ul li a:hover, nav ul li a.active { color: #fff; }
+
+    .hero {
+      padding: 88px 0 72px;
+      background: radial-gradient(ellipse at 30% 60%, #152238 0%, #0c1220 70%);
+    }
+    .hero-badge {
+      display: inline-block; background: #1a2d4a; border: 1px solid #2a4467;
+      border-radius: 24px; padding: 6px 16px; font-size: 0.82rem;
+      color: #61d0ff; margin-bottom: 18px;
+    }
+    .hero h1 { margin-bottom: 16px; }
+    .hero p { font-size: 1.15rem; color: #8fa5c0; max-width: 640px; margin-bottom: 32px; }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 12px 28px; border-radius: 8px; font-size: 0.95rem;
+      font-weight: 600; cursor: pointer; border: none; transition: background .2s;
+    }
+    .btn-primary { background: #1d8cf8; color: #fff; }
+    .btn-primary:hover { background: #3aa1ff; color: #fff; }
+    .btn-secondary { background: transparent; border: 1px solid #2a4467; color: #a3b1c6; }
+    .btn-secondary:hover { background: #182840; color: #fff; }
+    .btn-group { display: flex; flex-wrap: wrap; gap: 12px; }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; margin-top: 8px; }
+    .card {
+      background: #0f1929; border: 1px solid #1e2d44; border-radius: 14px;
+      padding: 26px; transition: border-color .25s;
+    }
+    section.alt .card { background: #0c1524; }
+    .card:hover { border-color: #2a5a9a; }
+    .card h3 { font-size: 1.05rem; margin-bottom: 8px; }
+    .card p { font-size: 0.9rem; color: #8fa5c0; }
+
+    table.compat {
+      width: 100%; max-width: 820px; border-collapse: collapse;
+      margin-top: 24px; font-size: 0.95rem;
+    }
+    table.compat th, table.compat td {
+      padding: 11px 14px; text-align: left;
+      border-bottom: 1px solid #1e2d44;
+    }
+    table.compat th {
+      color: #d0d7e3; font-weight: 600; font-size: 0.85rem;
+      text-transform: uppercase; letter-spacing: 0.04em;
+      background: #131c2e;
+    }
+    table.compat td { color: #a3b1c6; }
+    table.compat .ok { color: #3fb950; font-weight: 700; }
+
+    ol.steps { list-style: none; counter-reset: step; margin-top: 8px; }
+    ol.steps li {
+      counter-increment: step; position: relative;
+      padding: 0 0 28px 56px; max-width: 720px;
+    }
+    ol.steps li:last-child { padding-bottom: 0; }
+    ol.steps li::before {
+      content: counter(step); position: absolute; left: 0; top: 0;
+      width: 36px; height: 36px; border-radius: 50%;
+      background: #1a2d4a; border: 1px solid #2a4467; color: #61d0ff;
+      font-weight: 700; display: flex; align-items: center; justify-content: center;
+    }
+    ol.steps h3 { margin-bottom: 4px; }
+    ol.steps p { color: #8fa5c0; font-size: 0.95rem; }
+    pre {
+      background: #111b2c; border: 1px solid #1e2d44; border-radius: 8px;
+      padding: 14px 16px; white-space: pre-wrap; word-break: break-word;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.85rem; color: #a3b1c6; margin: 10px 0 0;
+    }
+
+    .note {
+      background: #0f1929; border: 1px solid #1e2d44; border-left: 3px solid #1d8cf8;
+      border-radius: 0 10px 10px 0; padding: 18px 22px; margin-top: 28px;
+      font-size: 0.92rem; color: #8fa5c0; max-width: 760px;
+    }
+    section.alt .note { background: #0c1524; }
+    .note strong { color: #d0d7e3; }
+    .note.warn { border-left-color: #e0a030; }
+
+    ul.plain { list-style: none; margin-top: 8px; max-width: 740px; }
+    ul.plain li {
+      position: relative; padding: 6px 0 6px 28px; color: #a3b1c6; font-size: 0.95rem;
+    }
+    ul.plain li::before { content: "✓"; position: absolute; left: 0; color: #3ecf8e; font-weight: 700; }
+    ul.plain.limit li::before { content: "—"; color: #e0a030; }
+
+    .download-box {
+      background: linear-gradient(135deg, #152238, #0f1929);
+      border: 1px solid #2a4467; border-radius: 16px; padding: 48px;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 36px; justify-content: space-between;
+    }
+    .download-box h2 { margin-bottom: 8px; flex: 1 1 320px; }
+    .download-box .meta { color: #8fa5c0; font-size: 0.9rem; margin-top: 6px; }
+
+    footer {
+      text-align: center; padding: 48px 0; font-size: 0.82rem; color: #586a82;
+      border-top: 1px solid #1e2d44;
+    }
+
+    @media (max-width: 720px) {
+      .hero { padding-top: 56px; text-align: center; }
+      .hero p { margin-inline: auto; }
+      .btn-group { justify-content: center; }
+      .download-box { flex-direction: column; text-align: center; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="wrapper">
+    <nav>
+      <a href="index.html" class="logo">
+        <img src="https://raw.githubusercontent.com/bobeire/opbs/master/resources/icon.png" alt="OPBS icon" />
+        OPBS
+      </a>
+      <ul>
+        <li><a href="index.html#features">Features</a></li>
+        <li><a href="macrium.html">Macrium</a></li>
+        <li><a href="migrate.html" class="active">Migrate</a></li>
+        <li><a href="benchmark.html">Benchmarks</a></li>
+        <li><a href="prove-your-restore.html">Prove It</a></li>
+        <li><a href="index.html#download">Download</a></li>
+        <li><a href="releases.html">Releases</a></li>
+        <li><a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrapper">
+    <span class="hero-badge">User-state migration &middot; new in 0.6.88</span>
+    <h1>New PC.<br />Same you.</h1>
+    <p>
+      When a machine is replaced or Windows is reinstalled, OPBS moves what
+      you actually care about — Documents, Desktop, browser profiles, chat
+      histories, game saves, per-user settings — from your old disk image
+      (or the old drive itself) onto the running new install.
+      <strong style="color:#d0d7e3">Dry-run by default, refuses up front,
+      verifies after.</strong> And it hands you a <code>winget</code>
+      manifest so your apps come back too.
+    </p>
+    <div class="btn-group">
+      <a href="https://github.com/bobeire/opbs/releases/latest" class="btn btn-primary" target="_blank">
+        ⬇ Download OPBS
+      </a>
+      <a href="#how" class="btn btn-secondary">How it works</a>
+    </div>
+  </div>
+</section>
+
+<section id="tiers">
+  <div class="wrapper">
+    <h2>What actually moves</h2>
+    <p class="lead">
+      Three tiers, each with its own mechanism — and its own honest boundary.
+    </p>
+    <table class="compat">
+      <thead>
+        <tr>
+          <th>Tier</th>
+          <th>What</th>
+          <th>How</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong style="color:#d0d7e3">1 &middot; Profile data</strong></td>
+          <td>Documents, Desktop, Downloads, Pictures&hellip;, <code>%APPDATA%</code> /
+              <code>%LOCALAPPDATA%</code>, known app data stores</td>
+          <td>File copy with per-file journal and MD5 verification</td>
+          <td class="ok">&#10003; shipped</td>
+        </tr>
+        <tr>
+          <td><strong style="color:#d0d7e3">2 &middot; Per-user settings</strong></td>
+          <td>Curated per-user registry keys — browsers, terminals, app
+              preferences living in <code>NTUSER.DAT</code></td>
+          <td>Key-level offline hive transplant: load, copy key by key,
+              count-verify, unload</td>
+          <td class="ok">&#10003; shipped</td>
+        </tr>
+        <tr>
+          <td><strong style="color:#d0d7e3">3 &middot; Your programs</strong></td>
+          <td>Installed-app inventory from the source's uninstall keys</td>
+          <td><code>winget-import.json</code> plus a human-readable
+              reinstall list</td>
+          <td class="ok">&#10003; shipped</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="note">
+      <strong>OPBS never copies installed program binaries — on purpose.</strong>
+      Licensing, COM registrations, services and drivers make that a trap
+      even commercial tools fail at. The honest 2026 answer is
+      <code>winget import</code> on the new machine, and OPBS builds that
+      manifest for you from what it finds on the old one.
+    </div>
+    <div class="note">
+      <strong>Identity is handled, not assumed.</strong> The new account's
+      SID never matches the old one — files are copied as you (elevated),
+      then the owner of the copied tree is rewritten to the target profile's
+      SID so inherited rights just work. Saved browser passwords sit behind
+      DPAPI, which is machine-bound: copied profiles may need one re-login,
+      and the report says so.
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="sources">
+  <div class="wrapper">
+    <h2>Start from what you already have</h2>
+    <p class="lead">
+      Every source funnels into the same thing OPBS already reads better
+      than anyone: an NTFS volume and its user profiles.
+    </p>
+    <div class="grid">
+      <div class="card">
+        <h3>🖼 An old machine's image</h3>
+        <p>
+          Point at an <code>.opbs</code>, Macrium <code>.mrimg</code> or
+          <code>.mrimgx</code> backup and pull the profiles straight out of
+          it — no original hardware needed. OPBS reads
+          <a href="macrium.html">the Macrium formats natively ↗</a>,
+          chains included.
+        </p>
+      </div>
+      <div class="card">
+        <h3>💽 The old drive, plugged in</h3>
+        <p>
+          Pull the disk, plug it in — the classic two-machine swap. OPBS
+          reads the volume directly, finds the profiles and inventories
+          what's on them.
+        </p>
+      </div>
+      <div class="card">
+        <h3>💾 Restore into a VHD first</h3>
+        <p>
+          The flagship path: restore the old machine into a virtual disk on
+          the new PC, attach it, and migrate the profiles onto the live OS.
+          No bare-metal restore on the target, no second machine needed.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🔗 Read-only mount</h3>
+        <p>
+          Mount a partition from any image as a real drive letter via WinFsp
+          and migrate from there — reads are served on demand, the image is
+          never written.
+        </p>
+      </div>
+    </div>
+    <div class="note">
+      <strong>Source images are read-only, always.</strong> Inventory and
+      plan don't write a single byte. Everything happens against the live
+      target, and only after you accept a plan.
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrapper">
+    <h2>Dry-run first — always</h2>
+    <p class="lead">
+      The same trust contract as OPBS restores, applied end to end.
+    </p>
+    <ol class="steps" style="margin-top:32px">
+      <li>
+        <h3>Inventory <span style="color:#586a82;font-weight:500">(read-only)</span></h3>
+        <p>
+          Profiles and SIDs on the source, app scan through the knowledge
+          base, known store detection (mail, browsers, chat, saves), and a
+          free-space check on the target.
+        </p>
+      </li>
+      <li>
+        <h3>Plan <span style="color:#586a82;font-weight:500">(read-only)</span></h3>
+        <p>
+          Every file move with sizes, every registry key, every refusal with
+          a reason — and a plan hash. <code>migrate plan</code> exits 1 when
+          refusals exist, so scripts can't sleepwalk past them.
+        </p>
+      </li>
+      <li>
+        <h3>Execute</h3>
+        <p>
+          <code>--execute</code> requires handing back the hash the plan
+          printed. Every file is journalled, so a crash mid-profile leaves
+          a journal you can <code>--resume</code>. Existing target files
+          abort that profile unless you pass <code>--merge</code>.
+        </p>
+      </li>
+      <li>
+        <h3>Verify &amp; report</h3>
+        <p>
+          A full MD5 pass over what was copied, then
+          <code>report.json</code> + <code>winget-import.json</code> under
+          <code>.opbs-migrate/</code> — migrated, skipped, refused and
+          needs-reinstall, with paths.
+        </p>
+      </li>
+    </ol>
+    <div class="note warn">
+      <strong>Refused up front, never halfway:</strong> a locked BitLocker
+      source, missing image chain members, not enough free space on the
+      target, a target profile that doesn't exist yet — OPBS does not
+      create Windows accounts, so create the account (and log in once)
+      first — and apps it can't safely classify ask for an explicit
+      <code>--include</code>.
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="wizard">
+  <div class="wrapper">
+    <h2>The Migrate wizard</h2>
+    <p class="lead">
+      A GUI over the exact same CLI verbs — five steps, nothing off-script.
+    </p>
+    <div class="grid">
+      <div class="card">
+        <h3>🗂 Source &amp; profile</h3>
+        <p>
+          Pick a live system drive or an image (with partition and
+          passphrase), then choose the profile to migrate. Listing is a
+          cheap in-process scan of <code>Users\</code> — no store walk.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🎯 Target</h3>
+        <p>
+          Point at the existing profile folder on the new install. OPBS
+          verifies it really is a directory before you can continue — no
+          discovering a typo at execute time.
+        </p>
+      </div>
+      <div class="card">
+        <h3>📋 Plan review</h3>
+        <p>
+          Totals, plan hash, registry keys, winget reinstall hints and every
+          refusal in the open. The execute button stays disabled while any
+          refusal exists.
+        </p>
+      </div>
+      <div class="card">
+        <h3>⚙️ Options</h3>
+        <p>
+          Registry transplant (only offered when elevated), owner/SID
+          rewrite (on by default when elevated), and merge / resume /
+          no-verify switches for the special cases.
+        </p>
+      </div>
+      <div class="card">
+        <h3>▶️ Run &amp; report</h3>
+        <p>
+          Progress streams from the copy journal as files land, and ends in
+          the full report — summary, registry outcomes, owner status, and
+          artifacts you can open with one click.
+        </p>
+      </div>
+      <div class="card">
+        <h3>🧒 Never blocks the app</h3>
+        <p>
+          The wizard spawns the CLI in a child process; JSON arrives via
+          files and passphrases via short-lived temp files — never on the
+          command line, never on the main loop.
+        </p>
+      </div>
+    </div>
+    <div class="note">
+      <strong>And you can rehearse it.</strong>
+      Settings &rarr; <strong>Scheduled Migration Drills</strong> runs a
+      strictly read-only <code>migrate plan</code> against the newest image
+      on a cron you pick, records the result next to the image in
+      <code>opbs-migrate-drill-history.json</code>, and only raises an
+      alert after several consecutive failures.
+      <a href="prove-your-restore.html">Why rehearsals matter ↗</a>
+    </div>
+  </div>
+</section>
+
+<section id="cli">
+  <div class="wrapper">
+    <h2>Headless CLI</h2>
+    <p class="lead">
+      Every verb is scriptable — read-only JSON out, execute gated on a
+      plan hash.
+    </p>
+<pre style="margin-top:24px">:: read-only inventory of an image partition
+OPBS.exe --cli migrate inventory "D:\Images\old-pc.mrimg" --partition 1
+
+:: dry-run plan — prints the plan hash, exits 1 if anything is refused
+OPBS.exe --cli migrate plan "D:\Images\old-pc.mrimg" --partition 1 --profile all
+
+:: execute — hand the plan's hash back; add --registry in an elevated shell
+OPBS.exe --cli migrate run "D:\Images\old-pc.mrimg" --partition 1 --profile alice --target C:\Users\alice --execute --plan-hash &lt;hash&gt; --registry
+
+:: the same thing from the live machine you are sitting at
+OPBS.exe --cli migrate inventory --live</pre>
+    <ul class="plain" style="margin-top:22px">
+      <li><strong style="color:#d0d7e3"><code>--json</code> / <code>--json-out FILE</code></strong> — machine-readable plan, run and inventory output for automation.</li>
+      <li><strong style="color:#d0d7e3"><code>--apps-db my.json</code></strong> — merge your own app entries over the 43-app seed (validated on load).</li>
+      <li><strong style="color:#d0d7e3"><code>--passphrase</code></strong> — encrypted source images; the GUI hands it over as a short-lived file instead of argv.</li>
+      <li><strong style="color:#d0d7e3"><code>--folder</code> / <code>--target</code> / <code>--profile</code></strong> — scope a single folder or profile instead of everything.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt" id="apps">
+  <div class="wrapper">
+    <h2>A knowledge base you can read</h2>
+    <p class="lead">
+      Where per-app data lives, which registry keys are safe to move, and
+      what to reinstall — as a plain JSON file in the repo, not a black box.
+    </p>
+<pre style="margin-top:24px">{
+  "id": "google-chrome",
+  "name": "Google Chrome",
+  "data": ["%LOCALAPPDATA%/Google/Chrome/User Data"],
+  "registry": ["HKCU/Software/Google/Chrome"],
+  "winget": "Google.Chrome",
+  "class": "data+settings"
+}</pre>
+    <ul class="plain" style="margin-top:22px">
+      <li><strong style="color:#d0d7e3">43 seed apps</strong> across browsers, mail, chat, dev tools, media, utilities and game launchers — every winget id verified against winget-pkgs.</li>
+      <li><strong style="color:#d0d7e3">Classes:</strong> <code>data</code>, <code>data+settings</code>, <code>reinstall-only</code> (AV, Office, COM-heavy — data paths ignored), <code>ignore</code>.</li>
+      <li><strong style="color:#d0d7e3">Validated on load</strong> — HKCU-only registry keys (HKLM is never written), known <code>%TOKENS%</code>, no drive-absolute paths, <code>Publisher.Package</code> winget shape.</li>
+      <li><strong style="color:#d0d7e3">Contribute an entry</strong> — copy a seed entry, verify the winget id, test it against a real profile with <code>--apps-db</code>, and open a PR. Entries land with the next release.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="limits">
+  <div class="wrapper">
+    <h2>Honest limits</h2>
+    <p class="lead">
+      What OPBS won't do — because a migration tool that oversells itself
+      is worse than one that doesn't.
+    </p>
+    <ul class="plain" style="margin-top:24px">
+      <li><strong style="color:#d0d7e3">Program binaries stay put.</strong> You get a winget manifest and a human-readable list instead — by design, not a gap.</li>
+      <li><strong style="color:#d0d7e3">No HKLM, no OS migration.</strong> The target runs its own Windows; OPBS moves user state into it, key-level only, from curated per-user keys.</li>
+      <li><strong style="color:#d0d7e3">Driver-level software is reinstall-only:</strong> antivirus, virtual-disk filters, niche hardware suites.</li>
+      <li><strong style="color:#d0d7e3">Workgroup machines in v1.</strong> Domain/GPO-managed state re-applies itself from policy anyway.</li>
+      <li><strong style="color:#d0d7e3">x64 &rarr; x64 in v1</strong>, Windows-only, and v0.6.x: real tests, real verification, still young in the field.</li>
+      <li><strong style="color:#d0d7e3">EFS and BitLocker:</strong> encrypted files copy decrypted and are flagged in the report; locked BitLocker sources are refused until you unlock them.</li>
+    </ul>
+    <ul class="plain limit" style="margin-top:8px">
+      <li>If your old machine is domain-joined, or you need certified compliance and an enterprise support contract, Microsoft's USMT or a paid vendor is the right call.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="download">
+  <div class="wrapper">
+    <div class="download-box">
+      <div>
+        <h2>Get OPBS</h2>
+        <p class="meta">Free &middot; GPL-3.0 &middot; Windows 10 / 11 &middot; Migrates from .opbs, .mrimg, .mrimgx and live disks</p>
+      </div>
+      <div class="btn-group">
+        <a id="dl-installer"
+           href="https://github.com/bobeire/opbs/releases/latest"
+           class="btn btn-primary" target="_blank">
+          ⬇ Installer (.exe)
+        </a>
+        <a id="dl-portable"
+           href="https://github.com/bobeire/opbs/releases/latest"
+           class="btn btn-secondary" target="_blank">
+          Portable (.exe)
+        </a>
+        <a href="index.html#features" class="btn btn-secondary">
+          All features
+        </a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrapper">
+    &copy; 2026 RHITCS &middot;
+    <a href="https://github.com/bobeire/opbs/blob/master/COPYING" target="_blank">GPL-3.0</a> &middot;
+    <a href="index.html">Home</a> &middot;
+    <a href="releases.html">Releases</a> &middot;
+    <a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a>
+  </div>
+</footer>
+
+<script>
+  // Point the download buttons at the newest release's assets.
+  // Falls back to the releases page if the API is unreachable.
+  (async () => {
+    try {
+      const res = await fetch('https://api.github.com/repos/bobeire/opbs/releases/latest');
+      if (!res.ok) return;
+      const rel = await res.json();
+      const installer = (rel.assets || []).find(a => /^OPBS-Setup-.*\.exe$/.test(a.name));
+      const portable  = (rel.assets || []).find(a => /^OPBS-[0-9].*\.exe$/.test(a.name));
+      if (installer) document.getElementById('dl-installer').href = installer.browser_download_url;
+      if (portable)  document.getElementById('dl-portable').href  = portable.browser_download_url;
+    } catch (_) { /* keep releases/latest fallback */ }
+  })();
+</script>
+
+</body>
+</html>
