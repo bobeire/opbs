@@ -14,6 +14,16 @@ import {
   readMacriumImage
 } from './mrimg-format';
 
+/**
+ * Upper bound on decompressed bytes kept in the per-reader block cache.
+ * The NTFS browse layer reads the MFT one 1 KiB record at a time, so without
+ * a cache every record re-reads, re-decompresses and re-hashes the whole
+ * block it lives in (64 KiB => 64x wasted work) — large volumes took minutes
+ * of pegged CPU to open. The cache bounds that to one decompress per block;
+ * the byte cap keeps streaming a huge file from growing memory without limit.
+ */
+const BLOCK_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+
 /** Read and decompress a QuickLZ block frame at `filePosition`. */
 function readQuickLzBlock(imagePath: string, filePosition: number, compressed: boolean): Buffer {
   const header = readImageFileRange(imagePath, filePosition, MR_V7_HEADER_LEN);
@@ -102,6 +112,9 @@ export class MacriumPartitionReader implements PartitionReader {
   private readonly blockCount: number;
   private readonly compressed: boolean;
   private reservedTrack: Buffer | undefined;
+  /** Decompressed blocks keyed by index, in least-recently-used order. */
+  private readonly cache = new Map<number, Buffer>();
+  private cacheBytes = 0;
 
   constructor(
     private readonly info: MacriumImageInfo,
@@ -185,6 +198,34 @@ export class MacriumPartitionReader implements PartitionReader {
   }
 
   private loadBlock(idx: number): Buffer {
+    const totalBlocks = this.blockCount;
+    if (idx >= totalBlocks) {
+      throw new Error(`Macrium block index out of range: ${idx}`);
+    }
+    const hit = this.cache.get(idx);
+    if (hit) {
+      // Re-insert so the entry counts as most-recently-used under eviction.
+      this.cache.delete(idx);
+      this.cache.set(idx, hit);
+      return hit;
+    }
+    const raw = this.loadBlockFromDisk(idx);
+    if (raw.length <= BLOCK_CACHE_MAX_BYTES) {
+      this.cache.set(idx, raw);
+      this.cacheBytes += raw.length;
+      while (this.cacheBytes > BLOCK_CACHE_MAX_BYTES) {
+        const oldest = this.cache.keys().next();
+        if (oldest.done || oldest.value === idx) break;
+        const evicted = this.cache.get(oldest.value);
+        if (!evicted) break;
+        this.cache.delete(oldest.value);
+        this.cacheBytes -= evicted.length;
+      }
+    }
+    return raw;
+  }
+
+  private loadBlockFromDisk(idx: number): Buffer {
     const totalBlocks = this.blockCount;
     if (idx >= totalBlocks) {
       throw new Error(`Macrium block index out of range: ${idx}`);
