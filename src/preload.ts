@@ -67,6 +67,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // File dialogs
   selectDirectory: (options?: any) => ipcRenderer.invoke('select-directory', options),
+  pathIsDirectory: (targetPath: string) => ipcRenderer.invoke('path-is-directory', targetPath),
   selectFile: (options?: any) => ipcRenderer.invoke('select-file', options),
 
   // Retention & images

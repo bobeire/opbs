@@ -12,10 +12,10 @@ export interface BuildPlanOptions {
 }
 
 const PHASE_NOTES = [
-  'Phase 0 spike: plans tier-1 file data only — nothing is written.',
+  'Dry run: nothing is written until you execute the plan.',
   'Registry transplant keys (tier 2) are planned per store; `migrate run --execute --registry` from an elevated shell transplants them after the file copy.',
   'Installed program binaries are never copied — reinstall via the winget list on the target.',
-  'App inventory from uninstall registry keys needs an offline SOFTWARE-hive scan — not in the spike; reinstall-only apps on the source are therefore not auto-detected.'
+  'App inventory from uninstall registry keys needs an offline SOFTWARE-hive scan, so reinstall-only apps on the source are not auto-detected.'
 ];
 
 /** Builds a dry-run migration plan for one profile. Read-only against the source. */
@@ -47,7 +47,7 @@ export function buildPlan(source: MigrateSource, profileName: string, appsDb: Ap
     } catch {
       refusals.push({
         reason: 'target-profile-missing',
-        detail: `Target profile directory does not exist: ${options.targetProfileDir}. Create the Windows account first; this spike does not create accounts.`
+        detail: `Target profile directory does not exist: ${options.targetProfileDir}. Create the Windows account first; OPBS does not create accounts.`
       });
     }
   }

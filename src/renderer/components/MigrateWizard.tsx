@@ -37,6 +37,8 @@ function MigrateWizard({ onComplete }: MigrateWizardProps) {
   const [profilesError, setProfilesError] = useState<string | null>(null);
 
   const [target, setTarget] = useState('');
+  const [targetError, setTargetError] = useState<string | null>(null);
+  const [checkingTarget, setCheckingTarget] = useState(false);
 
   // Plan
   const [planResult, setPlanResult] = useState<MigratePlanResult | null>(null);
@@ -367,6 +369,7 @@ function MigrateWizard({ onComplete }: MigrateWizardProps) {
             value={target}
             onChange={(e) => {
               setTarget(e.target.value);
+              setTargetError(null);
               resetPlan();
             }}
             placeholder="C:\Users\Alice"
@@ -376,6 +379,7 @@ function MigrateWizard({ onComplete }: MigrateWizardProps) {
               void window.electronAPI.selectDirectory({ title: 'Select target profile directory' }).then((dir) => {
                 if (dir) {
                   setTarget(dir);
+                  setTargetError(null);
                   resetPlan();
                 }
               })
@@ -385,12 +389,41 @@ function MigrateWizard({ onComplete }: MigrateWizardProps) {
           </button>
         </div>
       </div>
+      {targetError && (
+        <div className="error-message">
+          <p>[target-profile-missing] {targetError}</p>
+        </div>
+      )}
       <div className="wizard-actions">
         <button className="btn-secondary" onClick={() => setStep('source')}>
           Back
         </button>
-        <button className="btn-primary" disabled={!target.trim()} onClick={() => setStep('plan')}>
-          Next
+        <button
+          className="btn-primary"
+          disabled={!target.trim() || checkingTarget}
+          onClick={() => {
+            const candidate = target.trim().replace(/^"|"$/g, '');
+            setCheckingTarget(true);
+            setTargetError(null);
+            void window.electronAPI
+              .pathIsDirectory(candidate)
+              .then((ok) => {
+                setCheckingTarget(false);
+                if (!ok) {
+                  setTargetError(
+                    `Target profile directory does not exist: ${candidate}. Create the Windows account first; OPBS does not create accounts.`
+                  );
+                  return;
+                }
+                setStep('plan');
+              })
+              .catch(() => {
+                setCheckingTarget(false);
+                setTargetError(`Could not check ${candidate}. Verify the path and try again.`);
+              });
+          }}
+        >
+          {checkingTarget ? 'Checking…' : 'Next'}
         </button>
       </div>
     </div>

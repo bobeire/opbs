@@ -84,6 +84,7 @@ declare global {
       updateBackupProfile: (id: string, updates: any) => Promise<any>;
       deleteBackupProfile: (id: string) => Promise<boolean>;
       selectDirectory: (options?: { title?: string; defaultPath?: string }) => Promise<string | undefined>;
+      pathIsDirectory: (targetPath: string) => Promise<boolean>;
       selectFile: (options?: any) => Promise<string | undefined>;
       selectSaveFile: (options?: any) => Promise<string | undefined>;
       saveTextFile: (filePath: string, content: string) => Promise<{ ok: boolean; path: string }>;

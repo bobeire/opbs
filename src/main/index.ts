@@ -1091,6 +1091,14 @@ function setupIpcHandlers(): void {
     return result.canceled ? undefined : result.filePaths[0];
   });
 
+  ipcMain.handle('path-is-directory', async (_, targetPath: string) => {
+    try {
+      return fs.statSync(targetPath).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+
   ipcMain.handle('select-file', async (_, options) => {
     const result = await dialog.showOpenDialog(mainWindow!, {
       properties: ['openFile'],
