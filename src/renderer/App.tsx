@@ -79,6 +79,11 @@ function App() {
     void window.electronAPI.getVersion().then((v) => setAppVersion(v));
     // Theme: authoritative settings value over the cached first-paint value.
     void window.electronAPI.getSettings().then((s) => applyTheme(s?.theme));
+    // `--open-page <page>` startup flag: pulled here (not pushed at
+    // did-finish-load) so the nav can't race listener registration.
+    void window.electronAPI.takeStartupNav().then((page) => {
+      if (page) setCurrentPage(page);
+    });
     // Update check happens in main at startup (initAutoUpdater); calling it
     // here too would make background checks indistinguishable from the
     // manual "Check for updates" button.
@@ -99,7 +104,7 @@ function App() {
 
   useEffect(() => {
     const cleanup = window.electronAPI.onNav((page) => {
-      if (page === 'backup' || page === 'restore' || page === 'schedules' || page === 'vss' || page === 'copy' || page === 'disks' || page === 'repositories') {
+      if (page === 'browse' || page === 'backup' || page === 'restore' || page === 'schedules' || page === 'vss' || page === 'copy' || page === 'disks' || page === 'repositories') {
         setCurrentPage(page);
       }
     });

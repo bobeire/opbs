@@ -169,6 +169,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   installUpdate: () => ipcRenderer.invoke('install-update'),
   getVersion: () => ipcRenderer.invoke('get-version'),
 
+  // `--open-page` startup navigation (consumed once)
+  takeStartupNav: () => ipcRenderer.invoke('take-startup-nav'),
+
   // Network destination discovery
   networkDiscover: () => ipcRenderer.invoke('network-discover'),
   networkShares: (host: string) => ipcRenderer.invoke('network-shares', host),

@@ -353,6 +353,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   const handleSelectImage = async () => {
     const path = await window.electronAPI.selectFile({
       filters: [
+        { name: 'All supported backup images', extensions: ['opbs', 'mrimgx', 'mrimg'] },
         { name: 'Backup Images', extensions: ['opbs'] },
         { name: 'Macrium Reflect Images', extensions: ['mrimgx', 'mrimg'] },
         { name: 'All Files', extensions: ['*'] }

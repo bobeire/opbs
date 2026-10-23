@@ -47,6 +47,7 @@ import { normalizeBackupLocation } from './utils/location';
 import { initErrorReporter, setErrorReporting } from './utils/error-reporter';
 import { resolveImageChain } from './imaging/restore-engine';
 import { registerFileAssociations, unregisterFileAssociations, parseFileActionArgs, FileAction } from './utils/file-associations';
+import { parseOpenPageArg, type OpenPage } from './utils/startup-nav';
 import { readDrillHistory } from './utils/drill-history';
 import { sweepStaleJobDirs } from './utils/job-dir-sweep';
 import { compactChain, type CompactProgress } from './imaging/compact-engine';
@@ -71,6 +72,10 @@ const mountLaunchers = new Map<string, { cancel(): void }>();
 // Explorer file-handler action (context-menu verb on an image): delivered to
 // the renderer once it has loaded, or run headless for verify.
 let pendingFileAction: FileAction | null = null;
+
+// `--open-page <page>` startup flag: pulled by the renderer once its
+// listeners are mounted (a push at did-finish-load could race React's mount).
+let pendingOpenPage: OpenPage | null = null;
 
 function notify(title: string, body: string): void {
   try {
@@ -492,6 +497,7 @@ function main(): void {
   }
 
   const startupFileAction = parseFileActionArgs(process.argv);
+  const startupOpenPage = parseOpenPageArg(process.argv);
 
   // One window per app instance; a second launch (e.g. another context-menu
   // click) focuses the existing window and hands it the file action.
@@ -501,12 +507,17 @@ function main(): void {
   }
   app.on('second-instance', (_event, argv) => {
     const action = parseFileActionArgs(argv);
+    const openPage = parseOpenPageArg(argv);
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
     if (action) {
       queueFileAction(action);
+    } else if (openPage && mainWindow && !mainWindow.webContents.isLoading()) {
+      // Renderer is already mounted here (second instance implies a running
+      // app), so the nav event path is safe.
+      mainWindow.webContents.send('nav', openPage);
     }
   });
 
@@ -535,6 +546,9 @@ function main(): void {
     scheduler.startAll();
     if (startupFileAction) {
       queueFileAction(startupFileAction);
+    }
+    if (startupOpenPage) {
+      pendingOpenPage = startupOpenPage;
     }
     if (mainWindow) {
       initAutoUpdater(mainWindow);
@@ -1097,6 +1111,14 @@ function setupIpcHandlers(): void {
     } catch {
       return false;
     }
+  });
+
+  // `--open-page` startup navigation: the renderer pulls this once after its
+  // listeners are mounted and the flag is consumed.
+  ipcMain.handle('take-startup-nav', () => {
+    const page = pendingOpenPage;
+    pendingOpenPage = null;
+    return page;
   });
 
   ipcMain.handle('select-file', async (_, options) => {

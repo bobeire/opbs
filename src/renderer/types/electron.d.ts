@@ -385,6 +385,7 @@ declare global {
       checkForUpdates: () => Promise<{ ok: boolean }>;
       installUpdate: () => Promise<{ ok: boolean }>;
       getVersion: () => Promise<string>;
+      takeStartupNav: () => Promise<'browse' | 'backup' | 'restore' | 'schedules' | 'vss' | 'copy' | 'disks' | 'repositories' | null>;
       networkDiscover: () => Promise<{ machines: { name: string; addresses: string[]; services: string[] }[] }>;
       networkShares: (host: string) => Promise<{ shares: { unc: string; name: string; kind: 'share' | 'admin'; reachable: boolean; writable: boolean; remark?: string }[] }>;
       networkTest: (uncPath: string, create?: boolean) => Promise<{ path: string; ok: boolean; writable?: boolean; reachable?: boolean; created?: boolean; error?: string }>;
