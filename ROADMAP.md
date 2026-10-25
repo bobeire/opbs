@@ -1462,3 +1462,26 @@ to date has shipped; **Investigate** items need spike work first.
   shows up in a profile, prefer overlapping it with the compression workers,
   larger blocks for encrypted images, or fewer frame Buffer copies over
   porting.
+
+### In-place access to files inside images (ProjFS)
+
+Ask (issue #7 follow-up): open a huge file living *inside* an image — e.g. a
+100 GB VeraCrypt container in a Macrium `.mrimg` — without extracting it,
+ideally with no additional driver.
+
+- **Works today**: Mount the partition with WinFsp and point VeraCrypt at the
+  mounted path. The read-only bridge already answers positioned reads straight
+  from the image (decompress on demand + 64 MB block cache), so nothing is
+  extracted and nothing written. Open detail: VeraCrypt locks the container
+  file while mounted — if our bridge rejects the lock call, accepting byte-
+  range locks as no-ops is a small change on our side (untested).
+- **Zero-install candidate**: Windows' inbox **Projected File System (ProjFS)**
+  (Win10 1709+, no driver install) could expose the container as one *virtual*
+  file whose byte ranges are fetched from the image on demand — VeraCrypt sees
+  a normal path, the image stays read-only. Needs a native provider over
+  ProjectedFSLib, size/attributes from the parsed NTFS record, range reads via
+  the existing block cache, and provider lifecycle handling. Real feature, not
+  a patch.
+- **Status**: design-only, demand-driven — not scheduled. Rejected:
+  named pipes/HTTP (not seekable), localhost SMB share (admin + fragile),
+  full extraction (defeats the purpose).
