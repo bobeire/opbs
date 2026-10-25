@@ -421,7 +421,6 @@ body {
   padding: 20px;
   border-radius: 8px;
   border: 2px solid var(--border-color);
-  cursor: pointer;
   transition: border-color 0.2s;
 }
 
@@ -434,9 +433,24 @@ body {
   background-color: rgba(37, 99, 235, 0.1);
 }
 
+/* Multi-select toggle: checkbox + disk model as one row. */
+.disk-card .disk-select-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.disk-card .disk-select-toggle input[type='checkbox'] {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  accent-color: var(--primary-color);
+}
+
 .disk-card h3 {
   font-size: 1rem;
-  margin-bottom: 8px;
+  margin-bottom: 0;
 }
 
 .disk-card p {

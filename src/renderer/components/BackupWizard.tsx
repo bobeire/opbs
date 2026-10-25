@@ -128,8 +128,15 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     backupRunning && activeProgress ? 'progress' : 'select_source'
   );
   const [disks, setDisks] = useState<DiskInfo[]>([]);
-  const [selectedDisk, setSelectedDisk] = useState<DiskInfo | null>(null);
+  // Multi-select of whole disks to image. Exactly one entry reuses the
+  // partition-level flow; two or more fan out (one whole-disk image each).
+  const [selectedDiskIndexes, setSelectedDiskIndexes] = useState<number[]>([]);
   const [selectedPartitions, setSelectedPartitions] = useState<number[]>([]);
+  // Derived: the single selected disk (partition panel only appears for one).
+  const selectedDisk =
+    selectedDiskIndexes.length === 1
+      ? disks.find((d) => d.index === selectedDiskIndexes[0]) ?? null
+      : null;
   const [sourceVhdPath, setSourceVhdPath] = useState<string | null>(null);
   const [allDisks, setAllDisks] = useState(initialAllDisks ?? false);
   const [destinationPath, setDestinationPath] = useState(initialDestination ?? '');
@@ -363,6 +370,18 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
 
   const eligibleDisks = disks.filter((d) => d.partitions.length > 0);
 
+  // Toggle a whole disk in/out of the multi-select. Checking a disk resets the
+  // partition pick (it only applies to a single selected disk); checking any
+  // disk turns off the "all disks" and VHD modes.
+  const toggleDiskSelection = (index: number) => {
+    setAllDisks(false);
+    setSourceVhdPath(null);
+    setSelectedDiskIndexes((prev) =>
+      prev.includes(index) ? prev.filter((i) => i !== index) : [...prev, index]
+    );
+    setSelectedPartitions([]);
+  };
+
   const applyProfile = (profile: any) => {
     setSourceVhdPath(null);
     const disk = disks.find((d) => d.index === profile.sourceDiskIndex);
@@ -370,7 +389,8 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       setProfileMsg({ kind: 'err', text: `Profile "${profile.name}" references disk ${profile.sourceDiskIndex}, which is not present on this machine.` });
       return;
     }
-    setSelectedDisk(disk);
+    setAllDisks(false);
+    setSelectedDiskIndexes([disk.index]);
     setSelectedPartitions(profile.sourcePartitions ?? []);
     if (profile.destinationPath) {
       setDestinationPath(profile.destinationPath);
@@ -419,7 +439,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     });
     if (picked) {
       setSourceVhdPath(picked);
-      setSelectedDisk(null);
+      setSelectedDiskIndexes([]);
       setSelectedPartitions([]);
       setAllDisks(false);
     }
@@ -433,6 +453,10 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     }
     if (sourceVhdPath) {
       setProfileMsg({ kind: 'err', text: 'Profiles store physical disk sources — select a disk instead of a VHD/VHDX file.' });
+      return;
+    }
+    if (selectedDiskIndexes.length > 1) {
+      setProfileMsg({ kind: 'err', text: 'Saved profiles back up a single disk (that is what the scheduler runs). Deselect down to one disk to save a profile, or run the multi-disk backup directly.' });
       return;
     }
     if (!selectedDisk || !destinationPath.trim()) {
@@ -525,10 +549,15 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
           ...(incrementalEnabled && baseImagePath ? { baseImagePath } : {})
         };
         trackResult(await window.electronAPI.startBackup(config));
-      } else if (allDisks) {
-        for (let i = 0; i < eligibleDisks.length; i++) {
-          const disk = eligibleDisks[i];
-          setDiskLabel(`Disk ${i + 1} of ${eligibleDisks.length}: ${disk.model}`);
+      } else if (allDisks || selectedDiskIndexes.length > 1) {
+        // Fan out: one whole-disk image per disk. "All disks" images every
+        // eligible disk; multi-select images exactly the chosen ones.
+        const disksToImage = allDisks
+          ? eligibleDisks
+          : eligibleDisks.filter((d) => selectedDiskIndexes.includes(d.index));
+        for (let i = 0; i < disksToImage.length; i++) {
+          const disk = disksToImage[i];
+          setDiskLabel(`Disk ${i + 1} of ${disksToImage.length}: ${disk.model}`);
           const config: BackupConfig = {
             ...common,
             ...(imageName.trim() ? { imageName: `${imageName.trim()}-disk${disk.index}` } : {}),
@@ -623,7 +652,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                     onChange={(e) => {
                       setAllDisks(e.target.checked);
                       if (e.target.checked) {
-                        setSelectedDisk(null);
+                        setSelectedDiskIndexes([]);
                         setSelectedPartitions([]);
                       }
                     }}
@@ -705,34 +734,42 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
 
             {!allDisks && !sourceVhdPath && (
               <div className="disk-list">
-                {disks.map((disk) => (
-                  <div
-                    key={disk.index}
-                    className={`disk-card ${selectedDisk?.index === disk.index ? 'selected' : ''}`}
-                    onClick={() => {
-                      setSelectedDisk(disk);
-                      setSelectedPartitions([]);
-                    }}
-                  >
-                    <h3>{disk.model}</h3>
-                    <p>Size: {formatSize(disk.size)}</p>
-                    <p>Partitions: {disk.partitions.length}</p>
-                    <button
-                      className="btn-primary btn-small disk-image-all"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedDisk(disk);
-                        setSelectedPartitions(disk.partitions.map((p) => p.partitionIndex));
-                        setCurrentStep('select_destination');
-                      }}
+                {disks.map((disk) => {
+                  const checked = selectedDiskIndexes.includes(disk.index);
+                  return (
+                    <div
+                      key={disk.index}
+                      className={`disk-card ${checked ? 'selected' : ''}`}
                     >
-                      Image this entire disk
-                    </button>
-                  </div>
-                ))}
+                      <label className="checkbox-label disk-select-toggle">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleDiskSelection(disk.index)}
+                        />
+                        <h3>{disk.model}</h3>
+                      </label>
+                      <p>Size: {formatSize(disk.size)}</p>
+                      <p>Partitions: {disk.partitions.length}</p>
+                      <button
+                        className="btn-primary btn-small disk-image-all"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setAllDisks(false);
+                          setSourceVhdPath(null);
+                          setSelectedDiskIndexes([disk.index]);
+                          setSelectedPartitions(disk.partitions.map((p) => p.partitionIndex));
+                          setCurrentStep('select_destination');
+                        }}
+                      >
+                        Image this entire disk
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
-            
+
 {selectedDisk && !sourceVhdPath && (
               <div className="partition-selection">
                 <h3>Select Partitions to Backup</h3>
@@ -770,7 +807,12 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
               <button className="btn-secondary" onClick={onComplete}>Cancel</button>
               <button
                 className="btn-primary"
-                disabled={!allDisks && !sourceVhdPath && (!selectedDisk || selectedPartitions.length === 0)}
+                disabled={
+                  !allDisks &&
+                  !sourceVhdPath &&
+                  (selectedDiskIndexes.length === 0 ||
+                    (selectedDiskIndexes.length === 1 && selectedPartitions.length === 0))
+                }
                 onClick={() => setCurrentStep('select_destination')}
               >
                 Next
@@ -1104,6 +1146,19 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                   <>
                     <li>Source: Entire system ({eligibleDisks.length} disks)</li>
                     <li>Disks: {eligibleDisks.map((d) => d.model).join(' | ') || 'none found'}</li>
+                  </>
+                ) : selectedDiskIndexes.length > 1 ? (
+                  <>
+                    <li>
+                      Source: {selectedDiskIndexes.length} selected disks (entire disks)
+                    </li>
+                    <li>
+                      Disks:{' '}
+                      {eligibleDisks
+                        .filter((d) => selectedDiskIndexes.includes(d.index))
+                        .map((d) => d.model)
+                        .join(' | ') || 'none found'}
+                    </li>
                   </>
                 ) : (
                   <>
