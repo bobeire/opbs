@@ -122,6 +122,7 @@ interface Settings {
   errorReporting: { enabled: boolean; endpoint: string };
   fileAssociations: boolean;
   theme: 'system' | 'light' | 'dark';
+  adkPromptDisabled: boolean;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -208,7 +209,8 @@ const DEFAULT_SETTINGS: Settings = {
     enabled: false,
     endpoint: ''
   },
-  fileAssociations: true
+  fileAssociations: true,
+  adkPromptDisabled: false
 };
 
 function Settings() {
@@ -1469,6 +1471,25 @@ function Settings() {
               onChange={(e) => handleChange('fileAssociations', e.target.checked)}
             />
             Associate .opbs images with OPBS
+          </label>
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <h2>Startup</h2>
+        <p className="field-hint">
+          The Windows ADK prompt offers to install the ADK needed to build
+          recovery media. If you only back up, browse and restore images, you
+          can switch the prompt off here.
+        </p>
+        <div className="setting-item">
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={!settings.adkPromptDisabled}
+              onChange={(e) => handleChange('adkPromptDisabled', !e.target.checked)}
+            />
+            Show the Windows ADK prompt at startup
           </label>
         </div>
       </div>

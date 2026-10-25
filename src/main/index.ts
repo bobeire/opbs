@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, Menu, Notification, nativeTheme } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, Menu, Notification, nativeTheme, screen } from 'electron';
 import path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
@@ -48,6 +48,7 @@ import { initErrorReporter, setErrorReporting } from './utils/error-reporter';
 import { resolveImageChain } from './imaging/restore-engine';
 import { registerFileAssociations, unregisterFileAssociations, parseFileActionArgs, FileAction } from './utils/file-associations';
 import { parseOpenPageArg, type OpenPage } from './utils/startup-nav';
+import { sanitizeWindowState, WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT } from './utils/window-state';
 import { readDrillHistory } from './utils/drill-history';
 import { sweepStaleJobDirs } from './utils/job-dir-sweep';
 import { compactChain, type CompactProgress } from './imaging/compact-engine';
@@ -277,11 +278,19 @@ function runAsHelper(args: string[], pipeName?: string): void {
 }
 
 function createWindow(): void {
+  // Restore the geometry of the previous session (sanitized against the
+  // displays that exist right now — a state from a vanished monitor falls
+  // back to the default size).
+  const savedState = sanitizeWindowState(
+    settingsManager.getSettings().windowState,
+    screen.getAllDisplays().map((display) => display.workArea)
+  );
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    minWidth: 900,
-    minHeight: 600,
+    ...(savedState
+      ? { x: savedState.x, y: savedState.y, width: savedState.width, height: savedState.height }
+      : { width: 1200, height: 800 }),
+    minWidth: WINDOW_MIN_WIDTH,
+    minHeight: WINDOW_MIN_HEIGHT,
     title: 'OPBS — Open Pickle Backup System',
     icon: path.join(__dirname, '../resources/icon.ico'),
     show: false,
@@ -290,6 +299,17 @@ function createWindow(): void {
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js')
     }
+  });
+  if (savedState?.maximized) mainWindow.maximize();
+
+  // Persist geometry once per session, on close: getNormalBounds() reports
+  // the restore bounds even while maximized, so both are captured correctly.
+  mainWindow.on('close', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const bounds = mainWindow.getNormalBounds();
+    settingsManager.updateSettings({
+      windowState: { ...bounds, maximized: mainWindow.isMaximized() }
+    });
   });
 
   // Show the window only once the first frame (the startup splash) is painted,

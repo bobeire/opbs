@@ -54,6 +54,20 @@ export interface AppSettings {
   lastRepoAnchorTarget: string;
   /** Appearance: follow the OS (Windows) theme or force light/dark. */
   theme: 'system' | 'light' | 'dark';
+  /** Main-window geometry restored at startup; null = default size/position. */
+  windowState: WindowState | null;
+  /** Suppress the startup "Windows ADK not found" prompt (the Media view
+   *  still shows ADK status and offers the install there). */
+  adkPromptDisabled: boolean;
+}
+
+/** Persisted main-window geometry; sanitized by utils/window-state.ts. */
+export interface WindowState {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  maximized: boolean;
 }
 
 export interface CloudSettings {
@@ -205,6 +219,8 @@ export interface BackupProfile {
 
 const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
+  windowState: null,
+  adkPromptDisabled: false,
   defaultCompression: 3,
   defaultVerification: true,
   backupLocation: '',

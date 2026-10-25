@@ -12,9 +12,16 @@ function AdkPrompt() {
 
   useEffect(() => {
     let cancelled = false;
-    window.electronAPI.mediaCheck().then((report) => {
-      if (!cancelled) setPhase(report?.ok ?? false ? 'installed' : 'missing');
-    });
+    void window.electronAPI
+      .getSettings()
+      .then((s) => (cancelled || s?.adkPromptDisabled ? null : window.electronAPI.mediaCheck()))
+      .then((report) => {
+        // null = suppressed by settings; keep the prompt hidden either way.
+        if (!cancelled && report) setPhase(report?.ok ?? false ? 'installed' : 'missing');
+      })
+      .catch(() => {
+        // Same as before: a failed check leaves the prompt hidden.
+      });
     return () => {
       cancelled = true;
     };
@@ -31,6 +38,15 @@ function AdkPrompt() {
       setError(e?.message ?? 'ADK installation failed.');
       setPhase('error');
     }
+  }, []);
+
+  const dismissForever = useCallback(async () => {
+    try {
+      await window.electronAPI.updateSettings({ adkPromptDisabled: true });
+    } catch {
+      // Fall back to a plain dismissal — the prompt may return next launch.
+    }
+    setPhase('dismissed');
   }, []);
 
   if (phase === 'checking' || phase === 'installed' || phase === 'dismissed') return null;
@@ -56,6 +72,9 @@ function AdkPrompt() {
             <>
               <button className="btn-primary" onClick={() => void install()}>
                 Install now
+              </button>
+              <button className="btn-secondary" onClick={() => void dismissForever()}>
+                Don't show again
               </button>
               <button className="btn-secondary" onClick={() => setPhase('dismissed')}>
                 Later
