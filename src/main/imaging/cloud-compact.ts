@@ -8,7 +8,7 @@ import {
   type StagedCloudImage
 } from './cloud-restore';
 import { cloudStoreFromLocation } from '../utils/cloud-store';
-import { S3Store, resolveS3Config, buildObjectLock, type ObjectLockRequest } from '../utils/s3';
+import { resolveS3Config, buildObjectLock, type ObjectLockRequest } from '../utils/s3';
 import { sidecarPathFor } from '../utils/bitlocker-capture';
 import { logger } from '../utils/logger';
 

@@ -48,7 +48,7 @@ function dismCandidates(root: string, arch: PeArch): string[] {
   return [...(fs.existsSync(adkDism) ? [adkDism] : []), ...(systemDism ? [systemDism] : [])];
 }
 
-export function kitExists(root: string, arch: PeArch): boolean {
+export function kitExists(root: string, _arch: PeArch): boolean {
   return (
     fs.existsSync(path.join(root, 'Windows Preinstallation Environment', 'copype.cmd')) &&
     fs.existsSync(path.join(root, 'Windows Preinstallation Environment', 'MakeWinPEMedia.cmd'))

@@ -10,9 +10,7 @@ import {
   readImageInfo,
   scanPartialImage,
   getCompressionId,
-  CIPHER_NONE,
-  FLAG_HAS_BLOCK_INDEX,
-  FLAG_RESUMED
+  CIPHER_NONE
 } from './image-format';
 import { ImagingJob, JobProgress, JobResult, ImagingPartition, JobEncryption, ResumeCheckpoint } from './imaging-job';
 import { launchElevatedJob } from '../helper/launcher';

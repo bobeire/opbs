@@ -1,5 +1,5 @@
 import { readFileRange, NtfsFile, NtfsNode } from './ntfs';
-import { listDirectory, resolvePath, resolveNtfsFile, BrowseSession, NtfsBrowseSession } from './file-browse';
+import { listDirectory, resolvePath, resolveNtfsFile, BrowseSession } from './file-browse';
 
 /**
  * Read-only filesystem backend for the WinFsp mount bridge. For every NTFS

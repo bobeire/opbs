@@ -24,7 +24,6 @@ import {
   compressionTypeOf,
   compressBlock,
   COMPRESSION_NONE,
-  COMPRESSION_ZSTD,
   FLAG_HAS_BLOCK_INDEX,
   FLAG_VERIFIED,
   FLAG_INCREMENTAL,
@@ -34,7 +33,6 @@ import {
   clearImageInfoCache,
   PARTITION_TABLE_ENTRY_SIZE,
   BLOCK_INDEX_ENTRY_SIZE,
-  BLOCK_INDEX_ENTRY_SIZE_V1,
   crc32,
   scanPartialImage,
   ImageCipher,
@@ -443,14 +441,12 @@ export async function runBackupJob(
       // Determine read source device and base offset.
       let device: string;
       let baseOffset: bigint;
-      let snapshotDevice = '';
 
       if (part.readSource === 'volume' && part.volumeDevicePath) {
         const snap = snapshotCache.get(part.volumeDevicePath);
         if (snap) {
           device = snap.devicePath;
           baseOffset = 0n;
-          snapshotDevice = part.volumeDevicePath;
         } else {
           device = part.volumeDevicePath;
           baseOffset = 0n;

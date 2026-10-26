@@ -1,6 +1,5 @@
 import * as fs from 'fs';
 import * as os from 'os';
-import * as path from 'path';
 import { DiskEnumerator } from '../utils/disk-enumerator';
 import {
   readImageInfo,

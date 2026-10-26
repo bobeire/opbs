@@ -134,7 +134,7 @@ function parseHosts(stdout: string, add: (name: string, address: string | undefi
 
 async function discoverNetView(
   add: (name: string, address: string | undefined, service: string) => void,
-  hosts: Map<string, DiscoveredMachine>
+  _hosts: Map<string, DiscoveredMachine>
 ): Promise<void> {
   const r = await runNet(['view', '/all'], 15000);
   if (r.code === 0 && r.stdout) parseHosts(r.stdout, add);

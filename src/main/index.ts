@@ -21,7 +21,7 @@ import { launchElevatedJob } from './helper/launcher';
 import { loadNative } from './utils/native-loader';
 import type { VssJob, VssJobResult } from './utils/vss';
 import { winfspAvailable, winfspLoadNote } from './imaging/mount-manager';
-import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains, writeManifest } from './backup/retention';
+import { applyRetention, planRetention, scanBackupDirectory, groupIntoChains } from './backup/retention';
 import { checkDiskHealth } from './utils/disk-health';
 import { toDiskIndex, toChkdskVolume } from './utils/input-guard';
 import { runCli } from './cli';
