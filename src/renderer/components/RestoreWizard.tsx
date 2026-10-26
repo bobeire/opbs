@@ -64,6 +64,7 @@ interface PreflightResult {
   unlockRequired?: boolean;
   lockedLetter?: string;
   targetIsSystemDisk?: boolean;
+  targetsIncludeSystemVolume?: boolean;
   targetFileExists?: boolean;
 }
 
@@ -436,10 +437,20 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
       !!preflight.targetFileExists ||
       (preflight.targetDiskPartitionCount ?? 0) > 0);
 
+  // Hard stop: restoring into the live system/boot/SystemDrive volume is
+  // impossible from inside the OS. Those volumes must be dismounted before we
+  // raw-write them, and the ones Windows is running from can't be (AUTOCHK/
+  // Explorer hold them) — the write fails with ERROR_ACCESS_DENIED, often
+  // after partially touching the disk. Matched per-target (by offset), so
+  // restoring a data partition that shares the system disk stays allowed.
+  // Direct the user to bootable recovery media instead.
+  const systemDiskBlocked = targetKind === 'disk' && !!preflight?.targetsIncludeSystemVolume;
+
   const canStart =
     !!preflight &&
     preflight.ok &&
     targetReady &&
+    !systemDiskBlocked &&
     !(imageInfo?.encrypted && !passphrase.trim()) &&
     (!destructiveAckNeeded || acknowledge);
 
@@ -557,7 +568,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
               <p className="warning-text">
                 {targetKind === 'vhd'
                   ? 'Warning: The restore writes into the virtual disk file, overwriting its contents!'
-                  : 'Warning: This will overwrite all data on the target disk!'}
+                  : 'Warning: Restoring overwrites the selected partitions on the target disk with the image contents!'}
               </p>
 
               {targetKind === 'disk' &&
@@ -767,11 +778,27 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                           </strong>
                         </div>
                       </div>
-                      {(preflight.targetDiskPartitionCount ?? 0) > 0 && (
+                      {systemDiskBlocked && (
+                        <div className="error-message">
+                          <p>
+                            <strong>This is the disk Windows is running from.</strong> A restore
+                            cannot be performed from inside a live Windows session — the system
+                            volume cannot be unlocked for writing, so the restore would fail (and
+                            could leave the disk partially written).
+                          </p>
+                          <p>
+                            To restore this disk, build a bootable recovery media under{' '}
+                            <strong>Media</strong>, boot from it, and run the restore there.
+                          </p>
+                        </div>
+                      )}
+                      {(preflight.targetDiskPartitionCount ?? 0) > 0 && !systemDiskBlocked && (
                         <div className="error-message">
                           <p>
                             Target disk already has {preflight.targetDiskPartitionCount} partition(s).
-                            Restoring overwrites the existing data in place.
+                            {preflight.writeTableScheme
+                              ? ' Restoring overwrites the existing data in place.'
+                              : ` This restore writes only the ${preflight.targets?.length ?? 'selected'} selected partition(s) back to their original offsets — the partition table and any partitions you did not select are left untouched.`}
                           </p>
                         </div>
                       )}
@@ -881,7 +908,9 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                   Yes, I understand{' '}
                   {targetKind === 'vhd'
                     ? 'the virtual disk file will be overwritten and existing data in it will be lost.'
-                    : 'the target disk will be permanently overwritten and existing data will be lost.'}
+                    : preflight?.writeTableScheme
+                      ? 'the target disk will be permanently overwritten and existing data will be lost.'
+                      : 'the selected partitions will be overwritten with the image contents.'}
                 </label>
               </div>
             )}

@@ -45,6 +45,12 @@ export interface RestorePreflightResult {
   /** True when the target disk holds Windows (system/boot) — a reboot is
    *  required after restore; secondary disks do not need one. */
   targetIsSystemDisk?: boolean;
+  /** True when the restore targets actually include the live system/boot/
+   *  SystemDrive volume. Those cannot be dismounted while Windows runs, so a
+   *  restore into them fails (ERROR_ACCESS_DENIED); the UI must block it and
+   *  point at recovery media. A data partition sharing the system disk does
+   *  not set this — that restore is allowed. */
+  targetsIncludeSystemVolume?: boolean;
   /** VHD/VHDX target: an existing file at the target path will be
    *  overwritten — the UI must ask for an explicit acknowledgement. */
   targetFileExists?: boolean;
@@ -255,7 +261,8 @@ export class RestoreManager extends EventEmitter {
           sameDisk: false,
           encrypted,
           passphraseRequired,
-          targetIsSystemDisk: false
+          targetIsSystemDisk: false,
+          targetsIncludeSystemVolume: false
         };
       }
 
@@ -274,6 +281,22 @@ export class RestoreManager extends EventEmitter {
         targetIsSystemDisk = sysDisk !== null && sysDisk === config.targetDiskIndex;
       }
 
+      // Precise guard: do the restore targets actually include the live
+      // system/boot/SystemDrive volume(s)? Matching is by on-disk offset, so
+      // restoring a *data* partition that merely shares the system disk does
+      // NOT set this (that restore succeeds — the data volume can be
+      // dismounted). Only targets that cover a volume Windows is actively
+      // running from are blocked, because those cannot be dismounted and raw
+      // writes to them fail with ERROR_ACCESS_DENIED.
+      const targetOffsets = new Set(targets.map((t) => t.offset));
+      const targetsIncludeSystemVolume = (targetDisk?.partitions ?? []).some(
+        (p) =>
+          targetOffsets.has(p.offset) &&
+          (p.isSystem === true ||
+            p.isBoot === true ||
+            (p.driveLetter || '').replace(':', '').toUpperCase() === systemDrive)
+      );
+
       return {
         ok: true,
         requiredBytes,
@@ -287,7 +310,8 @@ export class RestoreManager extends EventEmitter {
         sameDisk: (job.warnings ?? []).some((w) => w.includes('same disk the image')),
         encrypted,
         passphraseRequired,
-        targetIsSystemDisk
+        targetIsSystemDisk,
+        targetsIncludeSystemVolume
       };
     } catch (error) {
       // Failure-driven unlock path: a permission/absence failure whose volume

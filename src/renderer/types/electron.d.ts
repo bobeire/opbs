@@ -48,6 +48,7 @@ declare global {
         unlockRequired?: boolean;
         lockedLetter?: string;
         targetIsSystemDisk?: boolean;
+        targetsIncludeSystemVolume?: boolean;
       }>;
       getImageInfo: (imagePath: string) => Promise<any>;
       fetchCloudImage: (uri: string) => Promise<{ ok: boolean; imagePath?: string; error?: string }>;
