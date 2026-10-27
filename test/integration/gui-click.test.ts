@@ -26,7 +26,20 @@ const CSP_VIOLATIONS: string[] = [];
 
 test(
   'launches the app and click-tests every sidebar view without errors',
+  {
+    timeout: 300000,
+    // GitHub's Windows runner intermittently kills the Electron window
+    // during startup (~1 in 3 runs: firstWindow resolves, then the page
+    // closes before domcontentloaded). The same build passes locally every
+    // time, so this is environment flake, not app behaviour — retry on CI
+    // only; local runs stay strict.
+    retry: process.env.CI ? 2 : 0
+  },
   async () => {
+    // Retries re-run this body; reset shared collectors so a prior failed
+    // attempt's captured errors can't fail an otherwise clean run.
+    PAGE_ERRORS.length = 0;
+    CSP_VIOLATIONS.length = 0;
     console.log('[gui-click] launching electron…');
     const app: ElectronApplication = await electron.launch(
     {
@@ -89,6 +102,5 @@ test(
   } finally {
     await app.close();
   }
-  },
-  300000
+  }
 );
