@@ -5,6 +5,8 @@ import {
   groupMediaDrives,
   protectedDriveLetters,
   usbTargetGuard,
+  usbSizeGuard,
+  FAT32_FORMAT_LIMIT_BYTES,
   listMediaDrives,
   MediaDriveInfo
 } from '../../src/main/utils/media-drives';
@@ -194,6 +196,28 @@ describe('usbTargetGuard', () => {
     expect(usbTargetGuard('', ['C'])).toContain('Invalid USB target');
     expect(usbTargetGuard('garbage', ['C'])).toContain('Invalid USB target');
     expect(usbTargetGuard('12:', ['C'])).toContain('Invalid USB target');
+  });
+});
+
+describe('usbSizeGuard', () => {
+  it('accepts drives at or below the FAT32 format limit', () => {
+    expect(usbSizeGuard(FAT32_FORMAT_LIMIT_BYTES)).toBeNull();
+    expect(usbSizeGuard(16 * 1024 ** 3)).toBeNull();
+    expect(usbSizeGuard(32_000_000_000)).toBeNull();
+  });
+
+  it('refuses drives above the limit with the FAT32 explanation', () => {
+    const err = usbSizeGuard(64 * 1024 ** 3);
+    expect(err).toContain('larger than 32 GB');
+    expect(err).toContain('FAT32');
+    expect(usbSizeGuard(128 * 1024 ** 3)).toContain('Rufus');
+  });
+
+  it('stays quiet when the size is unknown or nonsensical', () => {
+    expect(usbSizeGuard(undefined)).toBeNull();
+    expect(usbSizeGuard(null)).toBeNull();
+    expect(usbSizeGuard(0)).toBeNull();
+    expect(usbSizeGuard(NaN)).toBeNull();
   });
 });
 

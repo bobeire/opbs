@@ -181,11 +181,15 @@ function MediaView({ onComplete }: MediaViewProps) {
 
   const allDrives = drives ? [...drives.primary, ...drives.others] : [];
   const selectedDrive = allDrives.find((d) => d.letter === usbDrive);
+  // Windows can only FAT32-format drives up to 32 GB, and MakeWinPEMedia
+  // formats the stick as FAT32 — larger sticks fail at the format step.
+  const FAT32_MAX_BYTES = 32 * 1024 * 1024 * 1024;
+  const usbTooLarge = !!selectedDrive && selectedDrive.sizeBytes > FAT32_MAX_BYTES;
 
   const canCreate =
     !building &&
     report?.ready &&
-    (format === 'iso' ? !!isoPath : !!selectedDrive && usbConfirmed);
+    (format === 'iso' ? !!isoPath : !!selectedDrive && !usbTooLarge && usbConfirmed);
 
   return (
     <div className="media-view">
@@ -357,8 +361,20 @@ function MediaView({ onComplete }: MediaViewProps) {
               )}
               <p className="field-hint">
                 Pick the USB stick to turn into recovery media — it will be completely erased.
+                The stick must be 32 GB or smaller: the media is formatted FAT32 and Windows
+                cannot FAT32-format larger drives. For a bigger drive, build an ISO and write it
+                with Rufus.
               </p>
             </div>
+            {usbTooLarge && (
+              <div className="error-message">
+                <p>
+                  {selectedDrive.text} is larger than 32 GB — the build would fail at the format
+                  step (Windows cannot FAT32-format drives above 32 GB). Use a 32 GB or smaller
+                  stick, or build an ISO and write it to this drive with Rufus.
+                </p>
+              </div>
+            )}
             {selectedDrive && (
               <div className="setting-item">
                 <label className="checkbox-label">

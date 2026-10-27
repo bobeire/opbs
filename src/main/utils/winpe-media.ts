@@ -5,7 +5,7 @@ import * as path from 'path';
 import { psQuote, runElevatedPowerShell as runPowershell } from './elevated';
 import { locateAdk, peArchForProcess, PeArch } from './adk';
 import { nodeRuntimeDir } from './node-install';
-import { usbTargetGuard, protectedDriveLetters } from './media-drives';
+import { usbTargetGuard, usbSizeGuard, listMediaDrives, protectedDriveLetters } from './media-drives';
 import { logger } from './logger';
 
 /**
@@ -614,6 +614,18 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
     if (guardError) {
       return { ok: false, format: options.format, output: options.output, arch, error: guardError };
     }
+    // Capacity check: MakeWinPEMedia formats the stick as FAT32, and Windows
+    // refuses to FAT32-format volumes above 32 GB — catch it before the
+    // lengthy build instead of at the very last step.
+    const letterMatch = /^([A-Za-z]):?/.exec(String(options.output ?? '').trim());
+    const groups = listMediaDrives();
+    const drive = [...groups.primary, ...groups.others].find(
+      (d) => d.letter.toUpperCase() === (letterMatch?.[1] ?? '').toUpperCase()
+    );
+    const sizeError = usbSizeGuard(drive?.sizeBytes);
+    if (sizeError) {
+      return { ok: false, format: options.format, output: options.output, arch, error: sizeError };
+    }
   }
   const adk = locateAdk(arch, options.adkRoot);
   if (!adk || !adk.copype || !adk.dism || !adk.makeWinPEMedia) {
@@ -845,7 +857,11 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
       fs.readFileSync(resultPath, 'utf-8').replace(/^\uFEFF/, '')
     ) as { ok?: boolean; error?: string; output?: string };
     if (!parsed.ok) {
-      const error = `${parsed.error ?? 'Media build failed'} (work kept at ${work} for inspection)`;
+      const formatHint = /Failed to format|DiskPart errorlevel|-2147024809|0x80070057/i.test(parsed.error ?? '')
+        ? ' Hint: MakeWinPEMedia formats the stick as FAT32, which Windows limits to 32 GB — ' +
+          'use a USB drive of 32 GB or smaller, or write an ISO image to the drive with Rufus.'
+        : '';
+      const error = `${parsed.error ?? 'Media build failed'}${formatHint} (work kept at ${work} for inspection)`;
       logger.error(`Recovery media build failed: ${error}`);
       return {
         ok: false,

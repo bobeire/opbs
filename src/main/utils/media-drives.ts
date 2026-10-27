@@ -121,7 +121,8 @@ export function formatMediaDriveOption(d: MediaDriveInfo): string {
   const traits = [d.busType || 'unknown bus'];
   if (d.removable) traits.push('removable');
   else if (!d.usb) traits.push('INTERNAL');
-  return `${d.letter}: — ${name} (${formatSize(d.sizeBytes)}, ${traits.join(', ')})`;
+  const tooBig = typeof d.sizeBytes === 'number' && d.sizeBytes > FAT32_FORMAT_LIMIT_BYTES;
+  return `${d.letter}: — ${name} (${formatSize(d.sizeBytes)}, ${traits.join(', ')})${tooBig ? ' — TOO LARGE FOR FAT32 (>32 GB)' : ''}`;
 }
 
 /**
@@ -163,6 +164,31 @@ export function groupMediaDrives(drives: MediaDriveInfo[], protectedLetters: str
   const primary = eligible.filter((d) => d.usb || d.removable).map(withText).sort(byLetter);
   const others = eligible.filter((d) => !d.usb && !d.removable).map(withText).sort(byLetter);
   return { primary, others };
+}
+
+/**
+ * Windows refuses to FAT32-format volumes larger than 32 GiB, and
+ * MakeWinPEMedia formats the USB stick as FAT32 — so anything bigger fails
+ * at the very end of the media build unless it is caught up front.
+ */
+export const FAT32_FORMAT_LIMIT_BYTES = 32 * 1024 * 1024 * 1024;
+
+/**
+ * Server-side capacity check for USB creation: MakeWinPEMedia's FAT32 format
+ * cannot succeed on volumes above the limit. Returns an error message, or
+ * null when the size is acceptable (or unknown).
+ */
+export function usbSizeGuard(sizeBytes: number | undefined | null): string | null {
+  if (typeof sizeBytes !== 'number' || !Number.isFinite(sizeBytes) || sizeBytes <= 0) return null;
+  if (sizeBytes > FAT32_FORMAT_LIMIT_BYTES) {
+    return (
+      `This USB drive is larger than 32 GB, and Windows can only FAT32-format drives up to ` +
+      `32 GB — the recovery media build would fail at the format step. Use a USB drive of ` +
+      `32 GB or smaller, or build an ISO and write it to this drive with a tool that can ` +
+      `format larger FAT32 volumes (e.g. Rufus).`
+    );
+  }
+  return null;
 }
 
 /**
