@@ -24,6 +24,9 @@ jobs:
           node node_modules/electron/install.js
           test -f node_modules/electron/dist/electron.exe
           echo "electron.exe present"
+          # electron#45251/#52307: a dist without its locale packs crashes
+          # the renderer on Windows — print the actual state for diagnosis.
+          echo "electron locales: $(ls node_modules/electron/dist/locales/*.pak 2>/dev/null | wc -l) pack(s); en-US=$(test -f node_modules/electron/dist/locales/en-US.pak && echo present || echo MISSING)"
       - name: Typecheck (main/preload)
         run: npx tsc --noEmit -p tsconfig.main.json
       - name: Typecheck (renderer)

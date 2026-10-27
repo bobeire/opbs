@@ -1,6 +1,7 @@
 import { test, expect } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright';
 import * as path from 'path';
+import * as fs from 'fs';
 
 const APP_ROOT = path.resolve(__dirname, '../..');
 
@@ -180,6 +181,17 @@ test(
     // attempt's captured errors can't fail an otherwise clean run.
     PAGE_ERRORS.length = 0;
     CSP_VIOLATIONS.length = 0;
+    // electron#45251 / #52307: a dist with an empty or locale-mismatched
+    // locales/ dir crashes Windows renderers (reproduced locally: removing
+    // the packs makes render-process-gone fire with reason=crashed). Print
+    // the state of the dist we are about to launch so a CI failure says
+    // immediately whether the install is intact.
+    const localesDir = path.join(APP_ROOT, 'node_modules', 'electron', 'dist', 'locales');
+    const packs = fs.existsSync(localesDir) ? fs.readdirSync(localesDir).filter((f) => f.endsWith('.pak')) : [];
+    console.log(
+      `[gui-click] electron locales: ${packs.length} pack(s), en-US=${packs.includes('en-US.pak') ? 'present' : 'MISSING'}`
+    );
+
     console.log('[gui-click] launching electron…');
     const app: ElectronApplication = await electron.launch(
     {
@@ -188,17 +200,23 @@ test(
       // Runner display stack crash loop (death certificate, 842275d): the
       // GPU process dies with 0xC0000005 every ~4s until Chromium logs
       // "GPU process isn't usable. Goodbye." and the whole app exits —
-      // the renderer never reaches domcontentloaded. Software compositing
-      // sidesteps it; local machines with a real GPU keep testing the
-      // default path (flag is CI-only).
-      ...(process.env.CI ? ['--disable-gpu'] : [])
+      // the renderer never reaches domcontentloaded. --disable-gpu was
+      // verified delivered (app.commandLine.hasSwitch) yet the 0xC0000005
+      // persists, so also drop both sandbox layers: renderer + GPU are the
+      // only sandboxed processes here, and they are exactly the two that
+      // die (simultaneously, same exception) while the unsandboxed main
+      // process lives. Flags are CI-only; local runs keep the default path.
+      ...(process.env.CI ? ['--disable-gpu', '--no-sandbox', '--disable-gpu-sandbox'] : [])
     ],
     cwd: APP_ROOT,
     env: {
       ...process.env,
       // Spawned shells resolve cmd.exe via PATH; this bash environment
       // strips System32, so re-add it for playwright's launcher.
-      PATH: [process.env.PATH, 'C:\\Windows\\System32', 'C:\\Windows'].filter(Boolean).join(';')
+      PATH: [process.env.PATH, 'C:\\Windows\\System32', 'C:\\Windows'].filter(Boolean).join(';'),
+      // Chromium's own log on CI: if the crash survives the sandbox flags,
+      // gpu/sandbox/fatal lines explain it (capped by PROC_OUT_CAP above).
+      ...(process.env.CI ? { ELECTRON_ENABLE_LOGGING: '1' } : {})
     },
     timeout: 60_000
   });
@@ -295,7 +313,9 @@ test(
     } catch (error) {
       console.log(`[gui-click] main process unreachable (already dead): ${String(error).split('\n')[0]}`);
     }
-    console.log(tail(`[gui-click] app stdout/stderr/exit:\n${bounded(procOut)}`));
+    // Generous budget: CI adds ELECTRON_ENABLE_LOGGING lines around the
+    // [gcert] mirror, and the crash sequence must survive the trim.
+    console.log(tail(`[gui-click] app stdout/stderr/exit:\n${bounded(procOut)}`, 24000));
     throw err;
   } finally {
     await app.close().catch(() => undefined);
