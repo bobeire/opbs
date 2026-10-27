@@ -123,6 +123,7 @@ interface Settings {
   fileAssociations: boolean;
   theme: 'system' | 'light' | 'dark';
   adkPromptDisabled: boolean;
+  checkForUpdatesOnStartup: boolean;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -210,7 +211,8 @@ const DEFAULT_SETTINGS: Settings = {
     endpoint: ''
   },
   fileAssociations: true,
-  adkPromptDisabled: false
+  adkPromptDisabled: false,
+  checkForUpdatesOnStartup: true
 };
 
 function Settings() {
@@ -1477,11 +1479,6 @@ function Settings() {
 
       <div className="settings-section">
         <h2>Startup</h2>
-        <p className="field-hint">
-          The Windows ADK prompt offers to install the ADK needed to build
-          recovery media. If you only back up, browse and restore images, you
-          can switch the prompt off here.
-        </p>
         <div className="setting-item">
           <label className="checkbox-label">
             <input
@@ -1491,6 +1488,28 @@ function Settings() {
             />
             Show the Windows ADK prompt at startup
           </label>
+          <p className="field-hint">
+            The Windows ADK prompt offers to install the ADK needed to build
+            recovery media. If you only back up, browse and restore images, you
+            can switch the prompt off here.
+          </p>
+        </div>
+        <div className="setting-item">
+          <label className="checkbox-label">
+            <input
+              type="checkbox"
+              checked={settings.checkForUpdatesOnStartup}
+              onChange={(e) => handleChange('checkForUpdatesOnStartup', e.target.checked)}
+            />
+            Check for updates at startup
+          </label>
+          <p className="field-hint">
+            When on, OPBS silently checks for new versions when it starts and
+            downloads one in the background to install when you quit. When off,
+            OPBS never contacts GitHub on its own — no startup check and no
+            error toast if a firewall blocks it. The manual "Check for updates"
+            button always works. Takes effect on the next launch.
+          </p>
         </div>
       </div>
 

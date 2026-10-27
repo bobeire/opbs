@@ -571,7 +571,7 @@ function main(): void {
       pendingOpenPage = startupOpenPage;
     }
     if (mainWindow) {
-      initAutoUpdater(mainWindow);
+      initAutoUpdater(mainWindow, settingsManager.getSettings().checkForUpdatesOnStartup);
     }
 
     app.on('activate', () => {

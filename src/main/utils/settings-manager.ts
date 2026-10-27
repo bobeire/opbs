@@ -59,6 +59,11 @@ export interface AppSettings {
   /** Suppress the startup "Windows ADK not found" prompt (the Media view
    *  still shows ADK status and offers the install there). */
   adkPromptDisabled: boolean;
+  /** Run the silent update check when OPBS starts. Off = never contact
+   *  GitHub on startup (no check, no background download, and no startup
+   *  error toast when the network is blocked); the manual "Check for
+   *  updates" button keeps working unchanged. */
+  checkForUpdatesOnStartup: boolean;
 }
 
 /** Persisted main-window geometry; sanitized by utils/window-state.ts. */
@@ -221,6 +226,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
   windowState: null,
   adkPromptDisabled: false,
+  checkForUpdatesOnStartup: true,
   defaultCompression: 3,
   defaultVerification: true,
   backupLocation: '',

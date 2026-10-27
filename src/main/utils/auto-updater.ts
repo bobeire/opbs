@@ -24,7 +24,7 @@ function enabled(): boolean {
   return app.getName().toLowerCase() === 'opbs';
 }
 
-export function initAutoUpdater(window: BrowserWindow): void {
+export function initAutoUpdater(window: BrowserWindow, startupCheck: boolean): void {
   updaterWindow = window;
 
   if (!enabled()) {
@@ -69,9 +69,15 @@ export function initAutoUpdater(window: BrowserWindow): void {
     }
   });
 
-  void autoUpdater.checkForUpdates().catch((err) => {
-    logger.warn('Initial update check failed', err);
-  });
+  if (startupCheck) {
+    void autoUpdater.checkForUpdates().catch((err) => {
+      logger.warn('Initial update check failed', err);
+    });
+  } else {
+    // Settings → Startup: never contact GitHub on our own. Listeners above
+    // stay armed so the manual "Check for updates" button is unaffected.
+    logger.info('Startup update check disabled in Settings — manual checks only');
+  }
 }
 
 export async function checkForUpdates(): Promise<boolean> {
