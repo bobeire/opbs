@@ -48,6 +48,17 @@ function getUserDataDir(): string {
 }
 
 /**
+ * Normalize a level to the enum. AppSettings.logLevel stores lowercase
+ * strings ('debug' | 'info' | 'warn' | 'error') while the enum is uppercase —
+ * without this, a raw settings value breaks the enum comparison in shouldLog
+ * and silently disables level filtering.
+ */
+export function normalizeLogLevel(level: LogLevel | string): LogLevel {
+  if (typeof level !== 'string') return level;
+  return LogLevel[level.trim().toUpperCase() as keyof typeof LogLevel] ?? LogLevel.INFO;
+}
+
+/**
  * Logger that prefers electron-log (crash/file handling, rotation) but falls
  * back to a minimal file+console logger when electron-log is not bundled,
  * e.g. inside the WinPE smoke/restore payload.
@@ -131,12 +142,13 @@ class Logger {
     }
   }
 
-  setLevel(level: LogLevel): void {
-    this.level = level;
+  setLevel(level: LogLevel | string): void {
+    const normalized = normalizeLogLevel(level);
+    this.level = normalized;
     if (this.el) {
       try {
-        this.el.transports.file.level = level.toLowerCase();
-        this.el.transports.console.level = level.toLowerCase();
+        this.el.transports.file.level = normalized.toLowerCase();
+        this.el.transports.console.level = normalized.toLowerCase();
       } catch {
         // ignore
       }

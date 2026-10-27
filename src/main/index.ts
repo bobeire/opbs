@@ -8,7 +8,7 @@ import { BackupManager } from './backup/manager';
 import { RestoreManager } from './restore/manager';
 import { BackupScheduler } from './backup/scheduler';
 import { SettingsManager } from './utils/settings-manager';
-import { logger, type LogLevel } from './utils/logger';
+import { logger } from './utils/logger';
 import { initAutoUpdater, checkForUpdates, quitAndInstall } from './utils/auto-updater';
 import { discoverNetworkMachines, enumerateShares, testNetworkDestination } from './utils/network';
 import { ImagingEngine } from './imaging/backup-engine';
@@ -1086,9 +1086,7 @@ function setupIpcHandlers(): void {
     const result = settingsManager.updateSettings(updates);
     syncNativeTheme(result.theme);
     if (result.logLevel) {
-      // Settings stores lower-cased level names; the logger's LogLevel enum is
-      // upper-cased. Assert across without altering the runtime value.
-      logger.setLevel(result.logLevel as unknown as LogLevel);
+      logger.setLevel(result.logLevel);
     }
     if (result.errorReporting) {
       setErrorReporting(result.errorReporting);
@@ -1248,7 +1246,7 @@ function setupIpcHandlers(): void {
         return { ok: false, error: 'Invalid settings file format' };
       }
       const merged = settingsManager.updateSettings(parsed);
-      logger.setLevel(merged.logLevel as unknown as LogLevel);
+      logger.setLevel(merged.logLevel);
       scheduler.resyncFromSettings();
       return { ok: true, settings: merged };
     } catch (err) {

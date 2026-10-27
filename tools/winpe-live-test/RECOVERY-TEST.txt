@@ -1,0 +1,129 @@
+OPBS Recovery-After-Reboot Live Test - Instructions (any x64 Windows machine)
+============================================================================
+
+What this test does
+-------------------
+Exercises the full "restore after reboot into the Windows Recovery
+Environment" round-trip against a scratch VHDX - never a physical disk:
+
+  1. prep   : make sure test\src.vhdx exists (the prep-src.js source VHD)
+              and back it up to test\recovery-image.opbs with
+              backup --source-vhd.
+  2. stage  : write test\recovery-config.json (restore into the scratch
+              test\restored.vhdx) and run "recovery stage". This copies the
+              machine's winre.wim (never modifies it), stages the
+              auto-restore payload under %SystemDrive%\Recovery\OPBS and
+              adds a ONE-SHOT "OPBS Recovery" BCD boot entry.
+  3. reboot : the machine boots "OPBS Recovery" once, runs the restore
+              automatically (a 10-second cancel window appears at boot),
+              writes OPBS-restore-result.json at the system-drive root and
+              reboots back into Windows by itself.
+  4. after  : read the result with "recovery status" (the marker is
+              consumed on read), verify test\restored.vhdx and that the
+              one-shot boot entry is gone, then remove everything with
+              "recovery cleanup".
+
+  cancel : abort without rebooting - runs "recovery cleanup" and asserts the
+           staged folder and the boot entry are gone.
+
+The source of truth for this harness is the OPBS repo
+(tools/winpe-live-test/); the scripts run from there in a live Windows
+session on the test machine (they do NOT run from the USB stick).
+
+Safety
+------
+- No step writes to a physical disk. The only restore target is the scratch
+  VHDX test\restored.vhdx, created and written by the WinRE phase.
+- Everything stays inside <this folder>\test\ and
+  %SystemDrive%\Recovery\OPBS (the staged payload).
+- The one-shot boot entry is removed afterwards (after/cancel); the normal
+  boot menu is never modified. The interactive recovery wizard and the
+  recovery media can restore to physical disks - this test does not use
+  them for anything.
+- "recovery stage" DOES edit the machine's BCD (adds the one-shot entry)
+  and, if BitLocker is on, suspends its protectors for one boot (they
+  resume automatically afterwards). That is the feature under test.
+
+Requirements
+------------
+- x64 Windows with UEFI or BIOS boot, >= 2 GB RAM
+- A repo build with dist\ present (npm run build), or an installed OPBS
+  pointed at with:
+    recovery-test.cmd <phase> --cli <path\to\dist\cli\index.js>
+- Admin rights. Run recovery-test.cmd from an elevated console (the
+  bcdedit checks read the system BCD); staging raises one UAC prompt.
+- test\src.vhdx from prep-src.js (the WinPE VHD test's source VHD). The
+  prep phase generates it via prep-src.js if it is missing.
+- Note: <this folder>\test\ must live on the system drive. The WinRE phase
+  reads the image and writes restored.vhdx via absolute paths, and the PE
+  environment usually keeps that drive letter.
+
+How to run
+----------
+Open an elevated console (Run as administrator), cd to tools\winpe-live-test
+and run one phase per step. Each phase ends with "ALL PASS" (failure shows
+"FAILED: n").
+
+1. recovery-test.cmd prep
+   Backs test\src.vhdx up to test\recovery-image.opbs.
+2. recovery-test.cmd stage
+   Stages the restore and prints the follow-up instructions - READ them.
+   Then restart the machine now (Start menu -> Restart, or:
+   shutdown /r /t 0). Do not shut down + power on (Fast Startup).
+3. The machine boots "OPBS Recovery" instead of Windows (one-shot). A
+   10-second cancel window appears - do NOT cancel. The restore runs
+   automatically into test\restored.vhdx, then the machine reboots back
+   into Windows on its own. Log in again.
+4. recovery-test.cmd after
+   Verifies the round-trip and cleans up.
+
+To abort BEFORE restarting (nothing has been restored yet):
+   recovery-test.cmd cancel
+
+Expected ending line of every phase: "ALL PASS".
+
+Where the evidence lands
+------------------------
+  test\recovery-test-log.txt    - full console log with PASS/FAIL lines
+                                  for every phase (prep truncates the log,
+                                  later phases append to it)
+  test\recovery-image.opbs      - the image the staged restore writes back
+  test\restored.vhdx            - the scratch VHDX restored by the WinRE
+                                  run (after phase only)
+  test\recovery-config.json     - the exact config that was staged
+  %SystemDrive%\OPBS-restore-result.json - written by the WinRE run and
+                                  consumed by "recovery status"; the after
+                                  phase logs its contents
+
+Manual checkpoints
+------------------
+- At the OPBS Recovery console the restore output streams by; on success
+  the last lines are "Restore completed. Rebooting back into Windows..."
+  and the machine restarts within seconds.
+- If the machine does NOT return to Windows automatically, look at the
+  recovery console:
+  * "*** THE RESTORE FAILED ***" - the error is printed above it. Take a
+    photo, then reboot manually. The after phase reports the failure exit
+    code from the result file ("FAIL: recovery restore reported ok - ...").
+  * "Cancelled - no restore has been run." - the 10-second window was
+    cancelled. The one-shot entry is consumed at boot either way, so type
+    wpeutil reboot to come back to Windows, then run
+    recovery-test.cmd cancel and start over with recovery-test.cmd stage.
+  * "ERROR: staged OPBS restore payload not found on any volume." - the
+    staged volume kept no drive letter in PE. Look for \Recovery\OPBS on
+    the volumes (dir C:\Recovery\OPBS, dir D:\Recovery\OPBS, ...) and
+    report it - this is a bug in the payload scan.
+  * If the console sits at a prompt after the restore finished, type
+    wpeutil reboot.
+- If the machine boots straight back into Windows without showing OPBS
+  Recovery and recovery-test.cmd after reports "no pending result", the
+  one-shot entry did not fire: run recovery-test.cmd cancel, then
+  recovery-test.cmd stage again and RESTART (shutdown /r /t 0).
+
+Re-running
+----------
+Every phase is safe to re-run where practical: prep refreshes
+test\recovery-image.opbs, stage cleans up a previous staging first and
+deletes a stale test\restored.vhdx, cancel can be run any number of times.
+"after" consumes the result marker, so a second after run reports "no
+pending result" - run prep + stage again for another full round-trip.

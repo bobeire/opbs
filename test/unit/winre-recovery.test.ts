@@ -7,6 +7,7 @@ import {
   recoveryPayloadTextFiles,
   buildStageScript,
   buildCleanupScript,
+  stageRecoveryRestore,
   type RecoveryStageConfig,
   type StageScriptParams
 } from '../../src/main/recovery/winre-recovery';
@@ -147,6 +148,22 @@ describe('recoveryPayloadTextFiles', () => {
     expect(restoreJson(restoreConfig({ passphrase: 'hunter2' })).passphrase).toBe('hunter2');
   });
 
+  it('writes targetVirtualDisk instead of targetDiskIndex for virtual-disk targets', () => {
+    const parsed = restoreJson(
+      restoreConfig({
+        targetDiskIndex: undefined,
+        targetVirtualDisk: { path: 'C:\\test\\restored.vhdx', virtualSize: 268435456, type: 'dynamic' }
+      })
+    );
+    expect(parsed.targetDiskIndex).toBeUndefined();
+    expect(parsed.targetVirtualDisk).toEqual({
+      path: 'C:\\test\\restored.vhdx',
+      virtualSize: 268435456,
+      type: 'dynamic'
+    });
+    expect(parsed.targetPartitions).toEqual([2, 3]);
+  });
+
   it('defaults verifyBeforeWrite to true and honors an explicit false', () => {
     expect(restoreJson(restoreConfig()).verifyBeforeWrite).toBe(true);
     expect(restoreJson(restoreConfig({ verifyBeforeWrite: false })).verifyBeforeWrite).toBe(false);
@@ -218,5 +235,36 @@ describe('buildCleanupScript', () => {
     expect(script).toContain('Remove-Item -Recurse -Force $stageRoot');
     expect(script).toContain('ok = $true');
     expect(script).toContain('ConvertTo-Json');
+  });
+});
+
+describe('stageRecoveryRestore validation (early exits — nothing machine-level runs)', () => {
+  it('rejects a missing image', async () => {
+    const r = await stageRecoveryRestore({ imagePath: '', targetDiskIndex: 0, targetPartitions: [0] });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('No image');
+  });
+
+  it('rejects setting both a disk and a virtual-disk target', async () => {
+    const r = await stageRecoveryRestore({
+      imagePath: 'D:\\x.opbs',
+      targetDiskIndex: 0,
+      targetVirtualDisk: { path: 'C:\\t.vhdx', virtualSize: 1, type: 'dynamic' },
+      targetPartitions: [0]
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('exactly one');
+  });
+
+  it('rejects setting neither target', async () => {
+    const r = await stageRecoveryRestore({ imagePath: 'D:\\x.opbs', targetPartitions: [0] });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('exactly one');
+  });
+
+  it('rejects an empty partition selection', async () => {
+    const r = await stageRecoveryRestore({ imagePath: 'D:\\x.opbs', targetDiskIndex: 0, targetPartitions: [] });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('No partitions');
   });
 });

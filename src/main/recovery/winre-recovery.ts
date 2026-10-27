@@ -58,7 +58,10 @@ const PE_PAYLOAD_SCAN = 'Recovery\\OPBS\\media\\OPBS\\node.exe';
 /** The restore config staged as OPBS-restore.json (CLI restore schema). */
 export interface RecoveryStageConfig {
   imagePath: string;
-  targetDiskIndex: number;
+  /** Target physical disk (mutually exclusive with targetVirtualDisk). */
+  targetDiskIndex?: number;
+  /** Restore into a virtual disk instead — used by the live-test harness. */
+  targetVirtualDisk?: { path: string; virtualSize: number; type: 'dynamic' | 'fixed' };
   targetPartitions: number[];
   passphrase?: string;
   verifyBeforeWrite?: boolean;
@@ -218,7 +221,9 @@ export function recoveryPayloadTextFiles(config: RecoveryStageConfig): Array<{ n
       content: JSON.stringify(
         {
           imagePath: config.imagePath,
-          targetDiskIndex: config.targetDiskIndex,
+          ...(config.targetVirtualDisk
+            ? { targetVirtualDisk: config.targetVirtualDisk }
+            : { targetDiskIndex: config.targetDiskIndex }),
           targetPartitions: config.targetPartitions,
           ...(config.passphrase ? { passphrase: config.passphrase } : {}),
           verifyBeforeWrite: config.verifyBeforeWrite !== false
@@ -486,8 +491,10 @@ export async function stageRecoveryRestore(
     if (!config || typeof config.imagePath !== 'string' || !config.imagePath.trim()) {
       return { ok: false, error: 'No image selected.' };
     }
-    if (!Number.isInteger(config.targetDiskIndex) || config.targetDiskIndex < 0) {
-      return { ok: false, error: 'No target disk selected.' };
+    const hasVhd = !!config.targetVirtualDisk && typeof config.targetVirtualDisk.path === 'string';
+    const hasDisk = Number.isInteger(config.targetDiskIndex) && (config.targetDiskIndex ?? -1) >= 0;
+    if (hasVhd === hasDisk) {
+      return { ok: false, error: 'Set exactly one restore target: a target disk or a target virtual disk.' };
     }
     if (!Array.isArray(config.targetPartitions) || config.targetPartitions.length === 0) {
       return { ok: false, error: 'No partitions selected.' };

@@ -62,6 +62,7 @@
   "build": {
     "appId": "com.rhitcs.opbs",
     "productName": "OPBS",
+    "afterAllArtifactBuild": "scripts/after-build.js",
     "directories": {
       "output": "release"
     },

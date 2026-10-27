@@ -316,7 +316,8 @@ declare global {
       mediaDrives: () => Promise<{ primary: any[]; others: any[]; error?: string }>;
       recoveryStage: (config: {
         imagePath: string;
-        targetDiskIndex: number;
+        targetDiskIndex?: number;
+        targetVirtualDisk?: { path: string; virtualSize: number; type: 'dynamic' | 'fixed' };
         targetPartitions: number[];
         passphrase?: string;
         verifyBeforeWrite?: boolean;
