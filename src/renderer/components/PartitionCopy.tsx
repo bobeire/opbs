@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { planTargetLayout } from '../../main/utils/clone-layout';
 
 const MiB = 1024 * 1024;
@@ -26,8 +26,37 @@ interface ProgressInfo {
   currentPartition: string;
 }
 
+interface PartitionInfo {
+  partitionIndex: number;
+  offset: number;
+  size: number;
+  driveLetter?: string | null;
+  label?: string;
+  fsType?: string;
+  usedSpace?: number;
+}
+
+interface DiskInfo {
+  index: number;
+  model: string;
+  size: number;
+  partitions: PartitionInfo[];
+}
+
+interface ClonePreflightResult {
+  ok: boolean;
+  error?: string;
+  targetDiskPartitionCount?: number;
+  writeTableScheme?: string | null;
+  warnings?: string[];
+}
+
+interface CloneRunResult {
+  warnings: string[];
+}
+
 function PartitionCopy({ onComplete }: { onComplete: () => void }) {
-  const [disks, setDisks] = useState<any[]>([]);
+  const [disks, setDisks] = useState<DiskInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -45,23 +74,23 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
   const [dragSource, setDragSource] = useState<DragSource | null>(null);
   const dragRef = useRef<DragSource | null>(null);
 
-  const [preflightState, setPreflightState] = useState<{ configKey: string; result: any; error?: string } | null>(null);
+  const [preflightState, setPreflightState] = useState<{ configKey: string; result: ClonePreflightResult | null; error?: string } | null>(null);
   const [ack, setAck] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
   const [phase, setPhase] = useState<'config' | 'running' | 'done' | 'error'>('config');
   const [progress, setProgress] = useState<ProgressInfo | null>(null);
-  const [result, setResult] = useState<any | null>(null);
+  const [result, setResult] = useState<CloneRunResult | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const loadDisks = async () => {
     setLoading(true);
     setLoadError(null);
     try {
-      const list = await window.electronAPI.getDisks();
+      const list: DiskInfo[] = await window.electronAPI.getDisks();
       setDisks(list);
-    } catch (e: any) {
-      setLoadError(e?.message ?? 'Failed to list disks');
+    } catch (e: unknown) {
+      setLoadError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
@@ -69,14 +98,14 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
 
   useEffect(() => {
     let cancelled = false;
-    void window.electronAPI.getDisks().then((list) => {
+    void window.electronAPI.getDisks().then((list: DiskInfo[]) => {
       if (!cancelled) {
         setDisks(list);
         setLoading(false);
       }
-    }).catch((e: any) => {
+    }).catch((e: unknown) => {
       if (!cancelled) {
-        setLoadError(e?.message ?? 'Failed to list disks');
+        setLoadError(e instanceof Error ? e.message : String(e));
         setLoading(false);
       }
     });
@@ -86,7 +115,7 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
   }, []);
 
   useEffect(() => {
-    const cleanup = window.electronAPI.onCloneProgress((p: any) => {
+    const cleanup = window.electronAPI.onCloneProgress((p: ProgressInfo) => {
       setProgress({ ...p });
     });
     return cleanup;
@@ -94,13 +123,13 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
 
   const targetDisk = targetDiskIndex !== null ? disks.find((d) => d.index === targetDiskIndex) : null;
 
-  const partitionOf = (diskIndex: number, partitionIndex: number): any => {
+  const partitionOf = useCallback((diskIndex: number, partitionIndex: number): PartitionInfo | null => {
     const disk = disks.find((d) => d.index === diskIndex);
     if (!disk) return null;
-    return disk.partitions.find((p: any) => p.partitionIndex === partitionIndex) ?? null;
-  };
+    return disk.partitions.find((p) => p.partitionIndex === partitionIndex) ?? null;
+  }, [disks]);
 
-  const partitionLabel = (p: any): string => {
+  const partitionLabel = (p: PartitionInfo | null | undefined): string => {
     if (!p) return 'Partition';
     if (p.driveLetter) return `${p.driveLetter}:`;
     return p.label ?? `Partition ${p.partitionIndex}`;
@@ -109,7 +138,7 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
   // Filesystem capabilities for per-partition sizing: NTFS can both grow and
   // shrink on clone; FAT32 can only shrink; anything else is fixed at its
   // source size (the helper could not honour a different one).
-  const sizingBounds = (p: any): { minBytes: number; maxBytes: number } => {
+  const sizingBounds = (p: PartitionInfo): { minBytes: number; maxBytes: number } => {
     const used = alignUpMiB((p.usedSpace ?? 0) + MiB);
     if (p.fsType === 'NTFS') return { minBytes: used, maxBytes: Number.MAX_SAFE_INTEGER };
     if (p.fsType === 'FAT32') return { minBytes: used, maxBytes: p.size };
@@ -153,7 +182,7 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
       });
     if (parts.length === 0) return null;
     return planTargetLayout(parts, targetDisk.size, { growLast, shrinkToFit });
-  }, [placed, targetDiskIndex, sourceDiskIndex, targetDisk, disks, growLast, shrinkToFit, sizeGb]);
+  }, [placed, targetDiskIndex, sourceDiskIndex, targetDisk, growLast, shrinkToFit, sizeGb, partitionOf]);
 
   const cloneConfig = useMemo(() => {
     if (!plan || !plan.ok || sourceDiskIndex === null || targetDiskIndex === null) return null;
@@ -176,16 +205,16 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
   useEffect(() => {
     if (phase !== 'config' || !cloneConfig || !configKey) return;
     let cancelled = false;
-    void window.electronAPI.clonePreflight(cloneConfig).then((p: any) => {
+    void window.electronAPI.clonePreflight(cloneConfig).then((p: ClonePreflightResult) => {
       if (cancelled) return;
       if (p?.ok) {
         setPreflightState({ configKey, result: p });
       } else {
         setPreflightState({ configKey, result: null, error: p?.error ?? 'Copy plan rejected' });
       }
-    }).catch((e: any) => {
+    }).catch((e: unknown) => {
       if (!cancelled) {
-        setPreflightState({ configKey, result: null, error: e?.message ?? 'Copy plan rejected' });
+        setPreflightState({ configKey, result: null, error: e instanceof Error ? e.message : String(e) });
       }
     });
     return () => {
@@ -225,7 +254,7 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
     });
   };
 
-  const addAll = (disk: any) => {
+  const addAll = (disk: DiskInfo) => {
     if (targetDiskIndex === null) {
       setNote('Select a target disk first.');
       return;
@@ -250,7 +279,7 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
     setPlaced((prev) => {
       const seen = new Set(prev.map((d) => d.partitionIndex));
       const additions = disk.partitions
-        .map((p: any) => p.partitionIndex)
+        .map((p) => p.partitionIndex)
         .filter((i: number) => !seen.has(i))
         .map((i: number) => ({ partitionIndex: i }));
       return [...prev, ...additions];
@@ -304,10 +333,10 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
     setPhase('running');
     try {
       const res = await window.electronAPI.startClone(cloneConfig);
-      setResult(res);
+      setResult(res as unknown as CloneRunResult);
       setPhase('done');
-    } catch (e: any) {
-      setErrorMsg(e?.message ?? 'Copy failed');
+    } catch (e: unknown) {
+      setErrorMsg(e instanceof Error ? e.message : String(e));
       setPhase('error');
     }
   };
@@ -370,7 +399,7 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
           <p>Partitions were copied to the target disk successfully.</p>
           <p>The source disk was not modified.</p>
           {(result?.warnings?.length ?? 0) > 0 && (
-            <p className="dashboard-message">{result.warnings.join('; ')}</p>
+            <p className="dashboard-message">{result!.warnings.join('; ')}</p>
           )}
         </div>
         <div className="wizard-actions">
@@ -426,7 +455,7 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
                 </button>
               </div>
               <div className="copy-chip-list">
-                {disk.partitions.map((p: any) => {
+                {disk.partitions.map((p) => {
                   const usedHere = placed.some((d) => d.partitionIndex === p.partitionIndex) && sourceDiskIndex === disk.index;
                   return (
                     <div
@@ -491,7 +520,7 @@ function PartitionCopy({ onComplete }: { onComplete: () => void }) {
                   <div className="copy-strip-label">Current layout</div>
                   <div className="copy-strip">
                     {disk.partitions.length === 0 && <div className="copy-strip-free" style={{ width: '100%' }}>Empty</div>}
-                    {disk.partitions.map((p: any) => (
+                    {disk.partitions.map((p) => (
                       <div
                         key={p.partitionIndex}
                         className="copy-strip-existing"

@@ -82,8 +82,8 @@ function VssView({ onComplete }: VssViewProps) {
   const loadStatus = async () => {
     try {
       setStatus(await window.electronAPI.getVssStatus());
-    } catch (e: any) {
-      setError(e?.message ?? 'Failed to query the VSS service');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -91,8 +91,8 @@ function VssView({ onComplete }: VssViewProps) {
     void (async () => {
       try {
         setStatus(await window.electronAPI.getVssStatus());
-      } catch (e: any) {
-        setError(e?.message ?? 'Failed to query the VSS service');
+      } catch (e: unknown) {
+        setError(e instanceof Error ? e.message : String(e));
       }
     })();
     void (async () => {
@@ -104,7 +104,6 @@ function VssView({ onComplete }: VssViewProps) {
         /* leave empty */
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const runInspect = async () => {
@@ -115,8 +114,8 @@ function VssView({ onComplete }: VssViewProps) {
       const r = await window.electronAPI.inspectVss();
       setInspect(r);
       setControl(null);
-    } catch (e: any) {
-      setError(e?.message ?? 'VSS inspection failed');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
@@ -131,8 +130,8 @@ function VssView({ onComplete }: VssViewProps) {
       const r = await window.electronAPI.vssSmokeTest(selectedVolume);
       setSmoke(r);
       setControl(null);
-    } catch (e: any) {
-      setError(e?.message ?? 'Snapshot smoke test failed');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
@@ -147,8 +146,8 @@ function VssView({ onComplete }: VssViewProps) {
       const r = await window.electronAPI.vssServiceControl(action);
       setControl(r);
       await loadStatus();
-    } catch (e: any) {
-      setError(e?.message ?? `Failed to ${action} the VSS service`);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
@@ -163,8 +162,8 @@ function VssView({ onComplete }: VssViewProps) {
       const r = await window.electronAPI.vssRepair();
       setRepair(r);
       await loadStatus();
-    } catch (e: any) {
-      setError(e?.message ?? 'VSS repair failed');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }

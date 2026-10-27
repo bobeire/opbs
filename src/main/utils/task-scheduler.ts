@@ -265,6 +265,9 @@ export async function isHelperTaskRegistered(): Promise<boolean> {
  */
 export function isRunAsAdmin(exePath: string): boolean {
   try {
+    // Lazy require inside the registry probe: avoids loading child_process
+    // until the check actually runs.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { execFileSync } = require('child_process') as typeof import('child_process');
     const out = execFileSync(
       regExe,

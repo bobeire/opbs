@@ -426,7 +426,6 @@ function resolveExfatPath(session: ExfatBrowseSession, relPath: string): ExfatEn
 
 /** Resolve a relative path to a browse node (filesystem-agnostic). */
 export function resolvePath(session: BrowseSession, relPath: string): BrowseNode | null {
-  const segs = splitPath(relPath);
   if (session.filesystem === 'ntfs') {
     const rec = resolveNtfsPath(session, relPath);
     if (!rec) return null;

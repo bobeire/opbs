@@ -22,6 +22,14 @@ interface MediaCreateResult {
   error?: string;
 }
 
+interface MediaCreateOptions {
+  format: 'iso' | 'usb';
+  arch: 'amd64' | 'arm64';
+  output: string;
+  restoreConfig?: string;
+  yesForUsb?: boolean;
+}
+
 interface MediaDriveOption {
   letter: string;
   volumeLabel: string;
@@ -84,10 +92,10 @@ function MediaView({ onComplete }: MediaViewProps) {
   useEffect(() => {
     void (async () => {
       try {
-        const r = await window.electronAPI.mediaCheck();
+        const r: MediaCheckReport = await window.electronAPI.mediaCheck();
         setReport(r);
-      } catch (e: any) {
-        setError(e?.message ?? 'Failed to check media tools');
+      } catch (e: unknown) {
+        setError(e instanceof Error ? e.message : String(e));
       } finally {
         setChecking(false);
       }
@@ -118,7 +126,7 @@ function MediaView({ onComplete }: MediaViewProps) {
     setProgress('');
     setBuilding(true);
     try {
-      const options: any = {
+      const options: MediaCreateOptions = {
         format,
         arch: arch as 'amd64' | 'arm64',
         output: format === 'iso' ? isoPath : usbDrive,
@@ -127,10 +135,10 @@ function MediaView({ onComplete }: MediaViewProps) {
       if (format === 'usb') {
         options.yesForUsb = true;
       }
-      const r = await window.electronAPI.mediaCreate(options);
+      const r: MediaCreateResult = await window.electronAPI.mediaCreate(options);
       setResult(r);
-    } catch (e: any) {
-      setError(e?.message ?? 'Media creation failed');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBuilding(false);
     }
@@ -148,7 +156,7 @@ function MediaView({ onComplete }: MediaViewProps) {
 
   const refreshReport = async () => {
     try {
-      const r = await window.electronAPI.mediaCheck();
+      const r: MediaCheckReport = await window.electronAPI.mediaCheck();
       setReport(r);
     } catch (e) {
       setInstallError(e instanceof Error ? e.message : 'Failed to re-check media tools');

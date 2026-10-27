@@ -127,6 +127,32 @@ interface Settings {
   checkForUpdatesOnStartup: boolean;
 }
 
+/** Settings read back from the IPC layer: any field or section member may be
+ *  missing (older settings files predate sections/fields), which is why
+ *  mergeSettings layers each section over its defaults. */
+type LoadedSettings = Omit<
+  Partial<Settings>,
+  | 'notifications'
+  | 'scheduledVerification'
+  | 'scheduledDrill'
+  | 'scheduledMigrateDrill'
+  | 'scheduledScrub'
+  | 'cloud'
+  | 'errorReporting'
+> & {
+  notifications?: Partial<NotificationSettings>;
+  scheduledVerification?: Partial<ScheduledVerification>;
+  scheduledDrill?: Partial<ScheduledRestoreDrill>;
+  scheduledMigrateDrill?: Partial<ScheduledMigrateDrill>;
+  scheduledScrub?: Partial<ScheduledScrub>;
+  cloud?: {
+    s3?: Partial<S3Profile>;
+    sftp?: Partial<SftpProfile>;
+    ftp?: Partial<FtpProfile>;
+  };
+  errorReporting?: Partial<Settings['errorReporting']>;
+};
+
 const DEFAULT_SETTINGS: Settings = {
   theme: 'dark',
   defaultCompression: 3,
@@ -281,14 +307,14 @@ function Settings() {
     try {
       await window.electronAPI.registerHelperTask();
       setHelperTaskRegistered(true);
-    } catch (e: any) {
-      setHelperTaskError(e?.message ?? 'Registration failed');
+    } catch (e: unknown) {
+      setHelperTaskError(e instanceof Error ? e.message : 'Registration failed');
     } finally {
       setHelperTaskLoading(false);
     }
   };
 
-  const mergeSettings = (loaded: any): Settings => ({
+  const mergeSettings = (loaded: LoadedSettings | null | undefined): Settings => ({
     ...DEFAULT_SETTINGS,
     ...loaded,
     notifications: { ...DEFAULT_SETTINGS.notifications, ...(loaded?.notifications || {}) },
@@ -352,17 +378,17 @@ function Settings() {
     setHasChanges(true);
   };
 
-  const handleS3Change = (key: keyof S3Profile, value: any) => {
+  const handleS3Change = (key: keyof S3Profile, value: S3Profile[keyof S3Profile]) => {
     setSettings({ ...settings, cloud: { ...settings.cloud, s3: { ...settings.cloud.s3, [key]: value } } });
     setHasChanges(true);
   };
 
-  const handleSftpChange = (key: keyof SftpProfile, value: any) => {
+  const handleSftpChange = (key: keyof SftpProfile, value: SftpProfile[keyof SftpProfile]) => {
     setSettings({ ...settings, cloud: { ...settings.cloud, sftp: { ...settings.cloud.sftp, [key]: value } } });
     setHasChanges(true);
   };
 
-  const handleFtpChange = (key: keyof FtpProfile, value: any) => {
+  const handleFtpChange = (key: keyof FtpProfile, value: FtpProfile[keyof FtpProfile]) => {
     setSettings({ ...settings, cloud: { ...settings.cloud, ftp: { ...settings.cloud.ftp, [key]: value } } });
     setHasChanges(true);
   };
@@ -375,8 +401,8 @@ function Settings() {
       setSettings(mergeSettings(saved));
       const result = await window.electronAPI.verifyS3();
       setS3Result(result.ok ? { ok: true, count: result.keys?.length ?? 0 } : { ok: false, error: result.error });
-    } catch (e: any) {
-      setS3Result({ ok: false, error: e?.message ?? 'Connection failed' });
+    } catch (e: unknown) {
+      setS3Result({ ok: false, error: e instanceof Error ? e.message : 'Connection failed' });
     } finally {
       setS3Checking(false);
     }
@@ -390,8 +416,8 @@ function Settings() {
       setSettings(mergeSettings(saved));
       const result = await window.electronAPI.verifySftp();
       setSftpResult(result.ok ? { ok: true, count: result.count ?? 0 } : { ok: false, error: result.error });
-    } catch (e: any) {
-      setSftpResult({ ok: false, error: e?.message ?? 'Connection failed' });
+    } catch (e: unknown) {
+      setSftpResult({ ok: false, error: e instanceof Error ? e.message : 'Connection failed' });
     } finally {
       setSftpChecking(false);
     }
@@ -405,8 +431,8 @@ function Settings() {
       setSettings(mergeSettings(saved));
       const result = await window.electronAPI.verifyFtp();
       setFtpResult(result.ok ? { ok: true, count: result.count ?? 0 } : { ok: false, error: result.error });
-    } catch (e: any) {
-      setFtpResult({ ok: false, error: e?.message ?? 'Connection failed' });
+    } catch (e: unknown) {
+      setFtpResult({ ok: false, error: e instanceof Error ? e.message : 'Connection failed' });
     } finally {
       setFtpChecking(false);
     }
@@ -516,7 +542,7 @@ function Settings() {
           <label>Log Level:</label>
           <select
             value={settings.logLevel}
-            onChange={(e) => handleChange('logLevel', e.target.value as any)}
+            onChange={(e) => handleChange('logLevel', e.target.value as Settings['logLevel'])}
           >
             <option value="debug">Debug</option>
             <option value="info">Info</option>

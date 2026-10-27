@@ -376,8 +376,6 @@ export function planNtfsGrow(bytes: Buffer, newTotalSectors: number): NtfsGrowPl
     throw new GrowUnsupportedError('$Bitmap data run does not fit inside the old volume');
   }
 
-  const oldBitmapBytes = Math.ceil(oldTotalClusters / 8);
-  const oldBitmapClusters = Math.ceil(oldBitmapBytes / layout.clusterSize);
   const newRunClusters = Math.ceil(newBitmapBytes / layout.clusterSize);
   if (newRunClusters < bitmapRun.runLength) {
     throw new GrowUnsupportedError('$Bitmap allocation would shrink during grow');

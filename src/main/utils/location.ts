@@ -48,7 +48,9 @@ export function isNonFilesystemLocation(location: string): boolean {
  */
 export function detectFilesystemType(filePath: string): string | null {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // Lazy require inside the detection helper: avoids loading child_process
+    // until a filesystem probe actually runs.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { execFileSync } = require('child_process') as typeof import('child_process');
     const match = filePath.match(/^([A-Za-z]):/);
     if (!match) return null;

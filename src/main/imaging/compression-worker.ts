@@ -10,7 +10,9 @@ let fzstdDecompress: ((data: Uint8Array) => Uint8Array) | null = null;
 const addonPath = (workerData as { addonPath?: string } | null)?.addonPath;
 if (addonPath) {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // Lazy require: the native addon path is only known at runtime (workerData),
+    // so it cannot be a static import.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const addon = require(addonPath);
     if (addon.zstdCompress) nativeCompress = addon.zstdCompress;
     if (addon.zstdDecompress) nativeDecompress = addon.zstdDecompress;
@@ -21,7 +23,9 @@ if (addonPath) {
 
 // Always load fzstd for decompression fallback.
 try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  // Lazy require: optional fallback codec; the worker must start even when it
+  // is unavailable (the error surfaces only if a decompress needs it).
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   fzstdDecompress = require('fzstd').decompress;
 } catch {
   /* will error at runtime if needed */
@@ -33,7 +37,9 @@ function compress(data: Uint8Array, level: number, codec: string): Buffer {
       return Buffer.from(nativeCompress(data, level));
     }
     // JS fallback: zstdify with level fallback for known FSE bugs.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // Lazy require: zstdify is the JS fallback, loaded only when the native
+    // addon is missing, so the worker keeps running without it.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const zstdify = require('zstdify');
     try {
       return Buffer.from(zstdify.compress(data, { level }));
@@ -43,7 +49,7 @@ function compress(data: Uint8Array, level: number, codec: string): Buffer {
         if (fb === level) continue;
         try { return Buffer.from(zstdify.compress(data, { level: fb })); } catch { /* try next */ }
       }
-      throw new Error('zstdify compress failed at all levels: ' + msg);
+      throw new Error('zstdify compress failed at all levels: ' + msg, { cause: e });
     }
   }
   // deflate

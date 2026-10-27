@@ -72,11 +72,33 @@ export async function discoverNetworkMachines(): Promise<DiscoveredMachine[]> {
   return [...hosts.values()];
 }
 
+/** Fields read off the lazily-required bonjour-service objects below (the
+ *  package is loaded via require, so only what this file consumes is declared). */
+interface BonjourServiceInfo {
+  name?: string;
+  host: string;
+  type?: string | { name?: string };
+  referer?: { address?: string };
+}
+
+interface BonjourBrowser {
+  on(event: 'up' | 'error', listener: (service: BonjourServiceInfo) => void): void;
+}
+
+interface BonjourInstance {
+  find(options: { type: string }): BonjourBrowser;
+  destroy(): void;
+}
+
+interface BonjourModule {
+  Bonjour: new () => BonjourInstance;
+}
+
 function discoverMdns(
   add: (name: string, address: string | undefined, service: string) => void
 ): Promise<void> {
   return new Promise((resolve) => {
-    let bonjourMod: any;
+    let bonjourMod: BonjourModule;
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       bonjourMod = require('bonjour-service');
@@ -84,7 +106,7 @@ function discoverMdns(
       resolve();
       return;
     }
-    let b: any = null;
+    let b: BonjourInstance | null = null;
     try {
       b = new bonjourMod.Bonjour();
     } catch {
@@ -105,7 +127,7 @@ function discoverMdns(
       }
     };
 
-    const onUp = (srv: any) => {
+    const onUp = (srv: BonjourServiceInfo) => {
       if (!srv) return;
       const svcType = typeof srv.type === 'object' ? srv.type.name : srv.type;
       add(srv.name ?? srv.host, srv.referer?.address, svcType ? `_${svcType}._tcp` : '_smb._tcp');
@@ -113,7 +135,7 @@ function discoverMdns(
 
     for (const type of ['smb', 'workstation', 'device-info']) {
       try {
-        const browser: any = b.find({ type });
+        const browser: BonjourBrowser = b.find({ type });
         browser.on('up', onUp);
         browser.on('error', () => {
           // ignore individual browse errors; timer handles completion

@@ -113,8 +113,6 @@ const ATTR_INDEX_ALLOCATION = 0xa0;
 const ATTR_BITMAP = 0xb0;
 const ATTR_EFS = 0x100;
 
-const NTFS_SIGNATURE = 'NTFS    ';
-
 export function parseBootSector(reader: PartitionReader): NtfsLayout {
   const bpb = reader.read(0, 512);
   const oem = bpb.toString('ascii', 3, 11);

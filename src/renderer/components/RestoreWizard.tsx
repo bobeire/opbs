@@ -23,6 +23,33 @@ interface CloudDownloadProgress {
   bytesTotal: number;
 }
 
+/** Payload of the 'restore-progress' event (mapRestoreJobProgress in main). */
+interface RestoreProgress {
+  phase: 'preparing' | 'reading_image' | 'restoring' | 'completed' | 'error';
+  percentComplete: number;
+  bytesProcessed: number;
+  totalBytes: number;
+  speed: number;
+  estimatedTimeRemaining: number;
+  currentPartition: string;
+}
+
+/** Image summary returned by the get-image-info IPC (summarizeImage in main):
+ *  the fields this wizard reads. */
+interface ImageInfo {
+  totalSize: number;
+  partitions: Array<{
+    index: number;
+    size: number;
+    fsType: string;
+    offsetOnDisk: number;
+  }>;
+  backupDate: string;
+  encrypted: boolean;
+  incremental: boolean;
+  baseImagePath?: string;
+}
+
 interface DiskInfo {
   index: number;
   model: string;
@@ -114,7 +141,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   const isClone = mode === 'clone';
   const [currentStep, setCurrentStep] = useState<WizardStep>('select_image');
   const [imagePath, setImagePath] = useState(initialImagePath ?? '');
-  const [imageInfo, setImageInfo] = useState<any>(null);
+  const [imageInfo, setImageInfo] = useState<ImageInfo | null>(null);
   const [disks, setDisks] = useState<DiskInfo[]>([]);
   const [disksLoading, setDisksLoading] = useState(true);
   const [targetDiskIndex, setTargetDiskIndex] = useState<number | null>(null);
@@ -140,7 +167,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   const [unlockError, setUnlockError] = useState<string | null>(null);
   const [unlockNotice, setUnlockNotice] = useState<string | null>(null);
   const [preflightNonce, setPreflightNonce] = useState(0);
-  const [progress, setProgress] = useState<any>(null);
+  const [progress, setProgress] = useState<RestoreProgress | null>(null);
   const [restoreResult, setRestoreResult] = useState<RestoreResultSummary | null>(null);
   const [restoreError, setRestoreError] = useState<string | null>(null);
   // Cloud fetch: the URI downloads into an opbs-restore-* temp dir and the
@@ -163,7 +190,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   };
 
   useEffect(() => {
-    const cleanup = window.electronAPI.onRestoreProgress((p) => {
+    const cleanup = window.electronAPI.onRestoreProgress((p: RestoreProgress) => {
       setProgress(p);
     });
     return cleanup;
@@ -205,7 +232,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     if (!imagePath) return;
     window.electronAPI
       .getImageInfo(imagePath)
-      .then((info) => {
+      .then((info: ImageInfo) => {
         setImageInfo(info);
         // Offer a virtual disk big enough for the whole image until the user
         // types their own size.
@@ -276,8 +303,8 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
           .then((res) => {
             if (alive) setPreflight(res);
           })
-          .catch((e: any) => {
-            if (alive) setPreflight({ ok: false, error: e?.message ?? 'Preflight failed' });
+          .catch((e: unknown) => {
+            if (alive) setPreflight({ ok: false, error: e instanceof Error ? e.message : 'Preflight failed' });
           })
           .finally(() => {
             if (alive) setPreflightLoading(false);
@@ -645,7 +672,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                 <div className="partition-selection">
                   <h3>Select Partitions to Restore</h3>
                   <div className="partition-list">
-                    {imageInfo?.partitions.map((partition: any) => {
+                    {imageInfo?.partitions.map((partition) => {
                       const selected = targetPartitions.includes(partition.index);
                       const shrink = preflight?.shrinkInfo?.find(
                         (s) => s.partitionIndex === partition.index
@@ -961,14 +988,14 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                 <p>Phase: {phaseLabel(progress?.phase)}</p>
                 <p>Progress: {Math.round((progress?.percentComplete || 0) * 10) / 10}%</p>
                 {progress?.currentPartition && <p>Current: {progress.currentPartition}</p>}
-                {(progress?.bytesProcessed ?? 0) > 0 && progress?.totalBytes > 0 && (
+                {(progress?.bytesProcessed ?? 0) > 0 && (progress?.totalBytes ?? 0) > 0 && (
                   <p>
-                    {formatSize(progress.bytesProcessed)} of {formatSize(progress.totalBytes)}
+                    {formatSize(progress?.bytesProcessed ?? 0)} of {formatSize(progress?.totalBytes ?? 0)}
                   </p>
                 )}
-                {progress?.speed > 0 && <p>Speed: {formatSpeed(progress.speed)}</p>}
-                {progress?.estimatedTimeRemaining > 0 && progress?.estimatedTimeRemaining < Infinity && (
-                  <p>ETA: {formatDuration(progress.estimatedTimeRemaining)}</p>
+                {(progress?.speed ?? 0) > 0 && <p>Speed: {formatSpeed(progress?.speed ?? 0)}</p>}
+                {(progress?.estimatedTimeRemaining ?? 0) > 0 && (progress?.estimatedTimeRemaining ?? Infinity) < Infinity && (
+                  <p>ETA: {formatDuration(progress?.estimatedTimeRemaining ?? 0)}</p>
                 )}
                 {(progress?.phase === 'restoring' || progress?.phase === 'reading_image') && (
                   <p className="progress-resume-note">

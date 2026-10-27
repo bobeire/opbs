@@ -35,6 +35,18 @@ interface VolumeInfo {
   isBoot?: boolean;
 }
 
+/** Shape of the ConvertTo-Json objects emitted by the queryVolumes script below
+ *  (JSON.parse output is untrusted, so every field is optional/loose). */
+interface PsVolumeRecord {
+  PartitionNumber?: number;
+  DriveLetter?: string;
+  FileSystem?: string;
+  Label?: string;
+  Used?: number;
+  IsSystem?: boolean;
+  IsBoot?: boolean;
+}
+
 /** Query drive letter / filesystem / label / used space / system-boot flags per partition via PowerShell. */
 async function queryVolumes(diskIndex: number): Promise<Map<number, VolumeInfo>> {
   const result = new Map<number, VolumeInfo>();
@@ -49,7 +61,7 @@ async function queryVolumes(diskIndex: number): Promise<Map<number, VolumeInfo>>
     const out = (await runPowerShell(script, 15_000)).trim();
     if (!out) return result;
     const parsed = JSON.parse(out);
-    const arr: any[] = Array.isArray(parsed) ? parsed : [parsed];
+    const arr: PsVolumeRecord[] = Array.isArray(parsed) ? parsed : [parsed];
     for (const item of arr) {
       const pn = Number(item.PartitionNumber);
       if (!Number.isFinite(pn)) continue;

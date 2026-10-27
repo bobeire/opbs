@@ -17,37 +17,37 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPartitions: (diskIndex: number) => ipcRenderer.invoke('get-partitions', diskIndex),
 
   // Backup operations
-  startBackup: (config: any) => ipcRenderer.invoke('start-backup', config),
+  startBackup: (config: unknown) => ipcRenderer.invoke('start-backup', config),
   cancelBackup: () => ipcRenderer.invoke('cancel-backup'),
   isBackupRunning: () => ipcRenderer.invoke('is-backup-running'),
   isHelperTaskRegistered: () => ipcRenderer.invoke('is-helper-task-registered'),
   registerHelperTask: () => ipcRenderer.invoke('register-helper-task'),
-  registerUnattendedBackupTask: (scheduleId: string, schedule: any) => ipcRenderer.invoke('register-unattended-backup-task', scheduleId, schedule),
+  registerUnattendedBackupTask: (scheduleId: string, schedule: unknown) => ipcRenderer.invoke('register-unattended-backup-task', scheduleId, schedule),
   unregisterUnattendedBackupTask: (scheduleId: string) => ipcRenderer.invoke('unregister-unattended-backup-task', scheduleId),
   listUnattendedBackupTasks: () => ipcRenderer.invoke('list-unattended-backup-tasks'),
   getTaskStatus: (taskName: string) => ipcRenderer.invoke('get-task-status', taskName),
 
   // Restore operations
-  startRestore: (config: any) => ipcRenderer.invoke('start-restore', config),
+  startRestore: (config: unknown) => ipcRenderer.invoke('start-restore', config),
   cancelRestore: () => ipcRenderer.invoke('cancel-restore'),
-  restorePreflight: (config: any) => ipcRenderer.invoke('restore-preflight', config),
+  restorePreflight: (config: unknown) => ipcRenderer.invoke('restore-preflight', config),
   getImageInfo: (imagePath: string) => ipcRenderer.invoke('get-image-info', imagePath),
   fetchCloudImage: (uri: string) => ipcRenderer.invoke('fetch-cloud-image', uri),
   releaseStagedImage: (imagePath: string) => ipcRenderer.invoke('release-staged-image', imagePath),
 
   // Partition copy (disk-to-disk clone)
-  startClone: (config: any) => ipcRenderer.invoke('start-clone', config),
+  startClone: (config: unknown) => ipcRenderer.invoke('start-clone', config),
   cancelClone: () => ipcRenderer.invoke('cancel-clone'),
-  clonePreflight: (config: any) => ipcRenderer.invoke('clone-preflight', config),
+  clonePreflight: (config: unknown) => ipcRenderer.invoke('clone-preflight', config),
 
   // User-state migration (wizard)
-  migratePlan: (payload: any) => ipcRenderer.invoke('migrate-plan', payload),
-  migrateRun: (payload: any) => ipcRenderer.invoke('migrate-run', payload),
+  migratePlan: (payload: unknown) => ipcRenderer.invoke('migrate-plan', payload),
+  migrateRun: (payload: unknown) => ipcRenderer.invoke('migrate-run', payload),
   migrateCancel: () => ipcRenderer.invoke('migrate-cancel'),
-  migrateProfiles: (source: any) => ipcRenderer.invoke('migrate-profiles', source),
+  migrateProfiles: (source: unknown) => ipcRenderer.invoke('migrate-profiles', source),
   migrateDrillStatus: (dir: string) => ipcRenderer.invoke('migrate-drill-status', dir),
-  onMigrateProgress: (callback: (event: any) => void) => {
-    const handler = (_event: any, progress: any) => callback(progress);
+  onMigrateProgress: (callback: (event: unknown) => void) => {
+    const handler = (_event: unknown, progress: unknown) => callback(progress);
     ipcRenderer.on('migrate-progress', handler);
     return () => {
       ipcRenderer.removeListener('migrate-progress', handler);
@@ -56,23 +56,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Settings
   getSettings: () => ipcRenderer.invoke('get-settings'),
-  updateSettings: (updates: any) => ipcRenderer.invoke('update-settings', updates),
-  addScheduledBackup: (config: any) => ipcRenderer.invoke('add-scheduled-backup', config),
-  updateScheduledBackup: (id: string, updates: any) => ipcRenderer.invoke('update-scheduled-backup', id, updates),
+  updateSettings: (updates: unknown) => ipcRenderer.invoke('update-settings', updates),
+  addScheduledBackup: (config: unknown) => ipcRenderer.invoke('add-scheduled-backup', config),
+  updateScheduledBackup: (id: string, updates: unknown) => ipcRenderer.invoke('update-scheduled-backup', id, updates),
   deleteScheduledBackup: (id: string) => ipcRenderer.invoke('delete-scheduled-backup', id),
   validateCron: (expression: string) => ipcRenderer.invoke('validate-cron', expression),
-  addBackupProfile: (config: any) => ipcRenderer.invoke('add-backup-profile', config),
-  updateBackupProfile: (id: string, updates: any) => ipcRenderer.invoke('update-backup-profile', id, updates),
+  addBackupProfile: (config: unknown) => ipcRenderer.invoke('add-backup-profile', config),
+  updateBackupProfile: (id: string, updates: unknown) => ipcRenderer.invoke('update-backup-profile', id, updates),
   deleteBackupProfile: (id: string) => ipcRenderer.invoke('delete-backup-profile', id),
 
   // File dialogs
-  selectDirectory: (options?: any) => ipcRenderer.invoke('select-directory', options),
+  selectDirectory: (options?: unknown) => ipcRenderer.invoke('select-directory', options),
   pathIsDirectory: (targetPath: string) => ipcRenderer.invoke('path-is-directory', targetPath),
-  selectFile: (options?: any) => ipcRenderer.invoke('select-file', options),
+  selectFile: (options?: unknown) => ipcRenderer.invoke('select-file', options),
 
   // Retention & images
-  planRetention: (directory: string, options: any) => ipcRenderer.invoke('plan-retention', directory, options),
-  applyRetention: (directory: string, options: any) => ipcRenderer.invoke('apply-retention', directory, options),
+  planRetention: (directory: string, options: unknown) => ipcRenderer.invoke('plan-retention', directory, options),
+  applyRetention: (directory: string, options: unknown) => ipcRenderer.invoke('apply-retention', directory, options),
   listImages: (directory: string) => ipcRenderer.invoke('list-images', directory),
 
   // Recent backups & backup actions
@@ -113,10 +113,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Read-only mount of an image partition (WinFsp, elevated helper)
   winfspStatus: () => ipcRenderer.invoke('winfsp-status'),
   winfspInstall: () => ipcRenderer.invoke('winfsp-install'),
-  mountImage: (config: any) => ipcRenderer.invoke('mount-image', config),
+  mountImage: (config: unknown) => ipcRenderer.invoke('mount-image', config),
   unmountImage: (id: string) => ipcRenderer.invoke('unmount-image', id),
-  onMountStatus: (callback: (status: any) => void) => {
-    const handler = (_event: any, status: any) => callback(status);
+  onMountStatus: (callback: (status: unknown) => void) => {
+    const handler = (_event: unknown, status: unknown) => callback(status);
     ipcRenderer.on('mount-status', handler);
     return () => {
       ipcRenderer.removeListener('mount-status', handler);
@@ -124,7 +124,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // File dialogs
-  selectSaveFile: (options?: any) => ipcRenderer.invoke('select-save-file', options),
+  selectSaveFile: (options?: unknown) => ipcRenderer.invoke('select-save-file', options),
 
   // Config builder (read/write config JSON files)
   saveTextFile: (filePath: string, content: string) => ipcRenderer.invoke('save-text-file', filePath, content),
@@ -135,9 +135,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // WinPE recovery media
   mediaCheck: () => ipcRenderer.invoke('media-check'),
-  mediaCreate: (options: any) => ipcRenderer.invoke('media-create', options),
+  mediaCreate: (options: unknown) => ipcRenderer.invoke('media-create', options),
   mediaDrives: () => ipcRenderer.invoke('media-drives'),
-  adkInstall: (options: any) => ipcRenderer.invoke('adk-install', options),
+  adkInstall: (options: unknown) => ipcRenderer.invoke('adk-install', options),
   nodeInstall: () => ipcRenderer.invoke('node-install'),
 
   // BitLocker status (elevates only when explicitly asked)
@@ -176,8 +176,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   networkDiscover: () => ipcRenderer.invoke('network-discover'),
   networkShares: (host: string) => ipcRenderer.invoke('network-shares', host),
   networkTest: (uncPath: string, create?: boolean) => ipcRenderer.invoke('network-test', uncPath, create),
-  onUpdateStatus: (callback: (status: any) => void) => {
-    const handler = (_event: any, status: any) => callback(status);
+  onUpdateStatus: (callback: (status: unknown) => void) => {
+    const handler = (_event: unknown, status: unknown) => callback(status);
     ipcRenderer.on('update-status', handler);
     return () => {
       ipcRenderer.removeListener('update-status', handler);
@@ -185,7 +185,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   onNav: (callback: (page: string) => void) => {
-    const handler = (_event: any, page: string) => callback(page);
+    const handler = (_event: unknown, page: string) => callback(page);
     ipcRenderer.on('nav', handler);
     return () => {
       ipcRenderer.removeListener('nav', handler);
@@ -194,7 +194,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // File-handler verbs (Explorer context menu)
   onOpenImage: (callback: (payload: { verb: string; imagePath: string }) => void) => {
-    const handler = (_event: any, payload: { verb: string; imagePath: string }) => callback(payload);
+    const handler = (_event: unknown, payload: { verb: string; imagePath: string }) => callback(payload);
     ipcRenderer.on('open-image', handler);
     return () => {
       ipcRenderer.removeListener('open-image', handler);
@@ -202,8 +202,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // Events
-  onActivity: (callback: (event: any) => void) => {
-    const handler = (_event: any, activity: any) => callback(activity);
+  onActivity: (callback: (event: unknown) => void) => {
+    const handler = (_event: unknown, activity: unknown) => callback(activity);
     ipcRenderer.on('activity', handler);
     return () => {
       ipcRenderer.removeListener('activity', handler);
@@ -211,15 +211,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // Events
-  onBackupProgress: (callback: (progress: any) => void) => {
-    const handler = (_event: any, progress: any) => callback(progress);
+  onBackupProgress: (callback: (progress: unknown) => void) => {
+    const handler = (_event: unknown, progress: unknown) => callback(progress);
     ipcRenderer.on('backup-progress', handler);
     return () => {
       ipcRenderer.removeListener('backup-progress', handler);
     };
   },
-  onRestoreProgress: (callback: (progress: any) => void) => {
-    const handler = (_event: any, progress: any) => callback(progress);
+  onRestoreProgress: (callback: (progress: unknown) => void) => {
+    const handler = (_event: unknown, progress: unknown) => callback(progress);
     ipcRenderer.on('restore-progress', handler);
     return () => {
       ipcRenderer.removeListener('restore-progress', handler);
@@ -232,8 +232,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener('cloud-download-progress', handler);
     };
   },
-  onCloneProgress: (callback: (progress: any) => void) => {
-    const handler = (_event: any, progress: any) => callback(progress);
+  onCloneProgress: (callback: (progress: unknown) => void) => {
+    const handler = (_event: unknown, progress: unknown) => callback(progress);
     ipcRenderer.on('clone-progress', handler);
     return () => {
       ipcRenderer.removeListener('clone-progress', handler);

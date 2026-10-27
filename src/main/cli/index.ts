@@ -16,7 +16,7 @@ import { dispatchHelperJob } from '../helper/job-runner';
 import { launchElevatedJob } from '../helper/launcher';
 import { winfspAvailable } from '../imaging/mount-manager';
 import { JobResult } from '../imaging/imaging-job';
-import type { RestoreJobProgress } from '../imaging/imaging-job';
+import type { RestoreJobProgress, RestoreJob, RestoreTarget, JobEncryption } from '../imaging/imaging-job';
 import { locateAdk, peArchForProcess } from '../utils/adk';
 import { createRecoveryMedia, resolveNodeExe, smokeMediaPayload } from '../utils/winpe-media';
 import { openAnyBrowse, listDirectory, extractPath, formatTimestamp, resolvePath } from '../imaging/fs/file-browse';
@@ -784,14 +784,20 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   return result.ok ? 0 : 1;
 }
 
-function renderRestorePlan(plan: any): string {
+/** `RestoreJob` as rendered below: some plan producers attach a human-readable
+ *  `encryption.algorithm` label that the shared `JobEncryption` type omits. */
+interface RenderedRestorePlan extends RestoreJob {
+  encryption?: JobEncryption & { algorithm?: string };
+}
+
+function renderRestorePlan(plan: RenderedRestorePlan): string {
   const lines: string[] = [];
   lines.push(`Image: ${plan.imagePath}`);
   lines.push(`Verify before write: ${plan.verifyBeforeWrite ? 'yes' : 'no'}`);
   if (Array.isArray(plan.applyDeltas) && plan.applyDeltas.length > 0) {
     lines.push(`Apply delta chain: ${plan.applyDeltas.length} image(s)`);
   }
-  const targets: any[] = Array.isArray(plan.targets) ? plan.targets : [];
+  const targets: RestoreTarget[] = Array.isArray(plan.targets) ? plan.targets : [];
   lines.push(`Target partitions: ${targets.map((t) => `disk ${t.diskIndex} part ${t.partitionIndex} @${formatBytes(t.offset)}`).join(', ') || 'none'}`);
   if (Array.isArray(plan.shrinkInfo)) {
     for (const s of plan.shrinkInfo) {
@@ -805,7 +811,7 @@ function renderRestorePlan(plan: any): string {
     lines.push(`Encryption: ${plan.encryption.algorithm}`);
   }
   if (plan.writeTable) {
-    const entries: any[] = Array.isArray(plan.writeTable.entries) ? plan.writeTable.entries : [];
+    const entries: NonNullable<RestoreJob['writeTable']>['entries'] = Array.isArray(plan.writeTable.entries) ? plan.writeTable.entries : [];
     lines.push(`Partition table: ${plan.writeTable.scheme} (${entries.length} entries, disk size ${formatBytes(plan.writeTable.diskSize)})`);
   } else {
     lines.push('Partition table: keep existing (no layout change)');

@@ -14,6 +14,13 @@ interface UpdateStatus {
   manual?: boolean;
 }
 
+/** Payload of the 'activity' event (subset of ActivityEvent in main's scheduler, as used here). */
+interface ActivityEvent {
+  kind: 'success' | 'failure';
+  title: string;
+  body: string;
+}
+
 let nextId = 1;
 
 function ToastHost() {
@@ -44,7 +51,7 @@ function ToastHost() {
   );
 
   useEffect(() => {
-    const offActivity = window.electronAPI.onActivity((ev: any) => {
+    const offActivity = window.electronAPI.onActivity((ev: ActivityEvent) => {
       show({
         kind: ev.kind === 'success' ? 'success' : 'error',
         title: ev.title,

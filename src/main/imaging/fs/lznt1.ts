@@ -15,7 +15,6 @@
  * allocator).
  */
 
-const MAX_CHUNK = 4096;
 const OFFSET_BITS_LOOKUP = [0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400, 0x800, 0x1000];
 
 function offsetBits(emitted: number): number {

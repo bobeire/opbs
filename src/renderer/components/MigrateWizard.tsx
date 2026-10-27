@@ -8,6 +8,17 @@ interface MigrateWizardProps {
   onComplete: () => void;
 }
 
+interface ImagePartitionInfo {
+  index: number;
+  size: number;
+  fsType?: string;
+}
+
+interface ImageInfo {
+  partitions: ImagePartitionInfo[];
+  encrypted?: boolean;
+}
+
 function formatSize(bytes: number): string {
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
   let value = bytes;
@@ -25,7 +36,7 @@ function MigrateWizard({ onComplete }: MigrateWizardProps) {
 
   // Image source
   const [imagePath, setImagePath] = useState('');
-  const [imageInfo, setImageInfo] = useState<any>(null);
+  const [imageInfo, setImageInfo] = useState<ImageInfo | null>(null);
   const [imageLoading, setImageLoading] = useState(false);
   const [imageError, setImageError] = useState<string | null>(null);
   const [partitionIndex, setPartitionIndex] = useState(0);
@@ -108,9 +119,9 @@ function MigrateWizard({ onComplete }: MigrateWizardProps) {
         setProfiles([]);
         setProfilesError(res.error ?? 'Could not list user profiles.');
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       setProfiles([]);
-      setProfilesError(error?.message ?? 'Could not list user profiles.');
+      setProfilesError(error instanceof Error ? error.message : String(error));
     } finally {
       setProfilesLoading(false);
     }
@@ -139,13 +150,13 @@ function MigrateWizard({ onComplete }: MigrateWizardProps) {
     resetPlan();
     setImageLoading(true);
     try {
-      const info = await window.electronAPI.getImageInfo(file);
+      const info: ImageInfo = await window.electronAPI.getImageInfo(file);
       setImageInfo(info);
-      const parts: any[] = info?.partitions ?? [];
+      const parts: ImagePartitionInfo[] = info?.partitions ?? [];
       if (parts.length > 0) setPartitionIndex(Number(parts[0].index ?? 0));
       if (parts.length === 0) setImageError('No partitions found in this image.');
-    } catch (error: any) {
-      setImageError(error?.message ?? 'Could not read the image.');
+    } catch (error: unknown) {
+      setImageError(error instanceof Error ? error.message : String(error));
     } finally {
       setImageLoading(false);
     }
@@ -166,8 +177,8 @@ function MigrateWizard({ onComplete }: MigrateWizardProps) {
       } else {
         setPlanError(res.error ?? 'Planning failed.');
       }
-    } catch (error: any) {
-      setPlanError(error?.message ?? 'Planning failed.');
+    } catch (error: unknown) {
+      setPlanError(error instanceof Error ? error.message : String(error));
     } finally {
       setPlanning(false);
     }
@@ -209,8 +220,8 @@ function MigrateWizard({ onComplete }: MigrateWizardProps) {
       });
       setRunResult(res);
       if (!res.ok && res.error) setRunError(res.error);
-    } catch (error: any) {
-      setRunError(error?.message ?? 'Migration failed.');
+    } catch (error: unknown) {
+      setRunError(error instanceof Error ? error.message : String(error));
     } finally {
       setRunning(false);
     }
@@ -306,7 +317,7 @@ function MigrateWizard({ onComplete }: MigrateWizardProps) {
             {imageLoading && <p className="field-hint">Reading image header…</p>}
             {imageError && <div className="error-message">{imageError}</div>}
           </div>
-          {imageInfo?.partitions?.length > 0 && (
+          {(imageInfo?.partitions?.length ?? 0) > 0 && (
             <div className="setting-item">
               <label>Partition with the Windows volume:</label>
               <select
@@ -316,7 +327,7 @@ function MigrateWizard({ onComplete }: MigrateWizardProps) {
                   resetPlan();
                 }}
               >
-                {imageInfo.partitions.map((p: any) => (
+                {imageInfo!.partitions.map((p) => (
                   <option key={p.index} value={p.index}>
                     Partition {p.index} — {formatSize(Number(p.size) || 0)}
                     {p.fsType ? ` — ${p.fsType}` : ''}

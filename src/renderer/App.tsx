@@ -46,13 +46,29 @@ interface BrowseIntent {
   autoMount?: boolean;
 }
 
+/** Payload of the 'backup-progress' IPC event (mirrors BackupProgress in main; feeds BackupWizard's activeProgress). */
+interface BackupProgress {
+  phase: string;
+  percentComplete: number;
+  bytesProcessed: number;
+  totalBytes: number;
+  speed: number;
+  estimatedTimeRemaining: number;
+  currentPartition: string;
+  resuming?: boolean;
+  verifyDone?: number;
+  verifyTotal?: number;
+  /** Set on the 'completed' event — the image just written. */
+  imagePath?: string;
+}
+
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard');
   const [backupIntent, setBackupIntent] = useState<BackupIntent | null>(null);
   const [restoreIntent, setRestoreIntent] = useState<{ imagePath?: string; mode?: 'restore' | 'clone' } | null>(null);
   const [browseIntent, setBrowseIntent] = useState<BrowseIntent | null>(null);
   const [backupRunning, setBackupRunning] = useState(false);
-  const [lastBackupProgress, setLastBackupProgress] = useState<any>(null);
+  const [lastBackupProgress, setLastBackupProgress] = useState<BackupProgress | null>(null);
   const [appVersion, setAppVersion] = useState<string>('');
   const [initialDataReady, setInitialDataReady] = useState(false);
   const [splashMinElapsed, setSplashMinElapsed] = useState(false);
@@ -92,7 +108,7 @@ function App() {
   // Track backup state globally so it persists across navigation
   useEffect(() => {
     void window.electronAPI.isBackupRunning().then((running) => setBackupRunning(running));
-    const cleanup = window.electronAPI.onBackupProgress((p: any) => {
+    const cleanup = window.electronAPI.onBackupProgress((p: BackupProgress) => {
       setBackupRunning(true);
       setLastBackupProgress(p);
       if (p.phase === 'completed' || p.phase === 'error') {

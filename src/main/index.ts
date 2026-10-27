@@ -8,7 +8,7 @@ import { BackupManager } from './backup/manager';
 import { RestoreManager } from './restore/manager';
 import { BackupScheduler } from './backup/scheduler';
 import { SettingsManager } from './utils/settings-manager';
-import { logger } from './utils/logger';
+import { logger, type LogLevel } from './utils/logger';
 import { initAutoUpdater, checkForUpdates, quitAndInstall } from './utils/auto-updater';
 import { discoverNetworkMachines, enumerateShares, testNetworkDestination } from './utils/network';
 import { ImagingEngine } from './imaging/backup-engine';
@@ -609,6 +609,34 @@ function setupCloneEvents(): void {
   });
 }
 
+/** Schedule payload accepted by the 'register-unattended-backup-task' handler;
+ *  mirrors the schedule shape registerUnattendedBackupTask consumes. */
+interface UnattendedBackupSchedule {
+  cronExpression: string;
+  sourceDiskIndex: number;
+  sourcePartitions: number[];
+  destinationPath: string;
+  compressionLevel: number;
+  compressionType?: string;
+  compressionThreads?: number;
+  verificationEnabled: boolean;
+  incremental: boolean;
+  passphrase?: string;
+}
+
+/** Progress payload emitted by the elevated mount helper (only the fields the
+ *  mount-image handler reads). */
+interface MountJobProgress {
+  state?: string;
+  mountPoint?: string;
+}
+
+/** Result payload of the elevated mount helper job. */
+interface MountJobResult {
+  ok?: boolean;
+  error?: string;
+}
+
 function setupIpcHandlers(): void {
   // About dialog
   ipcMain.handle('show-about', async () => {
@@ -736,7 +764,7 @@ function setupIpcHandlers(): void {
   });
 
   ipcMain.handle('register-helper-task', async () => {
-    const { ensureHelperTaskRegistered, ensureRunAsAdmin, isRunAsAdmin } = await import('./utils/task-scheduler');
+    const { ensureHelperTaskRegistered, ensureRunAsAdmin } = await import('./utils/task-scheduler');
     const exe = process.execPath;
     const appPath = app.isPackaged ? undefined : app.getAppPath();
     // Try schtasks first (task scheduler approach).
@@ -751,18 +779,18 @@ function setupIpcHandlers(): void {
     return true;
   });
 
-  ipcMain.handle('register-unattended-backup-task', async (_, scheduleId: string, schedule: any) => {
+  ipcMain.handle('register-unattended-backup-task', async (_, scheduleId: string, schedule: UnattendedBackupSchedule) => {
     const { registerUnattendedBackupTask } = await import('./utils/task-scheduler');
     await registerUnattendedBackupTask(scheduleId, schedule);
     // Mark the schedule as unattended in settings.
-    settingsManager.updateScheduledBackup(scheduleId, { unattended: true } as any);
+    settingsManager.updateScheduledBackup(scheduleId, { unattended: true });
     return true;
   });
 
   ipcMain.handle('unregister-unattended-backup-task', async (_, scheduleId: string) => {
     const { unregisterUnattendedBackupTask } = await import('./utils/task-scheduler');
     await unregisterUnattendedBackupTask(scheduleId);
-    settingsManager.updateScheduledBackup(scheduleId, { unattended: false } as any);
+    settingsManager.updateScheduledBackup(scheduleId, { unattended: false });
     return true;
   });
 
@@ -1051,7 +1079,9 @@ function setupIpcHandlers(): void {
     const result = settingsManager.updateSettings(updates);
     syncNativeTheme(result.theme);
     if (result.logLevel) {
-      logger.setLevel(result.logLevel as any);
+      // Settings stores lower-cased level names; the logger's LogLevel enum is
+      // upper-cased. Assert across without altering the runtime value.
+      logger.setLevel(result.logLevel as unknown as LogLevel);
     }
     if (result.errorReporting) {
       setErrorReporting(result.errorReporting);
@@ -1211,7 +1241,7 @@ function setupIpcHandlers(): void {
         return { ok: false, error: 'Invalid settings file format' };
       }
       const merged = settingsManager.updateSettings(parsed);
-      logger.setLevel(merged.logLevel as any);
+      logger.setLevel(merged.logLevel as unknown as LogLevel);
       scheduler.resyncFromSettings();
       return { ok: true, settings: merged };
     } catch (err) {
@@ -1757,7 +1787,7 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       const msg = error instanceof Error ? error.message : String(error);
       logger.error(`browse-list failed: ${imagePath}#${partitionIndex} path="${relPath}": ${msg}`, error);
       if (msg.includes('Not an NTFS') || msg.includes('Not a FAT32') || msg.includes('Not an exFAT')) {
-        throw new Error('This partition uses an unsupported filesystem. NTFS, FAT32 and exFAT partitions can be browsed.');
+        throw new Error('This partition uses an unsupported filesystem. NTFS, FAT32 and exFAT partitions can be browsed.', { cause: error });
       }
       if (msg.includes('chain too long') || msg.includes('chain cycle') || msg.includes('chain spans')) {
         throw new Error(
@@ -1815,7 +1845,7 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       passphrase: config.passphrase
     };
     logger.info(`mount-image: launching helper for ${job.imagePath}#${job.partitionIndex} (${id})`);
-    const launcher = launchElevatedJob<typeof job, any, any>(job);
+    const launcher = launchElevatedJob<typeof job, MountJobProgress, MountJobResult>(job);
     mountLaunchers.set(id, { cancel: launcher.cancel });
 
     // Resolve only once the mount is live (or has failed). Returning early

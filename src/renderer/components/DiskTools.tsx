@@ -3,35 +3,134 @@ import { PassphraseInput } from './PassphraseInput';
 
 type Tab = 'mbr' | 'check' | 'trim' | 'smart' | 'bitlocker';
 
+interface DiskInfo {
+  index: number;
+  model: string;
+  size: number;
+}
+
+interface MbrPartitionEntry {
+  index: number;
+  active: boolean;
+  typeLabel: string;
+  startLba: number;
+  sectorCount: number;
+  sizeBytes: number;
+  startChs: string;
+  endChs: string;
+}
+
+type MbrInfo =
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      partitionStyle: 'mbr' | 'gpt' | 'raw';
+      diskSignature?: number;
+      partitionCount: number;
+      partitions: MbrPartitionEntry[];
+      bootable?: number;
+    };
+
+type MbrRaw =
+  | { ok: false; error: string }
+  | { ok: true; bootSignature: string; diskSignatureHex: string; partitions: MbrPartitionEntry[] };
+
+interface BootRecResult {
+  ok: boolean;
+  error?: string;
+  action: string;
+  output?: string;
+}
+
+interface ChkdskResult {
+  ok: boolean;
+  error?: string;
+  volume?: string;
+  mode?: string;
+  output?: string;
+}
+
+interface TrimStatusResult {
+  ok: boolean;
+  error?: string;
+  enabled?: boolean;
+  output?: string;
+}
+
+interface RetrimResult {
+  ok: boolean;
+  error?: string;
+  output?: string;
+}
+
+interface SmartDiskInfo {
+  diskIndex: number;
+  model: string;
+  size: number;
+  reliable: boolean;
+  temperatureCelsius?: number;
+  wear?: number;
+  unreliableSectors?: number;
+  warnings: string[];
+}
+
+// electron.d.ts types these disk-tools IPC handlers as `Promise<any>`; this
+// local alias narrows just those calls to the shapes the main-process tools
+// actually return (src/main/utils/disk-tools.ts).
+type DiskToolsApi = Omit<
+  Window['electronAPI'],
+  | 'getMbrInfo'
+  | 'getMbrRaw'
+  | 'bootRecFixMbr'
+  | 'bootRecRebuildBcd'
+  | 'chkdskScan'
+  | 'chkdskFix'
+  | 'chkdskBadSectors'
+  | 'getTrimStatus'
+  | 'retrimVolume'
+  | 'getSmartAllDisks'
+> & {
+  getMbrInfo: (diskIndex: number) => Promise<MbrInfo>;
+  getMbrRaw: (diskIndex: number) => Promise<MbrRaw>;
+  bootRecFixMbr: () => Promise<BootRecResult>;
+  bootRecRebuildBcd: () => Promise<BootRecResult>;
+  chkdskScan: (volume: string) => Promise<ChkdskResult>;
+  chkdskFix: (volume: string) => Promise<ChkdskResult>;
+  chkdskBadSectors: (volume: string) => Promise<ChkdskResult>;
+  getTrimStatus: () => Promise<TrimStatusResult>;
+  retrimVolume: (volume: string) => Promise<RetrimResult>;
+  getSmartAllDisks: () => Promise<SmartDiskInfo[]>;
+};
+
 function DiskTools({ onComplete: _onComplete }: { onComplete: () => void }) {
   const [tab, setTab] = useState<Tab>('mbr');
-  const [disks, setDisks] = useState<any[]>([]);
+  const [disks, setDisks] = useState<DiskInfo[]>([]);
   const [loading, setLoading] = useState(true);
 
   // MBR state
   const [selectedDisk, setSelectedDisk] = useState<number | null>(null);
-  const [mbrInfo, setMbrInfo] = useState<any | null>(null);
-  const [mbrRaw, setMbrRaw] = useState<any | null>(null);
+  const [mbrInfo, setMbrInfo] = useState<MbrInfo | null>(null);
+  const [mbrRaw, setMbrRaw] = useState<MbrRaw | null>(null);
   const [mbrLoading, setMbrLoading] = useState(false);
   const [bootAction, setBootAction] = useState<string | null>(null);
-  const [bootResult, setBootResult] = useState<any | null>(null);
+  const [bootResult, setBootResult] = useState<BootRecResult | null>(null);
   const [bootConfirm, setBootConfirm] = useState<string | null>(null);
   const [bootBusy, setBootBusy] = useState(false);
 
   // Chkdsk state
   const [chkdskVolume, setChkdskVolume] = useState('C:');
   const [chkdskMode, setChkdskMode] = useState<string | null>(null);
-  const [chkdskResult, setChkdskResult] = useState<any | null>(null);
+  const [chkdskResult, setChkdskResult] = useState<ChkdskResult | null>(null);
   const [chkdskBusy, setChkdskBusy] = useState(false);
 
   // TRIM state
-  const [trimStatus, setTrimStatus] = useState<any | null>(null);
+  const [trimStatus, setTrimStatus] = useState<TrimStatusResult | null>(null);
   const [trimBusy, setTrimBusy] = useState(false);
-  const [retrimResult, setRetrimResult] = useState<any | null>(null);
+  const [retrimResult, setRetrimResult] = useState<RetrimResult | null>(null);
   const [retrimVolume, setRetrimVolume] = useState('C:');
 
   // SMART state
-  const [smart, setSmart] = useState<any[]>([]);
+  const [smart, setSmart] = useState<SmartDiskInfo[]>([]);
   const [smartLoading, setSmartLoading] = useState(false);
 
   // BitLocker state (unlock tool + recovery-key viewer)
@@ -49,10 +148,12 @@ function DiskTools({ onComplete: _onComplete }: { onComplete: () => void }) {
   >(null);
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
 
+  const api = window.electronAPI as DiskToolsApi;
+
   useEffect(() => {
     void window.electronAPI.getDisks().then((list) => {
       setDisks(list);
-      if (list.length > 0 && selectedDisk === null) setSelectedDisk(list[0].index);
+      if (list.length > 0) setSelectedDisk((cur) => (cur === null ? list[0].index : cur));
       setLoading(false);
     });
   }, []);
@@ -60,7 +161,7 @@ function DiskTools({ onComplete: _onComplete }: { onComplete: () => void }) {
   const loadSmart = async () => {
     setSmartLoading(true);
     try {
-      const result = await (window.electronAPI as any).getSmartAllDisks();
+      const result = await api.getSmartAllDisks();
       setSmart(result);
     } catch { /* ignore */ }
     setSmartLoading(false);
@@ -69,13 +170,13 @@ function DiskTools({ onComplete: _onComplete }: { onComplete: () => void }) {
   useEffect(() => {
     if (tab !== 'smart' || smart.length > 0) return;
     let cancelled = false;
-    (window.electronAPI as any).getSmartAllDisks().then((result: any[]) => {
+    (window.electronAPI as DiskToolsApi).getSmartAllDisks().then((result) => {
       if (!cancelled) setSmart(result);
     }).catch(() => { /* ignore */ }).finally(() => {
       if (!cancelled) setSmartLoading(false);
     });
     return () => { cancelled = true; };
-  }, [tab]);
+  }, [tab, smart.length]);
 
   const formatSize = (bytes: number): string => {
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -90,9 +191,9 @@ function DiskTools({ onComplete: _onComplete }: { onComplete: () => void }) {
     setMbrLoading(true);
     setMbrRaw(null);
     try {
-      const info = await (window.electronAPI as any).getMbrInfo(selectedDisk);
+      const info = await api.getMbrInfo(selectedDisk);
       setMbrInfo(info);
-    } catch (e: any) { setMbrInfo({ ok: false, error: e?.message }); }
+    } catch (e: unknown) { setMbrInfo({ ok: false, error: e instanceof Error ? e.message : String(e) }); }
     setMbrLoading(false);
   };
 
@@ -101,9 +202,9 @@ function DiskTools({ onComplete: _onComplete }: { onComplete: () => void }) {
     setMbrLoading(true);
     setMbrInfo(null);
     try {
-      const raw = await (window.electronAPI as any).getMbrRaw(selectedDisk);
+      const raw = await api.getMbrRaw(selectedDisk);
       setMbrRaw(raw);
-    } catch (e: any) { setMbrRaw({ ok: false, error: e?.message }); }
+    } catch (e: unknown) { setMbrRaw({ ok: false, error: e instanceof Error ? e.message : String(e) }); }
     setMbrLoading(false);
   };
 
@@ -113,9 +214,9 @@ function DiskTools({ onComplete: _onComplete }: { onComplete: () => void }) {
     setBootBusy(true);
     setBootAction(action);
     try {
-      const result = await (window.electronAPI as any)[action === 'fixmbr' ? 'bootRecFixMbr' : 'bootRecRebuildBcd']();
+      const result = await api[action === 'fixmbr' ? 'bootRecFixMbr' : 'bootRecRebuildBcd']();
       setBootResult(result);
-    } catch (e: any) { setBootResult({ ok: false, error: e?.message, action }); }
+    } catch (e: unknown) { setBootResult({ ok: false, error: e instanceof Error ? e.message : String(e), action }); }
     setBootBusy(false);
   };
 
@@ -125,18 +226,18 @@ function DiskTools({ onComplete: _onComplete }: { onComplete: () => void }) {
     setChkdskBusy(true);
     setChkdskMode(mode);
     try {
-      const result = await (window.electronAPI as any)[`chkdsk${mode === 'scan' ? 'Scan' : mode === 'fix' ? 'Fix' : 'BadSectors'}`](chkdskVolume);
+      const result = await api[`chkdsk${mode === 'scan' ? 'Scan' : mode === 'fix' ? 'Fix' : 'BadSectors'}`](chkdskVolume);
       setChkdskResult(result);
-    } catch (e: any) { setChkdskResult({ ok: false, error: e?.message }); }
+    } catch (e: unknown) { setChkdskResult({ ok: false, error: e instanceof Error ? e.message : String(e) }); }
     setChkdskBusy(false);
   };
 
   const checkTrim = async () => {
     setTrimBusy(true);
     try {
-      const result = await (window.electronAPI as any).getTrimStatus();
+      const result = await api.getTrimStatus();
       setTrimStatus(result);
-    } catch (e: any) { setTrimStatus({ ok: false, error: e?.message }); }
+    } catch (e: unknown) { setTrimStatus({ ok: false, error: e instanceof Error ? e.message : String(e) }); }
     setTrimBusy(false);
   };
 
@@ -145,9 +246,9 @@ function DiskTools({ onComplete: _onComplete }: { onComplete: () => void }) {
     setBootConfirm(null);
     setTrimBusy(true);
     try {
-      const result = await (window.electronAPI as any).retrimVolume(retrimVolume);
+      const result = await api.retrimVolume(retrimVolume);
       setRetrimResult(result);
-    } catch (e: any) { setRetrimResult({ ok: false, error: e?.message }); }
+    } catch (e: unknown) { setRetrimResult({ ok: false, error: e instanceof Error ? e.message : String(e) }); }
     setTrimBusy(false);
   };
 
@@ -261,7 +362,7 @@ function DiskTools({ onComplete: _onComplete }: { onComplete: () => void }) {
                           </tr>
                         </thead>
                         <tbody>
-                          {mbrInfo.partitions.map((p: any, i: number) => (
+                          {mbrInfo.partitions.map((p, i) => (
                             <tr key={i}>
                               <td>{p.index + 1}</td>
                               <td>{p.active ? '✓' : ''}</td>
@@ -294,7 +395,7 @@ function DiskTools({ onComplete: _onComplete }: { onComplete: () => void }) {
                         <tr><th>#</th><th>Active</th><th>Type</th><th>Start LBA</th><th>Sectors</th><th>Size</th><th>Start CHS</th><th>End CHS</th></tr>
                       </thead>
                       <tbody>
-                        {mbrRaw.partitions.map((p: any, i: number) => (
+                        {mbrRaw.partitions.map((p, i) => (
                           <tr key={i}>
                             <td>{p.index + 1}</td>
                             <td>{p.active ? '✓' : ''}</td>
@@ -438,7 +539,7 @@ function DiskTools({ onComplete: _onComplete }: { onComplete: () => void }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {smart.map((s: any) => (
+                  {smart.map((s) => (
                     <tr key={s.diskIndex}>
                       <td>{s.diskIndex}</td>
                       <td>{s.model}</td>

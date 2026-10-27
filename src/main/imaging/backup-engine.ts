@@ -101,7 +101,11 @@ type LaunchedBackupJob = ReturnType<typeof launchElevatedJob<ImagingJob | Backup
 function sanitizeImageName(name: string): string {
   const base = path.basename(name.trim());
   const withoutExt = base.replace(/\.opbs$/i, '');
-  const cleaned = withoutExt.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '');
+  const cleaned = withoutExt
+    // Strips C0 control characters (0x00–0x1f) along with Windows-reserved
+    // filename characters — the control-char class is intentional here.
+    // eslint-disable-next-line no-control-regex
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '');
   return cleaned || `opbs-${Date.now()}`;
 }
 

@@ -52,7 +52,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
   const [nodes, setNodes] = useState<BrowseNode[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [_expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [, setExpanded] = useState<Set<number>>(new Set());
   const [extracting, setExtracting] = useState<string | null>(null);
   const [notice, setNotice] = useState('');
   const [winfspOk, setWinfspOk] = useState(false);
@@ -136,7 +136,6 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
     return () => {
       alive = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialImagePath]);
 
   const openImage = async (path: string) => {
@@ -166,8 +165,8 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
       } else {
         setError('This image has no partitions.');
       }
-    } catch (e: any) {
-      setError(e?.message ?? 'Failed to read the image');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to read the image');
       setInfo(null);
     }
   };
@@ -199,8 +198,8 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
       );
       setNodes(list);
       setCwd(relPath);
-    } catch (e: any) {
-      setError(e?.message ?? 'Failed to list directory');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to list directory');
     } finally {
       setLoading(false);
     }
@@ -255,8 +254,8 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         passphrase || undefined
       );
       setNotice(`Extracted ${result.files} item(s) to ${result.outPath}`);
-    } catch (e: any) {
-      setError(e?.message ?? 'Extraction failed');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Extraction failed');
     } finally {
       setExtracting(null);
     }
@@ -301,10 +300,10 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         setMounting(false);
         setMountError('');
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       mountIdRef.current = null;
       mountKeyRef.current = '';
-      setMountError(e?.message ?? 'Mount failed');
+      setMountError(e instanceof Error ? e.message : 'Mount failed');
       setMounting(false);
     }
   };

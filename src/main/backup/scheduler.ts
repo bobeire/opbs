@@ -135,6 +135,9 @@ export class BackupScheduler {
    * the app (and disk) settle.
    */
   private checkMissedSchedules(backups: ScheduledBackup[]): void {
+    // Lazy require: cron-parser is only needed when a schedule fires, so the
+    // main process starts without loading it.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const cronParser = require('cron-parser');
     const now = Date.now();
     for (const backup of backups) {

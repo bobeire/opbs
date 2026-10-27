@@ -35,10 +35,7 @@ export interface Fat32Entry {
 }
 
 const FAT32_EOF_MIN = 0x0FFFFFF8;
-const FAT32_EOF_MAX = 0x0FFFFFFF;
-const FAT32_BAD = 0x0FFFFFF7;
 const ATTR_DIRECTORY = 0x10;
-const ATTR_LFN = 0x0F;
 
 /**
  * Detect the FAT flavor (FAT12/FAT16/FAT32) from a boot sector's BPB.

@@ -14,6 +14,137 @@ interface RecentBackup {
   chain: string[];
 }
 
+interface DestinationHealthEntry {
+  path: string;
+  reachable: boolean;
+  freeBytes: number;
+  totalBytes: number;
+  imageCount: number;
+  chainCount: number;
+  newestDate?: number;
+  plannedPrune: number;
+}
+
+interface AnalyticsChainInfo {
+  chainEfficiency: number;
+}
+
+interface AnalyticsDestination {
+  directory: string;
+  imageCount: number;
+  chainCount: number;
+  totalDiskBytes: number;
+  totalImageBytes: number;
+  avgCompressionRatio: number;
+  chains?: AnalyticsChainInfo[];
+}
+
+interface BackupAnalytics {
+  destinations: AnalyticsDestination[];
+  totals: { totalDiskBytes: number; totalImageBytes: number; avgCompressionRatio: number };
+}
+
+interface ScrubStatusEntry {
+  directory: string;
+  lastOk: boolean | null;
+  lastScrubAt: number;
+  totalRepaired: number;
+  corruptImages: number;
+}
+
+interface IntegrityChainSummary {
+  chainCount: number;
+  completeChains: number;
+  brokenChains: number;
+  missingBases: unknown[];
+}
+
+interface IntegrityTamperSummary {
+  manifestPresent: boolean;
+  ok: boolean;
+  diff: {
+    missing: Array<{ name: string }>;
+    sizeChanged: Array<{ name: string }>;
+    unexpected: Array<{ name: string }>;
+  };
+}
+
+interface IntegrityEntry {
+  directory: string;
+  chain: IntegrityChainSummary;
+  tamper: IntegrityTamperSummary;
+}
+
+interface StoragePerfResult {
+  at?: number;
+  seqWriteMBs?: number;
+  seqReadMBs?: number;
+  ok?: boolean;
+  error?: string;
+}
+
+interface StorageHealthEntry {
+  path: string;
+  reachable: boolean;
+  freeBytes: number;
+  totalBytes: number;
+  imageCount: number;
+  chainCount: number;
+  completeChains: number;
+  verifiedImages: number;
+  parityProtectedImages: number;
+  imagesScrubbed: number;
+  hasDrill: boolean;
+  smart: { driveLetter?: string; available: boolean; warnings: string[] };
+  perf?: StoragePerfResult | null;
+  score: number;
+  status: 'good' | 'degraded' | 'at-risk';
+  warnings: string[];
+}
+
+interface MediaHealthData {
+  healthStatus?: string;
+  temperatureCelsius?: number;
+  wear?: number;
+  unreliableSectors?: number;
+}
+
+interface MediaHealthEntry {
+  diskIndex: number;
+  model: string;
+  size: number;
+  driveLetters: string[];
+  health: { data?: MediaHealthData | null; warnings: string[] };
+  unhealthy: boolean;
+}
+
+interface AnomalyFlag {
+  kind: 'size' | 'ratio' | 'speed' | 'gap' | 'info';
+  severity: 'critical' | 'warning' | 'info';
+  message: string;
+}
+
+interface AnomalyBaseline {
+  medianIntervalMs?: number;
+}
+
+interface AnomalyEntry {
+  directory: string;
+  historyCount: number;
+  baseline: AnomalyBaseline;
+  anomalies: AnomalyFlag[];
+  ok: boolean;
+}
+
+interface PartitionUsage {
+  usedSpace?: number;
+}
+
+interface DiskSpaceInfo {
+  size: number;
+  partitions: PartitionUsage[];
+}
+
 interface DashboardProps {
   onNavigate: (page: 'backup' | 'restore' | 'clone' | 'copy' | 'disks' | 'browse', intent?: { imagePath?: string }) => void;
   /** Fires once the initial backup-list and drive queries have settled (drives the startup splash). */
@@ -28,16 +159,13 @@ function Dashboard({ onNavigate, onLoaded }: DashboardProps) {
   const [message, setMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [systemInfo, setSystemInfo] = useState({ disks: 0, totalSpace: 0, usedSpace: 0 });
   const [destinations, setDestinations] = useState<string[]>([]);
-  const [health, setHealth] = useState<any[]>([]);
-  const [analytics, setAnalytics] = useState<{
-    destinations: any[];
-    totals: { totalDiskBytes: number; totalImageBytes: number; avgCompressionRatio: number };
-  } | null>(null);
-  const [scrubStatus, setScrubStatus] = useState<any[]>([]);
-  const [integrity, setIntegrity] = useState<any[]>([]);
-  const [storageHealth, setStorageHealth] = useState<any[]>([]);
-  const [mediaHealth, setMediaHealth] = useState<any[]>([]);
-  const [anomalies, setAnomalies] = useState<any[]>([]);
+  const [health, setHealth] = useState<DestinationHealthEntry[]>([]);
+  const [analytics, setAnalytics] = useState<BackupAnalytics | null>(null);
+  const [scrubStatus, setScrubStatus] = useState<ScrubStatusEntry[]>([]);
+  const [integrity, setIntegrity] = useState<IntegrityEntry[]>([]);
+  const [storageHealth, setStorageHealth] = useState<StorageHealthEntry[]>([]);
+  const [mediaHealth, setMediaHealth] = useState<MediaHealthEntry[]>([]);
+  const [anomalies, setAnomalies] = useState<AnomalyEntry[]>([]);
   const [perfRunning, setPerfRunning] = useState<string | null>(null);
   const [compactPct, setCompactPct] = useState(0);
   const [winfspMissing, setWinfspMissing] = useState(false);
@@ -64,7 +192,10 @@ function Dashboard({ onNavigate, onLoaded }: DashboardProps) {
       setDestinations(dirs);
       if (dirs.length > 0) {
         const healthRes = await window.electronAPI.destinationHealth(dirs);
-        setHealth(Array.isArray(healthRes) ? healthRes : []);
+        // The electronAPI type marks freeBytes/totalBytes optional (missing for
+        // cloud destinations); the table below only reads them for reachable
+        // local paths where the producer always fills both in.
+        setHealth(Array.isArray(healthRes) ? (healthRes as DestinationHealthEntry[]) : []);
       } else {
         setHealth([]);
       }
@@ -77,7 +208,9 @@ function Dashboard({ onNavigate, onLoaded }: DashboardProps) {
       const integrityRes = await window.electronAPI.getBackupIntegrity();
       setIntegrity(Array.isArray(integrityRes) ? integrityRes : []);
       const storageRes = await window.electronAPI.getStorageHealth();
-      setStorageHealth(Array.isArray(storageRes) ? storageRes : []);
+      // See the note on destinationHealth: freeBytes/totalBytes are only
+      // absent when the volume is unreachable, which the row already handles.
+      setStorageHealth(Array.isArray(storageRes) ? (storageRes as StorageHealthEntry[]) : []);
       const mediaRes = await window.electronAPI.getMediaHealth();
       setMediaHealth(Array.isArray(mediaRes) ? mediaRes : []);
       const anomalyRes = await window.electronAPI.getBackupAnomalies();
@@ -188,11 +321,11 @@ function Dashboard({ onNavigate, onLoaded }: DashboardProps) {
       .getDisks()
       .then((diskList) => {
         if (cancelled) return;
-        const disks: any[] = diskList ?? [];
-        const total = disks.reduce((sum: number, d: any) => sum + (d.size || 0), 0);
-        const used = disks.reduce((sum: number, d: any) => {
-          const parts: any[] | undefined = d.partitions;
-          return sum + (parts?.reduce((s: number, p: any) => s + (p.usedSpace || 0), 0) ?? 0);
+        const disks: DiskSpaceInfo[] = diskList ?? [];
+        const total = disks.reduce((sum: number, d: DiskSpaceInfo) => sum + (d.size || 0), 0);
+        const used = disks.reduce((sum: number, d: DiskSpaceInfo) => {
+          const parts: PartitionUsage[] | undefined = d.partitions;
+          return sum + (parts?.reduce((s: number, p: PartitionUsage) => s + (p.usedSpace || 0), 0) ?? 0);
         }, 0);
         setSystemInfo({ disks: disks.length, totalSpace: total, usedSpace: used });
       })
@@ -237,8 +370,8 @@ function Dashboard({ onNavigate, onLoaded }: DashboardProps) {
         setWinfspError(result?.error ?? 'WinFsp installation failed.');
         setWinfspPhase('error');
       }
-    } catch (e: any) {
-      setWinfspError(e?.message ?? 'WinFsp installation failed.');
+    } catch (e: unknown) {
+      setWinfspError(e instanceof Error ? e.message : 'WinFsp installation failed.');
       setWinfspPhase('error');
     }
   }, []);
@@ -789,8 +922,8 @@ function Dashboard({ onNavigate, onLoaded }: DashboardProps) {
             </thead>
             <tbody>
               {anomalies.map((entry) => {
-                const flags = (entry.anomalies ?? []).filter((a: any) => a.severity !== 'info');
-                const notes = (entry.anomalies ?? []).filter((a: any) => a.severity === 'info');
+                const flags = (entry.anomalies ?? []).filter((a) => a.severity !== 'info');
+                const notes = (entry.anomalies ?? []).filter((a) => a.severity === 'info');
                 const b = entry.baseline ?? {};
                 return (
                   <tr key={entry.directory}>
@@ -809,12 +942,12 @@ function Dashboard({ onNavigate, onLoaded }: DashboardProps) {
                       {flags.length === 0 ? (
                         <span className="badge badge-ok">no anomalies</span>
                       ) : (
-                        <span className="badge badge-err" title={flags.map((f: any) => f.message).join('\n')}>
-                          {flags.map((f: any) => f.kind).join(', ')}
+                        <span className="badge badge-err" title={flags.map((f) => f.message).join('\n')}>
+                          {flags.map((f) => f.kind).join(', ')}
                         </span>
                       )}
                       {notes.length > 0 && (
-                        <span className="drill-not-tested" title={notes.map((n: any) => n.message).join('\n')}>
+                        <span className="drill-not-tested" title={notes.map((n) => n.message).join('\n')}>
                           {" ·"} {notes[0].message}
                         </span>
                       )}

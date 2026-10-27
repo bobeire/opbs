@@ -90,7 +90,21 @@ interface ScheduleDefaults {
   autoCleanup: boolean;
 }
 
-function mergeDefaults(loaded: any): ScheduleDefaults {
+/** Config handed to startBackup when a scheduled backup is run on demand. */
+interface RunBackupConfig {
+  sourceDiskIndex: number;
+  sourcePartitions: number[];
+  destinationPath: string;
+  compressionLevel: number;
+  compressionType: 'deflate' | 'zstd';
+  compressionThreads: number;
+  verificationEnabled: boolean;
+  passphrase?: string;
+  /** Newest image in the destination directory; set for incremental runs. */
+  baseImagePath?: string;
+}
+
+function mergeDefaults(loaded: Partial<ScheduleDefaults> | null): ScheduleDefaults {
   return {
     backupLocation: loaded?.backupLocation ?? '',
     defaultCompression: loaded?.defaultCompression ?? 3,
@@ -411,8 +425,8 @@ function Schedules() {
         try {
           await window.electronAPI.registerUnattendedBackupTask(savedId, payload);
           setScheduleMsg({ ok: true, text: 'Scheduled backup updated. Unattended task registered — runs without UAC.' });
-        } catch (taskErr: any) {
-          setScheduleMsg({ ok: false, text: `Schedule saved, but task registration failed: ${taskErr?.message ?? taskErr}. The schedule will still run with UAC when the app is open.` });
+        } catch (taskErr: unknown) {
+          setScheduleMsg({ ok: false, text: `Schedule saved, but task registration failed: ${taskErr instanceof Error ? taskErr.message : String(taskErr)}. The schedule will still run with UAC when the app is open.` });
         }
       } else if (!scheduleForm.unattended && savedId) {
         await window.electronAPI.unregisterUnattendedBackupTask(savedId).catch(() => {});
@@ -420,8 +434,8 @@ function Schedules() {
 
       closeScheduleForm();
       await reloadJobs();
-    } catch (e: any) {
-      setScheduleError(e?.message ?? 'Failed to save the scheduled backup.');
+    } catch (e: unknown) {
+      setScheduleError(e instanceof Error ? e.message : 'Failed to save the scheduled backup.');
     }
   };
 
@@ -441,7 +455,7 @@ function Schedules() {
   };
 
   const handleRunSchedule = async (job: ScheduledBackup) => {
-    const cfg: any = {
+    const cfg: RunBackupConfig = {
       sourceDiskIndex: job.sourceDiskIndex,
       sourcePartitions: job.sourcePartitions,
       destinationPath: job.destinationPath,
@@ -463,8 +477,8 @@ function Schedules() {
     try {
       await window.electronAPI.startBackup(cfg);
       setScheduleMsg({ ok: true, text: `Scheduled backup "${job.name}" finished.` });
-    } catch (e: any) {
-      setScheduleMsg({ ok: false, text: `"${job.name}" failed: ${e?.message ?? 'unknown error'}` });
+    } catch (e: unknown) {
+      setScheduleMsg({ ok: false, text: `"${job.name}" failed: ${e instanceof Error ? e.message : 'unknown error'}` });
     }
   };
 

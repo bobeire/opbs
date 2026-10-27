@@ -34,8 +34,8 @@ function AdkPrompt() {
       const result = await window.electronAPI.adkInstall({});
       setPhase(result.ok ? 'installed' : 'error');
       if (!result.ok) setError(result.error ?? 'ADK installation failed.');
-    } catch (e: any) {
-      setError(e?.message ?? 'ADK installation failed.');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'ADK installation failed.');
       setPhase('error');
     }
   }, []);

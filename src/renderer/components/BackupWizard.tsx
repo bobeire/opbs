@@ -56,6 +56,35 @@ interface BackupConfig {
   repoLockDays?: number;
 }
 
+/** A saved backup profile (settings.backupProfiles entry / addBackupProfile
+ *  result). Field shapes mirror the BackupProfile the settings manager stores;
+ *  `resume` is round-tripped by the wizard on top of that. */
+interface BackupProfile {
+  id: string;
+  name: string;
+  sourceDiskIndex: number;
+  sourcePartitions: number[];
+  destinationPath: string;
+  compressionLevel: number;
+  compressionType?: 'deflate' | 'zstd';
+  compressionThreads?: number;
+  verificationEnabled: boolean;
+  incremental: boolean;
+  /** Resume an interrupted backup of the same source/destination. */
+  resume?: boolean;
+  passphrase?: string;
+  /** Only capture allocated clusters (NTFS/FAT32/exFAT); skip free space. */
+  usedBlocksOnly?: boolean;
+  /** Read only NTFS-journal-changed blocks for incrementals (USN tracking). */
+  useUsnJournal?: boolean;
+  /** Fraction (0..1) of a partition that USN may report as changed before the
+   *  run full-scans it instead (from a 0-100% UI/CLI value). */
+  usnFullScanThreshold?: number;
+  /** Immutable repository destination (images journaled + write-protected). */
+  repoDir?: string;
+  repoLockDays?: number;
+}
+
 interface BackupProgress {
   phase: string;
   percentComplete: number;
@@ -163,7 +192,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   const [diskLabel, setDiskLabel] = useState<string | null>(null);
   const [networkOpen, setNetworkOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [profiles, setProfiles] = useState<any[]>([]);
+  const [profiles, setProfiles] = useState<BackupProfile[]>([]);
   const [selectedProfileId, setSelectedProfileId] = useState<string>('');
   const [profileName, setProfileName] = useState('');
   const [profileMsg, setProfileMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
@@ -184,7 +213,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     void checkBitlocker('silent');
     window.electronAPI
       .getSettings()
-      .then((s) => setProfiles(s?.backupProfiles ?? []))
+      .then((s: { backupProfiles?: BackupProfile[] }) => setProfiles(s?.backupProfiles ?? []))
       .catch(() => setProfiles([]));
     const cleanup = window.electronAPI.onBackupProgress((p) => {
       setProgress(p);
@@ -385,7 +414,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     setSelectedPartitions([]);
   };
 
-  const applyProfile = (profile: any) => {
+  const applyProfile = (profile: BackupProfile) => {
     setSourceVhdPath(null);
     const disk = disks.find((d) => d.index === profile.sourceDiskIndex);
     if (!disk) {
@@ -475,7 +504,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       setProfileMsg({ kind: 'err', text: 'Passphrases do not match — re-enter to confirm.' });
       return;
     }
-    const payload: any = {
+    const payload: Omit<BackupProfile, 'id'> = {
       name: profileName.trim(),
       sourceDiskIndex: selectedDisk.index,
       sourcePartitions: selectedPartitions,
@@ -1380,8 +1409,8 @@ function NetworkPicker({ onPick }: NetworkPickerProps) {
       .then((res) => {
         if (alive) setMachines(res.machines ?? []);
       })
-      .catch((e: any) => {
-        if (alive) setError(e?.message ?? 'Discovery failed');
+      .catch((e: unknown) => {
+        if (alive) setError(e instanceof Error ? e.message : 'Discovery failed');
       })
       .finally(() => {
         if (alive) setLoading(false);
