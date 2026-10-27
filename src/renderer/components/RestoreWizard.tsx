@@ -180,6 +180,17 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   const [stagedFrom, setStagedFrom] = useState<string | null>(null);
   const stagedRef = useRef<string | null>(null);
 
+  // Restore after reboot into recovery: when the target is the live system
+  // disk the in-Windows restore stays hard-blocked, but the same restore can
+  // be staged to run automatically after a one-shot reboot into WinRE. The
+  // one-shot boot entry fires on the NEXT restart (any restart) with a
+  // 10-second cancel window at boot.
+  const [recoveryPhase, setRecoveryPhase] = useState<'idle' | 'staging' | 'staged' | 'restarting'>('idle');
+  const [recoveryProgress, setRecoveryProgress] = useState<string | null>(null);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [recoveryBitLocker, setRecoveryBitLocker] = useState(false);
+  const [recoveryPanelOpen, setRecoveryPanelOpen] = useState(true);
+
   const releaseStaged = () => {
     const staged = stagedRef.current;
     if (staged) {
@@ -200,6 +211,15 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     const cleanup = window.electronAPI.onCloudDownloadProgress((p) => setCloudProgress(p));
     return cleanup;
   }, []);
+
+  // Live staging steps streamed from the elevated staging script (same shape
+  // as the media build's onMediaProgress lines). The message is replaced, not
+  // appended — setState in the effect body would be a cascading-render hazard.
+  useEffect(() => {
+    if (recoveryPhase !== 'staging') return;
+    const off = window.electronAPI.onRecoveryProgress?.((p) => setRecoveryProgress(p?.message ?? ''));
+    return () => off?.();
+  }, [recoveryPhase]);
 
   // Leaving the wizard drops any staged temp copy (restore completion and
   // image replacement release earlier; this is the safety net).
@@ -444,6 +464,73 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
       setRestoreError(error instanceof Error ? error.message : String(error));
       setCurrentStep('error');
     }
+  };
+
+  // Stage the restore to run after a one-shot reboot into the recovery
+  // environment — the escape hatch for the live-system-disk hard block. The
+  // payload mirrors handleStartRestore's start config (only the core fields
+  // the bridge accepts) and always acknowledges the same-disk overwrite.
+  const handleStageForRecovery = async () => {
+    if (targetDiskIndex === null || recoveryPhase !== 'idle') return;
+    setRecoveryPhase('staging');
+    setRecoveryError(null);
+    setRecoveryProgress(null);
+    setRecoveryBitLocker(false);
+    setRecoveryPanelOpen(true);
+    try {
+      const result = await window.electronAPI.recoveryStage({
+        imagePath,
+        targetDiskIndex,
+        targetPartitions,
+        verifyBeforeWrite: true,
+        ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {}),
+        acknowledgeSameDisk: true
+      });
+      if (result.ok) {
+        setRecoveryBitLocker(!!result.bitLockerSuspended);
+        setRecoveryPhase('staged');
+      } else {
+        setRecoveryError(result.error ?? 'Staging the restore failed.');
+        setRecoveryPhase('idle');
+      }
+    } catch (error) {
+      setRecoveryError(error instanceof Error ? error.message : String(error));
+      setRecoveryPhase('idle');
+    }
+  };
+
+  const handleRecoveryReboot = async () => {
+    setRecoveryPhase('restarting');
+    try {
+      const result = await window.electronAPI.recoveryReboot();
+      if (!result.ok) {
+        setRecoveryError(result.error ?? 'The restart command failed.');
+        setRecoveryPhase('staged');
+      }
+    } catch (error) {
+      setRecoveryError(error instanceof Error ? error.message : String(error));
+      setRecoveryPhase('staged');
+    }
+  };
+
+  // Cancel the staged restore (removes the one-shot boot entry). Only returns
+  // to the normal panel when the cleanup actually succeeded — a failed cancel
+  // must not pretend the staged restore is gone.
+  const handleCancelStagedRestore = async () => {
+    try {
+      const result = await window.electronAPI.recoveryCleanup();
+      if (!result.ok) {
+        setRecoveryError(result.error ?? 'Cancelling the staged restore failed.');
+        return;
+      }
+    } catch (error) {
+      setRecoveryError(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    setRecoveryPhase('idle');
+    setRecoveryProgress(null);
+    setRecoveryError(null);
+    setRecoveryPanelOpen(true);
   };
 
   const formatSize = (bytes: number): string => {
@@ -807,18 +894,107 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                         </div>
                       </div>
                       {systemDiskBlocked && (
-                        <div className="error-message">
-                          <p>
-                            <strong>This is the disk Windows is running from.</strong> A restore
-                            cannot be performed from inside a live Windows session — the system
-                            volume cannot be unlocked for writing, so the restore would fail (and
-                            could leave the disk partially written).
-                          </p>
-                          <p>
-                            To restore this disk, build a bootable recovery media under{' '}
-                            <strong>Media</strong>, boot from it, and run the restore there.
-                          </p>
-                        </div>
+                        <>
+                          <div className="error-message">
+                            <p>
+                              <strong>This is the disk Windows is running from.</strong> A restore
+                              cannot be performed from inside a live Windows session — the system
+                              volume cannot be unlocked for writing, so the restore would fail (and
+                              could leave the disk partially written).
+                            </p>
+                            <p>
+                              To restore this disk, build a bootable recovery media under{' '}
+                              <strong>Media</strong>, boot from it, and run the restore there.
+                            </p>
+                            <div className="wizard-actions">
+                              <button
+                                className="btn-primary"
+                                onClick={() => void handleStageForRecovery()}
+                                disabled={recoveryPhase !== 'idle'}
+                              >
+                                {recoveryPhase === 'staging'
+                                  ? 'Staging…'
+                                  : 'Restore after reboot into recovery…'}
+                              </button>
+                            </div>
+                          </div>
+                          {recoveryPhase === 'staging' && (
+                            <>
+                              <p className="field-hint">
+                                Staging the restore for the reboot into recovery…
+                              </p>
+                              {recoveryProgress && <p>{recoveryProgress}</p>}
+                            </>
+                          )}
+                          {(recoveryPhase === 'staged' || recoveryPhase === 'restarting') &&
+                            recoveryPanelOpen && (
+                              <div className="warning-box">
+                                <p>
+                                  Staged. On the next restart the PC boots once into the OPBS
+                                  recovery environment and the restore runs there automatically —
+                                  you can cancel it within the first 10 seconds of that boot. The
+                                  result is reported the next time OPBS starts.
+                                </p>
+                                {recoveryBitLocker && (
+                                  <p>
+                                    BitLocker protection is suspended for one boot so the restore
+                                    can write the volume.
+                                  </p>
+                                )}
+                                {recoveryPhase === 'restarting' && <p>Restarting…</p>}
+                                <div className="wizard-actions">
+                                  <button
+                                    className="btn-danger"
+                                    onClick={() => void handleRecoveryReboot()}
+                                    disabled={recoveryPhase === 'restarting'}
+                                  >
+                                    Restart now
+                                  </button>
+                                  <button
+                                    className="btn-secondary"
+                                    onClick={() => setRecoveryPanelOpen(false)}
+                                    disabled={recoveryPhase === 'restarting'}
+                                  >
+                                    Restart later
+                                  </button>
+                                  <button
+                                    className="btn-secondary"
+                                    onClick={() => void handleCancelStagedRestore()}
+                                    disabled={recoveryPhase === 'restarting'}
+                                  >
+                                    Cancel staged restore
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          {recoveryPhase === 'staged' && !recoveryPanelOpen && (
+                            <div className="warning-box">
+                              <p>
+                                A restore is staged — it will run automatically on the next
+                                restart.
+                              </p>
+                              <div className="wizard-actions">
+                                <button
+                                  className="btn-secondary"
+                                  onClick={() => setRecoveryPanelOpen(true)}
+                                >
+                                  Details…
+                                </button>
+                                <button
+                                  className="btn-secondary"
+                                  onClick={() => void handleCancelStagedRestore()}
+                                >
+                                  Cancel staged restore
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                          {recoveryError && (
+                            <div className="error-message">
+                              <p>{recoveryError}</p>
+                            </div>
+                          )}
+                        </>
                       )}
                       {(preflight.targetDiskPartitionCount ?? 0) > 0 && !systemDiskBlocked && (
                         <div className="error-message">

@@ -137,6 +137,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   mediaCheck: () => ipcRenderer.invoke('media-check'),
   mediaCreate: (options: unknown) => ipcRenderer.invoke('media-create', options),
   mediaDrives: () => ipcRenderer.invoke('media-drives'),
+
+  // Recovery reboot: stage a restore that runs after reboot in WinRE
+  recoveryStage: (config: unknown) => ipcRenderer.invoke('recovery-stage', config),
+  recoveryCleanup: () => ipcRenderer.invoke('recovery-cleanup'),
+  recoveryStatus: () => ipcRenderer.invoke('recovery-status'),
+  recoveryReboot: () => ipcRenderer.invoke('recovery-reboot'),
   adkInstall: (options: unknown) => ipcRenderer.invoke('adk-install', options),
   nodeInstall: () => ipcRenderer.invoke('node-install'),
 
@@ -244,6 +250,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('media-progress', handler);
     return () => {
       ipcRenderer.removeListener('media-progress', handler);
+    };
+  },
+  onRecoveryProgress: (callback: (progress: { message: string }) => void) => {
+    const handler = (_event: unknown, progress: { message: string }) => callback(progress);
+    ipcRenderer.on('recovery-progress', handler);
+    return () => {
+      ipcRenderer.removeListener('recovery-progress', handler);
     };
   },
 

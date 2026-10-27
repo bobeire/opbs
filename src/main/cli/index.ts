@@ -125,6 +125,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdHealth(ctx);
       case 'media':
         return await cmdMedia(ctx);
+      case 'recovery':
+        return await cmdRecovery(ctx);
       case 'mrimg':
         return await cmdMrimg(ctx);
       case 'migrate':
@@ -368,6 +370,19 @@ Commands:
   media create --usb <drive> --yes [--arch ...] [--adk <root>] [--node <node.exe>]
                                          [--restore-config <restore.json>] [--driver <dir,...>] [--script-only]
                                          Build recovery media on a USB drive (destructive).
+  recovery stage <config.json>           Stage a restore that runs after one reboot in the
+                                         Windows Recovery Environment (elevated; one UAC
+                                         prompt). Uses a COPY of winre.wim plus a one-shot
+                                         boot entry; the normal boot menu is unchanged.
+                                         Config schema matches restore: imagePath,
+                                         targetDiskIndex, targetPartitions, passphrase?,
+                                         verifyBeforeWrite?
+  recovery cleanup                       Cancel a staged recovery restore (elevated): the
+                                         boot entry, the ramdisk object and the staged
+                                         files are removed.
+  recovery status                        Show whether a recovery restore is staged and any
+                                         pending result of the last recovery-environment run.
+  recovery reboot                        Reboot into the staged recovery environment.
   browse <image> [--partition N] [--path DIR] [--passphrase p]
                                          List files/directories in an image (no elevation).
                                          Accepts .opbs, .mrimgx, and .mrimg (Reflect 7/8).
@@ -2431,6 +2446,96 @@ async function cmdMediaSmart(ctx: CommandContext): Promise<number> {
     console.log('No physical disks discovered.');
   }
   return anyUnhealthy ? 1 : 0;
+}
+
+/**
+ * Recovery reboot (`recovery`): stage a restore that runs after one reboot in
+ * the Windows Recovery Environment, plus cleanup/status/reboot. The
+ * winre-recovery module is loaded lazily inside the actions so the CLI keeps
+ * loading on plain node.exe (WinPE) without Electron.
+ */
+async function cmdRecovery(ctx: CommandContext): Promise<number> {
+  const action = ctx.argv[0];
+
+  if (action === 'stage') {
+    const configPath = ctx.argv[1];
+    if (!configPath) {
+      console.error('Usage: recovery stage <config.json>');
+      return 1;
+    }
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    const { stageRecoveryRestore } = await import('../recovery/winre-recovery');
+    const result = await stageRecoveryRestore(config, {
+      onProgress: ctx.opts.json
+        ? undefined
+        : (message: string) => {
+            console.log(message);
+          }
+    });
+    if (ctx.opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (result.ok) {
+      console.log(`Recovery restore staged at ${result.stagedPath}${result.bitLockerSuspended ? ' (BitLocker suspended for one boot)' : ''}`);
+      console.log('Reboot to run it: recovery reboot');
+    } else {
+      console.error(`Recovery staging failed: ${result.error}`);
+    }
+    return result.ok ? 0 : 1;
+  }
+
+  if (action === 'cleanup') {
+    const { cleanupRecovery } = await import('../recovery/winre-recovery');
+    const result = await cleanupRecovery({
+      onProgress: ctx.opts.json
+        ? undefined
+        : (message: string) => {
+            console.log(message);
+          }
+    });
+    if (ctx.opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (result.ok) {
+      console.log(result.cleaned ? 'Staged recovery restore removed.' : 'No staged recovery restore to remove.');
+    } else {
+      console.error(`Recovery cleanup failed: ${result.error}`);
+    }
+    return result.ok ? 0 : 1;
+  }
+
+  if (action === 'status') {
+    const { readRecoveryStatus } = await import('../recovery/winre-recovery');
+    const status = readRecoveryStatus();
+    if (ctx.opts.json) {
+      console.log(JSON.stringify(status, null, 2));
+    } else {
+      console.log(status.staged ? `Staged: yes (${status.stagedPath})` : 'Staged: no');
+      if (status.pendingResult) {
+        console.log(
+          `Last recovery run: ${status.pendingResult.ok ? 'succeeded' : `failed (exit code ${status.pendingResult.exitCode ?? '?'})`}` +
+            `${status.pendingResult.finishedAt ? ` at ${status.pendingResult.finishedAt}` : ''}`
+        );
+      } else {
+        console.log('Last recovery run: no pending result.');
+      }
+    }
+    return 0;
+  }
+
+  if (action === 'reboot') {
+    const { rebootToRecovery } = await import('../recovery/winre-recovery');
+    const result = rebootToRecovery();
+    if (ctx.opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else if (result.ok) {
+      console.log('Rebooting into the recovery environment in 5 seconds...');
+    } else {
+      console.error(`Reboot failed: ${result.error}`);
+    }
+    return result.ok ? 0 : 1;
+  }
+
+  console.error('Usage: recovery stage <config.json> | recovery cleanup | recovery status | recovery reboot');
+  return 1;
 }
 
 async function cmdMrimg(ctx: CommandContext): Promise<number> {

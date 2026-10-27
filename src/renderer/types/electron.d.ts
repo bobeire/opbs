@@ -314,6 +314,29 @@ declare global {
       mediaCheck: () => Promise<any>;
       mediaCreate: (options: any) => Promise<any>;
       mediaDrives: () => Promise<{ primary: any[]; others: any[]; error?: string }>;
+      recoveryStage: (config: {
+        imagePath: string;
+        targetDiskIndex: number;
+        targetPartitions: number[];
+        passphrase?: string;
+        verifyBeforeWrite?: boolean;
+        acknowledgeSameDisk?: boolean;
+      }) => Promise<{
+        ok: boolean;
+        stagedPath?: string;
+        entryGuid?: string;
+        ramdiskGuid?: string;
+        bitLockerSuspended?: boolean;
+        winreSource?: string;
+        error?: string;
+      }>;
+      recoveryCleanup: () => Promise<{ ok: boolean; cleaned?: boolean; error?: string }>;
+      recoveryStatus: () => Promise<{
+        staged: boolean;
+        stagedPath?: string;
+        pendingResult?: { ok: boolean; exitCode?: number; finishedAt?: string } | null;
+      }>;
+      recoveryReboot: () => Promise<{ ok: boolean; error?: string }>;
       adkInstall: (options: any) => Promise<{ ok: boolean; adkRoot: string | null; steps: Array<{ name: string; exitCode: number }>; error?: string }>;
       nodeInstall: () => Promise<{ ok: boolean; nodeExe: string | null; version?: string; error?: string }>;
       bitlockerStatus: (options?: { elevate?: boolean; refresh?: boolean }) => Promise<{
@@ -361,6 +384,7 @@ declare global {
       onCloudDownloadProgress: (callback: (progress: { file: string; fileIndex: number; fileCount: number; fileBytesDone: number; fileBytesTotal: number; bytesDone: number; bytesTotal: number }) => void) => () => void;
       onCloneProgress: (callback: (progress: any) => void) => () => void;
       onMediaProgress: (callback: (progress: { message: string }) => void) => () => void;
+      onRecoveryProgress: (callback: (progress: { message: string }) => void) => () => void;
 
       // Disk tools
       getMbrInfo: (diskIndex: number) => Promise<any>;

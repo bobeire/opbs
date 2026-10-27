@@ -35,6 +35,13 @@ import { openAnyBrowse as fsOpenBrowseAny, listDirectory, extractPath, detectPar
 import { detectMacriumFormat, readMacriumImage, closeImageFds, clearMacriumInfoCache } from './imaging/mrimg';
 import { locateAdk, peArchForProcess } from './utils/adk';
 import { createRecoveryMedia, resolveNodeExe, MediaCreateOptions } from './utils/winpe-media';
+import {
+  stageRecoveryRestore,
+  cleanupRecovery,
+  readRecoveryStatus,
+  rebootToRecovery,
+  type RecoveryStageConfig
+} from './recovery/winre-recovery';
 import { installAdkExe } from './utils/adk-install';
 import { installNodeRuntime } from './utils/node-install';
 import { installWinfsp } from './utils/winfsp-install';
@@ -1993,6 +2000,31 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
   ipcMain.handle('media-drives', async () => {
     const { listMediaDrives } = await import('./utils/media-drives');
     return listMediaDrives();
+  });
+
+  // Restore after reboot into WinRE: stage/cancel a one-shot recovery restore
+  ipcMain.handle('recovery-stage', async (event, config: RecoveryStageConfig) => {
+    return stageRecoveryRestore(config, {
+      onProgress: (message: string) => {
+        try {
+          event.sender.send('recovery-progress', { message });
+        } catch {
+          /* renderer navigated away */
+        }
+      }
+    });
+  });
+
+  ipcMain.handle('recovery-cleanup', async () => {
+    return cleanupRecovery();
+  });
+
+  ipcMain.handle('recovery-status', async () => {
+    return readRecoveryStatus();
+  });
+
+  ipcMain.handle('recovery-reboot', async () => {
+    return rebootToRecovery();
   });
 
   // BitLocker volume status. elevate:true costs one UAC prompt; the renderer

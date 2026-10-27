@@ -46,6 +46,13 @@ interface BrowseIntent {
   autoMount?: boolean;
 }
 
+/** Startup report of a staged recovery restore that ran at boot. */
+interface RecoveryNotice {
+  kind: 'success' | 'error';
+  title: string;
+  body: string;
+}
+
 /** Payload of the 'backup-progress' IPC event (mirrors BackupProgress in main; feeds BackupWizard's activeProgress). */
 interface BackupProgress {
   phase: string;
@@ -69,6 +76,7 @@ function App() {
   const [browseIntent, setBrowseIntent] = useState<BrowseIntent | null>(null);
   const [backupRunning, setBackupRunning] = useState(false);
   const [lastBackupProgress, setLastBackupProgress] = useState<BackupProgress | null>(null);
+  const [recoveryNotice, setRecoveryNotice] = useState<RecoveryNotice | null>(null);
   const [appVersion, setAppVersion] = useState<string>('');
   const [initialDataReady, setInitialDataReady] = useState(false);
   const [splashMinElapsed, setSplashMinElapsed] = useState(false);
@@ -103,6 +111,41 @@ function App() {
     // Update check happens in main at startup (initAutoUpdater); calling it
     // here too would make background checks indistinguishable from the
     // manual "Check for updates" button.
+  }, []);
+
+  // A staged recovery restore runs outside OPBS (reboot into WinRE); report
+  // its result once when OPBS next starts. A restore that is staged but has
+  // not run yet is deliberately not nagged about here — the Restore page owns
+  // that flow.
+  useEffect(() => {
+    let alive = true;
+    void window.electronAPI
+      .recoveryStatus()
+      .then((status) => {
+        const result = status?.pendingResult;
+        if (!alive || !result) return;
+        setRecoveryNotice(
+          result.ok
+            ? {
+                kind: 'success',
+                title: 'Recovery restore completed',
+                body: 'The recovery restore completed successfully. Open Logs for the full report.'
+              }
+            : {
+                kind: 'error',
+                title: 'Recovery restore failed',
+                body: `The recovery restore did not complete${
+                  typeof result.exitCode === 'number' ? ` (exit code ${result.exitCode})` : ''
+                }. Check Logs for details, then try the restore again.`
+              }
+        );
+      })
+      .catch(() => {
+        // A failed status check has nothing to report — stay silent.
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   // Track backup state globally so it persists across navigation
@@ -365,6 +408,23 @@ function App() {
       </main>
 
       <ToastHost />
+      {recoveryNotice && (
+        // ToastHost is fed only from main's activity events, so the startup
+        // recovery report reuses the same toast classes (offset below the
+        // ToastHost stack) and stays until dismissed — a restore result is
+        // too important to auto-hide.
+        <div className="toast-host" style={{ top: 'auto', bottom: 16 }}>
+          <div
+            className={`toast ${recoveryNotice.kind === 'success' ? 'toast-success' : 'toast-error'}`}
+          >
+            <div className="toast-title">{recoveryNotice.title}</div>
+            <div className="toast-body">{recoveryNotice.body}</div>
+            <button className="toast-close" onClick={() => setRecoveryNotice(null)}>
+              ×
+            </button>
+          </div>
+        </div>
+      )}
       <AdkPrompt />
 
       {splashVisible && <SplashScreen />}

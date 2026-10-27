@@ -434,7 +434,7 @@ export function payloadTextFiles(): PayloadTextFile[] {
   ];
 }
 
-function buildWinpeEntry(): string {
+export function buildWinpeEntry(): string {
   return [
     "'use strict';",
     "const path = require('path');",
