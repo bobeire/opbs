@@ -483,6 +483,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
         targetDiskIndex,
         targetPartitions,
         verifyBeforeWrite: true,
+        clearFreeSpace,
         ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {}),
         acknowledgeSameDisk: true
       });

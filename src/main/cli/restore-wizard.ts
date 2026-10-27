@@ -372,6 +372,24 @@ export async function runRestoreWizard(io: WizardIO, deps: WizardDeps): Promise<
       }
       io.print('  Enter y or n.');
     }
+    let clearFreeSpace: boolean;
+    for (;;) {
+      const input = (
+        await io.ask('  Clear free space after restore? (zeroes blocks not in the image - much slower) [Y/n] > ')
+      )
+        .trim()
+        .toLowerCase();
+      if (input === 'q') throw new AbortWizard();
+      if (input === '' || input === 'y' || input === 'yes') {
+        clearFreeSpace = true;
+        break;
+      }
+      if (input === 'n' || input === 'no') {
+        clearFreeSpace = false;
+        break;
+      }
+      io.print('  Enter y or n.');
+    }
 
     // [4/4] review + preflight + confirm ------------------------------------
     io.print();
@@ -387,6 +405,9 @@ export async function runRestoreWizard(io: WizardIO, deps: WizardDeps): Promise<
     io.print(`  Target    : disk ${targetDisk.index} - ${targetDisk.model || 'unknown'} (${fmtBytes(targetDisk.size)})`);
     io.print(`  Overwrite : ALL current data on disk ${targetDisk.index}`);
     io.print(`  Verify    : ${verifyBeforeWrite ? 'yes (before writing)' : 'no'}`);
+    io.print(
+      `  Clear free: ${clearFreeSpace ? 'yes (zeroes every block not in the image — slower)' : 'no'}`
+    );
     if (passphrase !== undefined) {
       io.print('  Passphrase: set (encrypted image)');
     }
@@ -396,7 +417,8 @@ export async function runRestoreWizard(io: WizardIO, deps: WizardDeps): Promise<
       imagePath: image.path,
       targetDiskIndex: targetDisk.index,
       targetPartitions,
-      verifyBeforeWrite
+      verifyBeforeWrite,
+      clearFreeSpace
     };
     if (passphrase !== undefined) {
       config.passphrase = passphrase;

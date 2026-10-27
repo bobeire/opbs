@@ -321,6 +321,7 @@ declare global {
         targetPartitions: number[];
         passphrase?: string;
         verifyBeforeWrite?: boolean;
+        clearFreeSpace?: boolean;
         acknowledgeSameDisk?: boolean;
       }) => Promise<{
         ok: boolean;

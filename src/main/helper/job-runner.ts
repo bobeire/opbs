@@ -1003,6 +1003,22 @@ const TRANSIENT_WRITE_ERROR = /access is denied|being used by another process|th
  * The native layer closes and drops its cached handle when a write fails, so
  * each retry reopens the device cleanly.
  */
+/**
+ * Extra guidance appended to write failures with ERROR_ACCESS_DENIED: on a
+ * restore this almost never means missing permissions — it means the target
+ * region is still covered by a mounted/held volume or a BitLocker-locked one.
+ */
+export function writeErrorHint(message: string): string {
+  if (!/access is denied/i.test(message)) return '';
+  return (
+    'This is not a permissions problem: the raw write was refused because the target region is ' +
+    'still covered by a volume that is mounted or held in this environment (open files, ' +
+    'chkdsk/autochk) or is BitLocker-encrypted and locked here. Check `manage-bde -status` — if ' +
+    'a target volume shows "Protection On", unlock or suspend BitLocker first. If the failed ' +
+    'write was at block 0 of a partition, nothing has been written to that partition yet.'
+  );
+}
+
 export async function writeRawWithRetry(
   attemptWrite: () => void | Promise<unknown>,
   attempts = 20,
@@ -1014,6 +1030,10 @@ export async function writeRawWithRetry(
       return;
     } catch (error) {
       if (attempt >= attempts || !TRANSIENT_WRITE_ERROR.test(errorMessage(error))) {
+        const hint = writeErrorHint(errorMessage(error));
+        if (hint) {
+          throw new Error(`${errorMessage(error)} ${hint}`, { cause: error });
+        }
         throw error;
       }
       await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -1294,6 +1314,18 @@ export async function runRestoreJob(
           const volumePath = native.getVolumePath(target.diskIndex, target.offset);
           if (!volumePath) continue;
           if (!native.lockAndDismountVolume(volumePath)) {
+            if (phase === 'before restore') {
+              // Refuse to start: a raw write to a held volume dies partway
+              // through and leaves the disk partially written. Fail here
+              // instead — nothing has been touched yet.
+              throw new Error(
+                `Cannot lock ${target.label} for writing — the volume is still in use in this ` +
+                `environment (open files, chkdsk/autochk, or a mounted filesystem) or is ` +
+                `BitLocker-encrypted and locked here. Nothing has been written to the disk. ` +
+                `Close files on the volume and retry; check \`manage-bde -status\` and unlock ` +
+                `or suspend BitLocker if the volume shows "Protection On".`
+              );
+            }
             warnings.push(
               `Could not dismount ${target.label} ${phase}; eject and reinsert the drive (or reboot) if Explorer still shows stale files.`
             );
@@ -2021,6 +2053,18 @@ async function runMacriumRestoreJob(
           const volumePath = native.getVolumePath(target.diskIndex, target.offset);
           if (!volumePath) continue;
           if (!native.lockAndDismountVolume(volumePath)) {
+            if (phase === 'before restore') {
+              // Refuse to start: a raw write to a held volume dies partway
+              // through and leaves the disk partially written. Fail here
+              // instead — nothing has been touched yet.
+              throw new Error(
+                `Cannot lock ${target.label} for writing — the volume is still in use in this ` +
+                `environment (open files, chkdsk/autochk, or a mounted filesystem) or is ` +
+                `BitLocker-encrypted and locked here. Nothing has been written to the disk. ` +
+                `Close files on the volume and retry; check \`manage-bde -status\` and unlock ` +
+                `or suspend BitLocker if the volume shows "Protection On".`
+              );
+            }
             warnings.push(
               `Could not dismount ${target.label} ${phase}; eject and reinsert the drive (or reboot) if Explorer still shows stale files.`
             );

@@ -65,6 +65,7 @@ export interface RecoveryStageConfig {
   targetPartitions: number[];
   passphrase?: string;
   verifyBeforeWrite?: boolean;
+  clearFreeSpace?: boolean;
   acknowledgeSameDisk?: boolean;
 }
 
@@ -226,7 +227,8 @@ export function recoveryPayloadTextFiles(config: RecoveryStageConfig): Array<{ n
             : { targetDiskIndex: config.targetDiskIndex }),
           targetPartitions: config.targetPartitions,
           ...(config.passphrase ? { passphrase: config.passphrase } : {}),
-          verifyBeforeWrite: config.verifyBeforeWrite !== false
+          verifyBeforeWrite: config.verifyBeforeWrite !== false,
+          clearFreeSpace: config.clearFreeSpace !== false
         },
         null,
         2
