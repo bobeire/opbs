@@ -2585,3 +2585,98 @@ body {
 .builder-actions {
   margin-top: 16px;
 }
+
+/* Passphrase entry (shared PassphraseInput component): roomy masked input with
+   a show/hide toggle, and an optional confirm field on create. Attribute
+   selectors keep these winning over older rules like .builder-row
+   input[type="password"] / .bitlocker-unlock-row input[type="password"]
+   regardless of reveal state. */
+.passphrase-field {
+  width: 100%;
+}
+
+.passphrase-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+}
+
+.passphrase-input-wrap input.passphrase-input[type='password'],
+.passphrase-input-wrap input.passphrase-input[type='text'] {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 10px 42px 10px 12px;
+  font-size: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--sidebar-bg);
+  color: var(--text-color);
+}
+
+.passphrase-input-wrap input.passphrase-input[type='password']:focus,
+.passphrase-input-wrap input.passphrase-input[type='text']:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+.passphrase-input-wrap input.passphrase-input:disabled {
+  opacity: 0.6;
+}
+
+.passphrase-reveal {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.passphrase-reveal:hover:not(:disabled) {
+  color: var(--text-color);
+  background: var(--subtle-hover);
+}
+
+.passphrase-reveal:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.passphrase-field-compact input.passphrase-input[type='password'],
+.passphrase-field-compact input.passphrase-input[type='text'] {
+  min-height: 34px;
+  padding: 6px 38px 6px 10px;
+  font-size: 13px;
+}
+
+.passphrase-confirm {
+  margin-top: 8px;
+}
+
+.passphrase-status {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+.passphrase-status.ok {
+  color: var(--success-color);
+}
+
+.passphrase-status.err {
+  color: var(--danger-color);
+}
+
+.passphrase-status.pending {
+  color: var(--text-muted);
+}

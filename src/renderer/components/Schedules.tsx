@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react';
+import { PassphraseInput } from './PassphraseInput';
+import { confirmReady } from '../lib/passphrase';
 import {
   buildCronFromFriendly,
   parseCronToFriendly,
@@ -49,6 +51,7 @@ interface ScheduleForm {
   verificationEnabled: boolean;
   incremental: boolean;
   passphrase: string;
+  passphraseConfirm: string;
   maxRetries: number;
   retryDelayMinutes: number;
   retentionApplied: boolean;
@@ -179,6 +182,7 @@ function Schedules() {
     verificationEnabled: defaults.defaultVerification,
     incremental: false,
     passphrase: '',
+    passphraseConfirm: '',
     maxRetries: 2,
     retryDelayMinutes: 5,
     retentionApplied: false,
@@ -219,6 +223,7 @@ function Schedules() {
       verificationEnabled: job.verificationEnabled,
       incremental: job.incremental,
       passphrase: job.passphrase || '',
+      passphraseConfirm: job.passphrase || '',
       maxRetries: job.maxRetries ?? 2,
       retryDelayMinutes: job.retryDelayMinutes ?? 5,
       retentionApplied: job.retentionApplied ?? false,
@@ -329,6 +334,10 @@ function Schedules() {
   const handleScheduleSave = async () => {
     if (!scheduleForm) return;
     setScheduleError(null);
+    if (!confirmReady(scheduleForm.passphrase, scheduleForm.passphraseConfirm)) {
+      setScheduleError('Passphrases do not match — re-enter to confirm.');
+      return;
+    }
 
     let cronExpression = scheduleForm.cronExpression;
     if (!scheduleForm.advancedCron) {
@@ -896,11 +905,15 @@ function Schedules() {
 
           <div className="setting-item">
             <label>Encryption Passphrase:</label>
-            <input
-              type="password"
+            <PassphraseInput
+              mode="create"
               value={scheduleForm.passphrase}
-              onChange={(e) => setScheduleForm({ ...scheduleForm, passphrase: e.target.value })}
+              onChange={(v) => setScheduleForm({ ...scheduleForm, passphrase: v })}
+              confirmValue={scheduleForm.passphraseConfirm}
+              onConfirmChange={(v) => setScheduleForm({ ...scheduleForm, passphraseConfirm: v })}
               placeholder="Leave empty for no encryption"
+              ariaLabel="Encryption passphrase"
+              confirmAriaLabel="Confirm encryption passphrase"
             />
             <p className="field-hint">
               AES-256-GCM per-block. Required to verify or restore this backup. Stored in your settings file.

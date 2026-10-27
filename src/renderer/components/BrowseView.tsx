@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { PassphraseInput } from './PassphraseInput';
 
 interface BrowseNode {
   /** MFT record number (NTFS) or start cluster (FAT/exFAT), as sent by main. */
@@ -348,11 +349,11 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         {info?.encrypted && info.imageFormat !== 'mrimg' && info.imageFormat !== 'mrimgx' && (
           <div className="setting-item">
             <label>Passphrase:</label>
-            <input
-              type="password"
+            <PassphraseInput
               value={passphrase}
-              onChange={(e) => setPassphrase(e.target.value)}
+              onChange={setPassphrase}
               placeholder="Required for encrypted image"
+              ariaLabel="Image passphrase"
             />
           </div>
         )}

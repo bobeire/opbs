@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { applyTheme } from '../lib/theme';
+import { PassphraseInput } from './PassphraseInput';
 
 interface NotificationSettings {
   enabled: boolean;
@@ -768,17 +769,16 @@ function Settings() {
             </div>
             <div className="setting-item">
               <label>Image passphrase (leave empty if images are not encrypted):</label>
-              <input
-                type="password"
+              <PassphraseInput
                 value={settings.scheduledDrill.passphrase ?? ''}
-                onChange={(e) =>
+                onChange={(v) =>
                   handleChange('scheduledDrill', {
                     ...settings.scheduledDrill,
-                    passphrase: e.target.value
+                    passphrase: v
                   })
                 }
-                autoComplete="off"
                 placeholder="Lets drills restore encrypted images"
+                ariaLabel="Scheduled drill image passphrase"
               />
             </div>
             <div className="setting-item">
@@ -903,17 +903,16 @@ function Settings() {
             </div>
             <div className="setting-item">
               <label>Image passphrase (leave empty if images are not encrypted):</label>
-              <input
-                type="password"
+              <PassphraseInput
                 value={settings.scheduledMigrateDrill.passphrase ?? ''}
-                onChange={(e) =>
+                onChange={(v) =>
                   handleChange('scheduledMigrateDrill', {
                     ...settings.scheduledMigrateDrill,
-                    passphrase: e.target.value
+                    passphrase: v
                   })
                 }
-                autoComplete="off"
                 placeholder="Lets drills plan against encrypted images"
+                ariaLabel="Scheduled migrate drill image passphrase"
               />
             </div>
             <div className="setting-item">
@@ -1097,20 +1096,18 @@ function Settings() {
         </div>
         <div className="setting-item">
           <label>Access Key ID:</label>
-          <input
-            type="password"
+          <PassphraseInput
             value={settings.cloud.s3.accessKeyId}
-            onChange={(e) => handleS3Change('accessKeyId', e.target.value)}
-            autoComplete="off"
+            onChange={(v) => handleS3Change('accessKeyId', v)}
+            ariaLabel="S3 access key ID"
           />
         </div>
         <div className="setting-item">
           <label>Secret Access Key:</label>
-          <input
-            type="password"
+          <PassphraseInput
             value={settings.cloud.s3.secretAccessKey}
-            onChange={(e) => handleS3Change('secretAccessKey', e.target.value)}
-            autoComplete="off"
+            onChange={(v) => handleS3Change('secretAccessKey', v)}
+            ariaLabel="S3 secret access key"
           />
         </div>
         <div className="setting-item">
@@ -1217,11 +1214,10 @@ function Settings() {
         </div>
         <div className="setting-item">
           <label>Password:</label>
-          <input
-            type="password"
+          <PassphraseInput
             value={settings.cloud.sftp.password}
-            onChange={(e) => handleSftpChange('password', e.target.value)}
-            autoComplete="off"
+            onChange={(v) => handleSftpChange('password', v)}
+            ariaLabel="SFTP password"
           />
         </div>
         <div className="setting-item">
@@ -1302,11 +1298,10 @@ function Settings() {
         </div>
         <div className="setting-item">
           <label>Password:</label>
-          <input
-            type="password"
+          <PassphraseInput
             value={settings.cloud.ftp.password}
-            onChange={(e) => handleFtpChange('password', e.target.value)}
-            autoComplete="off"
+            onChange={(v) => handleFtpChange('password', v)}
+            ariaLabel="FTP password"
           />
         </div>
         <div className="setting-item">

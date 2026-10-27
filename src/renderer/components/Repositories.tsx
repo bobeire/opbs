@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { PassphraseInput } from './PassphraseInput';
+import { confirmReady, confirmStatus } from '../lib/passphrase';
 
 type BusyAction = 'open' | 'init' | 'verify' | 'prune' | 'unlock' | 'anchor' | null;
 
@@ -34,6 +36,7 @@ function statusBadge(state: RepoImageStateInfo): { cls: string; label: string } 
 function Repositories() {
   const [dir, setDir] = useState('');
   const [passphrase, setPassphrase] = useState('');
+  const [passphraseConfirm, setPassphraseConfirm] = useState('');
   const [overview, setOverview] = useState<RepoOpenResult | null>(null);
   const [busy, setBusy] = useState<BusyAction>(null);
   const [progress, setProgress] = useState('');
@@ -115,6 +118,10 @@ function Repositories() {
 
   const initRepo = async () => {
     if (!dir) return;
+    if (!confirmReady(passphrase, passphraseConfirm)) {
+      setError('Passphrases do not match — re-enter to confirm.');
+      return;
+    }
     setBusy('init');
     setError('');
     setNotice('');
@@ -261,6 +268,8 @@ function Repositories() {
   const states = overview?.states ?? [];
   const verifying = busy === 'verify';
 
+  const initConfirmStatus = confirmStatus(passphrase, passphraseConfirm);
+
   return (
     <div className="dashboard">
       <h1>Immutable Repositories</h1>
@@ -288,12 +297,12 @@ function Repositories() {
             {busy === 'open' ? 'Opening…' : 'Open'}
           </button>
         </div>
-        <div className="path-input" style={{ flex: 1, minWidth: 260, marginTop: 8 }}>
-          <input
-            type="password"
+        <div style={{ flex: 1, minWidth: 260, marginTop: 8 }}>
+          <PassphraseInput
             value={passphrase}
+            onChange={setPassphrase}
             placeholder="Passphrase (only for passphrase-initialized repositories)"
-            onChange={(e) => setPassphrase(e.target.value)}
+            ariaLabel="Repository passphrase"
           />
         </div>
         {progress && <p className="field-hint">{progress}</p>}
@@ -318,6 +327,28 @@ function Repositories() {
               </>
             )}
           </p>
+          <div className="disk-tools-row" style={{ marginTop: 8 }}>
+            <label>Confirm passphrase:</label>
+            <PassphraseInput
+              compact
+              style={{ flex: 1, minWidth: 240 }}
+              value={passphraseConfirm}
+              onChange={setPassphraseConfirm}
+              placeholder="Re-enter to confirm (empty = keyfile)"
+              ariaLabel="Confirm repository passphrase"
+              disabled={busy !== null}
+              onEnter={() => void initRepo()}
+            />
+          </div>
+          {initConfirmStatus === 'incomplete' && (
+            <p className="passphrase-status pending">Re-enter the passphrase to confirm.</p>
+          )}
+          {initConfirmStatus === 'match' && passphrase !== '' && (
+            <p className="passphrase-status ok">Passphrases match.</p>
+          )}
+          {initConfirmStatus === 'mismatch' && (
+            <p className="passphrase-status err">Passphrases do not match.</p>
+          )}
           <div className="disk-tools-row">
             <label>Default lock (days)</label>
             <input
@@ -327,7 +358,11 @@ function Repositories() {
               onChange={(e) => setInitLockDays(e.target.value)}
               style={{ width: 90 }}
             />
-            <button className="btn-primary" disabled={!dir || busy !== null} onClick={() => void initRepo()}>
+            <button
+              className="btn-primary"
+              disabled={!dir || busy !== null || !confirmReady(passphrase, passphraseConfirm)}
+              onClick={() => void initRepo()}
+            >
               {busy === 'init' ? 'Initializing…' : 'Initialize repository'}
             </button>
           </div>

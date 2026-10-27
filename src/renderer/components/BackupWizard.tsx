@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react';
+import { PassphraseInput } from './PassphraseInput';
+import { confirmReady } from '../lib/passphrase';
 
 interface DiskInfo {
   index: number;
@@ -153,6 +155,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   const [incrementalEnabled, setIncrementalEnabled] = useState(false);
   const [resumeEnabled, setResumeEnabled] = useState(false);
   const [passphrase, setPassphrase] = useState('');
+  const [passphraseConfirm, setPassphraseConfirm] = useState('');
   const [baseImagePath, setBaseImagePath] = useState<string | undefined>(undefined);
   const [baseImageName, setBaseImageName] = useState<string | undefined>(undefined);
   const [progress, setProgress] = useState<BackupProgress | null>(activeProgress ?? null);
@@ -420,6 +423,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     setIncrementalEnabled(profile.incremental ?? false);
     setResumeEnabled(profile.resume ?? false);
     setPassphrase(profile.passphrase ?? '');
+    setPassphraseConfirm(profile.passphrase ?? '');
     setProfileMsg({ kind: 'ok', text: `Profile "${profile.name}" applied.` });
   };
 
@@ -467,6 +471,10 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       setProfileMsg({ kind: 'err', text: 'Select at least one partition to back up.' });
       return;
     }
+    if (!confirmReady(passphrase, passphraseConfirm)) {
+      setProfileMsg({ kind: 'err', text: 'Passphrases do not match — re-enter to confirm.' });
+      return;
+    }
     const payload: any = {
       name: profileName.trim(),
       sourceDiskIndex: selectedDisk.index,
@@ -498,6 +506,10 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   };
 
   const handleStartBackup = async () => {
+    if (!confirmReady(passphrase, passphraseConfirm)) {
+      setErrorMsg('Passphrases do not match — re-enter to confirm.');
+      return;
+    }
     setCurrentStep('progress');
     setErrorMsg(null);
     setProgress(null);
@@ -1105,11 +1117,15 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
 
               <div className="option-group">
                 <label>Encryption Passphrase:</label>
-                <input
-                  type="password"
+                <PassphraseInput
+                  mode="create"
                   value={passphrase}
-                  onChange={(e) => setPassphrase(e.target.value)}
+                  onChange={setPassphrase}
+                  confirmValue={passphraseConfirm}
+                  onConfirmChange={setPassphraseConfirm}
                   placeholder="Leave empty for no encryption"
+                  ariaLabel="Encryption passphrase"
+                  confirmAriaLabel="Confirm encryption passphrase"
                 />
                 <p className="field-hint">
                   AES-256-GCM per-block. The passphrase is required to verify or restore this backup.

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { PassphraseInput } from './PassphraseInput';
 
 type Step = 'source' | 'target' | 'plan' | 'options' | 'run' | 'done';
 const STEP_ORDER: Step[] = ['source', 'target', 'plan', 'options', 'run'];
@@ -327,12 +328,11 @@ function MigrateWizard({ onComplete }: MigrateWizardProps) {
           {imageInfo?.encrypted && (
             <div className="setting-item">
               <label>Image passphrase:</label>
-              <input
-                type="password"
+              <PassphraseInput
                 value={passphrase}
-                onChange={(e) => setPassphrase(e.target.value)}
-                autoComplete="off"
+                onChange={setPassphrase}
                 placeholder="Required for encrypted images"
+                ariaLabel="Image passphrase"
               />
             </div>
           )}

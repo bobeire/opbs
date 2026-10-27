@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { PassphraseInput } from './PassphraseInput';
 
 type Tab = 'mbr' | 'check' | 'trim' | 'smart' | 'bitlocker';
 
@@ -480,15 +481,15 @@ function DiskTools({ onComplete: _onComplete }: { onComplete: () => void }) {
             <div className="disk-tools-row">
               <label>Volume:</label>
               <input className="disk-tools-input" value={blLetter} onChange={(e) => setBlLetter(e.target.value.toUpperCase())} placeholder="D:" />
-              <input
-                type="password"
-                className="disk-tools-input"
+              <PassphraseInput
+                compact
                 style={{ flex: 1, minWidth: 220 }}
                 value={blPassword}
-                onChange={(e) => setBlPassword(e.target.value)}
+                onChange={setBlPassword}
                 placeholder="48-digit recovery password"
+                ariaLabel="BitLocker recovery password"
                 disabled={blBusy}
-                onKeyDown={(e) => { if (e.key === 'Enter') void runUnlock(); }}
+                onEnter={() => void runUnlock()}
               />
               <button
                 className="btn-primary btn-small"
@@ -523,15 +524,15 @@ function DiskTools({ onComplete: _onComplete }: { onComplete: () => void }) {
             </div>
             <div className="disk-tools-row">
               <label>Passphrase:</label>
-              <input
-                type="password"
-                className="disk-tools-input"
+              <PassphraseInput
+                compact
                 style={{ flex: 1, minWidth: 220 }}
                 value={keysPassphrase}
-                onChange={(e) => setKeysPassphrase(e.target.value)}
+                onChange={setKeysPassphrase}
                 placeholder="Backup passphrase"
+                ariaLabel="Backup passphrase"
                 disabled={keysBusy}
-                onKeyDown={(e) => { if (e.key === 'Enter') void runKeysRead(); }}
+                onEnter={() => void runKeysRead()}
               />
               <button
                 className="btn-primary btn-small"

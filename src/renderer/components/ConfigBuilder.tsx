@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { PassphraseInput } from './PassphraseInput';
+import { confirmReady } from '../lib/passphrase';
 
 type Tab = 'backup' | 'restore' | 'clone' | 'drill' | 'schedule';
 type ScheduleMode = 'backup' | 'verify' | 'drill';
@@ -198,6 +200,7 @@ function ConfigBuilder() {
   } | null>(null);
 
   const [backup, setBackup] = useState<BackupForm>(DEFAULT_BACKUP);
+  const [backupPassphraseConfirm, setBackupPassphraseConfirm] = useState('');
   const [restore, setRestore] = useState<RestoreForm>(DEFAULT_RESTORE);
   const [clone, setClone] = useState<CloneForm>(DEFAULT_CLONE);
   const [drill, setDrill] = useState<DrillForm>(DEFAULT_DRILL);
@@ -454,6 +457,7 @@ function ConfigBuilder() {
       if (backup.sourceDiskIndex === null) missing.push('source disk');
       if (backup.sourcePartitions.length === 0) missing.push('partitions');
       if (!backup.destinationPath.trim()) missing.push('destination');
+      if (!confirmReady(backup.passphrase, backupPassphraseConfirm)) missing.push('passphrase re-entry matching the passphrase');
     } else if (t === 'restore') {
       if (!restore.imagePath.trim()) missing.push('image path');
       if (restore.targetKind === 'disk') {
@@ -530,6 +534,8 @@ function ConfigBuilder() {
         baseImagePath: asStr(rest.baseImagePath, prev.baseImagePath),
         passphrase: asStr(rest.passphrase, prev.passphrase)
       }));
+      // A loaded config's passphrase is already set — treat it as confirmed.
+      setBackupPassphraseConfirm(asStr(rest.passphrase, ''));
     } else if (t === 'restore') {
       const vhdObj = parsedVhd;
       const vhdPathParsed = vhdObj ? asStr(vhdObj.path, '') : '';
@@ -592,6 +598,10 @@ function ConfigBuilder() {
   };
 
   const saveJson = async (): Promise<void> => {
+    if (tab === 'backup' && !confirmReady(backup.passphrase, backupPassphraseConfirm)) {
+      setMsg({ kind: 'err', text: 'Passphrases do not match — re-enter to confirm.' });
+      return;
+    }
     try {
       const defaultName = tab === 'backup' ? 'job-backup.json'
         : tab === 'restore' ? 'job-restore.json'
@@ -607,6 +617,10 @@ function ConfigBuilder() {
   };
 
   const copyOutput = async (): Promise<void> => {
+    if (tab === 'backup' && !confirmReady(backup.passphrase, backupPassphraseConfirm)) {
+      setMsg({ kind: 'err', text: 'Passphrases do not match — re-enter to confirm.' });
+      return;
+    }
     try {
       await navigator.clipboard.writeText(outputText);
       setMsg({ kind: 'ok', text: tab === 'schedule' ? 'Command copied to clipboard' : 'JSON copied to clipboard' });
@@ -796,11 +810,15 @@ function ConfigBuilder() {
 
             <div className="builder-row">
               <label>Encryption passphrase (optional)</label>
-              <input
-                type="password"
+              <PassphraseInput
+                mode="create"
                 value={backup.passphrase}
+                onChange={(v) => setBackup((prev) => ({ ...prev, passphrase: v }))}
+                confirmValue={backupPassphraseConfirm}
+                onConfirmChange={setBackupPassphraseConfirm}
                 placeholder="Empty = no encryption"
-                onChange={(e) => setBackup((prev) => ({ ...prev, passphrase: e.target.value }))}
+                ariaLabel="Encryption passphrase"
+                confirmAriaLabel="Confirm encryption passphrase"
               />
             </div>
           </>
@@ -1019,10 +1037,10 @@ function ConfigBuilder() {
 
             <div className="builder-row">
               <label>Image passphrase (if encrypted)</label>
-              <input
-                type="password"
+              <PassphraseInput
                 value={restore.passphrase}
-                onChange={(e) => setRestore((prev) => ({ ...prev, passphrase: e.target.value }))}
+                onChange={(v) => setRestore((prev) => ({ ...prev, passphrase: v }))}
+                ariaLabel="Image passphrase"
               />
             </div>
           </>

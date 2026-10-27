@@ -283,6 +283,25 @@ test(
       const content = win.locator('.main-content');
       await content.waitFor({ state: 'visible' });
       expect((await content.textContent()) ?? '').toMatch(target.heading);
+
+      // Passphrase UI (discussion #8): wherever a secret field is on screen,
+      // the show/hide toggle must flip the input between masked and visible
+      // and back. Conditional so pages without a field skip it silently.
+      const reveal = win.locator('.passphrase-reveal').first();
+      if ((await reveal.count()) > 0 && (await reveal.isVisible())) {
+        const secretInput = win.locator('input.passphrase-input').first();
+        expect(await secretInput.getAttribute('type')).toBe('password');
+        await reveal.click();
+        expect(await secretInput.getAttribute('type')).toBe('text');
+        await win.locator('.passphrase-reveal').first().click();
+        expect(await secretInput.getAttribute('type')).toBe('password');
+        console.log(`[gui-click] passphrase reveal toggle verified on ${String(target.label)}`);
+      }
+      // Create flows carry a confirm field next to the secret (discussion #8).
+      if (String(target.label) === '/Repositories/') {
+        await win.getByLabel('Confirm repository passphrase').waitFor({ state: 'visible' });
+        console.log('[gui-click] repository init confirm field present');
+      }
     }
 
     // Every view navigated without a single renderer-side uncaught error,

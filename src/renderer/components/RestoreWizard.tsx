@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { PassphraseInput } from './PassphraseInput';
 
 /** VHD/VHDX target state shared by the target step, preflight and start. */
 function virtualDiskFormatFromPath(p: string): 'vhd' | 'vhdx' {
@@ -726,15 +727,15 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                         </div>
                       )}
                       <div className="bitlocker-unlock-row">
-                        <input
-                          type="password"
+                        <PassphraseInput
+                          compact
+                          style={{ flex: 1, minWidth: 240 }}
                           value={unlockPassword}
+                          onChange={setUnlockPassword}
                           placeholder={`Recovery password for ${preflight.lockedLetter ?? ''}: (48 digits)`}
+                          ariaLabel={`BitLocker recovery password for ${preflight.lockedLetter ?? ''}`}
                           disabled={unlockBusy}
-                          onChange={(e) => setUnlockPassword(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') void handleUnlockVolume();
-                          }}
+                          onEnter={() => void handleUnlockVolume()}
                         />
                         <button
                           className="btn-primary"
@@ -888,11 +889,11 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
 
               <div className="option-group">
                 <label>Encryption Passphrase:</label>
-                <input
-                  type="password"
+                <PassphraseInput
                   value={passphrase}
-                  onChange={(e) => setPassphrase(e.target.value)}
+                  onChange={setPassphrase}
                   placeholder={imageInfo?.encrypted ? 'Required for encrypted image' : 'Optional'}
+                  ariaLabel="Encryption passphrase"
                 />
               </div>
             </div>
