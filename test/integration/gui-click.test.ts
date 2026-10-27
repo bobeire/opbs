@@ -183,7 +183,16 @@ test(
     console.log('[gui-click] launching electron…');
     const app: ElectronApplication = await electron.launch(
     {
-    args: [APP_ROOT],
+    args: [
+      APP_ROOT,
+      // Runner display stack crash loop (death certificate, 842275d): the
+      // GPU process dies with 0xC0000005 every ~4s until Chromium logs
+      // "GPU process isn't usable. Goodbye." and the whole app exits —
+      // the renderer never reaches domcontentloaded. Software compositing
+      // sidesteps it; local machines with a real GPU keep testing the
+      // default path (flag is CI-only).
+      ...(process.env.CI ? ['--disable-gpu'] : [])
+    ],
     cwd: APP_ROOT,
     env: {
       ...process.env,
