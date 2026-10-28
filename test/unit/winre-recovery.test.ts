@@ -192,6 +192,16 @@ describe('buildStageScript', () => {
     expect(script).toContain('bcdedit /create /d \'OPBS Recovery\' /application osloader');
   });
 
+  it('finds winre.wim through reagentc GLOBALROOT device paths (field regression)', () => {
+    // reagentc /info prints \\?\GLOBALROOT\... which PowerShell's Test-Path
+    // and Copy-Item cannot open - the lookup must try the \\.\ Win32 form and
+    // use the .NET file APIs, or staging fails on every modern machine.
+    expect(script).toContain("StartsWith('\\\\?\\')");
+    expect(script).toContain("StartsWith('\\\\.\\')");
+    expect(script).toContain('[System.IO.File]::Exists');
+    expect(script).toContain('[System.IO.File]::Copy');
+  });
+
   it('mounts the copied wim, injects startnet.cmd and commits', () => {
     expect(script).toContain('/Mount-Wim');
     expect(script).toContain('/Unmount-Wim');
