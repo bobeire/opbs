@@ -23,11 +23,23 @@ if "%~1"=="" (
   pause
   exit /b 1
 )
+set "NODE=node"
+if exist "%~dp0node.exe" set "NODE=%~dp0node.exe"
+"%NODE%" -v >nul 2>nul
+if errorlevel 1 (
+  echo  *** Node.js was not found on this machine - nothing was run. ***
+  echo.
+  echo  Install Node.js from https://nodejs.org and re-run, or copy a
+  echo  node.exe next to this script and re-run.
+  echo.
+  pause
+  exit /b 1
+)
 echo  This test only creates/attaches VHDX files in test\ on this drive.
 echo  It never writes to a physical disk of this machine. The staged
 echo  one-shot boot entry is removed again at the end (after/cancel).
 echo.
-node "%~dp0recovery-test.js" %*
+"%NODE%" "%~dp0recovery-test.js" %*
 set RC=%ERRORLEVEL%
 echo.
 if not "%RC%"=="0" (
