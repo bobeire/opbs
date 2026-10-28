@@ -202,6 +202,19 @@ describe('buildStageScript', () => {
     expect(script).toContain('[System.IO.File]::Copy');
   });
 
+  it('points the ramdisk at boot.sdi and boots winload like WinRE does (field regression)', () => {
+    // The boot manager builds the RAM disk from boot.sdi BEFORE mounting the
+    // WIM: ramdisksdipath at the WIM boots to 0xc000007b ("a required device
+    // isn't connected"). The loader path must mirror WinRE's own entry.
+    expect(script).toContain("ramdisksdipath '\\Recovery\\OPBS\\boot.sdi'");
+    expect(script).not.toContain("ramdisksdipath '\\Recovery\\OPBS\\winre.wim'");
+    expect(script).toContain("'boot.sdi'");
+    expect(script).toContain("'\\windows\\system32\\winload.efi'");
+    expect(script).not.toContain('system32\\boot\\winload');
+    // cleanup must never delete the canonical {ramdiskoptions} shared with WinRE
+    expect(script).toContain('{ae5534e0-a924-466c-b836-758539a3ee3a}');
+  });
+
   it('mounts the copied wim, injects startnet.cmd and commits', () => {
     expect(script).toContain('/Mount-Wim');
     expect(script).toContain('/Unmount-Wim');

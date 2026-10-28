@@ -354,6 +354,7 @@ function phaseStage() {
   check('staged folder exists at ' + STAGE_DIR, fs.existsSync(STAGE_DIR), STAGE_DIR + ' missing');
   const REQUIRED = [
     'winre.wim',
+    'boot.sdi',
     'media\\OPBS\\node.exe',
     'media\\OPBS\\OPBS-restore.json',
     'media\\OPBS\\restore.cmd',
