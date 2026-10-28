@@ -154,7 +154,10 @@ function bcd(args) {
 }
 
 function bcdEnum() {
-  return bcd(['/enum']);
+  // /enum all, not plain /enum: the default display only lists the boot
+  // manager and {current} - non-default entries (like "OPBS Recovery") are
+  // invisible there and every check would read blind.
+  return bcd(['/enum', 'all']);
 }
 
 function bcdBootmgr() {
