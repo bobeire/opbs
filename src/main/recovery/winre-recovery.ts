@@ -136,11 +136,15 @@ export function buildRecoveryStartnetCmd(): string {
     // node.exe fatals at startup when OPENSSL_CONF points at an unreadable
     // path — neutralize it for every node.exe spawned from this console.
     'set "OPENSSL_CONF="',
-    'call wpeinit',
+    // Banner BEFORE wpeinit: a device-init hang must still show what is
+    // running instead of a silent black console.
     'echo.',
     'echo ============================================',
     'echo   OPBS Recovery - restore after reboot',
     'echo ============================================',
+    'echo.',
+    'echo Initializing devices (wpeinit - can take a minute)...',
+    'call wpeinit',
     'echo.',
     'set STAGED=',
     'for %%D in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (',
@@ -244,7 +248,13 @@ export function recoveryPayloadTextFiles(config: RecoveryStageConfig): Array<{ n
  * here (SIW2's original recipe: "the program and winpeshl.ini shoved in").
  */
 export function buildWinpeshlIni(): string {
-  return ['[LaunchApps]', '%SYSTEMROOT%\\System32\\cmd.exe, /c %SYSTEMROOT%\\System32\\startnet.cmd', ''].join('\r\n');
+  // Exactly the syntax this winpeshl.exe demonstrably parses - the stock
+  // file is "[LaunchApp]" + "AppPath=<command line>". The documented
+  // "[LaunchApps]" multi-app form is a different parser path and black-
+  // screens when unhandled (winpeshl exits, nothing runs).
+  return ['[LaunchApp]', 'AppPath=X:\\Windows\\System32\\cmd.exe /c X:\\Windows\\System32\\startnet.cmd', ''].join(
+    '\r\n'
+  );
 }
 
 export interface StageScriptParams {
