@@ -211,8 +211,6 @@ describe('buildStageScript', () => {
     expect(script).toContain("'boot.sdi'");
     expect(script).toContain("'\\windows\\system32\\winload.efi'");
     expect(script).not.toContain('system32\\boot\\winload');
-    // cleanup must never delete the canonical {ramdiskoptions} shared with WinRE
-    expect(script).toContain('{ae5534e0-a924-466c-b836-758539a3ee3a}');
   });
 
   it('mounts the copied wim, injects startnet.cmd and commits', () => {
@@ -258,6 +256,11 @@ describe('buildCleanupScript', () => {
     expect(script).toContain('Remove-Item -Recurse -Force $stageRoot');
     expect(script).toContain('ok = $true');
     expect(script).toContain('ConvertTo-Json');
+  });
+
+  it('never deletes the canonical {ramdiskoptions} shared with Windows RE', () => {
+    expect(script).toContain('{ae5534e0-a924-466c-b836-758539a3ee3a}');
+    expect(script).toContain('-ne');
   });
 });
 
