@@ -294,7 +294,6 @@ function phasePrep() {
  * run `recovery stage`, then assert the staged payload and BCD entry.
  */
 function phaseStage() {
-  probeElevation();
 
   // Idempotent re-run: a previous (unbooted) staging must go first, or its
   // one-shot BCD entry would leak.
@@ -424,7 +423,6 @@ function phaseStage() {
  * consumed one-shot entry, then clean everything up.
  */
 function phaseAfter() {
-  probeElevation();
 
   const st = runOpbs(['recovery', 'status', '--json'], STATUS_TIMEOUT_MS);
   const status = extractJson(st.out);
@@ -464,7 +462,6 @@ function phaseAfter() {
 
 /** cancel: abort the test before rebooting - remove entry + staged files. */
 function phaseCancel() {
-  probeElevation();
   const c = runOpbs(['recovery', 'cleanup'], CLEANUP_TIMEOUT_MS);
   check('recovery cleanup reported OK', c.code === 0, 'exit=' + c.code);
   check('staged folder removed', !fs.existsSync(STAGE_DIR), STAGE_DIR + ' still present');
