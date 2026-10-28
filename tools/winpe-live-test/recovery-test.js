@@ -161,17 +161,13 @@ function bcdBootmgr() {
   return bcd(['/enum', '{bootmgr}']);
 }
 
-function probeElevation() {
+function isElevated() {
   const r = spawnSync('net', ['session'], {
     encoding: 'utf8',
     windowsHide: true,
     timeout: 30000
   });
-  if (r.status === 0) {
-    log('elevation: admin console');
-  } else {
-    log('WARN: not elevated - backup/staging raise UAC themselves, but the bcdedit checks need an admin console');
-  }
+  return r.status === 0;
 }
 
 function onSystemDrive(p) {
@@ -214,9 +210,15 @@ function readImageMeta(imagePath) {
  * test\recovery-image.opbs. Everything stays inside test\.
  */
 function ensureSrcVhd() {
-  if (fs.existsSync(SRC_VHD)) {
-    check('src.vhdx staged in test\\', true);
+  const valid = () => fs.existsSync(SRC_VHD) && fs.statSync(SRC_VHD).size > 4 * 1024 * 1024;
+  if (valid()) {
+    check('src.vhdx staged in ' + TEST, true);
     return;
+  }
+  if (fs.existsSync(SRC_VHD)) {
+    // A partial file from a failed run must not pass the check next time.
+    log('removing a stale/partial src.vhdx before regenerating');
+    fs.rmSync(SRC_VHD, { force: true });
   }
   log('src.vhdx missing - generating it with prep-src.js ...');
   const r = spawnSync(process.execPath, [path.join(HERE, 'prep-src.js'), TEST], {
@@ -231,14 +233,13 @@ function ensureSrcVhd() {
   });
   log('    exit=' + r.status);
   check(
-    'src.vhdx staged in test\\',
-    fs.existsSync(SRC_VHD),
-    'prep-src.js could not create it - run "node prep-src.js" from an admin console, or copy a prepared test\\src.vhdx'
+    'src.vhdx staged in ' + TEST,
+    r.status === 0 && valid(),
+    'prep-src.js could not create it (see its output above) - it needs an admin console, or copy a prepared src.vhdx into ' + TEST
   );
 }
 
 function phasePrep() {
-  probeElevation();
   ensureSrcVhd();
   if (failures > 0) return;
 
@@ -533,6 +534,13 @@ function main() {
   check('OPBS CLI present', fs.existsSync(CLI), CLI + ' missing - build the repo (npm run build) or pass --cli <path>');
   if (failures > 0) return finish();
   check('artifacts on the system drive (PE keeps that letter)', onSystemDrive(TEST), TEST + ' is not under ' + SYSTEM_DRIVE);
+  if (failures > 0) return finish();
+  // VHD attach and bcdedit both need it - fail fast instead of cryptic 1314s.
+  check(
+    'running as an administrator',
+    isElevated(),
+    'right-click the console (or the .cmd) and choose "Run as administrator"'
+  );
   if (failures > 0) return finish();
 
   if (phase === 'prep') phasePrep();
