@@ -43,13 +43,13 @@ echo.
 set RC=%ERRORLEVEL%
 echo.
 if not "%RC%"=="0" (
-  if exist "%~dp0test\recovery-test-log.txt" (
-    echo  Phase finished with error code %RC%. See test\recovery-test-log.txt
+  if exist "%SystemDrive%\opbs-recovery-test\recovery-test-log.txt" (
+    echo  Phase finished with error code %RC%. See %SystemDrive%\opbs-recovery-test\recovery-test-log.txt
   ) else (
     echo  Phase finished with error code %RC% and wrote no log - the phase did not start.
   )
 ) else (
-  echo  Phase finished successfully. See test\recovery-test-log.txt
+  echo  Phase finished successfully. See %SystemDrive%\opbs-recovery-test\recovery-test-log.txt
 )
 echo.
 pause

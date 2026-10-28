@@ -41,15 +41,16 @@ const { spawnSync } = require('child_process');
 
 const HERE = __dirname;
 const REPO = path.resolve(HERE, '..', '..');
-const TEST = path.join(HERE, 'test');
+// Artifacts live on the SYSTEM DRIVE no matter which drive the repo sits on:
+// the WinRE phase must open the same paths from PE, and PE reliably keeps
+// only the system drive's letter. (A repo on D: used to fail the gate.)
+const SYSTEM_DRIVE = process.env.SystemDrive || 'C:';
+const TEST = path.join(SYSTEM_DRIVE, 'opbs-recovery-test');
 const SRC_VHD = path.join(TEST, 'src.vhdx');
 const IMAGE = path.join(TEST, 'recovery-image.opbs');
-// Created/restored by the WinRE phase - must stay on the system drive (see
-// the header comment): PE usually keeps that drive letter.
 const OUT_VHD = path.join(TEST, 'restored.vhdx');
 const CFG = path.join(TEST, 'recovery-config.json');
 const LOG = path.join(TEST, 'recovery-test-log.txt');
-const SYSTEM_DRIVE = process.env.SystemDrive || 'C:';
 const STAGE_DIR = path.join(SYSTEM_DRIVE, 'Recovery', 'OPBS');
 const RESULT_MARKER = path.join(SYSTEM_DRIVE, 'OPBS-restore-result.json');
 const ENTRY_DESCRIPTION = 'OPBS Recovery';
@@ -218,7 +219,7 @@ function ensureSrcVhd() {
     return;
   }
   log('src.vhdx missing - generating it with prep-src.js ...');
-  const r = spawnSync(process.execPath, [path.join(HERE, 'prep-src.js')], {
+  const r = spawnSync(process.execPath, [path.join(HERE, 'prep-src.js'), TEST], {
     cwd: HERE,
     env: Object.assign({}, process.env, { OPENSSL_CONF: '' }),
     encoding: 'utf8',
@@ -531,7 +532,7 @@ function main() {
 
   check('OPBS CLI present', fs.existsSync(CLI), CLI + ' missing - build the repo (npm run build) or pass --cli <path>');
   if (failures > 0) return finish();
-  check('test\\ on the system drive (PE keeps that letter)', onSystemDrive(TEST), TEST + ' is not under ' + SYSTEM_DRIVE);
+  check('artifacts on the system drive (PE keeps that letter)', onSystemDrive(TEST), TEST + ' is not under ' + SYSTEM_DRIVE);
   if (failures > 0) return finish();
 
   if (phase === 'prep') phasePrep();

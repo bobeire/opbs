@@ -13,10 +13,17 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
 const HERE = __dirname;
-const vd = require(path.join(HERE, 'dist', 'utils', 'virtual-disk.js'));
-const { attachAndDiscoverDisk } = require(path.join(HERE, 'dist', 'helper', 'vhd-attach.js'));
+// The USB harness ships dist\ next to this script; in a repo checkout it is
+// two levels up. Resolve whichever exists so prep works in both layouts.
+const DIST = fs.existsSync(path.join(HERE, 'dist', 'utils', 'virtual-disk.js'))
+  ? path.join(HERE, 'dist')
+  : path.join(HERE, '..', '..', 'dist');
+const vd = require(path.join(DIST, 'utils', 'virtual-disk.js'));
+const { attachAndDiscoverDisk } = require(path.join(DIST, 'helper', 'vhd-attach.js'));
 
-const TEST = path.join(HERE, 'test');
+// Artifacts go to the folder given as argv[2] (recovery-test.js keeps them on
+// the system drive), or next to this script for the USB harness.
+const TEST = process.argv[2] ? path.resolve(process.argv[2]) : path.join(HERE, 'test');
 const SRC = path.join(TEST, 'src.vhdx');
 const VIRTUAL_SIZE = 268435456; // 256 MB
 const PART_SIZE = 209715200; // 200 MB

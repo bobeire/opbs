@@ -84,7 +84,7 @@ Expected ending line of every phase: "ALL PASS".
 
 Where the evidence lands
 ------------------------
-  test\recovery-test-log.txt    - full console log with PASS/FAIL lines
+  %SystemDrive%\opbs-recovery-test\recovery-test-log.txt - full console log with PASS/FAIL lines
                                   for every phase (prep truncates the log,
                                   later phases append to it)
   test\recovery-image.opbs      - the image the staged restore writes back
