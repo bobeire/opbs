@@ -7,6 +7,7 @@ import {
   recoveryPayloadTextFiles,
   buildStageScript,
   buildCleanupScript,
+  buildWinpeshlIni,
   stageRecoveryRestore,
   type RecoveryStageConfig,
   type StageScriptParams
@@ -20,6 +21,7 @@ function stageParams(over: Partial<StageScriptParams> = {}): StageScriptParams {
     payload: [{ from: 'C:\\pkg\\node.exe', to: 'node.exe' }],
     textFiles: [{ name: 'restore.cmd', b64: 'cmVzdG9yZS5jbWQ=' }],
     startnetB64: 'c3RhcnRuZXQuY21k',
+    winpeshlB64: 'd2luZXBlc2hsLmluaQ==',
     ...over
   };
 }
@@ -211,6 +213,22 @@ describe('buildStageScript', () => {
     expect(script).toContain("'boot.sdi'");
     expect(script).toContain("'\\windows\\system32\\winload.efi'");
     expect(script).not.toContain('system32\\boot\\winload');
+  });
+
+  it('wires winpeshl.ini to the OPBS launcher instead of recenv (field regression)', () => {
+    // winre.wim boots via winpeshl.exe running winpeshl.ini INSTEAD of
+    // startnet.cmd. The stock ini launches recenv.exe (recovery UI) - a
+    // black screen for our purposes. Both files must be injected, and the
+    // entry mirrors WinRE's proven loader settings.
+    expect(script).toContain('winpeshl.ini');
+    expect(script).toContain('startnet.cmd');
+    const ini = buildWinpeshlIni();
+    expect(ini).toContain('[LaunchApps]');
+    expect(ini).toContain('startnet.cmd');
+    expect(ini).not.toContain('recenv');
+    expect(script).toContain("inherit '{bootloadersettings}'");
+    expect(script).toContain('nx OptIn');
+    expect(script).toContain('bootmenupolicy Standard');
   });
 
   it('mounts the copied wim, injects startnet.cmd and commits', () => {

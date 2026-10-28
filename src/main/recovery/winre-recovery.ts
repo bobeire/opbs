@@ -237,6 +237,16 @@ export function recoveryPayloadTextFiles(config: RecoveryStageConfig): Array<{ n
   ];
 }
 
+/**
+ * winpeshl.ini injected into the copied winre.wim. WinRE boots through
+ * winpeshl.exe, which runs winpeshl.ini INSTEAD of startnet.cmd - the stock
+ * ini launches recenv.exe (the recovery UI), so the payload must be wired
+ * here (SIW2's original recipe: "the program and winpeshl.ini shoved in").
+ */
+export function buildWinpeshlIni(): string {
+  return ['[LaunchApps]', '%SYSTEMROOT%\\System32\\cmd.exe, /c %SYSTEMROOT%\\System32\\startnet.cmd', ''].join('\r\n');
+}
+
 export interface StageScriptParams {
   work: string;
   progressFile: string;
@@ -246,6 +256,7 @@ export interface StageScriptParams {
   /** Text files written into media/OPBS from base64. */
   textFiles: Array<{ name: string; b64: string }>;
   startnetB64: string;
+  winpeshlB64: string;
 }
 
 /**
@@ -338,6 +349,7 @@ export function buildStageScript(p: StageScriptParams): string {
     `  if ($LASTEXITCODE -ne 0) { throw "dism /Mount-Wim failed with exit code $LASTEXITCODE" }`,
     `  try {`,
     `    [System.IO.File]::WriteAllText((Join-Path $mount 'Windows\\System32\\startnet.cmd'), [System.Text.Encoding]::ASCII.GetString([System.Convert]::FromBase64String('${p.startnetB64}')))`,
+    `    [System.IO.File]::WriteAllText((Join-Path $mount 'Windows\\System32\\winpeshl.ini'), [System.Text.Encoding]::ASCII.GetString([System.Convert]::FromBase64String('${p.winpeshlB64}')))`,
     `    & dism /English /Unmount-Wim /MountDir:"$mount" /Commit | Out-Null`,
     `    if ($LASTEXITCODE -ne 0) { throw "dism /Unmount-Wim /Commit failed with exit code $LASTEXITCODE" }`,
     `  } catch {`,
@@ -364,6 +376,9 @@ export function buildStageScript(p: StageScriptParams): string {
     `  if ($fw -eq 2) { & bcdedit /set $entryGuid path '\\windows\\system32\\winload.efi' | Out-Null }`,
     `  else { & bcdedit /set $entryGuid path '\\windows\\system32\\winload.exe' | Out-Null }`,
     `  & bcdedit /set $entryGuid systemroot '\\windows' | Out-Null`,
+    `  & bcdedit /set $entryGuid inherit '{bootloadersettings}' | Out-Null`,
+    `  & bcdedit /set $entryGuid nx OptIn | Out-Null`,
+    `  & bcdedit /set $entryGuid bootmenupolicy Standard | Out-Null`,
     `  & bcdedit /set $entryGuid detecthal Yes | Out-Null`,
     `  & bcdedit /set $entryGuid winpe Yes | Out-Null`,
     `  & bcdedit /bootsequence $entryGuid | Out-Null`,
@@ -554,7 +569,8 @@ export async function stageRecoveryRestore(
         resultFile,
         payload: stagedCopies,
         textFiles,
-        startnetB64: b64(buildRecoveryStartnetCmd())
+        startnetB64: b64(buildRecoveryStartnetCmd()),
+        winpeshlB64: b64(buildWinpeshlIni())
       }),
       'utf-8'
     );
