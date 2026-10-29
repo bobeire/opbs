@@ -123,6 +123,61 @@ function newestOpbs(dir) {
   return best;
 }
 
+/**
+ * Media layout probe (dual-partition sticks): log every lettered volume so the
+ * run shows both the FAT32 boot partition and — on a dual-partition USB — the
+ * NTFS data partition. When an `OPBS-Images` folder exists on any volume (what
+ * `media create --copy-data` fills), the newest image in it must parse: that is
+ * the proof the data partition is readable from WinPE. Single-partition media
+ * simply has no such folder and reports INFO.
+ */
+function probeMediaLayout() {
+  const letters = [];
+  for (let i = 0; i < 26; i++) {
+    const letter = String.fromCharCode(65 + i);
+    if (fs.existsSync(letter + ':\\')) letters.push(letter);
+  }
+  log('media: volumes ' + (letters.map((l) => l + ':').join(' ') || 'none'));
+
+  let dataDir = null;
+  for (let i = 0; i < letters.length; i++) {
+    const dir = letters[i] + ':\\OPBS-Images';
+    if (fs.existsSync(dir)) {
+      dataDir = dir;
+      break;
+    }
+  }
+  if (!dataDir) {
+    log('INFO: no OPBS-Images folder on any volume (single-partition media, or no --copy-data)');
+    return;
+  }
+  log('media: data partition at ' + dataDir);
+  let image = null;
+  try {
+    const files = fs.readdirSync(dataDir).filter((n) => /\.(opbs|mrimgx|mrimg)$/i.test(n)).sort();
+    image = files.length > 0 ? path.join(dataDir, files[files.length - 1]) : null;
+  } catch (e) {
+    check('OPBS-Images is readable', false, String((e && e.message) || e));
+    return;
+  }
+  check('OPBS-Images holds an image', image !== null, 'no .opbs/.mrimgx/.mrimg in ' + dataDir);
+  if (!image) return;
+  log('media: data image ' + image);
+  try {
+    let parts = [];
+    if (/\.opbs$/i.test(image)) {
+      const fmt = require(path.join(HERE, 'dist', 'imaging', 'image-format.js'));
+      parts = (fmt.readImageInfo(image).partitions || []);
+    } else {
+      const m = require(path.join(HERE, 'dist', 'imaging', 'mrimg', 'index.js'));
+      parts = (m.readMacriumImage(image).partitions || []);
+    }
+    check('data-partition image parses', parts.length > 0, parts.length + ' partition(s) in ' + image);
+  } catch (e) {
+    check('data-partition image parses', false, String((e && e.message) || e));
+  }
+}
+
 function main() {
   try {
     fs.mkdirSync(IMG, { recursive: true });
@@ -161,6 +216,8 @@ function main() {
 
   const disks = run(['disks']);
   check('disks command runs', disks.code === 0);
+
+  probeMediaLayout();
 
   probeNetwork(process.argv.indexOf('--require-net') >= 0);
 

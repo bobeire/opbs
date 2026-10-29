@@ -1546,6 +1546,8 @@ ideally with no additional driver.
   ProjectedFSLib, size/attributes from the parsed NTFS record, range reads via
   the existing block cache, and provider lifecycle handling. Real feature, not
   a patch.
-- **Status**: design-only, demand-driven — not scheduled. Rejected:
+- **Status**: design-only, demand-driven — **explicitly deferred past 0.6.94**
+  (decided 2026-10-29: the WinFsp mount already serves the use case, and this
+  is a native feature that would take over the release). Rejected:
   named pipes/HTTP (not seekable), localhost SMB share (admin + fragile),
   full extraction (defeats the purpose).

@@ -4,9 +4,15 @@ OPBS WinPE VHD Live Test - Instructions (any x64 machine)
 What this test does
 -------------------
 Runs two headless OPBS CLI jobs against scratch VHDX files that live on
-this USB stick only, after a network probe:
+this USB stick only, after a media-layout probe and a network probe:
 
-  0. network probe: list IPv4 addresses and try a TCP connect (records
+  0a. media layout: lists every lettered volume so the log shows both
+     partitions of a dual-partition stick (FAT32 boot + NTFS data). If an
+     OPBS-Images folder exists on any volume (what `media create --copy-data`
+     fills), the newest image in it must parse - that proves the data
+     partition is readable from WinPE. Single-partition media reports INFO
+     instead and is not failed for it.
+  0b. network probe: list IPv4 addresses and try a TCP connect (records
      whether NIC drivers loaded in WinPE; WARN only - pass --require-net
      to the script to make it a hard failure).
   1. backup --source-vhd : attach test\src.vhdx read-only and back it up
