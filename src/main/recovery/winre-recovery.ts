@@ -132,17 +132,17 @@ export function buildRecoveryStartnetCmd(): string {
   return [
     '@echo off',
     'title OPBS Recovery',
-    'mode con cols=100 lines=40',
-    // node.exe fatals at startup when OPENSSL_CONF points at an unreadable
-    // path — neutralize it for every node.exe spawned from this console.
-    'set "OPENSSL_CONF="',
-    // Banner BEFORE wpeinit: a device-init hang must still show what is
-    // running instead of a silent black console.
+    // Banner BEFORE everything else (incl. wpeinit): a hang must show what
+    // is running instead of a silent black console. No `mode con` - the
+    // mode switch is a blank-output suspect on some displays.
     'echo.',
     'echo ============================================',
     'echo   OPBS Recovery - restore after reboot',
     'echo ============================================',
     'echo.',
+    // node.exe fatals at startup when OPENSSL_CONF points at an unreadable
+    // path — neutralize it for every node.exe spawned from this console.
+    'set "OPENSSL_CONF="',
     'echo Initializing devices (wpeinit - can take a minute)...',
     'call wpeinit',
     'echo.',
@@ -252,9 +252,12 @@ export function buildWinpeshlIni(): string {
   // file is "[LaunchApp]" + "AppPath=<command line>". The documented
   // "[LaunchApps]" multi-app form is a different parser path and black-
   // screens when unhandled (winpeshl exits, nothing runs).
-  return ['[LaunchApp]', 'AppPath=X:\\Windows\\System32\\cmd.exe /c X:\\Windows\\System32\\startnet.cmd', ''].join(
-    '\r\n'
-  );
+  //
+  // Bisect mode: an INTERACTIVE console. If it appears, the whole boot
+  // chain below winpeshl is healthy and `startnet` can be run by hand to
+  // watch the flow live; if even this is black, the fault is at/below
+  // winpeshl itself.
+  return ['[LaunchApp]', 'AppPath=X:\\Windows\\System32\\cmd.exe', ''].join('\r\n');
 }
 
 export interface StageScriptParams {
@@ -389,6 +392,11 @@ export function buildStageScript(p: StageScriptParams): string {
     `  & bcdedit /set $entryGuid inherit '{bootloadersettings}' | Out-Null`,
     `  & bcdedit /set $entryGuid nx OptIn | Out-Null`,
     `  & bcdedit /set $entryGuid bootmenupolicy Standard | Out-Null`,
+    `  # Windows 11 24H2+ memory-integrity settings - present on every working`,
+    `  # Win11 boot entry ({current}, WinRE) and a black-screen suspect when`,
+    `  # missing on HVCI machines.`,
+    `  & bcdedit /set $entryGuid isolatedcontext Yes | Out-Null`,
+    `  & bcdedit /set $entryGuid allowedinmemorysettings 0x15000075 | Out-Null`,
     `  & bcdedit /set $entryGuid detecthal Yes | Out-Null`,
     `  & bcdedit /set $entryGuid winpe Yes | Out-Null`,
     `  & bcdedit /bootsequence $entryGuid | Out-Null`,

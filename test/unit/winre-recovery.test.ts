@@ -227,8 +227,11 @@ describe('buildStageScript', () => {
     // [LaunchApps] form black-screens on this winpeshl.exe (field regression).
     expect(ini).toContain('[LaunchApp]');
     expect(ini).not.toContain('[LaunchApps]');
-    expect(ini).toContain('AppPath=X:\\Windows\\System32\\cmd.exe /c X:\\Windows\\System32\\startnet.cmd');
+    expect(ini).toContain('AppPath=X:\\Windows\\System32\\cmd.exe');
     expect(ini).not.toContain('recenv');
+    // Win11 24H2+ memory-integrity parity with the working Windows entries.
+    expect(script).toContain('isolatedcontext Yes');
+    expect(script).toContain('allowedinmemorysettings 0x15000075');
     expect(script).toContain("inherit '{bootloadersettings}'");
     expect(script).toContain('nx OptIn');
     expect(script).toContain('bootmenupolicy Standard');
