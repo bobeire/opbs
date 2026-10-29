@@ -1108,7 +1108,33 @@ OPBS.exe --cli media create --iso D:\recovery\opbs-winpe.iso --driver D:\drivers
 OPBS.exe --cli media create --iso D:\recovery\opbs-winpe.iso --script-only
 # Stage + headless-boot the payload without elevation (native addon + codecs)
 OPBS.exe --cli media smoke [--node <node.exe>] [--dist <dir>] [--native <addon>]
+# Opt-in dual-partition stick: FAT32 boot + NTFS data partition (see below)
+OPBS.exe --cli media create --usb E --yes --dual-partition [--boot-size-mb 4096] \
+         [--copy-data D:\backups,E:\images\weekend.opbs]
 ```
+
+**Dual-partition USB (opt-in)**: the default stick stays exactly as it always
+was — one FAT32 partition written by `MakeWinPEMedia`, which is the one-click
+path for most people. With `--dual-partition` (or the checkbox on the Recovery
+Media screen) the stick is repartitioned instead as a small **FAT32 boot
+partition** plus an **NTFS data partition** on the rest of it:
+
+- it boots the same way on UEFI and BIOS (the boot partition is active, and
+  `bootsect /nt60 … /mbr` installs the boot code the same way
+  `MakeWinPEMedia` does);
+- the data partition is NTFS, so backup images **larger than FAT32's 4 GiB
+  file-size limit** can live on the media — `--copy-data <path,…>` copies
+  folders/files into `OPBS-Images\` on it (the recovery wizard's drive scan
+  finds them);
+- it lifts the 32 GB ceiling of the single-partition flow (only the boot
+  partition is FAT32, and it defaults to 4 GiB — tune with `--boot-size-mb`,
+  1024–32768).
+
+The stick is erased completely either way. The dual layout is new: the
+generated `build.ps1` is exactly what runs elevated (and `--script-only` lets
+you inspect it first), but it has not yet had the same physical-media boot
+test as the single-partition flow — treat the first build of a new stick type
+as unproven until you have booted it once.
 
 If the ADK is missing, the GUI detects it at startup and offers to download and
 silently install the Deployment Tools + WinPE add-on automatically (one UAC
@@ -1124,7 +1150,9 @@ The generated script: `copype` a WinPE working dir, layer OPBS under
 `media\OPBS\` (dist + codecs + `opbs_native.node` + `node.exe`), optionally
 `dism /Image ... /Add-Driver /Recurse` each `--driver` folder, inject a
 `startnet.cmd` into `boot.wim` that locates the OPBS folder and launches
-`restore.cmd`, commit with DISM, then `MakeWinPEMedia`. `restore.cmd` uses a
+`restore.cmd`, commit with DISM, then `MakeWinPEMedia` (the dual-partition USB
+layout partitions the stick and copies the tree itself instead — see above).
+`restore.cmd` uses a
 `OPBS-restore.json` on the media if present (or one supplied via
 `--restore-config`), otherwise asks for a config path.
 

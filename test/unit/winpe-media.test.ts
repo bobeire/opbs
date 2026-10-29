@@ -12,6 +12,7 @@ import {
   planPayloadCopies,
   planRestoreConfigCopy,
   buildElevatedScript,
+  buildDualPartitionLines,
   smokeMediaPayload,
   stagePayloadFiles,
   copyPath,
@@ -447,6 +448,106 @@ describe('winpe-media', () => {
       expect(s).toContain(`Write-Step 'Injecting storage/network drivers...'`);
       expect(s).toContain(`Write-Step 'Writing the recovery media (this can take several minutes)...'`);
       expect(s).toContain(`Write-Step 'Done.'`);
+    });
+  });
+
+  describe('dual-partition media (FAT32 boot + NTFS data)', () => {
+    const base = {
+      arch: ARCH,
+      format: 'usb' as const,
+      output: 'E:',
+      stage: 'C:/stage',
+      adkCopype: 'C:/adk/copype.cmd',
+      adkDandISetEnv: 'C:/adk/Deployment Tools/DandISetEnv.bat',
+      adkDism: 'C:/adk/dism.exe',
+      adkMakeWinPEMedia: 'C:/adk/MakeWinPEMedia.cmd',
+      payloadCopies: [{ from: 'C:/x/node.exe', to: 'node.exe' }],
+      payloadTextFiles: [{ name: 'restore.cmd', content: 'echo hi' }],
+      startnetCmd: 'call wpeinit',
+      yesForUsb: true
+    };
+
+    const lines = (over: Partial<Parameters<typeof buildDualPartitionLines>[0]> = {}): string =>
+      buildDualPartitionLines({
+        mediaDir: 'C:/stage/media',
+        targetLetter: 'e:',
+        adkDandISetEnv: 'C:/adk/Deployment Tools/DandISetEnv.bat',
+        ...over
+      }).join('\r\n');
+
+    it('partitions the stick as a FAT32 boot partition plus an NTFS data partition', () => {
+      const s = lines();
+      expect(s).toContain(`$diskNum = [int]$disk.Number`);
+      expect(s).toContain(`('select disk ' + $diskNum),`);
+      expect(s).toContain(`'clean',`);
+      expect(s).toContain(`'convert mbr',`);
+      expect(s).toContain(`('create partition primary size=4096'),`);
+      expect(s).toContain(`'active',`);
+      expect(s).toContain(`'format fs=fat32 quick label="OPBS-RECOVERY"',`);
+      expect(s).toContain(`('assign letter=E'),`);
+      expect(s).toContain(`'create partition primary',`);
+      expect(s).toContain(`'format fs=ntfs quick label="OPBS-DATA"',`);
+      // diskpart next to the running script, so a re-run is inspectable.
+      expect(s).toContain(`Join-Path $PSScriptRoot 'diskpart.txt'`);
+    });
+
+    it('clamps the boot size to the supported range', () => {
+      expect(lines({ bootSizeMb: 100 })).toContain('create partition primary size=1024');
+      expect(lines({ bootSizeMb: 999_999 })).toContain('create partition primary size=32768');
+      expect(lines({ bootSizeMb: 2048 })).toContain('create partition primary size=2048');
+      expect(lines({ bootSizeMb: undefined })).toContain('create partition primary size=4096');
+    });
+
+    it('refuses the system disk and discovers the letters Windows assigns', () => {
+      const s = lines();
+      expect(s).toContain('Refusing to repartition the disk Windows is running from');
+      expect(s).toContain('$script:bootLetter = [string]$boot.DriveLetter');
+      expect(s).toContain('$script:dataLetter = [string]$data.DriveLetter');
+      // A stale letter reservation must not leave a partition unlettered.
+      expect(s).toContain('Add-PartitionAccessPath -AssignDriveLetter');
+      expect(s).toContain('Windows did not assign drive letters to both partitions');
+    });
+
+    it('copies the built tree and installs the boot code instead of MakeWinPEMedia', () => {
+      const s = lines();
+      // Mirrors MakeWinPEMedia's own /UFD steps: xcopy /herky (hidden/system
+      // attributes on bootmgr survive) + bootsect /nt60 ... /mbr /force.
+      expect(s).toContain(String.raw`xcopy /herky "`);
+      expect(s).toContain(String.raw`*.*" "' + $script:bootLetter + ':\" >NUL')`);
+      expect(s).toContain('bootsect /nt60 ');
+      expect(s).toContain(': /mbr /force');
+      // MakeWinPEMedia formats the WHOLE target FAT32 — unusable here.
+      expect(s).not.toContain('MakeWinPEMedia');
+    });
+
+    it('copies requested images into OPBS-Images on the data partition', () => {
+      const s = lines({ copyToData: ['D:/images', 'E:/more.opbs'] });
+      expect(s).toContain(`$dataRoot = $script:dataLetter + ':\\OPBS-Images'`);
+      expect(s).toContain(`Copy-Item -Path 'D:/images' -Destination $dataRoot -Recurse -Force`);
+      expect(s).toContain(`Copy-Item -Path 'E:/more.opbs' -Destination $dataRoot -Recurse -Force`);
+      expect(s).toContain(`Copy source not found: D:/images`);
+      expect(lines()).not.toContain('OPBS-Images');
+    });
+
+    it('builds the dual layout into the elevated script and reports the letters', () => {
+      const s = buildElevatedScript({
+        ...base,
+        format: 'usb',
+        output: 'E:',
+        yesForUsb: true,
+        dualPartition: true
+      });
+      expect(s).not.toContain('MakeWinPEMedia.cmd');
+      expect(s).toContain('diskpart /s $dp');
+      expect(s).toContain('bootsect /nt60 ');
+      expect(s).toContain(';bootLetter=$script:bootLetter;dataLetter=$script:dataLetter');
+    });
+
+    it('keeps the single-partition MakeWinPEMedia flow by default', () => {
+      const s = buildElevatedScript({ ...base, format: 'usb', output: 'E:', yesForUsb: true });
+      expect(s).toContain('MakeWinPEMedia.cmd');
+      expect(s).not.toContain('diskpart /s');
+      expect(s).not.toContain('bootLetter=');
     });
   });
 

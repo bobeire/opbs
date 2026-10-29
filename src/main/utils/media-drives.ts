@@ -192,6 +192,33 @@ export function usbSizeGuard(sizeBytes: number | undefined | null): string | nul
 }
 
 /**
+ * Guards for the opt-in dual-partition layout (FAT32 boot + NTFS data). Only
+ * the boot partition is FAT32, so the 32 GB format cap does not apply — but
+ * the boot size must be sane and the stick must still hold a usable data
+ * area. Returns an error message, or null when the target is acceptable.
+ */
+export function dualPartitionGuard(
+  bootSizeMb: number | undefined,
+  sizeBytes: number | undefined | null
+): string | null {
+  const bootMb = bootSizeMb ?? 4096;
+  if (!Number.isFinite(bootMb) || bootMb < 1024 || bootMb > 32 * 1024) {
+    return `Boot partition size ${bootSizeMb} MiB is out of range (1024–32768 MiB).`;
+  }
+  if (typeof sizeBytes === 'number' && Number.isFinite(sizeBytes) && sizeBytes > 0) {
+    const needed = (bootMb + 1024) * 1024 * 1024; // boot + 1 GiB of data space
+    if (sizeBytes < needed) {
+      return (
+        `This USB drive is too small for a dual-partition layout: the ${bootMb} MiB boot partition ` +
+        `plus at least 1 GiB of data space needs ${Math.ceil(needed / 1024 ** 3)} GB. Use a bigger ` +
+        `drive, shrink the boot partition (--boot-size-mb), or build single-partition media.`
+      );
+    }
+  }
+  return null;
+}
+
+/**
  * Server-side safety net for USB creation: refuse a target letter that holds
  * Windows or OPBS itself, regardless of what the UI sent. Returns an error
  * message, or null when the target is acceptable.

@@ -6,6 +6,7 @@ import {
   protectedDriveLetters,
   usbTargetGuard,
   usbSizeGuard,
+  dualPartitionGuard,
   FAT32_FORMAT_LIMIT_BYTES,
   listMediaDrives,
   MediaDriveInfo
@@ -218,6 +219,30 @@ describe('usbSizeGuard', () => {
     expect(usbSizeGuard(null)).toBeNull();
     expect(usbSizeGuard(0)).toBeNull();
     expect(usbSizeGuard(NaN)).toBeNull();
+  });
+});
+
+describe('dualPartitionGuard', () => {
+  it('accepts big sticks (only the small boot partition is FAT32)', () => {
+    expect(dualPartitionGuard(undefined, 128 * 1024 ** 3)).toBeNull();
+    expect(dualPartitionGuard(4096, 2 * 1024 ** 4)).toBeNull();
+  });
+
+  it('accepts an unknown size instead of blocking the build', () => {
+    expect(dualPartitionGuard(4096, undefined)).toBeNull();
+    expect(dualPartitionGuard(4096, 0)).toBeNull();
+  });
+
+  it('refuses a boot size outside the FAT32-formatable range', () => {
+    expect(dualPartitionGuard(512, 32 * 1024 ** 3)).toContain('out of range');
+    expect(dualPartitionGuard(64 * 1024, 32 * 1024 ** 3)).toContain('out of range');
+  });
+
+  it('refuses a stick that cannot hold boot plus a usable data area', () => {
+    const err = dualPartitionGuard(4096, 4.5 * 1024 ** 3);
+    expect(err).toContain('too small');
+    expect(err).toContain('--boot-size-mb');
+    expect(dualPartitionGuard(4096, 8 * 1024 ** 3)).toBeNull();
   });
 });
 

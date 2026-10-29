@@ -369,7 +369,13 @@ Commands:
                                          the build script and exits so you can run it in an admin shell).
   media create --usb <drive> --yes [--arch ...] [--adk <root>] [--node <node.exe>]
                                          [--restore-config <restore.json>] [--driver <dir,...>] [--script-only]
+                                         [--dual-partition] [--boot-size-mb N] [--copy-data <path,...>]
                                          Build recovery media on a USB drive (destructive).
+                                         --dual-partition (opt-in) repartitions the stick as a small
+                                         FAT32 boot partition plus an NTFS data partition on the rest
+                                         of it, so backup images bigger than FAT32's 4 GB file limit
+                                         can live on the media (--copy-data copies them across).
+                                         The default stays the single FAT32 partition.
   recovery stage <config.json>           Stage a restore that runs after one reboot in the
                                          Windows Recovery Environment (elevated; one UAC
                                          prompt). Uses a COPY of winre.wim plus a one-shot
@@ -2295,6 +2301,24 @@ async function cmdMedia(ctx: CommandContext): Promise<number> {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
+    const dualPartition = ctx.argv.includes('--dual-partition');
+    const bootSizeMbRaw = flagValue(ctx.argv, '--boot-size-mb');
+    let bootSizeMb: number | undefined;
+    if (bootSizeMbRaw !== undefined) {
+      bootSizeMb = Number(bootSizeMbRaw);
+      if (!Number.isInteger(bootSizeMb) || bootSizeMb < 1024 || bootSizeMb > 32768) {
+        console.error('--boot-size-mb must be an integer between 1024 and 32768');
+        return 1;
+      }
+    }
+    if ((bootSizeMb !== undefined || ctx.argv.includes('--copy-data')) && !dualPartition) {
+      console.error('--boot-size-mb / --copy-data only apply to --dual-partition media');
+      return 1;
+    }
+    const copyToData = (flagValue(ctx.argv, '--copy-data') ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
 
     if ((iso && usb) || (!iso && !usb)) {
       console.error('Usage: media create --iso <out.iso> [options] | --usb <drive> --yes [options]');
@@ -2310,6 +2334,9 @@ async function cmdMedia(ctx: CommandContext): Promise<number> {
       nativeNode,
       restoreConfig,
       drivers,
+      dualPartition,
+      bootSizeMb,
+      copyToData,
       yesForUsb: !!iso || ctx.argv.includes('--yes'),
       scriptOnly: ctx.argv.includes('--script-only')
     });
@@ -2323,8 +2350,12 @@ async function cmdMedia(ctx: CommandContext): Promise<number> {
         `Result will appear at ${path.join(path.dirname(result.scriptPath), 'build', 'result.json')}.`
       );
     } else if (result.ok) {
+      const partitions =
+        result.bootLetter && result.dataLetter
+          ? ` — boot ${result.bootLetter}:, data ${result.dataLetter}: (OPBS-Images)`
+          : '';
       console.log(
-        `Recovery media written: ${result.output}${result.sizeBytes ? ` (${formatBytes(result.sizeBytes)})` : ''}`
+        `Recovery media written: ${result.output}${result.sizeBytes ? ` (${formatBytes(result.sizeBytes)})` : ''}${partitions}`
       );
     } else {
       console.error(`Recovery media failed: ${result.error}`);

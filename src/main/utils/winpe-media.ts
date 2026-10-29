@@ -5,7 +5,7 @@ import * as path from 'path';
 import { psQuote, runElevatedPowerShell as runPowershell } from './elevated';
 import { locateAdk, peArchForProcess, PeArch } from './adk';
 import { nodeRuntimeDir } from './node-install';
-import { usbTargetGuard, usbSizeGuard, listMediaDrives, protectedDriveLetters } from './media-drives';
+import { usbTargetGuard, usbSizeGuard, dualPartitionGuard, listMediaDrives, protectedDriveLetters } from './media-drives';
 import { logger } from './logger';
 
 /**
@@ -45,6 +45,18 @@ export interface MediaCreateOptions {
   /** Third-party driver directories to inject into the boot.wim via DISM
    *  (/Add-Driver /Recurse) before the media image is finalized. */
   drivers?: string[];
+  /**
+   * Dual-partition USB (opt-in): repartition the stick as a small FAT32 boot
+   * partition plus an NTFS data partition on the rest of it. Boot works the
+   * same way (UEFI + BIOS), but backup images larger than FAT32's 4 GiB
+   * file-size limit can live on the media. The default stays the single
+   * FAT32 partition MakeWinPEMedia produces.
+   */
+  dualPartition?: boolean;
+  /** Boot partition size in MiB for `dualPartition` (default 4096). */
+  bootSizeMb?: number;
+  /** Files/directories copied onto the NTFS data partition after the build. */
+  copyToData?: string[];
   /** Stage the payload + build script only; do NOT spawn the elevated ADK
    *  step. Useful in CI or shells that cannot raise UAC: run the returned
    *  `scriptPath` from an already-elevated PowerShell. */
@@ -62,6 +74,9 @@ export interface MediaCreateResult {
   sizeBytes?: number;
   /** Present when `scriptOnly` was requested: run this from an elevated PowerShell. */
   scriptPath?: string;
+  /** Dual-partition USB: the letters Windows assigned to the two partitions. */
+  bootLetter?: string;
+  dataLetter?: string;
   error?: string;
 }
 
@@ -455,6 +470,118 @@ function base64(value: string): string {
   return Buffer.from(value, 'utf-8').toString('base64');
 }
 
+/** Default size of the FAT32 boot partition on a dual-partition stick. */
+export const DUAL_BOOT_DEFAULT_MB = 4096;
+/** Smallest boot partition that still holds a WinPE tree plus the payload. */
+export const DUAL_BOOT_MIN_MB = 1024;
+/** FAT32-formatable ceiling: Windows refuses larger FAT32 volumes. */
+export const DUAL_BOOT_MAX_MB = 32 * 1024;
+
+/**
+ * Partitioning + copy steps for the opt-in dual-partition USB layout: a small
+ * FAT32 boot partition (UEFI and BIOS both boot it) plus an NTFS data
+ * partition on the rest of the stick, so backup images bigger than FAT32's
+ * 4 GiB file-size limit can live on the recovery media.
+ *
+ * The stick is repartitioned destructively (`diskpart clean`), the built
+ * WinPE tree is copied to the boot partition and made bootable with
+ * `bootsect /nt60 ... /mbr`, and any `copyToData` items land in
+ * `OPBS-Images` on the data partition. Returns the generated script lines;
+ * they rely on `Fail-Media`/`Write-Step` from the caller and set
+ * `$script:bootLetter` / `$script:dataLetter` for the final result. The
+ * single-partition flow (MakeWinPEMedia) stays the default and never runs
+ * this.
+ */
+export function buildDualPartitionLines(options: {
+  /** `<stage>/media`: the built WinPE tree to copy to the boot partition. */
+  mediaDir: string;
+  /** The stick's drive letter as chosen by the user (re-used for boot). */
+  targetLetter: string;
+  bootSizeMb?: number;
+  copyToData?: string[];
+  /** ADK DandISetEnv.bat, so `bootsect` resolves on PATH. */
+  adkDandISetEnv: string;
+  /** Name of the diskpart script written next to the running script. */
+  diskpartFileName?: string;
+}): string[] {
+  const requested = options.bootSizeMb ?? DUAL_BOOT_DEFAULT_MB;
+  const bootSizeMb = Number.isFinite(requested)
+    ? Math.min(DUAL_BOOT_MAX_MB, Math.max(DUAL_BOOT_MIN_MB, Math.round(requested)))
+    : DUAL_BOOT_DEFAULT_MB;
+  const letter = String(options.targetLetter ?? '').replace(/:$/, '').toUpperCase().slice(0, 1);
+  const drive = `${letter}:`;
+  const dpPath = `Join-Path $PSScriptRoot ${psQuote(options.diskpartFileName ?? 'diskpart.txt')}`;
+  const lines: string[] = [];
+  lines.push(`Write-Step 'Partitioning the USB drive (FAT32 boot + NTFS data)...'`);
+  lines.push(`$letter = ${psQuote(letter)}`);
+  lines.push(`$part = Get-Partition -DriveLetter $letter -ErrorAction SilentlyContinue`);
+  lines.push(`if (-not $part) { Fail-Media ${psQuote(`Target drive ${drive} was not found`)} }`);
+  lines.push(`$disk = $part | Get-Disk`);
+  lines.push(
+    `if ($disk.IsBoot -or $disk.IsSystem) { Fail-Media 'Refusing to repartition the disk Windows is running from' }`
+  );
+  lines.push(`$diskNum = [int]$disk.Number`);
+  lines.push(`$dp = ${dpPath}`);
+  // diskpart is the only tool that partitions AND formats in one pass; the
+  // script is written to disk because quoting inside a here-string breaks on
+  // `label="..."`.
+  lines.push('@(');
+  lines.push(`  ('select disk ' + $diskNum),`);
+  lines.push(`  'clean',`);
+  lines.push(`  'convert mbr',`);
+  lines.push(`  ('create partition primary size=${bootSizeMb}'),`);
+  lines.push(`  'active',`);
+  lines.push(`  'format fs=fat32 quick label="OPBS-RECOVERY"',`);
+  lines.push(`  ('assign letter=${letter}'),`);
+  lines.push(`  'create partition primary',`);
+  lines.push(`  'format fs=ntfs quick label="OPBS-DATA"',`);
+  lines.push(`  'assign'`);
+  lines.push(') | Set-Content -Path $dp -Encoding ASCII');
+  lines.push(`Write-Step 'Repartitioning the stick (this erases the whole drive)...'`);
+  lines.push(`& diskpart /s $dp`);
+  lines.push(`if ($LASTEXITCODE -ne 0) { Fail-Media "diskpart failed with exit code $LASTEXITCODE" }`);
+  // Windows normally re-uses the letter, but a stale letter reservation can
+  // leave the new volumes unlettered — assign on demand and discover.
+  lines.push(`$boot = Get-Partition -DiskNumber $diskNum -PartitionNumber 1`);
+  lines.push(
+    `if (-not $boot.DriveLetter) { $boot | Add-PartitionAccessPath -AssignDriveLetter | Out-Null; $boot = Get-Partition -DiskNumber $diskNum -PartitionNumber 1 }`
+  );
+  lines.push(`$data = Get-Partition -DiskNumber $diskNum -PartitionNumber 2`);
+  lines.push(
+    `if (-not $data.DriveLetter) { $data | Add-PartitionAccessPath -AssignDriveLetter | Out-Null; $data = Get-Partition -DiskNumber $diskNum -PartitionNumber 2 }`
+  );
+  lines.push(`$script:bootLetter = [string]$boot.DriveLetter`);
+  lines.push(`$script:dataLetter = [string]$data.DriveLetter`);
+  lines.push(
+    `if (-not $script:bootLetter -or -not $script:dataLetter) { Fail-Media 'Windows did not assign drive letters to both partitions' }`
+  );
+  // MakeWinPEMedia formats the WHOLE target as FAT32, so the dual layout
+  // copies the already-built <stage>/media tree itself and installs the boot
+  // code with bootsect — the same steps it would have done (`xcopy /herky`
+  // preserves hidden/system attributes on bootmgr).
+  lines.push(`Write-Step 'Copying the recovery environment to the boot partition...'`);
+  const mediaGlob = path.join(options.mediaDir, '*.*');
+  lines.push(
+    `& $env:ComSpec /d /s /c ('xcopy /herky "${mediaGlob}" "' + $script:bootLetter + ':\\" >NUL')`
+  );
+  lines.push(`if ($LASTEXITCODE -ne 0) { Fail-Media "copying the WinPE tree failed with exit code $LASTEXITCODE" }`);
+  lines.push(
+    `& $env:ComSpec /d /s /c ('call "${options.adkDandISetEnv}" >NUL && bootsect /nt60 ' + $script:bootLetter + ': /mbr /force')`
+  );
+  lines.push(`if ($LASTEXITCODE -ne 0) { Fail-Media "bootsect failed with exit code $LASTEXITCODE" }`);
+  const copyToData = (options.copyToData ?? []).filter((p) => String(p ?? '').trim() !== '');
+  if (copyToData.length > 0) {
+    lines.push(`Write-Step 'Copying backup images to the data partition...'`);
+    lines.push(`$dataRoot = $script:dataLetter + ':\\OPBS-Images'`);
+    lines.push(`New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null`);
+    for (const item of copyToData) {
+      lines.push(`if (-not (Test-Path -LiteralPath ${psQuote(item)})) { Fail-Media ${psQuote(`Copy source not found: ${item}`)} }`);
+      lines.push(`Copy-Item -Path ${psQuote(item)} -Destination $dataRoot -Recurse -Force`);
+    }
+  }
+  return lines;
+}
+
 /**
  * The elevated PowerShell orchestrator. Written to a temp script and launched
  * via `Start-Process -Verb RunAs`. Writes <stage>/result.json on completion.
@@ -478,6 +605,10 @@ export function buildElevatedScript(options: {
   startnetCmd: string;
   yesForUsb: boolean;
   drivers?: string[];
+  /** Dual-partition USB: FAT32 boot + NTFS data instead of MakeWinPEMedia. */
+  dualPartition?: boolean;
+  bootSizeMb?: number;
+  copyToData?: string[];
 }): string {
   const { arch, format, output, stage, payloadCopies, payloadTextFiles, startnetCmd } = options;
   const outputArg = format === 'usb' ? `${output.replace(/:$/, '')}:` : output;
@@ -591,14 +722,34 @@ export function buildElevatedScript(options: {
     lines.push('Write-Result @{ok=$false;error="USB output requires explicit confirmation (--yes)"}; exit 0');
   }
   lines.push(`Write-Step 'Writing the recovery media (this can take several minutes)...'`);
-  // /UFD (NOT /USB — other switches print usage and exit 1) and /f: the
-  // script runs -NonInteractive with a hidden console, so MakeWinPEMedia's
-  // format/overwrite prompt would abort the build. Confirmation is already
-  // enforced upstream (yesForUsb gate above; ISO mode is implicitly confirmed).
-  lines.push(cmdCall(`call "${options.adkMakeWinPEMedia}" /${format === 'iso' ? 'ISO' : 'UFD'} /f "${stage}" "${outputArg}"`));
-  lines.push(`if ($LASTEXITCODE -ne 0) { Write-Result @{ok=$false;error="MakeWinPEMedia failed with exit code $LASTEXITCODE"}; exit 0 }`);
+  if (format === 'usb' && options.dualPartition) {
+    // Dual layout: partition the stick (FAT32 boot + NTFS data), copy the
+    // built tree and install the boot code. MakeWinPEMedia would format the
+    // WHOLE target as FAT32, so it cannot be used here.
+    lines.push(
+      ...buildDualPartitionLines({
+        mediaDir: path.join(stage, 'media'),
+        targetLetter: outputArg.replace(/:$/, ''),
+        bootSizeMb: options.bootSizeMb,
+        copyToData: options.copyToData,
+        adkDandISetEnv: options.adkDandISetEnv
+      })
+    );
+  } else {
+    // /UFD (NOT /USB — other switches print usage and exit 1) and /f: the
+    // script runs -NonInteractive with a hidden console, so MakeWinPEMedia's
+    // format/overwrite prompt would abort the build. Confirmation is already
+    // enforced upstream (yesForUsb gate above; ISO mode is implicitly confirmed).
+    lines.push(cmdCall(`call "${options.adkMakeWinPEMedia}" /${format === 'iso' ? 'ISO' : 'UFD'} /f "${stage}" "${outputArg}"`));
+    lines.push(`if ($LASTEXITCODE -ne 0) { Write-Result @{ok=$false;error="MakeWinPEMedia failed with exit code $LASTEXITCODE"}; exit 0 }`);
+  }
   lines.push(`Write-Step 'Done.'`);
-  lines.push('Write-Result @{ok=$true;output=' + psQuote(outputArg) + '}');
+  lines.push(
+    'Write-Result @{ok=$true;output=' +
+      psQuote(outputArg) +
+      (format === 'usb' && options.dualPartition ? ';bootLetter=$script:bootLetter;dataLetter=$script:dataLetter' : '') +
+      '}'
+  );
   lines.push('Stop-Transcript -ErrorAction SilentlyContinue | Out-Null');
   lines.push('exit 0');
   return lines.join('\r\n');
@@ -616,15 +767,39 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
     }
     // Capacity check: MakeWinPEMedia formats the stick as FAT32, and Windows
     // refuses to FAT32-format volumes above 32 GB — catch it before the
-    // lengthy build instead of at the very last step.
+    // lengthy build instead of at the very last step. A dual-partition stick
+    // is FAT32 only on its (small) boot partition, so the cap does not apply
+    // there; it still needs to hold boot + a usable data area.
     const letterMatch = /^([A-Za-z]):?/.exec(String(options.output ?? '').trim());
     const groups = listMediaDrives();
     const drive = [...groups.primary, ...groups.others].find(
       (d) => d.letter.toUpperCase() === (letterMatch?.[1] ?? '').toUpperCase()
     );
-    const sizeError = usbSizeGuard(drive?.sizeBytes);
+    const sizeError = options.dualPartition
+      ? dualPartitionGuard(options.bootSizeMb, drive?.sizeBytes)
+      : usbSizeGuard(drive?.sizeBytes);
     if (sizeError) {
       return { ok: false, format: options.format, output: options.output, arch, error: sizeError };
+    }
+  }
+  if (options.dualPartition && options.format !== 'usb') {
+    return {
+      ok: false,
+      format: options.format,
+      output: options.output,
+      arch,
+      error: 'The dual-partition layout needs a USB drive target (--usb), not an ISO output.'
+    };
+  }
+  for (const item of options.copyToData ?? []) {
+    if (!fs.existsSync(item)) {
+      return {
+        ok: false,
+        format: options.format,
+        output: options.output,
+        arch,
+        error: `Copy source not found: ${item}`
+      };
     }
   }
   const adk = locateAdk(arch, options.adkRoot);
@@ -735,7 +910,10 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
       payloadTextFiles: payloadTextFiles(),
       startnetCmd: buildStartnetCmd(),
       yesForUsb: options.yesForUsb ?? false,
-      drivers: options.drivers ?? []
+      drivers: options.drivers ?? [],
+      dualPartition: options.dualPartition,
+      bootSizeMb: options.bootSizeMb,
+      copyToData: options.copyToData
     }),
     'utf-8'
   );
@@ -855,7 +1033,7 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
     }
     const parsed = JSON.parse(
       fs.readFileSync(resultPath, 'utf-8').replace(/^\uFEFF/, '')
-    ) as { ok?: boolean; error?: string; output?: string };
+    ) as { ok?: boolean; error?: string; output?: string; bootLetter?: string; dataLetter?: string };
     if (!parsed.ok) {
       const formatHint = /Failed to format|DiskPart errorlevel|-2147024809|0x80070057/i.test(parsed.error ?? '')
         ? ' Hint: MakeWinPEMedia formats the stick as FAT32, which Windows limits to 32 GB — ' +
@@ -878,7 +1056,15 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
     }
     logger.info(`Recovery media created: ${options.output}${sizeBytes ? ` (${sizeBytes} bytes)` : ''}`);
     succeeded = true;
-    return { ok: true, format: options.format, output: options.output, arch, sizeBytes };
+    return {
+      ok: true,
+      format: options.format,
+      output: options.output,
+      arch,
+      sizeBytes,
+      ...(parsed.bootLetter ? { bootLetter: parsed.bootLetter } : {}),
+      ...(parsed.dataLetter ? { dataLetter: parsed.dataLetter } : {})
+    };
   } finally {
     clearInterval(progressTimer);
     // Keep the staging directory when the build failed (so the elevated script

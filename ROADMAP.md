@@ -210,6 +210,23 @@ to date has shipped; **Investigate** items need spike work first.
   release build, `smoke-selfcheck` green. The harness is versioned at
   `tools/winpe-live-test/` and includes the network probe (IPv4 + TCP, WARN by
   default, `--require-net` makes it hard).
+- 🚧 **Dual-partition recovery media (opt-in, unreleased)**: `media create
+  --usb <drive> --yes --dual-partition [--boot-size-mb N] [--copy-data <path,…>]`
+  (or the checkbox on the Recovery Media screen) repartitions the stick as a
+  small FAT32 boot partition (default 4 GiB, `active`, boot code via
+  `bootsect /nt60 … /mbr`) plus an NTFS data partition on the rest of it, and
+  copies the built `<stage>/media` tree itself instead of `MakeWinPEMedia`
+  (which would format the whole target FAT32). Backup images larger than
+  FAT32's 4 GiB file-size limit live on the data partition (`--copy-data`
+  lands them in `OPBS-Images\`, which the recovery wizard's drive scan finds),
+  and the 32 GB FAT32 format ceiling no longer applies. The default one-click
+  flow is unchanged: the single FAT32 partition. `dualPartitionGuard` checks
+  the boot size (1024–32768 MiB) and that the stick holds boot + 1 GiB; the
+  elevated script refuses the system disk and re-discovers both drive letters
+  after `diskpart`. Unit tests cover the generated script and the guards, and
+  the emitted PowerShell is syntax-checked — but the **physical boot test is
+  still pending** (same `tools/winpe-live-test/` drill as the single-partition
+  media) before this ships.
 - ✅ Network drivers: the first probe run reported `ipv4=none` (the stock
   WinPE image carries no driver for the host NIC), so the host's Intel
   Ethernet packages (`e1d.inf` 12.19.2.60/62) were injected into the media's

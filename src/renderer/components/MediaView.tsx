@@ -19,6 +19,9 @@ interface MediaCreateResult {
   output: string;
   arch: string;
   sizeBytes?: number;
+  /** Dual-partition USB: letters of the FAT32 boot and NTFS data partitions. */
+  bootLetter?: string;
+  dataLetter?: string;
   error?: string;
 }
 
@@ -28,6 +31,10 @@ interface MediaCreateOptions {
   output: string;
   restoreConfig?: string;
   yesForUsb?: boolean;
+  /** FAT32 boot + NTFS data partition (USB only). */
+  dualPartition?: boolean;
+  bootSizeMb?: number;
+  copyToData?: string[];
 }
 
 interface MediaDriveOption {
@@ -55,6 +62,11 @@ function MediaView({ onComplete }: MediaViewProps) {
   const [isoPath, setIsoPath] = useState('');
   const [usbDrive, setUsbDrive] = useState('');
   const [usbConfirmed, setUsbConfirmed] = useState(false);
+  // Opt-in dual-partition layout (FAT32 boot + NTFS data); the default stays
+  // the single FAT32 partition for the one-click flow.
+  const [dualPartition, setDualPartition] = useState(false);
+  const [bootSizeMb, setBootSizeMb] = useState('4096');
+  const [dataFolder, setDataFolder] = useState('');
   const [arch, setArch] = useState('amd64');
   const [restoreConfig, setRestoreConfig] = useState('');
   const [building, setBuilding] = useState(false);
@@ -134,6 +146,12 @@ function MediaView({ onComplete }: MediaViewProps) {
       };
       if (format === 'usb') {
         options.yesForUsb = true;
+        if (dualPartition) {
+          options.dualPartition = true;
+          const mb = Number(bootSizeMb);
+          if (Number.isFinite(mb)) options.bootSizeMb = mb;
+          if (dataFolder) options.copyToData = [dataFolder];
+        }
       }
       const r: MediaCreateResult = await window.electronAPI.mediaCreate(options);
       setResult(r);
@@ -181,14 +199,19 @@ function MediaView({ onComplete }: MediaViewProps) {
 
   const allDrives = drives ? [...drives.primary, ...drives.others] : [];
   const selectedDrive = allDrives.find((d) => d.letter === usbDrive);
-  // Windows can only FAT32-format drives up to 32 GB, and MakeWinPEMedia
-  // formats the stick as FAT32 — larger sticks fail at the format step.
+  // Windows can only FAT32-format drives up to 32 GB, and the default build
+  // formats the whole stick as FAT32 — larger sticks fail at the format step.
+  // A dual-partition stick is FAT32 only on its small boot partition, so the
+  // cap does not apply there.
   const FAT32_MAX_BYTES = 32 * 1024 * 1024 * 1024;
-  const usbTooLarge = !!selectedDrive && selectedDrive.sizeBytes > FAT32_MAX_BYTES;
+  const usbTooLarge = !!selectedDrive && selectedDrive.sizeBytes > FAT32_MAX_BYTES && !dualPartition;
+  const bootMb = Number(bootSizeMb);
+  const bootSizeInvalid = dualPartition && (!Number.isInteger(bootMb) || bootMb < 1024 || bootMb > 32768);
 
   const canCreate =
     !building &&
     report?.ready &&
+    !bootSizeInvalid &&
     (format === 'iso' ? !!isoPath : !!selectedDrive && !usbTooLarge && usbConfirmed);
 
   return (
@@ -361,31 +384,91 @@ function MediaView({ onComplete }: MediaViewProps) {
               )}
               <p className="field-hint">
                 Pick the USB stick to turn into recovery media — it will be completely erased.
-                The stick must be 32 GB or smaller: the media is formatted FAT32 and Windows
-                cannot FAT32-format larger drives. For a bigger drive, build an ISO and write it
-                with Rufus.
+                The default media is a single FAT32 partition, which Windows cannot format above
+                32 GB (and which cannot hold files over 4 GB). For a bigger stick — or to store
+                backup images on it — use the dual-partition layout below.
               </p>
             </div>
             {usbTooLarge && (
               <div className="error-message">
                 <p>
-                  {selectedDrive.text} is larger than 32 GB — the build would fail at the format
-                  step (Windows cannot FAT32-format drives above 32 GB). Use a 32 GB or smaller
-                  stick, or build an ISO and write it to this drive with Rufus.
+                  {selectedDrive.text} is larger than 32 GB — a single-partition build would fail
+                  at the format step (Windows cannot FAT32-format drives above 32 GB). Turn on
+                  the dual-partition layout below, use a 32 GB or smaller stick, or build an ISO
+                  and write it to this drive with Rufus.
                 </p>
               </div>
             )}
             {selectedDrive && (
-              <div className="setting-item">
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={usbConfirmed}
-                    onChange={(e) => setUsbConfirmed(e.target.checked)}
-                  />
-                  I understand: erase everything on {selectedDrive.text}
-                </label>
-              </div>
+              <>
+                <div className="setting-item">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={dualPartition}
+                      onChange={(e) => setDualPartition(e.target.checked)}
+                    />
+                    Dual-partition layout: FAT32 boot + NTFS data partition (optional)
+                  </label>
+                  <p className="field-hint">
+                    Splits the stick into a small boot partition plus an NTFS data partition on
+                    the rest of it, so backup images larger than 4 GB can live on the media. Boot
+                    works the same way (UEFI and BIOS). Off by default: the classic single FAT32
+                    partition is still the one-click path.
+                  </p>
+                </div>
+                {dualPartition && (
+                  <div className="setting-item">
+                    <label>Boot partition size (MiB):</label>
+                    <input
+                      type="text"
+                      value={bootSizeMb}
+                      onChange={(e) => setBootSizeMb(e.target.value)}
+                      placeholder="4096"
+                    />
+                    {bootSizeInvalid && (
+                      <p className="error-text">Enter 1024–32768 MiB (default 4096).</p>
+                    )}
+                  </div>
+                )}
+                {dualPartition && (
+                  <div className="setting-item">
+                    <label>Copy backup images to the data partition (optional):</label>
+                    <div className="path-input">
+                      <input
+                        type="text"
+                        value={dataFolder}
+                        readOnly
+                        placeholder="A folder of .opbs / Macrium images…"
+                      />
+                      <button
+                        onClick={async () => {
+                          const p = await window.electronAPI.selectDirectory({
+                            title: 'Choose a folder of backup images to copy'
+                          });
+                          if (p) setDataFolder(p);
+                        }}
+                      >
+                        Browse
+                      </button>
+                    </div>
+                    <p className="field-hint">
+                      Copied into <code>OPBS-Images</code> on the NTFS partition, so the stick can
+                      restore without another drive. Large folders take a while.
+                    </p>
+                  </div>
+                )}
+                <div className="setting-item">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={usbConfirmed}
+                      onChange={(e) => setUsbConfirmed(e.target.checked)}
+                    />
+                    I understand: erase everything on {selectedDrive.text}
+                  </label>
+                </div>
+              </>
             )}
           </>
         )}
@@ -418,6 +501,9 @@ function MediaView({ onComplete }: MediaViewProps) {
               <p>
                 Recovery media written: {result.output}
                 {result.sizeBytes ? ` (${formatBytes(result.sizeBytes)})` : ''}
+                {result.bootLetter && result.dataLetter
+                  ? ` — boot ${result.bootLetter}:, data ${result.dataLetter}: (images in OPBS-Images)`
+                  : ''}
               </p>
             </div>
           ) : (
