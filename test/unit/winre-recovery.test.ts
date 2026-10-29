@@ -229,9 +229,11 @@ describe('buildStageScript', () => {
     expect(ini).not.toContain('[LaunchApps]');
     expect(ini).toContain('AppPath=X:\\Windows\\System32\\cmd.exe');
     expect(ini).not.toContain('recenv');
-    // Win11 24H2+ memory-integrity parity with the working Windows entries.
-    expect(script).toContain('isolatedcontext Yes');
-    expect(script).toContain('allowedinmemorysettings 0x15000075');
+    // The HVCI parity fields (isolatedcontext/allowedinmemorysettings) were
+    // tried here and REGRESSED the boot (stuck at the firmware logo) - the
+    // entry stays at the field set that at least reaches the load phase.
+    expect(script).not.toContain('isolatedcontext');
+    expect(script).not.toContain('allowedinmemorysettings');
     expect(script).toContain("inherit '{bootloadersettings}'");
     expect(script).toContain('nx OptIn');
     expect(script).toContain('bootmenupolicy Standard');
