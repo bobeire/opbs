@@ -213,6 +213,13 @@ describe('buildStageScript', () => {
     expect(script).toContain("'boot.sdi'");
     expect(script).toContain("'\\windows\\system32\\winload.efi'");
     expect(script).not.toContain('system32\\boot\\winload');
+    // The loader path must come from {current}: PEFirmwareType exists only in
+    // WinPE's registry, so probing it from Windows silently picks the BIOS
+    // loader on UEFI machines (field regression - black screen after load).
+    expect(script).toContain("bcdedit /enum '{current}'");
+    expect(script).not.toContain('Get-ItemProperty');
+    // Progress/result writes must survive the poller's concurrent reads.
+    expect(script).toContain('Start-Sleep');
   });
 
   it('wires winpeshl.ini to the OPBS launcher instead of recenv (field regression)', () => {
