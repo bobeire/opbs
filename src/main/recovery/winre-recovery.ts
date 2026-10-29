@@ -255,11 +255,12 @@ export function buildWinpeshlIni(): string {
   // "[LaunchApps]" multi-app form is a different parser path and black-
   // screens when unhandled (winpeshl exits, nothing runs).
   //
-  // Bisect mode: an INTERACTIVE console. If it appears, the whole boot
-  // chain below winpeshl is healthy and `startnet` can be run by hand to
-  // watch the flow live; if even this is black, the fault is at/below
-  // winpeshl itself.
-  return ['[LaunchApp]', 'AppPath=X:\\Windows\\System32\\cmd.exe', ''].join('\r\n');
+  // Auto flow: cmd /c startnet.cmd. If a given winpeshl.exe declined to
+  // split arguments, cmd.exe alone opens an interactive console - a safe
+  // fallback (type startnet), never a silent failure.
+  return ['[LaunchApp]', 'AppPath=X:\\Windows\\System32\\cmd.exe /c X:\\Windows\\System32\\startnet.cmd', ''].join(
+    '\r\n'
+  );
 }
 
 /**

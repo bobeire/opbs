@@ -237,7 +237,7 @@ describe('buildStageScript', () => {
     // [LaunchApps] form black-screens on this winpeshl.exe (field regression).
     expect(ini).toContain('[LaunchApp]');
     expect(ini).not.toContain('[LaunchApps]');
-    expect(ini).toContain('AppPath=X:\\Windows\\System32\\cmd.exe');
+    expect(ini).toContain('AppPath=X:\\Windows\\System32\\cmd.exe /c X:\\Windows\\System32\\startnet.cmd');
     expect(ini).not.toContain('recenv');
     // The HVCI parity fields (isolatedcontext/allowedinmemorysettings) were
     // tried here and REGRESSED the boot (stuck at the firmware logo) - the
