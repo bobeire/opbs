@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { readMacriumImage } from '../../../src/main/imaging/mrimg/mrimg-format';
 
 /**
  * Discovery for user-provided real Macrium Reflect `.mrimg` samples. The
@@ -79,4 +80,45 @@ export function findMrimgxSamples(): string[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Real password-protected Reflect X samples are covered by their own suite
+ * (`findMrimgxEncryptedSample`); the plain-container suite must skip them or
+ * every assertion about readability would fail on a locked image.
+ */
+export function findMrimgxUnencryptedSamples(): string[] {
+  return findMrimgxSamples().filter((candidate) => {
+    try {
+      return !readMacriumImage(candidate).encryption.enable;
+    } catch {
+      return true; // unreadable: let the plain suite report it
+    }
+  });
+}
+
+/**
+ * A real password-protected Reflect X sample plus its passphrase, if one is
+ * available. Both must come from outside the repo (the samples are gitignored
+ * and the passphrase must never be committed):
+ *  - `$OPBS_MRIMGX_ENC_SAMPLE` + `$OPBS_MRIMGX_ENC_PASSPHRASE`, or
+ *  - the first `*.mrimgx` in `imagefilesamples/` whose `$JSON` reports
+ *    encryption enabled, with the passphrase from the environment.
+ * Returns undefined (=> the real-sample suite skips) when either is missing.
+ */
+export function findMrimgxEncryptedSample(): { imagePath: string; passphrase: string } | undefined {
+  const passphrase = process.env.OPBS_MRIMGX_ENC_PASSPHRASE;
+  if (!passphrase) return undefined;
+  const env = process.env.OPBS_MRIMGX_ENC_SAMPLE;
+  if (env && fs.existsSync(env)) return { imagePath: env, passphrase };
+  for (const candidate of findMrimgxSamples()) {
+    try {
+      if (readMacriumImage(candidate).encryption.enable) {
+        return { imagePath: candidate, passphrase };
+      }
+    } catch {
+      /* not a readable image — keep looking */
+    }
+  }
+  return undefined;
 }

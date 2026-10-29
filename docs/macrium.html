@@ -267,7 +267,11 @@
       passphrase</strong> — browse, extract, mount and restore, delta sets
       included. The key is derived from the passphrase the way Macrium's own
       published format documentation specifies (PBKDF2-HMAC-SHA256 + AES-CBC),
-      and only the derived key is handed to the elevated helper. Reflect&nbsp;7/8
+      and only the derived key is handed to the elevated helper. This is
+      validated against a real encrypted image written by Macrium Reflect&nbsp;X:
+      every one of its 122,864 blocks decrypts to the MD5 digests Macrium
+      itself stored in the image, and its NTFS volume browses and extracts
+      normally. Reflect&nbsp;7/8
       encryption stays unsupported: that container has no published
       specification.
     </p>

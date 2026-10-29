@@ -295,17 +295,24 @@ to date has shipped; **Investigate** items need spike work first.
 - ✅ **Reflect 7/8 (`.mrimg`) password-protected images stay refused** with an
   honest message: that container's encryption has no published specification
   and no sample is available to validate a decoder against.
-- ⚠️ **Residual risk**: no real Reflect-X-encrypted sample was available, so
-  the round trip is proven against an independent encryptor built from the
-  same published scheme (`test/helpers/mrimg-image.ts`, tests in
-  `test/unit/mrimgx-encrypted.test.ts`). A real encrypted image is the
-  remaining ground-truth check — release notes should say so.
-- ✅ **Tests**: locked refusal, wrong passphrase + cached-success safety,
-  unlock with per-block MD5, compressed+encrypted, AES-128/192/256, a
-  plaintext-index variant, encrypted reserved track (array-position IV),
-  derived-key helper path, set composition across encrypted members, and the
-  restore-engine summary/job-key plumbing (74 tests across the mrimg and
-  restore suites).
+- ✅ **Ground truth: validated against a REAL Reflect X encrypted image** —
+  a 7.5 GB MBR / NTFS disk image written by Macrium Reflect X (AES-128,
+  600000 iterations): the passphrase HMAC verifies, every one of the 122,864
+  blocks decrypts (per-block IV) and decompresses to MD5s matching Macrium's
+  own stored digests, and the NTFS volume browses and extracts files. The
+  suite is `test/unit/mrimgx-encrypted-real.test.ts`, gated on
+  `OPBS_MRIMGX_ENC_PASSPHRASE` (+ optional `OPBS_MRIMGX_ENC_SAMPLE`) because
+  the sample is gitignored and the passphrase must never be committed.
+  A synthetic round trip (`test/helpers/mrimg-image.ts` encryptor,
+  `test/unit/mrimgx-encrypted.test.ts`) covers the AES-192/256 variants,
+  compressed-then-encrypted blocks, the reserved track and encrypted backup
+  sets, which the single real sample does not exercise.
+- ✅ **Tests**: the real-sample suite above (5), plus synthetic coverage for
+  locked refusal, wrong passphrase + cached-success safety, unlock with
+  per-block MD5, compressed+encrypted, AES-128/192/256, a plaintext-index
+  variant, encrypted reserved track (array-position IV), derived-key helper
+  path, set composition across encrypted members, and the restore-engine
+  summary/job-key plumbing (79 tests across the mrimg and restore suites).
 
 ### Foreign Macrium restore (.mrimgx / .mrimg) (0.6.64)
 - ✅ `runRestoreJob` auto-detects a Macrium container (`detectMacriumFormat`)

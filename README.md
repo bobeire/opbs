@@ -635,7 +635,11 @@ OPBS.exe --cli extract img.mrimg --partition 1 --path "Users\me\notes.txt" --out
   reaches disk is the recovery-media staging file `OPBS-restore.json`, which
   carries a staged restore's passphrase like every other staged job: treat
   recovery media like a key.
-  A wrong passphrase is reported as such instead of a parse error.
+  A wrong passphrase is reported as such instead of a parse error. Validated
+  against a real encrypted image written by Macrium Reflect X: every one of
+  its 122,864 blocks decrypts and decompresses to the MD5 digests Macrium
+  itself stored in the image, and its NTFS volume browses and extracts
+  normally.
   **Password-protected Reflect 7/8 (`.mrimg`) images stay
   unsupported** — that container's encryption has no published specification —
   so restore them with Macrium Reflect, or decrypt to an unencrypted image

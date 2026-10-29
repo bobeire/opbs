@@ -15,16 +15,17 @@ import {
 import { openMacriumPartitionReader } from '../../src/main/imaging/mrimg/mrimg-reader';
 import { compressBlock, COMPRESSION_ZSTD } from '../../src/main/imaging/image-format';
 import { openAnyBrowse, detectPartitionFilesystem } from '../../src/main/imaging/fs/file-browse';
-import { findMrimgxSamples } from './helpers/v7-sample';
+import { findMrimgxUnencryptedSamples } from './helpers/v7-sample';
 
-const SAMPLES = findMrimgxSamples();
+const SAMPLES = findMrimgxUnencryptedSamples();
 
 /**
  * Real Reflect X (`.mrimgx`) samples, discovered from `imagefilesamples/`
- * (gitignored, user-provided — never a fixed filename). Covers the
- * reserved-boot-region fix: FAT32 volumes store their boot area + FATs in
- * the index's reserved track, and the partition reader must map it in front
- * of the data blocks so the filesystem layers see the boot sector at
+ * (gitignored, user-provided — never a fixed filename). Password-protected
+ * samples are excluded here and covered by `mrimgx-encrypted-real.test.ts`.
+ * Covers the reserved-boot-region fix: FAT32 volumes store their boot area +
+ * FATs in the index's reserved track, and the partition reader must map it in
+ * front of the data blocks so the filesystem layers see the boot sector at
  * offset 0.
  */
 describe.each(SAMPLES.length ? SAMPLES : [])('mrimgx real sample: %s', (sample) => {
