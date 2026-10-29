@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { PassphraseInput } from './PassphraseInput';
 
 interface BrowseNode {
@@ -65,6 +65,10 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
   const currentBrowsable = currentPartition ? currentPartition.browsable !== false : false;
   const [mounting, setMounting] = useState(false);
   const [mountError, setMountError] = useState('');
+  // Optional drive letter for the mount ('' = let WinFsp pick one). Letters
+  // already in use are offered disabled, so the picker cannot collide.
+  const [mountLetter, setMountLetter] = useState('');
+  const [usedLetters, setUsedLetters] = useState<string[]>([]);
   // The mount-status listener is registered once ([]); it must read the current
   // mount id / image key through refs or it closes over null and drops every event.
   const mountIdRef = useRef<string | null>(null);
@@ -303,6 +307,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         imagePath,
         partitionIndex,
         label: `OPBS ${imagePath.split(/[\\/]/).pop() ?? 'image'} (partition ${partitionIndex})`,
+        ...(mountLetter ? { driveLetter: mountLetter } : {}),
         passphrase: passphrase || undefined
       });
       // Refs first so a concurrent mount-status event is not dropped.
@@ -337,6 +342,27 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
     if (!id) return;
     await window.electronAPI.unmountImage(id);
   };
+
+  // Drive letters already in use on this machine, for the optional
+  // mount-letter picker. Best-effort: an empty list just means every letter
+  // looks free (WinFsp then still refuses a taken one).
+  const refreshUsedLetters = useCallback(async () => {
+    try {
+      const groups = await window.electronAPI.mediaDrives();
+      setUsedLetters(
+        [...(groups?.primary ?? []), ...(groups?.others ?? [])].map((d) => (d.letter ?? '').toUpperCase())
+      );
+    } catch {
+      /* keep whatever list we have */
+    }
+  }, []);
+
+  useEffect(() => {
+    // Deferred so the initial setState does not run synchronously inside the
+    // effect (react-hooks/set-state-in-effect).
+    const timer = setTimeout(() => void refreshUsedLetters(), 0);
+    return () => clearTimeout(timer);
+  }, [refreshUsedLetters, mountPoint]);
 
   const formatSize = (bytes: number): string => {
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -413,6 +439,23 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         </div>
       ) : (
         <div className="mount-bar">
+          <label className="field-hint" htmlFor="mount-letter">
+            Letter:
+          </label>
+          <select
+            id="mount-letter"
+            value={mountLetter}
+            onChange={(e) => setMountLetter(e.target.value)}
+            disabled={mounting}
+            aria-label="Drive letter for the mounted image"
+          >
+            <option value="">Auto</option>
+            {'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((L) => (
+              <option key={L} value={`${L}:`} disabled={usedLetters.includes(L) && mountLetter !== `${L}:`}>
+                {L}: {usedLetters.includes(L) ? '(in use)' : ''}
+              </option>
+            ))}
+          </select>
           <button
             className="btn-secondary btn-small"
             disabled={mounting || partitionIndex === null || currentPartition?.fsType !== 'NTFS'}

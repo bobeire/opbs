@@ -16,7 +16,7 @@ import { dispatchHelperJob } from '../helper/job-runner';
 import { launchElevatedJob } from '../helper/launcher';
 import { winfspAvailable } from '../imaging/mount-manager';
 import { JobResult } from '../imaging/imaging-job';
-import type { RestoreJobProgress, RestoreJob, RestoreTarget, JobEncryption } from '../imaging/imaging-job';
+import type { RestoreJobProgress, RestoreJob, RestoreTarget } from '../imaging/imaging-job';
 import { locateAdk, peArchForProcess } from '../utils/adk';
 import { createRecoveryMedia, resolveNodeExe, smokeMediaPayload } from '../utils/winpe-media';
 import { openAnyBrowse, listDirectory, extractPath, formatTimestamp, resolvePath } from '../imaging/fs/file-browse';
@@ -805,13 +805,7 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   return result.ok ? 0 : 1;
 }
 
-/** `RestoreJob` as rendered below: some plan producers attach a human-readable
- *  `encryption.algorithm` label that the shared `JobEncryption` type omits. */
-interface RenderedRestorePlan extends RestoreJob {
-  encryption?: JobEncryption & { algorithm?: string };
-}
-
-function renderRestorePlan(plan: RenderedRestorePlan): string {
+function renderRestorePlan(plan: RestoreJob): string {
   const lines: string[] = [];
   lines.push(`Image: ${plan.imagePath}`);
   lines.push(`Verify before write: ${plan.verifyBeforeWrite ? 'yes' : 'no'}`);
@@ -828,8 +822,10 @@ function renderRestorePlan(plan: RenderedRestorePlan): string {
       );
     }
   }
-  if (plan.encryption?.algorithm) {
-    lines.push(`Encryption: ${plan.encryption.algorithm}`);
+  if (plan.macriumKey) {
+    lines.push('Encryption: Macrium image key derived from the passphrase');
+  } else if (plan.encryption) {
+    lines.push('Encryption: AES-256-GCM (key derived from the passphrase)');
   }
   if (plan.writeTable) {
     const entries: NonNullable<RestoreJob['writeTable']>['entries'] = Array.isArray(plan.writeTable.entries) ? plan.writeTable.entries : [];

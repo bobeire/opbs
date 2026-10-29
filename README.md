@@ -11,7 +11,17 @@ Website: https://opbs.rhitcs.com
 
 ## Install
 
-Installer and portable exe: [GitHub Releases](https://github.com/bobeire/opbs/releases/latest).
+From [GitHub Releases](https://github.com/bobeire/opbs/releases/latest) —
+three artifacts, same program:
+
+- `OPBS-Setup-<version>.exe` — the installer (per-machine, Start menu, file
+  associations).
+- `OPBS-Portable-<version>.exe` — single-file portable build (self-extracting).
+- `OPBS-Portable-<version>.zip` — the same portable app as a plain ZIP: unzip
+  it to a folder you choose and run `OPBS.exe` from there. Use this one if the
+  self-extracting exe is being quarantined — it unpacks to a fresh `%TEMP%`
+  folder on every launch, which antivirus reputation engines dislike; a ZIP
+  extracted once to a stable path does not.
 
 Via [Chocolatey](https://chocolatey.org):
 

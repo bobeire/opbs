@@ -1,5 +1,95 @@
 export {};
 
+/**
+ * Structural shapes of the main-process responses the renderer consumes.
+ * They are deliberately the fields the UI reads — widening them is cheap,
+ * `Promise<any>` everywhere is not (a typo in a handler call is silent).
+ */
+interface ApiBrowseNode {
+  id: number;
+  name: string;
+  parentId: number;
+  isDirectory: boolean;
+  size: number;
+  modified?: number;
+  isEncrypted?: boolean;
+}
+
+interface ApiImageSummary {
+  totalSize: number;
+  partitions: Array<{
+    index: number;
+    size: number;
+    fsType: string;
+    offsetOnDisk: number;
+    blockCount?: number;
+  }>;
+  backupDate: string;
+  compressionId: number;
+  flags: number;
+  blockSize: number;
+  blocks: number;
+  encrypted: boolean;
+  encryptionAlgorithm?: string;
+  passphraseRequired?: boolean;
+  incremental: boolean;
+  baseImagePath?: string;
+  sourceDisk?: { model: string; serial: string };
+}
+
+interface ApiMediaCheckReport {
+  ok: boolean;
+  arch: string;
+  adkRoot: string | null;
+  copype: string | null;
+  makeWinPEMedia: string | null;
+  dism: string | null;
+  oscdimg: string | null;
+  winpeBitlocker: boolean;
+  node: string | null;
+  ready: boolean;
+}
+
+interface ApiMediaCreateOptions {
+  format: 'iso' | 'usb';
+  arch: 'amd64' | 'arm64';
+  output: string;
+  restoreConfig?: string;
+  yesForUsb?: boolean;
+  /** FAT32 boot + NTFS data partition (USB only). */
+  dualPartition?: boolean;
+  bootSizeMb?: number;
+  copyToData?: string[];
+}
+
+interface ApiMediaCreateResult {
+  ok: boolean;
+  format: 'iso' | 'usb';
+  output: string;
+  arch: string;
+  sizeBytes?: number;
+  scriptPath?: string;
+  /** Dual-partition USB: letters of the FAT32 boot and NTFS data partitions. */
+  bootLetter?: string;
+  dataLetter?: string;
+  error?: string;
+}
+
+interface ApiMediaDrive {
+  letter: string;
+  volumeLabel: string;
+  fs: string;
+  sizeBytes: number;
+  driveType: string;
+  busType: string;
+  model: string;
+  removable: boolean;
+  usb: boolean;
+  isSystem: boolean;
+  /** Pre-formatted picker text, e.g. `E: — Cruzer Blade (7.7 GB, USB)`. */
+  text: string;
+}
+
 declare global {
   interface Window {
     electronAPI: {
@@ -50,7 +140,7 @@ declare global {
         targetIsSystemDisk?: boolean;
         targetsIncludeSystemVolume?: boolean;
       }>;
-      getImageInfo: (imagePath: string, passphrase?: string) => Promise<any>;
+      getImageInfo: (imagePath: string, passphrase?: string) => Promise<ApiImageSummary>;
       fetchCloudImage: (uri: string) => Promise<{ ok: boolean; imagePath?: string; error?: string }>;
       releaseStagedImage: (imagePath: string) => Promise<{ ok: boolean }>;
       startClone: (config: any) => Promise<void>;
@@ -308,12 +398,12 @@ declare global {
         }>
       >;
       browsePartitions: (imagePath: string, passphrase?: string) => Promise<{ encrypted: boolean; imageFormat?: string; partitions: Array<{ partitionIndex: number; size: number; offsetOnDisk: number; blockCount: number; fsType?: string; browsable?: boolean; reason?: string }> }>;
-      browseList: (imagePath: string, partitionIndex: number, relPath: string, passphrase?: string) => Promise<any[]>;
-      browseExtract: (imagePath: string, partitionIndex: number, relPath: string, outPath: string, passphrase?: string) => Promise<any>;
+      browseList: (imagePath: string, partitionIndex: number, relPath: string, passphrase?: string) => Promise<ApiBrowseNode[]>;
+      browseExtract: (imagePath: string, partitionIndex: number, relPath: string, outPath: string, passphrase?: string) => Promise<{ ok?: boolean; files: number; outPath: string }>;
       browseClose: () => Promise<void>;
-      mediaCheck: () => Promise<any>;
-      mediaCreate: (options: any) => Promise<any>;
-      mediaDrives: () => Promise<{ primary: any[]; others: any[]; error?: string }>;
+      mediaCheck: () => Promise<ApiMediaCheckReport>;
+      mediaCreate: (options: ApiMediaCreateOptions) => Promise<ApiMediaCreateResult>;
+      mediaDrives: () => Promise<{ primary: ApiMediaDrive[]; others: ApiMediaDrive[]; error?: string }>;
       recoveryStage: (config: {
         imagePath: string;
         targetDiskIndex?: number;
@@ -401,7 +491,14 @@ declare global {
       getSmartAllDisks: () => Promise<any[]>;
       winfspStatus: () => Promise<{ available: boolean; note?: string }>;
       winfspInstall: () => Promise<{ ok: boolean; code?: number; available?: boolean; error?: string }>;
-      mountImage: (config: any) => Promise<{ ok: boolean; id?: string; mountPoint?: string; error?: string }>;
+      mountImage: (config: {
+        imagePath: string;
+        partitionIndex: number;
+        label?: string;
+        /** Drive letter like `E:` (optional; WinFsp auto-assigns when omitted). */
+        driveLetter?: string;
+        passphrase?: string;
+      }) => Promise<{ ok: boolean; id?: string; mountPoint?: string; error?: string }>;
       unmountImage: (id: string) => Promise<{ ok: boolean; error?: string }>;
       onMountStatus: (callback: (status: any) => void) => () => void;
       showAbout: () => Promise<void>;
