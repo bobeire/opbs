@@ -3,6 +3,19 @@ import * as path from 'path';
 import { createHash } from 'crypto';
 import { decompressBlock, COMPRESSION_ZSTD } from '../image-format';
 import { decompressQuickLz, parseQuickLzFrame } from './quicklz';
+import {
+  MacriumAesVariant,
+  MacriumKeyMaterial,
+  MacriumPasswordError,
+  clearMacriumKeys,
+  decryptMacriumMetadata,
+  deriveMacriumKey,
+  getMacriumKey,
+  macriumAesVariant,
+  setMacriumKey,
+  verifyMacriumHmac,
+  zstdFrameLength
+} from './mrimg-crypto';
 
 /**
  * Cached read-only file descriptors for image files. Opening/closing the file
@@ -156,6 +169,12 @@ export interface MacriumBackupSet {
   missingIncrements: number[];
   /** True when every file the indexes need is present (composition done). */
   resolved: boolean;
+  /**
+   * Chain members that are password-protected with different key parameters
+   * (image id / iteration count) than the image being opened: the derived key
+   * cannot decrypt them, so the set is refused instead of failing mid-read.
+   */
+  encryptionMismatch?: string;
 }
 
 export interface MacriumPartitionInfo {
@@ -225,6 +244,12 @@ export interface MacriumImageInfo {
   mergedFiles?: number[];
   compression: { method?: string; level?: string };
   encryption: { enable: boolean; keyIterations: number; aesType?: number; hmac?: string };
+  /**
+   * True once the image's key material is available (the passphrase was
+   * verified). Key material itself never lives on this object — it is kept
+   * out-of-band so it cannot be serialized to the renderer or a job file.
+   */
+  unlocked?: boolean;
   splitFile: boolean;
   deltaIndex: boolean;
   /**
@@ -246,14 +271,29 @@ export interface MacriumImageInfo {
 export class MacriumUnsupportedError extends Error {}
 
 /**
+ * How to unlock a password-protected Reflect X image: the user's passphrase,
+ * or already-derived key material (used by the elevated helper, which must
+ * not receive the passphrase itself).
+ */
+export type MacriumUnlock = string | { key: string; aes: MacriumAesVariant };
+
+/** Password required / wrong for a Macrium image (a kind of unsupported). */
+export { MacriumPasswordError };
+
+/**
  * First unsupported-container reason for a parsed Macrium image, or null when
  * the container itself is readable. Detection is format-agnostic (both the
  * Reflect X `$JSON` header and the v7 footer XML feed it) so the partition
  * reader, the filesystem probe and `mrimg info` all report the same verdict.
  */
 export function macriumUnsupportedReason(info: MacriumImageInfo): string | null {
-  if (info.encryption.enable) {
-    return `${info.imagePath}: password-protected Macrium images are not supported yet.`;
+  if (info.encryption.enable && !info.unlocked) {
+    return `${info.imagePath}: this Macrium image is password-protected; enter its passphrase to open it.`;
+  }
+  if (info.encryption.enable && info.format !== 'mrimgx') {
+    // Reflect 7/8 (.mrimg) encryption predates Macrium's published format and
+    // has no public specification; only Reflect X images can be unlocked.
+    return `${info.imagePath}: password-protected Reflect 7/8 images are not supported yet; restore it with Macrium Reflect or decrypt it to an unencrypted image first.`;
   }
   if (info.splitFile) {
     return `${info.imagePath}: split Macrium images (multi-part .mrimgx/.0001 files) are not supported yet.`;
@@ -274,6 +314,9 @@ export function macriumUnsupportedReason(info: MacriumImageInfo): string | null 
   // cross-file block must name a file that exists.
   if (info.format === 'mrimgx') {
     const set = info.backupSet;
+    if (set?.encryptionMismatch) {
+      return `${info.imagePath}: ${set.encryptionMismatch}`;
+    }
     if (set?.basePath && !fs.existsSync(set.basePath)) {
       return `${info.imagePath}: base image ${path.basename(set.basePath)} not found; restore or merge the chain in Reflect first.`;
     }
@@ -415,22 +458,32 @@ function walkMetaGroups(imagePath: string, start: number, expectedGroups: number
   return groups;
 }
 
-/** Read + validate + decompress a single metadata block payload per the reference reader. */
-function readMetaBlockBody(imagePath: string, block: MetaBlockRecord): Buffer {
+/**
+ * Read + validate + decrypt + decompress a single metadata block payload per
+ * the reference reader. The header's MD5 covers the STORED (encrypted and/or
+ * compressed) bytes; encryption is AES-ECB and runs before decompression.
+ * Ciphertext is padded to 16 bytes, so the zstd frame length is trimmed.
+ */
+function readMetaBlockBody(imagePath: string, block: MetaBlockRecord, material?: MacriumKeyMaterial): Buffer {
   const stored = readFileRange(imagePath, block.bodyOffset, block.bodyLength);
   const digest = createHash('md5').update(stored).digest();
   if (!digest.equals(block.hash)) {
     throw new Error(`Macrium metadata block ${block.name} failed metadata hash check in ${imagePath}.`);
   }
+  let body = stored;
   if ((block.flags & FLAG_ENCRYPTED) !== 0) {
-    throw new MacriumUnsupportedError(
-      'Encrypted Macrium metadata blocks are not supported yet (passphrase-protected images).'
-    );
+    if (!material) {
+      throw new MacriumPasswordError(
+        `${imagePath}: this Macrium image's metadata is encrypted; enter its passphrase to open it.`
+      );
+    }
+    body = decryptMacriumMetadata(stored, material);
   }
   if ((block.flags & FLAG_COMPRESSED) !== 0) {
-    return decompressBlock(stored, COMPRESSION_ZSTD);
+    const frameLength = zstdFrameLength(body);
+    return decompressBlock(frameLength !== undefined ? body.subarray(0, frameLength) : body, COMPRESSION_ZSTD);
   }
-  return stored;
+  return body;
 }
 
 function parseIndexElements(buf: Buffer, offset: number, count: number): MacriumIndexElement[] {
@@ -1207,34 +1260,116 @@ const macriumInfoCache = new Map<string, MacriumImageInfo>();
  */
 const backupSetMemberCache = new Map<string, MacriumImageInfo>();
 
-/** Clear the cached Macrium image parses (call when browsing ends). */
+/** Clear the cached Macrium image parses and key material (browsing ended). */
 export function clearMacriumInfoCache(): void {
   macriumInfoCache.clear();
   backupSetMemberCache.clear();
+  clearMacriumKeys();
 }
 
-export function readMacriumImage(imagePath: string): MacriumImageInfo {
-  const cached = macriumInfoCache.get(imagePath);
+/**
+ * Cache tag for an unlock: a locked parse and an unlocked parse of the same
+ * file are different results, and two different passphrases must never share
+ * an entry (a cached success would otherwise mask a wrong passphrase).
+ */
+function unlockTag(unlock: MacriumUnlock | undefined): string {
+  if (unlock === undefined) return '';
+  if (typeof unlock === 'string') {
+    return `p:${createHash('sha256').update(unlock).digest('hex')}`;
+  }
+  return `k:${unlock.aes}:${unlock.key}`;
+}
+
+function cacheKey(imagePath: string, unlock: MacriumUnlock | undefined): string {
+  return `${imagePath}\u0000${unlockTag(unlock)}`;
+}
+
+/**
+ * Resolve key material for an image: derive + verify from a passphrase, or
+ * accept already-derived material after verifying its HMAC. Returns undefined
+ * for an unencrypted image; throws `MacriumPasswordError` on a wrong secret.
+ */
+function resolveKeyMaterial(
+  imagePath: string,
+  info: MacriumImageInfo,
+  unlock: MacriumUnlock | undefined
+): MacriumKeyMaterial | undefined {
+  if (!info.encryption.enable) return undefined;
+  if (unlock === undefined) return undefined;
+  const aes = macriumAesVariant(info.encryption.aesType) ?? 14;
+  const material: MacriumKeyMaterial =
+    typeof unlock === 'string'
+      ? deriveMacriumKey(
+          info.imageId,
+          unlock,
+          info.encryption.keyIterations > 0 ? info.encryption.keyIterations : 600000,
+          aes
+        )
+      : { key: Buffer.from(unlock.key, 'hex'), aes: unlock.aes };
+  if (material.key.length !== 32) {
+    throw new MacriumPasswordError(`${imagePath}: the supplied Macrium key is not 32 bytes.`);
+  }
+  if (!verifyMacriumHmac(material, info.encryption.hmac ?? '')) {
+    throw new MacriumPasswordError(`${imagePath}: incorrect passphrase for this password-protected Macrium image.`);
+  }
+  return material;
+}
+
+/**
+ * Open a Macrium image. Password-protected Reflect X images need `unlock`:
+ * the user's passphrase (validated against the image's HMAC) or derived key
+ * material. Without it the container is still parsed for its geometry, but
+ * its block index is not read and `macriumUnsupportedReason` refuses it.
+ */
+export function readMacriumImage(imagePath: string, unlock?: MacriumUnlock): MacriumImageInfo {
+  const key = cacheKey(imagePath, unlock);
+  const cached = macriumInfoCache.get(key);
   if (cached) return cached;
-  const info = readMacriumImageUncached(imagePath);
-  macriumInfoCache.set(imagePath, info);
+  const info = readMacriumImageUncached(imagePath, {}, unlock);
+  macriumInfoCache.set(key, info);
   return info;
+}
+
+/**
+ * Key material to carry in a job file for the elevated helper: derived (and
+ * HMAC-verified) here so the job holds the derived key instead of the
+ * passphrase. Returns undefined for images that are not password-protected;
+ * throws `MacriumPasswordError` for a wrong passphrase.
+ */
+export function macriumJobKey(
+  imagePath: string,
+  passphrase?: string
+): { key: string; aes: MacriumAesVariant } | undefined {
+  if (!passphrase || !detectMacriumFormat(imagePath)) return undefined;
+  readMacriumImage(imagePath, passphrase);
+  const material = getMacriumKey(imagePath);
+  return material ? { key: material.key.toString('hex'), aes: material.aes } : undefined;
 }
 
 /**
  * Parse a sibling backup-set member: its own header and (when indexed) raw
  * block index, without resolving a set of its own. Unreadable siblings are
- * skipped rather than failing the whole set (as the reference reader does).
+ * skipped rather than failing the whole set (as the reference reader does) —
+ * except a password failure, which the set resolver records as an encryption
+ * mismatch instead of a "missing file".
  */
-function readBackupSetMember(imagePath: string, index: boolean): MacriumImageInfo | undefined {
+function readBackupSetMember(
+  imagePath: string,
+  index: boolean,
+  unlock?: MacriumUnlock
+): MacriumImageInfo | undefined {
   try {
-    return readMacriumImageUncached(imagePath, { index, chain: false });
-  } catch {
+    return readMacriumImageUncached(imagePath, { index, chain: false }, unlock);
+  } catch (error) {
+    if (error instanceof MacriumPasswordError) throw error;
     return undefined;
   }
 }
 
-function readBackupSetMemberCached(imagePath: string): MacriumImageInfo | undefined {
+function readBackupSetMemberCached(imagePath: string, unlock?: MacriumUnlock): MacriumImageInfo | undefined {
+  // Only keyless parses share the member cache; an unlocked parse is cheap to
+  // repeat and must not leak key material into a cache used by locked reads.
+  if (unlock !== undefined) return readBackupSetMember(imagePath, true, unlock);
   const cached = backupSetMemberCache.get(imagePath);
   if (cached) return cached;
   const info = readBackupSetMember(imagePath, true);
@@ -1249,8 +1384,11 @@ interface MrimgxParseOptions {
   chain?: boolean;
 }
 
-function readMacriumImageUncached(imagePath: string, opts: MrimgxParseOptions = {}): MacriumImageInfo {
-  const withIndex = opts.index !== false;
+function readMacriumImageUncached(
+  imagePath: string,
+  opts: MrimgxParseOptions = {},
+  unlock?: MacriumUnlock
+): MacriumImageInfo {
   const withChain = opts.chain !== false;
   const format = detectMacriumFormat(imagePath);
   if (format === 'mrimg-v7') {
@@ -1302,7 +1440,9 @@ function readMacriumImageUncached(imagePath: string, opts: MrimgxParseOptions = 
     encryption: {
       enable: Boolean(encryption.enable),
       keyIterations: num(encryption.key_iterations, 0),
-      aesType: numOpt(encryption.aes_type),
+      // Macrium stores the variant as the string "aes-128"/"aes-192"/"aes-256";
+      // keep the internal 10/12/14 numbering used by the crypto helpers.
+      aesType: macriumAesVariant(encryption.aes_type as string | number | undefined),
       hmac: str(encryption.hmac)
     },
     splitFile: Boolean(header.split_file),
@@ -1313,6 +1453,17 @@ function readMacriumImageUncached(imagePath: string, opts: MrimgxParseOptions = 
 
   const indexFilePosition = num(header.index_file_position, -1);
   if (indexFilePosition < 0) throw new Error(`Missing index_file_position in ${imagePath}.`);
+
+  // Resolve key material before any block that may be encrypted is read. A
+  // wrong passphrase throws here, so a locked image is never half-parsed.
+  const material = resolveKeyMaterial(imagePath, info, unlock);
+  if (material) {
+    info.unlocked = true;
+    setMacriumKey(imagePath, material);
+  }
+  // An encrypted image without key material still parses its geometry (from
+  // the plaintext $JSON) but skips the encrypted index sections.
+  const withIndex = opts.index !== false && (!info.encryption.enable || !!material);
   const groupCount = disksJson.length + disksJson.reduce<number>((n, d) => {
     const disk = rec(d);
     return n + arr(disk.partitions).length;
@@ -1358,7 +1509,7 @@ function readMacriumImageUncached(imagePath: string, opts: MrimgxParseOptions = 
         const group = indexGroups[g] ?? [];
         const indexBlock = group.find((b) => b.name === BLOCK_INDEX);
         if (indexBlock) {
-          const payload = readMetaBlockBody(imagePath, indexBlock);
+          const payload = readMetaBlockBody(imagePath, indexBlock, material);
           const parsedIndex = parseIndexPayload(payload, info.deltaIndex);
           blocks = parsedIndex.blocks;
           deltaBlocks = parsedIndex.deltaBlocks;
@@ -1397,8 +1548,8 @@ function readMacriumImageUncached(imagePath: string, opts: MrimgxParseOptions = 
     });
   });
 
-  if (withChain && !info.encryption.enable && !info.splitFile && wantsBackupSet(info)) {
-    resolveBackupSet(info);
+  if (withChain && (!info.encryption.enable || material) && !info.splitFile && wantsBackupSet(info)) {
+    resolveBackupSet(info, unlock);
   }
   return info;
 }
@@ -1440,12 +1591,13 @@ function isCompressionEnabled(info: MacriumImageInfo): boolean {
  * Missing chain members are recorded rather than thrown: `macriumUnsupportedReason`
  * turns them into the standard refusal.
  */
-function resolveBackupSet(info: MacriumImageInfo): void {
+function resolveBackupSet(info: MacriumImageInfo, unlock?: MacriumUnlock): void {
   const dir = path.dirname(info.imagePath);
   const ext = path.extname(info.imagePath).toLowerCase();
   const selfPath = path.resolve(info.imagePath);
   const targetIncrement = info.incrementNumber ?? 0;
   const parsed: MacriumImageInfo[] = [info];
+  let encryptionMismatch: string | undefined;
   let names: string[];
   try {
     names = fs.readdirSync(dir);
@@ -1464,7 +1616,18 @@ function resolveBackupSet(info: MacriumImageInfo): void {
     // Phase 2: indexed parse for actual members (delta records / seed blocks).
     // An unreadable index drops the file from the set entirely, like the
     // reference reader's per-file exception handling.
-    const member = readBackupSetMemberCached(candidate);
+    let member: MacriumImageInfo | undefined;
+    try {
+      member = readBackupSetMemberCached(candidate, unlock);
+    } catch (e) {
+      // A password-protected member that this key cannot open would otherwise
+      // be skipped and surface as a confusing "missing chain file".
+      if (e instanceof MacriumPasswordError) {
+        encryptionMismatch ??= `${candidate}: encrypted with a different passphrase or key settings than ${info.imagePath}.`;
+        continue;
+      }
+      throw e;
+    }
     if (!member) continue;
     parsed.push(member);
   }
@@ -1534,7 +1697,8 @@ function resolveBackupSet(info: MacriumImageInfo): void {
     files,
     missing,
     missingIncrements,
-    resolved: (!needsChain || chainOk) && missing.length === 0 && missingIncrements.length === 0
+    resolved: (!needsChain || chainOk) && missing.length === 0 && missingIncrements.length === 0,
+    ...(encryptionMismatch ? { encryptionMismatch } : {})
   };
 }
 

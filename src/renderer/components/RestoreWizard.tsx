@@ -46,6 +46,7 @@ interface ImageInfo {
   }>;
   backupDate: string;
   encrypted: boolean;
+  encryptionAlgorithm?: string;
   incremental: boolean;
   baseImagePath?: string;
 }
@@ -248,10 +249,14 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     };
   }, []);
 
+  // A new image invalidates the previous summary (the path-changing handlers
+  // clear it explicitly). A wrong passphrase must NOT blank it — that would
+  // lose the partition list while the user corrects the field — so the fetch
+  // below keeps the last good summary on failure.
   useEffect(() => {
     if (!imagePath) return;
     window.electronAPI
-      .getImageInfo(imagePath)
+      .getImageInfo(imagePath, passphrase || undefined)
       .then((info: ImageInfo) => {
         setImageInfo(info);
         // Offer a virtual disk big enough for the whole image until the user
@@ -265,8 +270,10 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
           setVhdSizeGb(Math.max(1, Math.ceil(bytes / 1073741824)));
         }
       })
-      .catch(() => setImageInfo(null));
-  }, [imagePath]);
+      .catch(() => {
+        /* keep the last good summary — a wrong passphrase must not blank it */
+      });
+  }, [imagePath, passphrase]);
 
   // Per-partition target sizes (GB) become a targetLayout override: an entry
   // is emitted only for a partition whose size field was actually filled in.
@@ -349,7 +356,8 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     targetKind,
     vhdPath,
     vhdSizeGb,
-    vhdType
+    vhdType,
+    passphrase
   ]);
 
   // Unlock the image's BitLocker-locked volume with a recovery password, then
@@ -387,6 +395,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
       if (result?.ok && result.imagePath) {
         stagedRef.current = result.imagePath;
         setStagedFrom(uri);
+        setImageInfo(null);
         setImagePath(result.imagePath);
         setCloudProgress(null);
       } else {
@@ -411,6 +420,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     
     if (path) {
       releaseStaged();
+      setImageInfo(null);
       setImagePath(path);
     }
   };
@@ -634,7 +644,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                         ? `Incremental ${imageInfo.baseImagePath ? `(base: ${imageInfo.baseImagePath.split(/[\\/]/).pop()})` : ''}`
                         : 'Full'}
                     </li>
-                    <li>Encryption: {imageInfo.encrypted ? 'AES-256-GCM' : 'None'}</li>
+                    <li>Encryption: {imageInfo.encrypted ? (imageInfo.encryptionAlgorithm ?? 'AES-256-GCM') : 'None'}</li>
                   </ul>
                 </div>
               )}
@@ -831,6 +841,26 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                 <div className="preflight-panel">
                   {preflightLoading ? (
                     <p className="field-hint">Checking target disk…</p>
+                  ) : preflight && !preflight.ok && preflight.passphraseRequired ? (
+                    <div className="bitlocker-unlock-box">
+                      <div className="error-message">
+                        <p>{preflight.error ?? 'This image is password-protected.'}</p>
+                      </div>
+                      <div className="bitlocker-unlock-row">
+                        <PassphraseInput
+                          compact
+                          style={{ flex: 1, minWidth: 240 }}
+                          value={passphrase}
+                          onChange={setPassphrase}
+                          placeholder="Image passphrase"
+                          ariaLabel="Image passphrase"
+                        />
+                      </div>
+                      <p className="field-hint">
+                        The key is derived from this passphrase in the app; only the derived key is
+                        passed to the elevated helper.
+                      </p>
+                    </div>
                   ) : preflight && !preflight.ok && preflight.unlockRequired ? (
                     <div className="bitlocker-unlock-box">
                       <div className="error-message">

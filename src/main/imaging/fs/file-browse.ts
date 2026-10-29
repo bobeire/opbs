@@ -7,7 +7,7 @@ import { logger } from '../../utils/logger';
 import { parseBootSector, readFileRecords, buildTree, readFileData, readStreamData, readDirectoryIndex, EfsEncryptedError, NtfsFile, NtfsLayout, NtfsNode } from './ntfs';
 import { parseFat32BootSector, listFat32Directory, readFileData as readFat32FileData, Fat32Layout, Fat32Entry, detectFatType } from './fat32';
 import { parseExfatBootSector, listExfatDirectory, readExfatFileData, detectExfat, ExfatLayout, ExfatEntry } from './exfat';
-import { detectMacriumFormat, readMacriumImage, openMacriumPartitionReader, MacriumUnsupportedError } from '../mrimg';
+import { detectMacriumFormat, readMacriumImage, openMacriumPartitionReader, MacriumUnsupportedError, MacriumPasswordError, MacriumUnlock } from '../mrimg';
 
 /**
  * High-level file browsing/extraction over a backup image (OPBS `.opbs` chain
@@ -69,17 +69,25 @@ export interface ExfatBrowseSession {
 
 export type BrowseSession = NtfsBrowseSession | Fat32BrowseSession | ExfatBrowseSession;
 
+/**
+ * The `.opbs` reader wants a raw passphrase; a Macrium unlock can also be
+ * already-derived key material, which only the Macrium reader understands.
+ */
+function opbsPassphrase(unlock?: MacriumUnlock): string | undefined {
+  return typeof unlock === 'string' ? unlock : undefined;
+}
+
 /** Open a browse session for a partition in an image chain. */
 export function openBrowse(
   imagePath: string,
   partitionIndex: number,
-  passphrase?: string
+  passphrase?: MacriumUnlock
 ): BrowseSession {
   // Normalise a multi-volume path (`.001`, `.002`, ...) to the base image so
   // chain resolution and volume mapping start from volume 0.
   const basePath = baseVolumePath(imagePath);
   const chain = resolveImageChain(basePath);
-  const { reader } = partitionReaderForChain(chain, partitionIndex, passphrase);
+  const { reader } = partitionReaderForChain(chain, partitionIndex, opbsPassphrase(passphrase));
   return openBrowseFromReader(basePath, partitionIndex, reader);
 }
 
@@ -168,10 +176,10 @@ function openExfatBrowse(
  * Open a browse session for whatever image flavor the path holds: a `.opbs`
  * image chain, a `.mrimgx` Reflect X image, or a `.mrimg` Reflect 7/8 image.
  */
-export function openAnyBrowse(imagePath: string, partitionIndex: number, passphrase?: string): BrowseSession {
+export function openAnyBrowse(imagePath: string, partitionIndex: number, passphrase?: MacriumUnlock): BrowseSession {
   const format = detectMacriumFormat(imagePath);
   if (format) {
-    const info = readMacriumImage(imagePath);
+    const info = readMacriumImage(imagePath, passphrase);
     const reader = openMacriumPartitionReader(info, partitionIndex);
     return openBrowseFromReader(imagePath, partitionIndex, reader);
   }
@@ -186,18 +194,18 @@ export function openAnyBrowse(imagePath: string, partitionIndex: number, passphr
 export function detectPartitionFilesystem(
   imagePath: string,
   partitionIndex: number,
-  passphrase?: string
+  passphrase?: MacriumUnlock
 ): { fsType: string; browsable: boolean; reason?: string } {
   try {
     const format = detectMacriumFormat(imagePath);
     let reader: PartitionReader;
     if (format) {
-      const info = readMacriumImage(imagePath);
+      const info = readMacriumImage(imagePath, passphrase);
       reader = openMacriumPartitionReader(info, partitionIndex);
     } else {
       const basePath = baseVolumePath(imagePath);
       const chain = resolveImageChain(basePath);
-      reader = partitionReaderForChain(chain, partitionIndex, passphrase).reader;
+      reader = partitionReaderForChain(chain, partitionIndex, opbsPassphrase(passphrase)).reader;
     }
     if (reader.size === 0) return { fsType: 'Empty', browsable: false };
     const bpb = reader.read(0, 512);
@@ -211,6 +219,12 @@ export function detectPartitionFilesystem(
     if (detectExfat(bpb)) return { fsType: 'exFAT', browsable: true };
     return { fsType: oem.trim() || 'Unknown', browsable: false };
   } catch (e) {
+    if (e instanceof MacriumPasswordError) {
+      // Wrong/missing passphrase for a password-protected Macrium image: keep
+      // the exact reason so the UI can prompt for the passphrase.
+      logger.info(`detectPartitionFilesystem: partition ${partitionIndex} locked: ${e.message}`);
+      return { fsType: 'Encrypted', browsable: false, reason: e.message };
+    }
     if (e instanceof MacriumUnsupportedError) {
       // A recognised-but-refused container (encrypted/split/delta): keep the
       // exact verdict instead of collapsing it into "Unknown", so callers can
@@ -230,7 +244,7 @@ export function detectPartitionFilesystem(
  * a restore. Never throws; failures (encrypted image without a key, corrupt
  * data) mean "not an ESP".
  */
-export function probeEspPartition(imagePath: string, partitionIndex: number, passphrase?: string): boolean {
+export function probeEspPartition(imagePath: string, partitionIndex: number, passphrase?: MacriumUnlock): boolean {
   try {
     const { fsType } = detectPartitionFilesystem(imagePath, partitionIndex, passphrase);
     if (fsType !== 'FAT32') {
@@ -247,7 +261,7 @@ export function probeEspPartition(imagePath: string, partitionIndex: number, pas
   }
 }
 
-export type EspProbe = (imagePath: string, partitionIndex: number, passphrase?: string) => boolean;
+export type EspProbe = (imagePath: string, partitionIndex: number, passphrase?: MacriumUnlock) => boolean;
 
 /**
  * Infer GPT type GUIDs for the partitions a restore will lay down: every EFI
@@ -258,7 +272,7 @@ export type EspProbe = (imagePath: string, partitionIndex: number, passphrase?: 
 export function inferTableTypeGuids(
   imagePath: string,
   partitionIndexes: number[],
-  passphrase?: string,
+  passphrase?: MacriumUnlock,
   probe: EspProbe = probeEspPartition
 ): Record<number, string> {
   const typeGuids: Record<number, string> = {};
@@ -290,7 +304,7 @@ export function mbrTypeForFs(fsType: string): number {
 export function inferMbrTypes(
   imagePath: string,
   partitionIndexes: number[],
-  passphrase?: string
+  passphrase?: MacriumUnlock
 ): Record<number, number> {
   const mbrTypes: Record<number, number> = {};
   for (const idx of partitionIndexes) {

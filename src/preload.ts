@@ -31,7 +31,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startRestore: (config: unknown) => ipcRenderer.invoke('start-restore', config),
   cancelRestore: () => ipcRenderer.invoke('cancel-restore'),
   restorePreflight: (config: unknown) => ipcRenderer.invoke('restore-preflight', config),
-  getImageInfo: (imagePath: string) => ipcRenderer.invoke('get-image-info', imagePath),
+  getImageInfo: (imagePath: string, passphrase?: string) => ipcRenderer.invoke('get-image-info', imagePath, passphrase),
   fetchCloudImage: (uri: string) => ipcRenderer.invoke('fetch-cloud-image', uri),
   releaseStagedImage: (imagePath: string) => ipcRenderer.invoke('release-staged-image', imagePath),
 
@@ -103,7 +103,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   vssServiceControl: (action: 'start' | 'stop') => ipcRenderer.invoke('vss-service-control', action),
 
   // Browse backup images (file-level)
-  browsePartitions: (imagePath: string) => ipcRenderer.invoke('browse-partitions', imagePath),
+  browsePartitions: (imagePath: string, passphrase?: string) => ipcRenderer.invoke('browse-partitions', imagePath, passphrase),
   browseList: (imagePath: string, partitionIndex: number, relPath: string, passphrase?: string) =>
     ipcRenderer.invoke('browse-list', imagePath, partitionIndex, relPath, passphrase),
   browseExtract: (imagePath: string, partitionIndex: number, relPath: string, outPath: string, passphrase?: string) =>

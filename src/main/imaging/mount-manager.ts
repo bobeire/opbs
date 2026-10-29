@@ -2,6 +2,7 @@ import * as path from 'path';
 import { loadNative } from '../utils/native-loader';
 import { openAnyBrowse, BrowseSession } from './fs/file-browse';
 import { handleBridgeRequest, BridgeRequest, BridgeReply } from './fs/mount-fs';
+import { MacriumAesVariant } from './mrimg';
 import { logger } from '../utils/logger';
 
 /**
@@ -23,6 +24,11 @@ export interface MountConfig {
   /** Volume label shown in Explorer. */
   label?: string;
   passphrase?: string;
+  /**
+   * Derived key for a password-protected Reflect X image: the helper's job
+   * file carries this instead of the passphrase.
+   */
+  macriumKey?: { key: string; aes: MacriumAesVariant };
 }
 
 export interface MountHandle {
@@ -89,7 +95,7 @@ export function mountImage(config: MountConfig): MountHandle {
     );
   }
   logger.info(`mountImage: opening ${config.imagePath}#${config.partitionIndex}`);
-  const session = openAnyBrowse(config.imagePath, config.partitionIndex, config.passphrase);
+  const session = openAnyBrowse(config.imagePath, config.partitionIndex, config.macriumKey ?? config.passphrase);
   const handler = (req: BridgeRequest): BridgeReply => handleBridgeRequest(session, req);
   const label = config.label ?? `OPBS ${path.basename(config.imagePath)}`;
   const res = native.winfspMount(

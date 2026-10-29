@@ -13,6 +13,14 @@ import {
   readImageFileRange,
   readMacriumImage
 } from './mrimg-format';
+import {
+  MacriumKeyMaterial,
+  MacriumPasswordError,
+  decryptMacriumBlock,
+  getMacriumKey,
+  macriumBlockIv,
+  zstdFrameLength
+} from './mrimg-crypto';
 
 /**
  * Upper bound on decompressed bytes kept in the per-reader block cache.
@@ -197,6 +205,44 @@ export class MacriumPartitionReader implements PartitionReader {
     return { path: this.info.imagePath, compressed: this.compressed };
   }
 
+  /**
+   * Read one stored block from the file that owns it and, for a
+   * password-protected image, decrypt it (AES-CBC with the per-block IV).
+   * Returns the still-compressed plaintext.
+   */
+  private readStoredBlock(src: { path: string; compressed: boolean }, filePosition: number, storedLength: number, ivIndex: number): Buffer {
+    const stored = readImageFileRange(src.path, filePosition, storedLength);
+    if (!this.info.encryption.enable) return stored;
+    const material = this.keyFor(src.path);
+    const diskNumber = this.info.disks[this.part.diskIndex]?.diskNumber ?? 0;
+    const iv = macriumBlockIv(this.info.imageId, diskNumber, this.part.partitionNumber, ivIndex, material);
+    return decryptMacriumBlock(stored, material, iv);
+  }
+
+  /** Key material for a chain member, from the out-of-band key map. */
+  private keyFor(imagePath: string): MacriumKeyMaterial {
+    const material = getMacriumKey(imagePath);
+    if (!material) {
+      throw new MacriumPasswordError(
+        `${imagePath}: this Macrium image is password-protected; enter its passphrase to open it.`
+      );
+    }
+    return material;
+  }
+
+  /** Decompress a stored block, trimming AES padding from encrypted frames. */
+  private decodeBlock(src: { path: string; compressed: boolean }, plaintext: Buffer, expected: number): Buffer {
+    if (src.compressed) {
+      const frameLength = this.info.encryption.enable ? zstdFrameLength(plaintext) : undefined;
+      return decompressBlock(frameLength !== undefined ? plaintext.subarray(0, frameLength) : plaintext, COMPRESSION_ZSTD);
+    }
+    // Encrypted plaintext is padded to the AES block size; the block's real
+    // length is the partition block size (or the short tail of the last one).
+    return this.info.encryption.enable && plaintext.length > expected
+      ? plaintext.subarray(0, expected)
+      : plaintext;
+  }
+
   private loadBlock(idx: number): Buffer {
     const totalBlocks = this.blockCount;
     if (idx >= totalBlocks) {
@@ -285,8 +331,8 @@ export class MacriumPartitionReader implements PartitionReader {
           // this image on a full container, or the chain member the composed
           // backup-set index routed it to.
           const src = this.resolveBlockSource(el.fileNumber);
-          const stored = readImageFileRange(src.path, el.filePosition, el.storedLength);
-          raw = src.compressed ? decompressBlock(stored, COMPRESSION_ZSTD) : stored;
+          const plaintext = this.readStoredBlock(src, el.filePosition, el.storedLength, idx);
+          raw = this.decodeBlock(src, plaintext, expected);
         }
       }
     }
@@ -319,6 +365,7 @@ export class MacriumPartitionReader implements PartitionReader {
     if (this.reservedTrack) return this.reservedTrack;
     const els = this.part.reserved ?? [];
     const chunks: Buffer[] = [];
+    let reservedIndex = 0;
     for (const el of els) {
       if (el.storedLength <= 0 || el.filePosition < 0) {
         throw new MacriumUnsupportedError(
@@ -326,10 +373,25 @@ export class MacriumPartitionReader implements PartitionReader {
         );
       }
       const src = this.resolveBlockSource(el.fileNumber);
-      const stored = readImageFileRange(src.path, el.filePosition, el.storedLength);
-      const raw = src.compressed ? decompressBlock(stored, COMPRESSION_ZSTD) : stored;
-      const digest = createHash('md5').update(raw).digest();
-      if (!digest.equals(el.md5)) {
+      // The reserved track's IV counter is the element's position in the
+      // reserved array (reference `readBlock` call site), not its logical
+      // offset in the partition.
+      const plaintext = this.readStoredBlock(src, el.filePosition, el.storedLength, reservedIndex++);
+      let raw = this.decodeBlock(src, plaintext, plaintext.length);
+      let verified = createHash('md5').update(raw).digest().equals(el.md5);
+      if (!verified && this.info.encryption.enable && !src.compressed) {
+        // AES padding on a short final reserved block: find the exact length
+        // by trimming at most one AES block until the hash matches.
+        for (let n = raw.length - 1; n >= Math.max(0, raw.length - 16); n--) {
+          const candidate = raw.subarray(0, n);
+          if (createHash('md5').update(candidate).digest().equals(el.md5)) {
+            raw = candidate;
+            verified = true;
+            break;
+          }
+        }
+      }
+      if (!verified) {
         throw new Error(`Macrium reserved block failed hash verification in ${src.path}.`);
       }
       chunks.push(raw);

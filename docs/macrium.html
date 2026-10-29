@@ -249,7 +249,7 @@
           <td class="ok">&#10003;</td>
           <td class="ok">&#10003; (delta)</td>
           <td class="ok">&#10003; (delta)</td>
-          <td class="no">not yet</td>
+          <td class="ok">&#10003; (passphrase)</td>
         </tr>
       </tbody>
     </table>
@@ -261,6 +261,15 @@
       any target byte is written — a refusal you can plan around, not a
       half-finished restore. Reflect 7/8 images are validated against their
       own per-block MD5s; Reflect X against Macrium's official demo image.
+    </p>
+    <p class="note">
+      <strong>Password-protected Reflect&nbsp;X images open with their
+      passphrase</strong> — browse, extract, mount and restore, delta sets
+      included. The key is derived from the passphrase the way Macrium's own
+      published format documentation specifies (PBKDF2-HMAC-SHA256 + AES-CBC),
+      and only the derived key is handed to the elevated helper. Reflect&nbsp;7/8
+      encryption stays unsupported: that container has no published
+      specification.
     </p>
   </div>
 </section>
@@ -376,10 +385,14 @@
     </div>
     <div class="note warn">
       <strong>Refused up front, never mid-restore:</strong> password-protected
-      images, split multi-part sets, and file-and-folder (File Backup) images
-      are not supported. OPBS detects them from the file contents and refuses
-      with a clear message before touching the disk, instead of failing
-      halfway through with a confusing parse error.
+      Reflect&nbsp;7/8 images (that container's encryption has no published
+      specification), split multi-part sets, and file-and-folder (File Backup)
+      images are not supported. OPBS detects them from the file contents and
+      refuses with a clear message before touching the disk, instead of failing
+      halfway through with a confusing parse error. Password-protected
+      Reflect&nbsp;X images are supported — just enter the passphrase
+      (implemented from Macrium's own published format documentation, so a
+      real-world image that won't open is a bug worth reporting).
     </div>
   </div>
 </section>
@@ -480,7 +493,7 @@ OPBS.exe --cli browse "D:\Images\win11-01-01.mrimg" --partition 2</pre>
     </p>
     <ul class="plain" style="margin-top:24px">
       <li><strong style="color:#d0d7e3">Not a Macrium clone.</strong> OPBS reads and restores Macrium images, but writes new backups in its own open <code>.opbs</code> format.</li>
-      <li><strong style="color:#d0d7e3">Refuses what it can't do safely:</strong> password-protected, split, and file-and-folder Macrium images (see above).</li>
+      <li><strong style="color:#d0d7e3">Refuses what it can't do safely:</strong> password-protected Reflect&nbsp;7/8 images, split multi-part sets, and file-and-folder Macrium images (see above).</li>
       <li><strong style="color:#d0d7e3">Windows-only</strong>, and young: OPBS is at v0.6.x. It has a real test suite and real-sample validation, but it has not been in the field for 20 years.</li>
     </ul>
     <ul class="plain limit" style="margin-top:8px">

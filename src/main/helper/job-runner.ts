@@ -51,7 +51,7 @@ import { detectFatType } from '../imaging/fs/fat32';
 
 type AnyShrinkPlan = NtfsShrinkPlan | Fat32ShrinkPlan;
 import { readUsedBlockIndexes } from '../imaging/fs/used-blocks';
-import { mountImage, winfspAvailable } from '../imaging/mount-manager';
+import { mountImage, winfspAvailable, type MountConfig } from '../imaging/mount-manager';
 import { PartitionReader, ChainPartitionReader } from '../imaging/image-browse';
 import {
   detectMacriumFormat,
@@ -60,7 +60,8 @@ import {
   macriumPartitionSize,
   openMacriumPartitionReader,
   MacriumImageInfo,
-  MacriumPartitionInfo
+  MacriumPartitionInfo,
+  MacriumAesVariant
 } from '../imaging/mrimg';
 import {
   ImagingJob,
@@ -1929,7 +1930,12 @@ async function runMacriumRestoreJob(
   // surface as a clean job result, not an escaped exception.
   let info: MacriumImageInfo;
   try {
-    info = readMacriumImage(job.imagePath);
+    // The helper receives derived key material (never the passphrase) for a
+    // password-protected Reflect X image.
+    const unlock = job.macriumKey
+      ? { key: job.macriumKey.key, aes: job.macriumKey.aes as MacriumAesVariant }
+      : undefined;
+    info = readMacriumImage(job.imagePath, unlock);
     const refusal = macriumRestoreRefusal(info);
     if (refusal) {
       failBeforeWrite(refusal);
@@ -2910,13 +2916,7 @@ export async function runMountJob(
   cancelPath: string,
   pipeClient?: PipeClient
 ): Promise<void> {
-  const job = readAndConsumeJob<{
-    imagePath: string;
-    partitionIndex: number;
-    driveLetter?: string;
-    label?: string;
-    passphrase?: string;
-  }>(jobPath);
+  const job = readAndConsumeJob<MountConfig>(jobPath);
 
   const writeResult = (result: Record<string, unknown>): void => {
     emitResult(resultPath, result, pipeClient);

@@ -50,7 +50,7 @@ declare global {
         targetIsSystemDisk?: boolean;
         targetsIncludeSystemVolume?: boolean;
       }>;
-      getImageInfo: (imagePath: string) => Promise<any>;
+      getImageInfo: (imagePath: string, passphrase?: string) => Promise<any>;
       fetchCloudImage: (uri: string) => Promise<{ ok: boolean; imagePath?: string; error?: string }>;
       releaseStagedImage: (imagePath: string) => Promise<{ ok: boolean }>;
       startClone: (config: any) => Promise<void>;
@@ -307,7 +307,7 @@ declare global {
           unhealthy: boolean;
         }>
       >;
-      browsePartitions: (imagePath: string) => Promise<{ encrypted: boolean; imageFormat?: string; partitions: Array<{ partitionIndex: number; size: number; offsetOnDisk: number; blockCount: number; fsType?: string; browsable?: boolean; reason?: string }> }>;
+      browsePartitions: (imagePath: string, passphrase?: string) => Promise<{ encrypted: boolean; imageFormat?: string; partitions: Array<{ partitionIndex: number; size: number; offsetOnDisk: number; blockCount: number; fsType?: string; browsable?: boolean; reason?: string }> }>;
       browseList: (imagePath: string, partitionIndex: number, relPath: string, passphrase?: string) => Promise<any[]>;
       browseExtract: (imagePath: string, partitionIndex: number, relPath: string, outPath: string, passphrase?: string) => Promise<any>;
       browseClose: () => Promise<void>;

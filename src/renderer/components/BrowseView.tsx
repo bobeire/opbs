@@ -136,18 +136,30 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
     return () => {
       alive = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialImagePath]);
 
-  const openImage = async (path: string) => {
-    setImagePath(path);
-    setPartitionIndex(null);
-    setNodes([]);
-    setCwd('');
-    setNotice('');
+  const openImage = async (path: string, keepSelection = false) => {
+    if (!keepSelection) {
+      setImagePath(path);
+      setPartitionIndex(null);
+      setNodes([]);
+      setCwd('');
+      setNotice('');
+    }
     setError('');
     try {
-      const loaded = await window.electronAPI.browsePartitions(path);
+      const loaded = await window.electronAPI.browsePartitions(path, passphrase || undefined);
       setInfo(loaded);
+      if (keepSelection) {
+        // Re-open after a passphrase change: keep the current partition when it
+        // is still browsable, and just clear the previous error.
+        const current = loaded.partitions.find((p: BrowsePartition) => p.partitionIndex === partitionIndex);
+        if (current && current.browsable !== false) {
+          setNotice('Image unlocked.');
+          return;
+        }
+      }
       const browsable = loaded.partitions.filter((p: BrowsePartition) => p.browsable !== false);
       if (browsable.length > 0) {
         setPartitionIndex(browsable[0].partitionIndex);
@@ -166,10 +178,22 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         setError('This image has no partitions.');
       }
     } catch (e: unknown) {
+      // A wrong passphrase must not discard the partition list: keep the locked
+      // view so the user can correct the field instead of re-selecting a file.
+      if (!keepSelection) setInfo(null);
       setError(e instanceof Error ? e.message : 'Failed to read the image');
-      setInfo(null);
     }
   };
+
+  // Password-protected Reflect X images re-open shortly after the passphrase
+  // changes (debounced while typing), so the partition list reflects the
+  // unlocked — or wrong-key — state without an explicit button.
+  useEffect(() => {
+    if (!imagePath || info?.imageFormat !== 'mrimgx' || !info.encrypted) return;
+    const timer = setTimeout(() => void openImage(imagePath, true), 500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [passphrase]);
 
   const handleSelectImage = async () => {
     const path = await window.electronAPI.selectFile({
@@ -345,7 +369,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
           </div>
         </div>
 
-        {info?.encrypted && info.imageFormat !== 'mrimg' && info.imageFormat !== 'mrimgx' && (
+        {info?.encrypted && info.imageFormat !== 'mrimg' && (
           <div className="setting-item">
             <label>Passphrase:</label>
             <PassphraseInput

@@ -32,7 +32,7 @@ import { isElevatedSync } from './imaging/migrate/identity';
 import { readMigrateDrillHistory } from './utils/migrate-drill-history';
 import { readImageInfo, verifyImage, CIPHER_NONE, clearImageInfoCache } from './imaging/image-format';
 import { openAnyBrowse as fsOpenBrowseAny, listDirectory, extractPath, detectPartitionFilesystem, BrowseSession } from './imaging/fs/file-browse';
-import { detectMacriumFormat, readMacriumImage, closeImageFds, clearMacriumInfoCache } from './imaging/mrimg';
+import { detectMacriumFormat, readMacriumImage, macriumJobKey, closeImageFds, clearMacriumInfoCache } from './imaging/mrimg';
 import { locateAdk, peArchForProcess } from './utils/adk';
 import { createRecoveryMedia, resolveNodeExe, MediaCreateOptions } from './utils/winpe-media';
 import {
@@ -820,8 +820,8 @@ function setupIpcHandlers(): void {
     return restoreManager.cancelRestore();
   });
 
-  ipcMain.handle('get-image-info', async (_, imagePath: string) => {
-    return restoreManager.getImageSummary(imagePath);
+  ipcMain.handle('get-image-info', async (_, imagePath: string, passphrase?: string) => {
+    return restoreManager.getImageSummary(imagePath, passphrase);
   });
 
   ipcMain.handle('restore-preflight', async (_, config) => {
@@ -1742,15 +1742,15 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
   });
 
   // File browsing over a backup image
-  ipcMain.handle('browse-partitions', async (_, imagePath: string) => {
+  ipcMain.handle('browse-partitions', async (_, imagePath: string, passphrase?: string) => {
     const format = detectMacriumFormat(imagePath);
     if (format) {
-      const info = readMacriumImage(imagePath);
+      const info = readMacriumImage(imagePath, passphrase);
       return {
         encrypted: info.encryption.enable,
         imageFormat: format === 'mrimgx' ? 'mrimgx' : 'mrimg',
         partitions: info.partitions.map((p, i) => {
-          const { fsType, browsable, reason } = detectPartitionFilesystem(imagePath, i);
+          const { fsType, browsable, reason } = detectPartitionFilesystem(imagePath, i, passphrase);
           return {
             partitionIndex: i,
             diskIndex: p.diskIndex,
@@ -1771,7 +1771,7 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       partitions: info.partitions
         .filter((p) => p.size > 0)
         .map((p) => {
-          const { fsType, browsable } = detectPartitionFilesystem(imagePath, p.partitionIndex);
+          const { fsType, browsable } = detectPartitionFilesystem(imagePath, p.partitionIndex, passphrase);
           return {
             partitionIndex: p.partitionIndex,
             size: p.size,
@@ -1841,13 +1841,17 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       return { ok: false, error };
     }
     const id = `mount-${crypto.randomUUID()}`;
+    // A password-protected Reflect X image is opened with its derived key: the
+    // job file is written to disk for the helper and must not hold the
+    // passphrase (a wrong passphrase fails here, before the UAC prompt).
+    const macriumKey = macriumJobKey(config.imagePath, config.passphrase);
     const job = {
       type: 'mount',
       imagePath: config.imagePath,
       partitionIndex: config.partitionIndex,
       driveLetter: config.driveLetter,
       label: config.label,
-      passphrase: config.passphrase
+      ...(macriumKey ? { macriumKey } : { passphrase: config.passphrase })
     };
     logger.info(`mount-image: launching helper for ${job.imagePath}#${job.partitionIndex} (${id})`);
     const launcher = launchElevatedJob<typeof job, MountJobProgress, MountJobResult>(job);

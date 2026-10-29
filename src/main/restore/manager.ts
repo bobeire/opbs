@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import { RestoreCoordinator, RestoreJobConfig, mapRestoreJobProgress, summarizeImage, ImageSummary } from '../imaging/restore-engine';
+import { MacriumPasswordError } from '../imaging/mrimg';
 import { RestoreJob, RestoreJobProgress, RestoreJobResult } from '../imaging/imaging-job';
 import { DiskEnumerator, querySystemDiskIndex } from '../utils/disk-enumerator';
 import { listBitlockerStatus } from '../utils/bitlocker';
@@ -163,8 +164,8 @@ export class RestoreManager extends EventEmitter {
     await this.coordinator.cancel();
   }
 
-  getImageSummary(imagePath: string): ImageSummary {
-    return summarizeImage(imagePath);
+  getImageSummary(imagePath: string, passphrase?: string): ImageSummary {
+    return summarizeImage(imagePath, passphrase);
   }
 
   /**
@@ -211,7 +212,7 @@ export class RestoreManager extends EventEmitter {
 
       const job = await this.coordinator.buildJob(config);
 
-      const summary = this.getImageSummary(config.imagePath);
+      const summary = this.getImageSummary(config.imagePath, config.passphrase);
       const sizeByIndex = new Map<number, number>(summary.partitions.map((p) => [p.index, p.size]));
 
       let requiredBytes = 0;
@@ -314,6 +315,13 @@ export class RestoreManager extends EventEmitter {
         targetsIncludeSystemVolume
       };
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // A password-protected Macrium image: `buildJob` refuses it until a
+      // passphrase is supplied, and a wrong passphrase surfaces here too. The
+      // wizard turns this into the passphrase prompt instead of a dead end.
+      if (error instanceof MacriumPasswordError || /password-protected|incorrect passphrase/i.test(message)) {
+        return { ok: false, error: message, encrypted: true, passphraseRequired: true };
+      }
       // Failure-driven unlock path: a permission/absence failure whose volume
       // root is also unreachable is almost always a locked BitLocker volume.
       const err = error as NodeJS.ErrnoException & { bitlockerSuspect?: string };

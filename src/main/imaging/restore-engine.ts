@@ -18,7 +18,9 @@ import {
   detectMacriumFormat,
   readMacriumImage,
   macriumRestoreRefusal,
-  macriumPartitionSize
+  macriumPartitionSize,
+  getMacriumKey,
+  MacriumAesVariant
 } from './mrimg';
 import { RestoreJob, RestoreJobProgress, RestoreJobResult, RestoreTarget, JobEncryption } from './imaging-job';
 import { buildRestoreTablePlan, RestoreTableOptions, RestoreTablePlan } from './partition-table';
@@ -43,6 +45,12 @@ export interface RestoreJobConfig {
   verifyBeforeWrite?: boolean;
   /** Optional passphrase required to read an encrypted image. */
   passphrase?: string;
+  /**
+   * Derived key for a password-protected Reflect X (`.mrimgx`) image, set by
+   * the app when a job is forwarded to the elevated helper so the passphrase
+   * itself never reaches the helper's job file. Preferred over `passphrase`.
+   */
+  macriumKey?: { key: string; aes: MacriumAesVariant };
   /** Include deltas to bring the restore up to date. Defaults to auto-resolving the chain. */
   applyDeltas?: boolean | string[];
   /** Worker threads for multithreaded restore decompression (0/unset = sync). */
@@ -106,21 +114,32 @@ export interface ImageSummary {
   blockSize: number;
   blocks: number;
   encrypted: boolean;
+  /** Cipher label for the summary UI (e.g. "AES-256-CBC" for Reflect X). */
+  encryptionAlgorithm?: string;
+  /** The image is password-protected and needs a passphrase before restoring. */
+  passphraseRequired?: boolean;
   incremental: boolean;
   baseImagePath?: string;
   /** Identity of the source disk, when the image recorded it. */
   sourceDisk?: { model: string; serial: string };
 }
 
-export function summarizeImage(imagePath: string): ImageSummary {
+export function summarizeImage(imagePath: string, passphrase?: string): ImageSummary {
   if (detectMacriumFormat(imagePath)) {
-    const info = readMacriumImage(imagePath);
-    const refusal = macriumRestoreRefusal(info);
-    if (refusal) throw new Error(refusal);
+    const info = readMacriumImage(imagePath, passphrase);
+    // A password-protected image without (or before) its passphrase still has
+    // a usable summary: geometry comes from the plaintext $JSON, so the
+    // wizard can show the partitions and ask for the passphrase instead of
+    // failing outright. Everything else is refused as before.
+    const locked = info.encryption.enable && !info.unlocked;
+    if (!locked) {
+      const refusal = macriumRestoreRefusal(info);
+      if (refusal) throw new Error(refusal);
+    }
     const partitions = info.partitions.map((p, index) => ({
       index,
       size: macriumPartitionSize(p),
-      fsType: detectPartitionFilesystem(imagePath, index).fsType,
+      fsType: locked ? p.fsType : detectPartitionFilesystem(imagePath, index, passphrase).fsType,
       offsetOnDisk: p.offsetOnDisk ?? 0,
       blockCount: p.blockCount
     }));
@@ -134,10 +153,17 @@ export function summarizeImage(imagePath: string): ImageSummary {
       flags: 0,
       blockSize: info.partitions[0]?.blockSize ?? 0,
       blocks: info.partitions.reduce((sum, p) => sum + p.blockCount, 0),
-      // Container refusals above guarantee an unencrypted image; `incremental`
-      // stays false because a Macrium chain member resolves to a full logical
-      // volume on its own (the flag drives the .opbs delta-chain UI).
-      encrypted: false,
+      encrypted: info.encryption.enable,
+      encryptionAlgorithm: info.encryption.enable
+        ? info.encryption.aesType === 10
+          ? 'AES-128-CBC'
+          : info.encryption.aesType === 12
+            ? 'AES-192-CBC'
+            : 'AES-256-CBC'
+        : undefined,
+      passphraseRequired: locked,
+      // `incremental` stays false because a Macrium chain member resolves to
+      // a full logical volume on its own (the flag drives the .opbs chain UI).
       incremental: false
     };
   }
@@ -201,7 +227,8 @@ function opbsRestoreSource(config: RestoreJobConfig, chain: string[]): RestoreSo
 }
 
 function macriumRestoreSource(config: RestoreJobConfig): RestoreSourceView {
-  const info = readMacriumImage(config.imagePath);
+  // The derived key (elevated-helper path) wins over the passphrase.
+  const info = readMacriumImage(config.imagePath, config.macriumKey ?? config.passphrase);
   const refusal = macriumRestoreRefusal(info);
   if (refusal) throw new Error(refusal);
   return {
@@ -231,6 +258,24 @@ export interface RestoreVhdJob {
   config: RestoreJobConfig;
 }
 
+/**
+ * The config as it may be forwarded to the elevated helper inside a job file:
+ * for a password-protected Macrium image the passphrase is swapped for the
+ * derived key first, so the helper's job file never holds a passphrase.
+ */
+function forwardConfigToHelper(config: RestoreJobConfig): RestoreJobConfig {
+  if (!config.passphrase || !detectMacriumFormat(config.imagePath)) return config;
+  readMacriumImage(config.imagePath, config.passphrase);
+  const material = getMacriumKey(config.imagePath);
+  if (!material) return config;
+  const forwarded: RestoreJobConfig = {
+    ...config,
+    macriumKey: { key: material.key.toString('hex'), aes: material.aes }
+  };
+  delete forwarded.passphrase;
+  return forwarded;
+}
+
 export class RestoreEngine implements RestoreCoordinator {
   private current: LaunchedRestoreJob | null = null;
 
@@ -257,6 +302,19 @@ export class RestoreEngine implements RestoreCoordinator {
     }
 
     const source = isMacrium ? macriumRestoreSource(config) : opbsRestoreSource(config, chain);
+    // Password-protected Reflect X image: hand the elevated helper the derived
+    // key, never the passphrase. `macriumRestoreSource` already parsed with it,
+    // so the key map holds the verified material (or the caller supplied the
+    // derived key outright, e.g. a forwarded virtual-disk job).
+    let macriumKey: RestoreJob['macriumKey'];
+    if (source.isMacrium) {
+      if (config.macriumKey) {
+        macriumKey = config.macriumKey;
+      } else if (config.passphrase) {
+        const material = getMacriumKey(config.imagePath);
+        if (material) macriumKey = { key: material.key.toString('hex'), aes: material.aes };
+      }
+    }
     const targets: RestoreTarget[] = [];
     const shrinkInfo: NonNullable<RestoreJob['shrinkInfo']> = [];
 
@@ -575,6 +633,7 @@ export class RestoreEngine implements RestoreCoordinator {
       applyDeltas: chain.slice(1),
       encryption,
       sourceEncryption,
+      macriumKey,
       compressionThreads,
       writeTable,
       validateAfterWrite: config.validateAfterWrite,
@@ -588,9 +647,10 @@ export class RestoreEngine implements RestoreCoordinator {
   async runRestore(config: RestoreJobConfig, onProgress: (p: RestoreJobProgress) => void): Promise<RestoreJobResult> {
     // Virtual-disk targets are prepared inside the elevated helper (create /
     // attach / discover), so the job file carries the raw config instead of a
-    // pre-built restore job.
+    // pre-built restore job. A Macrium passphrase is swapped for the derived
+    // key first: the helper's job file must hold no passphrase.
     const payload: RestoreJob | RestoreVhdJob = config.targetVirtualDisk
-      ? { type: 'restore-vhd', config }
+      ? { type: 'restore-vhd', config: forwardConfigToHelper(config) }
       : await this.buildJob(config);
 
     logger.info(`Starting elevated restore from ${config.imagePath}`, {

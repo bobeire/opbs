@@ -3,6 +3,7 @@ export {
   readMacriumImage,
   readMacriumV7Image,
   parseIndexPayload,
+  macriumJobKey,
   MacriumImageInfo,
   MacriumPartitionInfo,
   MacriumIndexElement,
@@ -11,6 +12,7 @@ export {
   MacriumBackupSetMember,
   MacriumBackupSetFile,
   MacriumFormat,
+  MacriumUnlock,
   MacriumUnsupportedError,
   macriumUnsupportedReason,
   macriumRestoreRefusal,
@@ -27,5 +29,21 @@ export {
   closeImageFds,
   clearMacriumInfoCache
 } from './mrimg-format';
+export {
+  MacriumAesVariant,
+  MacriumKeyMaterial,
+  MacriumPasswordError,
+  deriveMacriumKey,
+  macriumAesVariant,
+  macriumKeyHmac,
+  verifyMacriumHmac,
+  macriumBlockIv,
+  decryptMacriumBlock,
+  decryptMacriumMetadata,
+  zstdFrameLength,
+  setMacriumKey,
+  getMacriumKey,
+  clearMacriumKeys
+} from './mrimg-crypto';
 export { MacriumPartitionReader, openMacriumPartitionReader } from './mrimg-reader';
 export { parseQuickLzFrame, decompressQuickLz, QuickLzFrameInfo } from './quicklz';

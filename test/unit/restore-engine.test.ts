@@ -752,18 +752,35 @@ describe('RestoreEngine Macrium images', () => {
     return b;
   }
 
-  function writeMacrium(tweak?: (json: any) => void, opts?: { start?: number; length?: number }): void {
+  function writeMacrium(
+    tweak?: (json: any) => void,
+    opts?: {
+      start?: number;
+      length?: number;
+      /** Password-protected Reflect X container (needs a 16-hex image id). */
+      encrypt?: { passphrase: string; imageId?: string };
+    }
+  ): void {
     const start = opts?.start ?? GEOM_OFFSET;
     const length = opts?.length ?? PART_SIZE;
-    const built = buildMrimgxImage([ntfsBlock(0x11), ntfsBlock(0x22)], (json) => {
-      json.disks[0].partitions[0]._geometry = {
-        start,
-        end: start + length - 1,
-        length,
-        boot_sector_offset: 0
-      };
-      tweak?.(json);
-    });
+    const built = buildMrimgxImage(
+      [ntfsBlock(0x11), ntfsBlock(0x22)],
+      (json) => {
+        json.disks[0].partitions[0]._geometry = {
+          start,
+          end: start + length - 1,
+          length,
+          boot_sector_offset: 0
+        };
+        if (opts?.encrypt) {
+          // The key derivation hashes an 8-byte image id, so encrypted
+          // fixtures must carry 16 hex characters of it.
+          json._header.imageid = opts.encrypt.imageId ?? 'DE17A00000000002';
+        }
+        tweak?.(json);
+      },
+      opts?.encrypt ? { encrypt: { passphrase: opts.encrypt.passphrase } } : undefined
+    );
     fs.writeFileSync(imagePath, built.buffer);
   }
 
@@ -791,6 +808,52 @@ describe('RestoreEngine Macrium images', () => {
       passphrase: 'hunter2'
     });
     expect(job.encryption).toBeUndefined();
+    expect(job.sourceEncryption).toBeUndefined();
+    // An unencrypted container has nothing to derive either.
+    expect(job.macriumKey).toBeUndefined();
+  });
+
+  it('hands the elevated helper the derived key, never the passphrase', async () => {
+    writeMacrium(undefined, { encrypt: { passphrase: 'hunter2' } });
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const job = await engine.buildJob({
+      imagePath,
+      targetDiskIndex: 1,
+      targetPartitions: [0],
+      passphrase: 'hunter2'
+    });
+    expect(job.macriumKey).toBeDefined();
+    expect(job.macriumKey!.key).toMatch(/^[0-9a-f]{64}$/);
+    expect(job.macriumKey!.aes).toBe(14);
+    expect(job.encryption).toBeUndefined();
+    expect(job.sourceEncryption).toBeUndefined();
+    expect(JSON.stringify(job)).not.toContain('hunter2');
+  });
+
+  it('refuses a Macrium restore without a passphrase, and with a wrong one', async () => {
+    writeMacrium(undefined, { encrypt: { passphrase: 'hunter2' } });
+    const engine = new RestoreEngine(createFakeEnumerator());
+    await expect(
+      engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] })
+    ).rejects.toThrow(/passphrase/);
+    await expect(
+      engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0], passphrase: 'wrong' })
+    ).rejects.toThrow(/incorrect passphrase/i);
+  });
+
+  it('summarizes a locked Macrium image instead of failing', () => {
+    writeMacrium(undefined, { encrypt: { passphrase: 'hunter2' } });
+    const locked = summarizeImage(imagePath);
+    expect(locked.encrypted).toBe(true);
+    expect(locked.passphraseRequired).toBe(true);
+    expect(locked.encryptionAlgorithm).toBe('AES-256-CBC');
+    expect(locked.partitions).toHaveLength(1);
+    expect(locked.partitions[0].size).toBe(PART_SIZE);
+
+    const unlocked = summarizeImage(imagePath, 'hunter2');
+    expect(unlocked.encrypted).toBe(true);
+    expect(unlocked.passphraseRequired).toBe(false);
+    expect(unlocked.partitions[0].fsType).toBe('NTFS');
   });
 
   it('grows a partition when targetLayout requests a larger size (fresh table planned)', async () => {
@@ -944,6 +1007,27 @@ describe('RestoreEngine Macrium images', () => {
     );
     expect(result).toEqual({ ok: true });
     expect(launchElevatedJob).toHaveBeenCalledWith(expect.objectContaining({ type: 'restore' }));
+  });
+
+  it('forwards a virtual-disk restore with the derived key, never the passphrase', async () => {
+    writeMacrium(undefined, { encrypt: { passphrase: 'hunter2' } });
+    const engine = new RestoreEngine(createFakeEnumerator());
+    await engine.runRestore(
+      {
+        imagePath,
+        targetVirtualDisk: { path: path.join(dir, 'target.vhdx'), virtualSize: 128 * 1024 ** 3, type: 'dynamic' },
+        targetPartitions: [0],
+        passphrase: 'hunter2'
+      },
+      () => undefined
+    );
+    expect(launchElevatedJob).toHaveBeenCalledWith(expect.objectContaining({ type: 'restore-vhd' }));
+    const payload = vi.mocked(launchElevatedJob).mock.calls[0][0] as {
+      config: { passphrase?: string; macriumKey?: { key: string; aes: number } };
+    };
+    expect(payload.config.passphrase).toBeUndefined();
+    expect(payload.config.macriumKey?.key).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(payload)).not.toContain('hunter2');
   });
 });
 

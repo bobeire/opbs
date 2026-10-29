@@ -20,7 +20,7 @@ import type { RestoreJobProgress, RestoreJob, RestoreTarget, JobEncryption } fro
 import { locateAdk, peArchForProcess } from '../utils/adk';
 import { createRecoveryMedia, resolveNodeExe, smokeMediaPayload } from '../utils/winpe-media';
 import { openAnyBrowse, listDirectory, extractPath, formatTimestamp, resolvePath } from '../imaging/fs/file-browse';
-import { detectMacriumFormat, readMacriumImage, macriumUnsupportedReason } from '../imaging/mrimg';
+import { detectMacriumFormat, readMacriumImage, macriumJobKey, macriumUnsupportedReason } from '../imaging/mrimg';
 import { SftpStore } from '../utils/sftp';
 import { FtpStore } from '../utils/ftp';
 import { cloudStoreFromLocation } from '../utils/cloud-store';
@@ -2392,7 +2392,7 @@ function printMrimgInfo(info: import('../imaging/mrimg').MacriumImageInfo): void
     console.log(`  disk:     ${disk.diskFormat || '?'}${sig}${size}`);
   }
   console.log(`  compression: ${info.compression.level && info.compression.level !== 'none' ? `${info.compression.method || 'zstd'} @ ${info.compression.level}` : 'none'}`);
-  console.log(`  encryption:  ${enc.enable ? `yes (${enc.aesType ?? '?'} variant, ${enc.keyIterations} iterations)` : 'no'}`);
+  console.log(`  encryption:  ${enc.enable ? `yes (${enc.aesType === 10 ? 'AES-128' : enc.aesType === 12 ? 'AES-192' : 'AES-256'}-CBC, ${enc.keyIterations} iterations${info.unlocked ? ', unlocked' : ', locked'})` : 'no'}`);
   if (info.splitFile) console.log('  split-file:  yes (multi-part; browsing not yet supported)');
   const chain = info.chain ?? info.partitions.find((p) => p.chain)?.chain;
   if (chain) {
@@ -2542,7 +2542,7 @@ async function cmdMrimg(ctx: CommandContext): Promise<number> {
   const action = ctx.argv[0];
   const file = ctx.argv[1];
   if (action !== 'info' || !file) {
-    console.error('Usage: mrimg info <image.mrimgx|image.mrimg>');
+    console.error('Usage: mrimg info <image.mrimgx|image.mrimg> [--passphrase-file <path|->]');
     return 1;
   }
   try {
@@ -2551,7 +2551,10 @@ async function cmdMrimg(ctx: CommandContext): Promise<number> {
       console.error(`Not a Macrium Reflect image: ${file}`);
       return 1;
     }
-    const info = readMacriumImage(file);
+    // Password-protected Reflect X images need the passphrase to read their
+    // index; without it the container's geometry is still reported.
+    const passphrase = resolvePassphrase(ctx.argv).value;
+    const info = readMacriumImage(file, passphrase);
     if (ctx.opts.json) {
       console.log(JSON.stringify(info, null, 2));
     } else {
@@ -2829,13 +2832,22 @@ async function cmdMount(ctx: CommandContext): Promise<number> {
     return 1;
   }
 
+  let mountKey: ReturnType<typeof macriumJobKey>;
+  try {
+    // A password-protected Reflect X image is opened with its derived key:
+    // the job file must not hold the passphrase (a wrong one fails here).
+    mountKey = macriumJobKey(imagePath, passphrase);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
   const job = {
     type: 'mount',
     imagePath,
     partitionIndex,
     driveLetter: letter,
     label,
-    passphrase
+    ...(mountKey ? { macriumKey: mountKey } : { passphrase })
   };
 
   try {

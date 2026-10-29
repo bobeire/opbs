@@ -147,6 +147,13 @@ export interface RestoreJob {
    * the root's key as the single-source fallback.
    */
   sourceEncryption?: Array<JobEncryption & { imagePath: string }>;
+  /**
+   * Macrium Reflect X key material for a password-protected image: the
+   * PBKDF2-derived key (hex) plus Macrium's AES variant code (10/12/14). The
+   * elevated helper receives this instead of the passphrase, and the key never
+   * reaches the renderer.
+   */
+  macriumKey?: { key: string; aes: number };
   /** Worker threads for multithreaded restore decompression (0/unset = sync). */
   compressionThreads?: number;
   /**

@@ -262,11 +262,50 @@ to date has shipped; **Investigate** items need spike work first.
   (`macriumUnsupportedReason`) used by the partition reader, the filesystem
   probe (which now surfaces the reason instead of collapsing to "Unknown"),
   and `mrimg info` (prints an `unsupported:` line). The GUI browse view shows
-  the refusal reason and hides the useless passphrase box for Macrium images.
+  the refusal reason instead of the useless generic hint (the passphrase box
+  now applies to Macrium images too — see **Encrypted Macrium images** below).
   v7 chain members whose base image is present are browsable (see
   **v7 differential/incremental chains** below); mrimgx delta containers and
   chain members missing their base stay refused with a merge-in-Reflect hint
   (superseded by **mrimgx delta chains** below, 0.6.66).
+
+### Encrypted Macrium images (.mrimgx) (unreleased)
+- ✅ **Reflect X password-protected images open with their passphrase** —
+  `mrimg info`, `browse`, `extract`, mount and restore, including delta
+  backup sets. Implemented from Macrium's published format documentation
+  (`github.com/macrium/mrimgx_file_layout`, MIT): PBKDF2-HMAC-SHA256 over
+  `SHA256(imageid)` with the image's own iteration count, HMAC-of-empty as
+  the password verifier, AES-128/192/256 (per-block CBC with an IV derived
+  from image id + disk + partition + block index, ECB for metadata blocks),
+  ciphertext zero-padded to 16 bytes so zstd frames are trimmed to their
+  frame length. Locked images still parse their geometry (plaintext `$JSON`)
+  so the wizard can show the partitions and ask for the passphrase.
+- ✅ **Key handling**: the derived key lives out-of-band (`mrimg-crypto.ts`
+  key map) and never on `MacriumImageInfo`, so it cannot reach the renderer
+  or a log line. Elevated jobs (restore, mount, restore-to-VHD) carry only
+  the derived key — the passphrase is never written to a job file. The
+  recovery-media staging file `OPBS-restore.json` still carries a staged
+  restore's passphrase (unchanged convention).
+- ✅ **Cache correctness**: the image-parse cache and the key map are keyed by
+  the unlock (passphrase hash / key), so a cached success can never mask a
+  wrong passphrase; `clearMacriumInfoCache` zeroes and drops the keys.
+- ✅ **Set handling**: blocks routed to another member of the backup set
+  decrypt with that member's key, and a member whose key fails is refused as
+  an encryption mismatch instead of a confusing "missing chain file".
+- ✅ **Reflect 7/8 (`.mrimg`) password-protected images stay refused** with an
+  honest message: that container's encryption has no published specification
+  and no sample is available to validate a decoder against.
+- ⚠️ **Residual risk**: no real Reflect-X-encrypted sample was available, so
+  the round trip is proven against an independent encryptor built from the
+  same published scheme (`test/helpers/mrimg-image.ts`, tests in
+  `test/unit/mrimgx-encrypted.test.ts`). A real encrypted image is the
+  remaining ground-truth check — release notes should say so.
+- ✅ **Tests**: locked refusal, wrong passphrase + cached-success safety,
+  unlock with per-block MD5, compressed+encrypted, AES-128/192/256, a
+  plaintext-index variant, encrypted reserved track (array-position IV),
+  derived-key helper path, set composition across encrypted members, and the
+  restore-engine summary/job-key plumbing (74 tests across the mrimg and
+  restore suites).
 
 ### Foreign Macrium restore (.mrimgx / .mrimg) (0.6.64)
 - ✅ `runRestoreJob` auto-detects a Macrium container (`detectMacriumFormat`)
@@ -294,7 +333,8 @@ to date has shipped; **Investigate** items need spike work first.
   `backup_type: diff/inc` never touch the disk (mrimgx chains now restore
   when their set is on disk — **mrimgx delta chains** below). `verifyBeforeWrite` stays
   false for Macrium (the reader's per-block MD5 is the integrity check),
-  encryption keys are never carried, and compression threads default to 0.
+  no passphrase is ever carried (an encrypted image's derived key is — see
+  **Encrypted Macrium images** above), and compression threads default to 0.
 - ✅ Surfaces: `summarizeImage` reports the Macrium layout (sizes, offsets,
   `fsType` probe, `backup_time` in seconds → ISO date); the `restore` CLI,
   restore wizard, ConfigBuilder/GUI pickers and drive scans accept

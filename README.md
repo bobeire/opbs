@@ -35,7 +35,7 @@ scoop install opbs
 - **Resumable imaging**: `resume` (CLI `--resume`) continues an interrupted local backup from the partial image already at the target path — completed partitions are kept and the run resumes at the next partition boundary instead of restarting from scratch.
 - **Used-blocks-only capture**: `usedBlocksOnly` (CLI `--used-blocks-only`) reads the NTFS `$Bitmap` and stores only blocks containing allocated clusters, dropping free space; non-NTFS partitions fall back to a full capture.
 - **Read-only mount via WinFsp**: mount a partition from a `.opbs` or Macrium image as a virtual drive letter with **zero extra disk usage** — file reads are served lazily by decompressing only the covering blocks. Requires the free WinFsp runtime (https://winfsp.dev). Works for standard (non-admin) users through WinFsp's per-LUID volume namespace; a live smoke test covers mount → cross-process probe → unmount.
-- **Restore from Macrium Reflect images**: `restore` also accepts Macrium `.mrimgx` (Reflect X) and `.mrimg` (Reflect 7/8) containers — placement is read from the image's own geometry/table entries, every block is decompressed and MD5-verified before it lands on the target, and unsupported variants (password-protected, split, file-and-folder backups, chain members with files missing from disk) are refused up front instead of touching the disk. v7 (`.mrimg`) **and mrimgx (Reflect X) delta** differential/incremental chains browse and restore when the base images / backup set are on disk — the member is resolved against its chain so you always see/restore the full logical volume state. Works from the CLI, the restore wizard and the Config Builder.
+- **Restore from Macrium Reflect images**: `restore` also accepts Macrium `.mrimgx` (Reflect X) and `.mrimg` (Reflect 7/8) containers — placement is read from the image's own geometry/table entries, every block is decompressed and MD5-verified before it lands on the target, and unsupported variants (split, file-and-folder backups, chain members with files missing from disk, password-protected Reflect 7/8 images) are refused up front instead of touching the disk. **Password-protected Reflect X (`.mrimgx`) images open with their passphrase** — browsing, extraction, mounting and restore, including delta backup sets. v7 (`.mrimg`) **and mrimgx (Reflect X) delta** differential/incremental chains browse and restore when the base images / backup set are on disk — the member is resolved against its chain so you always see/restore the full logical volume state. Works from the CLI, the restore wizard and the Config Builder.
 - **Disk-to-disk clone**: `clone` copies selected live partitions straight onto a different local disk (VSS snapshots, optional dissimilar layout + fresh GPT/MBR table, optional grow-on-restore), with no image file or cloud upload. The GUI **Partition Copy** screen makes this drag-and-drop: pick a target disk, drag partition chips onto it (or “Copy all partitions”), preview the auto-sequential 1 MiB-aligned layout with optional grow-to-fill, confirm the erase warning, and watch live progress.
 - **Backup from a virtual disk (VHD/VHDX)**: `sourceVirtualDisk` (CLI `--source-vhd`, or "Back up from a VHD/VHDX file…" on the backup wizard's source step) images a `.vhd`/`.vhdx` file directly — the elevated helper attaches the file **write-protected** (no drive letter), discovers the physical disk index it maps to, builds the ordinary backup job (empty partition selection = every partition on the file), runs it, then detaches. No need to mount the volume or run the backup against the host's live disks.
 - **Restore into a virtual disk (VHD/VHDX)**: `targetVirtualDisk` writes a restore into a `.vhd`/`.vhdx` file instead of a physical disk — the helper creates the file when missing (dynamic or fixed, up to 64 TiB), attaches it, re-runs every physical-disk safety gate against the attached disk, writes a fresh GPT/MBR table so the volumes are visible in Windows, then detaches the disk again. Available from the restore wizard, the Config Builder and JSON configs.
@@ -615,15 +615,31 @@ OPBS.exe --cli extract img.mrimg --partition 1 --path "Users\me\notes.txt" --out
   detected rather than silently misread.
 - Recognised-but-unreadable variants are **detected up front and refused with
   `MacriumUnsupportedError`** instead of failing mid-browse with a confusing
-  parse error: password-protected images (mrimgx `$JSON` encryption / v7
-  footer `<aes>`), split multi-part sets (mrimgx `split_file` / a v7 sibling
-  part next to a `-00-00` filename), and chain members whose base image or
-  backup-set files are missing from disk (mrimgx delta containers and v7
-  chain members alike). Detection is shared across
+  parse error: password-protected images opened without their passphrase (see
+  below), password-protected Reflect 7/8 images (v7 footer `<aes>`), split
+  multi-part sets (mrimgx `split_file` / a v7 sibling part next to a `-00-00`
+  filename), and chain members whose base image or backup-set files are
+  missing from disk (mrimgx delta containers and v7 chain members alike).
+  Detection is shared across
   every path — `mrimg info` prints an `unsupported:` line with the same
   verdict, browse/extract/mount throw the refusal, and the GUI browse view
   shows the exact reason instead of the generic "no browsable partitions"
   hint.
+- **Password-protected Reflect X images browse and extract with the
+  passphrase**: the GUI browse view shows a passphrase field as soon as the
+  container reports encryption, the CLI takes `--passphrase-file <path|->`
+  (or `OPBS_PASSPHRASE`). The key is derived from the passphrase in-process
+  (PBKDF2-HMAC-SHA256, exactly Macrium's published scheme) and jobs that run
+  in the elevated helper (restore, mount) carry only the derived key — the
+  passphrase itself is never written to a job file. The one place a passphrase
+  reaches disk is the recovery-media staging file `OPBS-restore.json`, which
+  carries a staged restore's passphrase like every other staged job: treat
+  recovery media like a key.
+  A wrong passphrase is reported as such instead of a parse error.
+  **Password-protected Reflect 7/8 (`.mrimg`) images stay
+  unsupported** — that container's encryption has no published specification —
+  so restore them with Macrium Reflect, or decrypt to an unencrypted image
+  first.
 - **v7 differential/incremental chains browse in place**: a
   `<id>-01-01.mrimg` (differential) or `<id>-02-02.mrimg` (incremental)
   resolves against its base (`<id>-00-00.mrimg`, `<id>-01-01.mrimg`, …)
@@ -669,11 +685,14 @@ OPBS.exe --cli wizard
   `verifyAfterRestore` reads the target back for a final MD5 pass, and
   grow-on-restore / fresh-partition-table / restore-drill behave exactly like
   an `.opbs` restore.
-- Refused **before any target byte is written**: password-protected and split
-  containers, chain members whose base image or backup-set files are missing
-  from disk, file-and-folder backups, and mrimgx `diff`/`inc` backups with no
-  set on disk — the reason surfaces in the wizard/GUI the same way it does for
-  browsing.
+- Refused **before any target byte is written**: split containers,
+  password-protected Reflect 7/8 images, chain members whose base image or
+  backup-set files are missing from disk, file-and-folder backups, and mrimgx
+  `diff`/`inc` backups with no set on disk — the reason surfaces in the
+  wizard/GUI the same way it does for browsing. A locked Reflect X image
+  simply asks for its passphrase instead (the wizard's preflight shows the
+  passphrase box; the CLI takes `--passphrase-file`), and a wrong passphrase
+  is reported before anything is written.
 - A v7 chain member restores the **full composed volume state**: the reader
   resolves carried-forward and delta blocks against the base chain (every
   block MD5-verified) before anything is written, so restoring the newest
