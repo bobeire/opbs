@@ -95,8 +95,11 @@ describe('buildRecoveryStartnetCmd', () => {
 
   it('has a 10-second cancel window before the automatic restore', () => {
     expect(script).toContain('The restore will start automatically in 10 seconds.');
-    expect(script).toContain('choice /c YN /T 10 /D Y /N');
-    expect(script).toContain('if errorlevel 2 goto :cancelled');
+    // choice.exe is absent from winre.wim (field regression - it failed safe
+    // to the cancel branch); the window runs on node, which travels with us.
+    expect(script).toContain('cancel-window.js');
+    expect(script).not.toContain('choice /c');
+    expect(script).toContain('if errorlevel 1 goto :cancelled');
     expect(script).toContain('Cancelled - no restore has been run.');
   });
 

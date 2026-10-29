@@ -157,8 +157,9 @@ export function buildRecoveryStartnetCmd(): string {
     'set "OPBS_STAGED=%STAGED%"',
     'echo.',
     'echo The restore will start automatically in 10 seconds.',
-    'choice /c YN /T 10 /D Y /N /M "Continue with the restore? [Y/N]: "',
-    'if errorlevel 2 goto :cancelled',
+    'echo Press any key within 10 seconds to cancel and open a command prompt instead.',
+    'X:\\OPBS\\node.exe X:\\OPBS\\cancel-window.js',
+    'if errorlevel 1 goto :cancelled',
     'call "X:\\OPBS\\restore.cmd"',
     'if errorlevel 1 goto :failed',
     'echo.',
@@ -221,6 +222,7 @@ export function recoveryPayloadTextFiles(config: RecoveryStageConfig): Array<{ n
   return [
     { name: 'winpe-entry.js', content: buildWinpeEntry() },
     { name: 'restore.cmd', content: buildRecoveryRestoreCmd() },
+    { name: 'cancel-window.js', content: buildCancelWindowJs() },
     {
       name: 'OPBS-restore.json',
       content: JSON.stringify(
@@ -258,6 +260,25 @@ export function buildWinpeshlIni(): string {
   // watch the flow live; if even this is black, the fault is at/below
   // winpeshl itself.
   return ['[LaunchApp]', 'AppPath=X:\\Windows\\System32\\cmd.exe', ''].join('\r\n');
+}
+
+/**
+ * 10-second cancel window, run from the recovery console. Exits 0 when the
+ * timer expires (proceed with the restore), 1 when the user presses a key
+ * (cancel). choice.exe and timeout.com are not present in every recovery
+ * image (winre.wim lacks choice) - node always is, it travels with us.
+ */
+export function buildCancelWindowJs(): string {
+  return [
+    "'use strict';",
+    "const rl = require('readline');",
+    "rl.emitKeypressEvents(process.stdin);",
+    "if (process.stdin.isTTY && process.stdin.setRawMode) process.stdin.setRawMode(true);",
+    "process.stdin.resume();",
+    "const timer = setTimeout(() => process.exit(0), 10000);",
+    "process.stdin.on('keypress', () => { clearTimeout(timer); process.exit(1); });",
+    ''
+  ].join('\n');
 }
 
 export interface StageScriptParams {

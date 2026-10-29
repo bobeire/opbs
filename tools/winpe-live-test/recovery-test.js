@@ -358,6 +358,7 @@ function phaseStage() {
     'media\\OPBS\\node.exe',
     'media\\OPBS\\OPBS-restore.json',
     'media\\OPBS\\restore.cmd',
+    'media\\OPBS\\cancel-window.js',
     'media\\OPBS\\winpe-entry.js',
     'stage.json'
   ];
