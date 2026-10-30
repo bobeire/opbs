@@ -18,6 +18,7 @@ function drive(over: Partial<MediaDriveInfo> = {}): MediaDriveInfo {
     volumeLabel: 'STICK',
     fs: 'exFAT',
     sizeBytes: 16_000_000_000,
+    diskSizeBytes: 16_000_000_000,
     driveType: 'Removable',
     busType: 'USB',
     model: 'Cruzer Blade',
@@ -49,6 +50,7 @@ describe('parseMediaDrivesJson', () => {
       volumeLabel: 'STICK',
       fs: 'exFAT',
       sizeBytes: 8_000_000_000,
+      diskSizeBytes: 0,
       driveType: 'Removable',
       busType: 'USB',
       model: 'Cruzer',
@@ -56,6 +58,28 @@ describe('parseMediaDrivesJson', () => {
       usb: true,
       isSystem: false
     });
+  });
+
+  it('keeps the disk size separate from the volume size', () => {
+    // A stick whose only volume is a leftover 4 GB partition is still an
+    // 8 GB device — the media build repartitions the disk, so callers must
+    // be able to see both.
+    const raw = JSON.stringify([
+      {
+        letter: 'D',
+        volumeLabel: 'OPBS-BOOT',
+        fs: 'FAT32',
+        sizeBytes: 4_293_918_720,
+        diskSizeBytes: 8_035_237_888,
+        driveType: 'Removable',
+        busType: 'USB',
+        model: 'Flash Disk',
+        isSystem: false
+      }
+    ]);
+    const drives = parseMediaDrivesJson(raw);
+    expect(drives[0].sizeBytes).toBe(4_293_918_720);
+    expect(drives[0].diskSizeBytes).toBe(8_035_237_888);
   });
 
   it('accepts a single object (not wrapped in an array)', () => {
@@ -243,6 +267,15 @@ describe('dualPartitionGuard', () => {
     expect(err).toContain('too small');
     expect(err).toContain('--boot-size-mb');
     expect(dualPartitionGuard(4096, 8 * 1024 ** 3)).toBeNull();
+  });
+
+  it('is handed the DISK size, so a leftover 4 GB volume on an 8 GB stick passes', () => {
+    // The first dual-partition build refused exactly this: the failed run had
+    // left a single 4 GB partition, the guard saw the volume size and said
+    // "too small" for a stick that is in fact 8 GB. winpe-media now passes
+    // diskSizeBytes for the device.
+    expect(dualPartitionGuard(4096, 8 * 1024 ** 3)).toBeNull();
+    expect(dualPartitionGuard(4096, 4 * 1024 ** 3)).toContain('too small');
   });
 });
 

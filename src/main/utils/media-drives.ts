@@ -14,7 +14,14 @@ export interface MediaDriveInfo {
   letter: string;
   volumeLabel: string;
   fs: string;
+  /** Size of the VOLUME on this letter. */
   sizeBytes: number;
+  /**
+   * Size of the underlying DISK. A stick whose volume is smaller than its
+   * disk (a partial repartition, or a small first partition) must be judged
+   * by the disk: the media build repartitions the whole device.
+   */
+  diskSizeBytes: number;
   /** Get-Volume DriveType: 'Removable' | 'Fixed' | 'CDRom' | 'Network' | ... */
   driveType: string;
   /** Get-Disk BusType: 'USB' | 'SATA' | 'NVMe' | ... */
@@ -50,15 +57,18 @@ foreach ($v in @(Get-Volume | Where-Object { $_.DriveLetter })) {
   }
   $bus = ''
   $model = ''
+  $diskSize = [int64]0
   if ($disk) {
     $bus = [string]$disk.BusType
     $model = [string]$disk.FriendlyName
+    $diskSize = [int64]$disk.Size
   }
   $vols += [pscustomobject][ordered]@{
     letter = $letter
     volumeLabel = [string]$v.FileSystemLabel
     fs = [string]$v.FileSystem
     sizeBytes = [int64]$v.Size
+    diskSizeBytes = $diskSize
     driveType = [string]$v.DriveType
     busType = $bus
     model = $model
@@ -93,6 +103,7 @@ export function parseMediaDrivesJson(raw: string): MediaDriveInfo[] {
       volumeLabel: String(entry.volumeLabel ?? ''),
       fs: String(entry.fs ?? ''),
       sizeBytes: Number(entry.sizeBytes) || 0,
+      diskSizeBytes: Number(entry.diskSizeBytes) || 0,
       driveType,
       busType,
       model: String(entry.model ?? ''),
@@ -195,23 +206,25 @@ export function usbSizeGuard(sizeBytes: number | undefined | null): string | nul
  * Guards for the opt-in dual-partition layout (FAT32 boot + NTFS data). Only
  * the boot partition is FAT32, so the 32 GB format cap does not apply — but
  * the boot size must be sane and the stick must still hold a usable data
- * area. Returns an error message, or null when the target is acceptable.
+ * area. `diskSizeBytes` is the whole device (the build repartitions it, so a
+ * small existing volume on a big stick must not fail this). Returns an error
+ * message, or null when the target is acceptable.
  */
 export function dualPartitionGuard(
   bootSizeMb: number | undefined,
-  sizeBytes: number | undefined | null
+  diskSizeBytes: number | undefined | null
 ): string | null {
   const bootMb = bootSizeMb ?? 4096;
   if (!Number.isFinite(bootMb) || bootMb < 1024 || bootMb > 32 * 1024) {
     return `Boot partition size ${bootSizeMb} MiB is out of range (1024–32768 MiB).`;
   }
-  if (typeof sizeBytes === 'number' && Number.isFinite(sizeBytes) && sizeBytes > 0) {
+  if (typeof diskSizeBytes === 'number' && Number.isFinite(diskSizeBytes) && diskSizeBytes > 0) {
     const needed = (bootMb + 1024) * 1024 * 1024; // boot + 1 GiB of data space
-    if (sizeBytes < needed) {
+    if (diskSizeBytes < needed) {
       return (
         `This USB drive is too small for a dual-partition layout: the ${bootMb} MiB boot partition ` +
-        `plus at least 1 GiB of data space needs ${Math.ceil(needed / 1024 ** 3)} GB. Use a bigger ` +
-        `drive, shrink the boot partition (--boot-size-mb), or build single-partition media.`
+        `plus at least 1 GiB of data space needs ${Math.ceil(needed / 1024 ** 3)} GB of drive space. ` +
+        `Use a bigger drive, shrink the boot partition (--boot-size-mb), or build single-partition media.`
       );
     }
   }

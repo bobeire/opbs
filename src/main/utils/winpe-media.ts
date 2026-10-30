@@ -789,7 +789,10 @@ export async function createRecoveryMedia(options: MediaCreateOptions): Promise<
       (d) => d.letter.toUpperCase() === (letterMatch?.[1] ?? '').toUpperCase()
     );
     const sizeError = options.dualPartition
-      ? dualPartitionGuard(options.bootSizeMb, drive?.sizeBytes)
+      ? // The build repartitions the whole device, so judge by the DISK: a
+        // stick whose only volume is a leftover 4 GB partition is still a
+        // 8 GB stick.
+        dualPartitionGuard(options.bootSizeMb, drive?.diskSizeBytes || drive?.sizeBytes)
       : usbSizeGuard(drive?.sizeBytes);
     if (sizeError) {
       return { ok: false, format: options.format, output: options.output, arch, error: sizeError };
