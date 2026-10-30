@@ -1026,11 +1026,13 @@ export function writeErrorHint(message: string): string {
  * dirty-volume case matters in WinPE: a dirty NTFS volume is mounted
  * READ-ONLY there, which both refuses writes to it ("Access is denied") and
  * blocks the exclusive lock this restore needs — a chkdsk or a removed drive
- * letter clears it.
+ * letter clears it. `volumePath` is included so a report identifies exactly
+ * which volume (GUID path) was refused.
  */
-export function lockFailureMessage(label: string): string {
+export function lockFailureMessage(label: string, volumePath?: string): string {
+  const where = volumePath ? ` (${volumePath})` : '';
   return (
-    `Cannot lock ${label} for writing — the volume is still in use in this environment ` +
+    `Cannot lock ${label}${where} for writing — the volume is still in use in this environment ` +
     `(open files, chkdsk/autochk, or a mounted filesystem), is mounted read-only because its ` +
     `dirty flag is set (writes to it then say "Access is denied"), or is BitLocker-encrypted ` +
     `and locked here. Nothing has been written to the disk. ` +
@@ -1343,7 +1345,7 @@ export async function runRestoreJob(
               // Refuse to start: a raw write to a held volume dies partway
               // through and leaves the disk partially written. Fail here
               // instead — nothing has been touched yet.
-              throw new Error(lockFailureMessage(target.label));
+              throw new Error(lockFailureMessage(target.label, volumePath));
             }
             warnings.push(
               `Could not dismount ${target.label} ${phase}; eject and reinsert the drive (or reboot) if Explorer still shows stale files.`
@@ -2085,7 +2087,7 @@ async function runMacriumRestoreJob(
               // Refuse to start: a raw write to a held volume dies partway
               // through and leaves the disk partially written. Fail here
               // instead — nothing has been touched yet.
-              throw new Error(lockFailureMessage(target.label));
+              throw new Error(lockFailureMessage(target.label, volumePath));
             }
             warnings.push(
               `Could not dismount ${target.label} ${phase}; eject and reinsert the drive (or reboot) if Explorer still shows stale files.`

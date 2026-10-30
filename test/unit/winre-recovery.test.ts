@@ -1,15 +1,20 @@
 import { describe, it, expect } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   parseBcdCreateGuid,
   parseReagentcWinreDir,
   buildRecoveryStartnetCmd,
   buildRecoveryRestoreCmd,
   recoveryPayloadTextFiles,
+  resolveStagedImagePath,
   buildStageScript,
   buildCleanupScript,
   buildWinpeshlIni,
   stageRecoveryRestore,
   type RecoveryStageConfig,
+  type StagedImageFallback,
   type StageScriptParams
 } from '../../src/main/recovery/winre-recovery';
 
@@ -179,6 +184,75 @@ describe('recoveryPayloadTextFiles', () => {
     expect(names).toContain('winpe-entry.js');
     expect(names).toContain('restore.cmd');
     expect(names).toContain('OPBS-restore.json');
+  });
+
+  it('records where the image lives on its volume so re-lettering cannot lose it', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-staged-'));
+    try {
+      const imagePath = path.join(dir, 'images', 'pc.opbs');
+      fs.mkdirSync(path.join(dir, 'images'), { recursive: true });
+      fs.writeFileSync(imagePath, Buffer.alloc(4096));
+      const parsed = restoreJson(restoreConfig({ imagePath }));
+      // Path from the volume root + size: no drive letter involved.
+      expect(parsed.imagePathFallback).toBeDefined();
+      const fallback = parsed.imagePathFallback as StagedImageFallback;
+      expect(fallback.relativePath.replace(/\//g, '\\')).toMatch(/images\\pc\.opbs$/i);
+      expect(fallback.sizeBytes).toBe(4096);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('omits the fallback when the image cannot be stat-ed at stage time', () => {
+    expect(restoreJson(restoreConfig({ imagePath: 'Z:\\gone\\pc.opbs' })).imagePathFallback).toBeUndefined();
+  });
+});
+
+describe('resolveStagedImagePath', () => {
+  const fallback: StagedImageFallback = { relativePath: 'images\\pc.opbs', sizeBytes: 1000 };
+  const GONE = 'Z:\\__no_such_volume__\\images\\pc.opbs';
+  const probe = (present: Record<string, number>) => ({
+    exists: (p: string) => present[p] !== undefined,
+    sizeOf: (p: string) => present[p]
+  });
+
+  it('returns the recorded path when it still exists', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-staged-'));
+    try {
+      const imagePath = path.join(dir, 'pc.opbs');
+      fs.writeFileSync(imagePath, Buffer.alloc(1000));
+      expect(resolveStagedImagePath(imagePath, fallback)).toBe(imagePath);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('finds the image on whatever letter its volume has now', () => {
+    const p = probe({ 'Q:\\images\\pc.opbs': 1000 });
+    expect(resolveStagedImagePath(GONE, fallback, p.exists, p.sizeOf)).toBe('Q:\\images\\pc.opbs');
+  });
+
+  it('accepts a relative path recorded with forward slashes', () => {
+    const p = probe({ 'Q:\\images\\pc.opbs': 1000 });
+    expect(
+      resolveStagedImagePath(GONE, { relativePath: 'images/pc.opbs', sizeBytes: 1000 }, p.exists, p.sizeOf)
+    ).toBe('Q:\\images\\pc.opbs');
+  });
+
+  it('refuses a same-named file of a different size', () => {
+    const p = probe({ 'Q:\\images\\pc.opbs': 999 });
+    expect(resolveStagedImagePath(GONE, fallback, p.exists, p.sizeOf)).toBeNull();
+  });
+
+  it('refuses to guess when the file sits on more than one volume', () => {
+    const p = probe({ 'Q:\\images\\pc.opbs': 1000, 'R:\\images\\pc.opbs': 1000 });
+    expect(resolveStagedImagePath(GONE, fallback, p.exists, p.sizeOf)).toBeNull();
+  });
+
+  it('does nothing without a fallback record', () => {
+    const p = probe({ 'Q:\\images\\pc.opbs': 1000 });
+    expect(resolveStagedImagePath(GONE, undefined, p.exists, p.sizeOf)).toBeNull();
+    expect(resolveStagedImagePath(GONE, { relativePath: '', sizeBytes: 1000 }, p.exists, p.sizeOf)).toBeNull();
   });
 });
 

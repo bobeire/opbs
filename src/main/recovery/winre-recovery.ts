@@ -69,6 +69,61 @@ export interface RecoveryStageConfig {
   acknowledgeSameDisk?: boolean;
 }
 
+/**
+ * A staged image reference that survives the recovery environment's drive
+ * letters: Windows' `E:\images\x.opbs` is frequently `F:\images\x.opbs` (or a
+ * different volume entirely) after booting WinRE/WinPE. The path from the
+ * volume root plus the file size identify the file no matter which letter the
+ * volume ends up with.
+ */
+export interface StagedImageFallback {
+  /** Path from the volume root, e.g. `images\x.opbs` (no drive letter). */
+  relativePath: string;
+  sizeBytes: number;
+}
+
+/**
+ * Resolve the image for a staged restore when the recorded drive-letter path
+ * no longer exists (the recovery environment re-letters volumes). Tries every
+ * lettered volume for the recorded relative path and requires the size to
+ * match, so a same-named file elsewhere cannot be picked up by accident.
+ *
+ * Returns the resolved path, or null when nothing matches — the caller then
+ * reports the original missing-path error.
+ */
+export function resolveStagedImagePath(
+  imagePath: string,
+  fallback: StagedImageFallback | undefined,
+  exists: (candidate: string) => boolean = (p) => {
+    try {
+      return fs.statSync(p).isFile();
+    } catch {
+      return false;
+    }
+  },
+  sizeOf: (candidate: string) => number = (p) => fs.statSync(p).size
+): string | null {
+  if (!fallback || !fallback.relativePath) return null;
+  const rel = String(fallback.relativePath).replace(/^[\\/]+/, '').replace(/\//g, '\\');
+  if (!rel) return null;
+  if (fs.existsSync(imagePath)) return imagePath;
+
+  // The recorded volume, whatever letter it has now: try every letter first
+  // (cheap — a handful of stat calls), and accept only an exact size match.
+  const matches: string[] = [];
+  for (let i = 0; i < 26; i++) {
+    const candidate = `${String.fromCharCode(65 + i)}:\\${rel}`;
+    if (!exists(candidate)) continue;
+    try {
+      if (typeof fallback.sizeBytes === 'number' && sizeOf(candidate) !== fallback.sizeBytes) continue;
+    } catch {
+      continue;
+    }
+    matches.push(candidate);
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+
 export interface RecoveryStageResult {
   ok: boolean;
   /** %SystemDrive%\Recovery\OPBS */
@@ -219,6 +274,20 @@ export function buildRecoveryRestoreCmd(): string {
 
 /** Text files placed in the payload root alongside the node runtime. */
 export function recoveryPayloadTextFiles(config: RecoveryStageConfig): Array<{ name: string; content: string }> {
+  // The recovery environment re-letters volumes: record where the image lives
+  // on ITS volume (path + size) so the restore can find it again whichever
+  // letter the volume ends up with.
+  let fallback: StagedImageFallback | undefined;
+  try {
+    const root = path.parse(config.imagePath).root;
+    const relativePath = path.relative(root, config.imagePath);
+    const sizeBytes = fs.statSync(config.imagePath).size;
+    if (relativePath && !relativePath.startsWith('..')) {
+      fallback = { relativePath, sizeBytes };
+    }
+  } catch {
+    /* image missing/unreadable at stage time — the restore reports it */
+  }
   return [
     { name: 'winpe-entry.js', content: buildWinpeEntry() },
     { name: 'restore.cmd', content: buildRecoveryRestoreCmd() },
@@ -228,6 +297,7 @@ export function recoveryPayloadTextFiles(config: RecoveryStageConfig): Array<{ n
       content: JSON.stringify(
         {
           imagePath: config.imagePath,
+          ...(fallback ? { imagePathFallback: fallback } : {}),
           ...(config.targetVirtualDisk
             ? { targetVirtualDisk: config.targetVirtualDisk }
             : { targetDiskIndex: config.targetDiskIndex }),

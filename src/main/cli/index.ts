@@ -858,6 +858,18 @@ async function cmdRestore(ctx: CommandContext): Promise<number> {
   if (config.targetDiskIndex === undefined && config.destinationDiskIndex !== undefined) {
     config.targetDiskIndex = config.destinationDiskIndex;
   }
+
+  // A staged recovery config records the image with a letter that the recovery
+  // environment may not have: fall back to the recorded path-on-its-volume and
+  // find it wherever that volume is now (see resolveStagedImagePath).
+  if (!fs.existsSync(config.imagePath ?? '') && config.imagePathFallback) {
+    const { resolveStagedImagePath } = await import('../recovery/winre-recovery');
+    const resolved = resolveStagedImagePath(String(config.imagePath ?? ''), config.imagePathFallback);
+    if (resolved) {
+      console.error(`note: image moved to ${resolved} (the recorded ${config.imagePath} is gone — drive letters changed)`);
+      config.imagePath = resolved;
+    }
+  }
   if (config.targetVirtualDisk && config.targetDiskIndex !== undefined) {
     console.error('Restore config: set either targetDiskIndex or targetVirtualDisk, not both.');
     return 1;
