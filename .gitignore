@@ -11,3 +11,6 @@ src/native/build/
 *.fbackup
 *.mrimg
 *.mrimgx
+# User-provided real image samples and their local drill configs (may carry
+# passphrases): never committed.
+imagefilesamples/
