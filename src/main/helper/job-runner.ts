@@ -59,6 +59,7 @@ import {
   macriumRestoreRefusal,
   macriumPartitionSize,
   openMacriumPartitionReader,
+  closeImageFds,
   MacriumImageInfo,
   MacriumPartitionInfo,
   MacriumAesVariant
@@ -1020,6 +1021,25 @@ export function writeErrorHint(message: string): string {
   );
 }
 
+/**
+ * Why a target volume cannot be taken for writing, and the ways out. The
+ * dirty-volume case matters in WinPE: a dirty NTFS volume is mounted
+ * READ-ONLY there, which both refuses writes to it ("Access is denied") and
+ * blocks the exclusive lock this restore needs — a chkdsk or a removed drive
+ * letter clears it.
+ */
+export function lockFailureMessage(label: string): string {
+  return (
+    `Cannot lock ${label} for writing — the volume is still in use in this environment ` +
+    `(open files, chkdsk/autochk, or a mounted filesystem), is mounted read-only because its ` +
+    `dirty flag is set (writes to it then say "Access is denied"), or is BitLocker-encrypted ` +
+    `and locked here. Nothing has been written to the disk. ` +
+    `Ways out: \`chkdsk X: /f\` clears the dirty flag; \`diskpart\` → \`select volume X\` → ` +
+    `\`remove letter=X\` frees a volume that something in this environment holds open; and ` +
+    `\`manage-bde -status\` shows BitLocker ("Protection On" means unlock or suspend it first).`
+  );
+}
+
 export async function writeRawWithRetry(
   attemptWrite: () => void | Promise<unknown>,
   attempts = 20,
@@ -1310,6 +1330,10 @@ export async function runRestoreJob(
       if (native.closeAllHandles) {
         native.closeAllHandles();
       }
+      // Close image files this process may still hold open (the Macrium reader
+      // caches fds per image for browse latency): an open handle anywhere in
+      // the environment keeps the volume alive and blocks the exclusive lock.
+      closeImageFds();
       if (native.lockAndDismountVolume && native.getVolumePath) {
         for (const target of job.targets) {
           const volumePath = native.getVolumePath(target.diskIndex, target.offset);
@@ -1319,13 +1343,7 @@ export async function runRestoreJob(
               // Refuse to start: a raw write to a held volume dies partway
               // through and leaves the disk partially written. Fail here
               // instead — nothing has been touched yet.
-              throw new Error(
-                `Cannot lock ${target.label} for writing — the volume is still in use in this ` +
-                `environment (open files, chkdsk/autochk, or a mounted filesystem) or is ` +
-                `BitLocker-encrypted and locked here. Nothing has been written to the disk. ` +
-                `Close files on the volume and retry; check \`manage-bde -status\` and unlock ` +
-                `or suspend BitLocker if the volume shows "Protection On".`
-              );
+              throw new Error(lockFailureMessage(target.label));
             }
             warnings.push(
               `Could not dismount ${target.label} ${phase}; eject and reinsert the drive (or reboot) if Explorer still shows stale files.`
@@ -2054,6 +2072,10 @@ async function runMacriumRestoreJob(
       if (native.closeAllHandles) {
         native.closeAllHandles();
       }
+      // Close image files this process may still hold open (the Macrium reader
+      // caches fds per image for browse latency): an open handle anywhere in
+      // the environment keeps the volume alive and blocks the exclusive lock.
+      closeImageFds();
       if (native.lockAndDismountVolume && native.getVolumePath) {
         for (const target of job.targets) {
           const volumePath = native.getVolumePath(target.diskIndex, target.offset);
@@ -2063,13 +2085,7 @@ async function runMacriumRestoreJob(
               // Refuse to start: a raw write to a held volume dies partway
               // through and leaves the disk partially written. Fail here
               // instead — nothing has been touched yet.
-              throw new Error(
-                `Cannot lock ${target.label} for writing — the volume is still in use in this ` +
-                `environment (open files, chkdsk/autochk, or a mounted filesystem) or is ` +
-                `BitLocker-encrypted and locked here. Nothing has been written to the disk. ` +
-                `Close files on the volume and retry; check \`manage-bde -status\` and unlock ` +
-                `or suspend BitLocker if the volume shows "Protection On".`
-              );
+              throw new Error(lockFailureMessage(target.label));
             }
             warnings.push(
               `Could not dismount ${target.label} ${phase}; eject and reinsert the drive (or reboot) if Explorer still shows stale files.`

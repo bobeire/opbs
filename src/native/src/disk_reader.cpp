@@ -50,27 +50,55 @@ bool DiskReader::LockAndDismountVolume(const std::string& volumePath) {
         nullptr
     );
     if (hVolume == INVALID_HANDLE_VALUE) {
+        // A dirty NTFS volume is mounted READ-ONLY in WinPE (and Windows does
+        // the same for a dirty volume it refuses to write): a GENERIC_WRITE
+        // open is denied there. A restore overwrites the partition wholesale,
+        // so the existing filesystem state is irrelevant — a read handle can
+        // still lock and dismount the volume, which is all we need before the
+        // raw writes.
+        hVolume = CreateFileW(
+            wide.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            nullptr
+        );
+    }
+    if (hVolume == INVALID_HANDLE_VALUE) {
         return false;
     }
 
     DWORD bytesReturned = 0;
     bool locked = false;
-    for (int attempt = 0; attempt < 8; attempt++) {
+    // A volume frees up within seconds once autochk/Explorer lets go of it, so
+    // retry long enough to outlast that instead of refusing a restore that is
+    // about to overwrite the volume anyway.
+    for (int attempt = 0; attempt < 40; attempt++) {
         if (DeviceIoControl(hVolume, FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &bytesReturned, nullptr)) {
             locked = true;
             break;
         }
-        Sleep(150);
+        Sleep(250);
     }
-    if (!locked) {
-        CloseHandle(hVolume);
-        return false;
-    }
-
-    if (!DeviceIoControl(hVolume, FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &bytesReturned, nullptr)) {
-        DeviceIoControl(hVolume, FSCTL_UNLOCK_VOLUME, nullptr, 0, nullptr, 0, &bytesReturned, nullptr);
-        CloseHandle(hVolume);
-        return false;
+    if (locked) {
+        if (!DeviceIoControl(hVolume, FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &bytesReturned, nullptr)) {
+            DeviceIoControl(hVolume, FSCTL_UNLOCK_VOLUME, nullptr, 0, nullptr, 0, &bytesReturned, nullptr);
+            CloseHandle(hVolume);
+            return false;
+        }
+    } else {
+        // Last resort: force the filesystem off the volume without the lock.
+        // The dismount tears ntfs.sys's state down so it cannot flush cached
+        // metadata over the image we are about to write. The lock is still
+        // attempted afterwards (it usually succeeds once the FS is gone) and
+        // the handle is held either way, so nothing re-mounts under us.
+        if (!DeviceIoControl(hVolume, FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &bytesReturned, nullptr)) {
+            CloseHandle(hVolume);
+            return false;
+        }
+        DeviceIoControl(hVolume, FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &bytesReturned, nullptr);
     }
 
     // Hold the lock for the duration of the raw writes so the volume stays
