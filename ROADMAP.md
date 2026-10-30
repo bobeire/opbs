@@ -227,6 +227,20 @@ to date has shipped; **Investigate** items need spike work first.
   the emitted PowerShell is syntax-checked — but the **physical boot test is
   still pending** (same `tools/winpe-live-test/` drill as the single-partition
   media) before this ships.
+- ✅ **Media live test, 0.6.94 round (2026-10-31)**: `test-vhd.cmd` run from
+  the booted stick on a second machine (laptop, Patriot M.2 P320 512GB,
+  WinPE) reports `ALL PASS` — `backup --source-vhd` of `test\src.vhdx` →
+  `restore` into a fresh GPT VHD, with the FAT32 destination auto-splitting
+  the image into 3994 MB volumes on the stick. `judge.js` afterwards (admin
+  console, Windows) reports `JUDGE ALL PASS` with both partitions
+  **byte-exact** (16,759,808 B + 209,715,200 B). Evidence on the stick:
+  `OPBS\test\winpe-test-log.txt` + `OPBS\test\judge-log.txt`. The new
+  media-layout probe runs first (`media: volumes C: D: X:` followed by the
+  `INFO: no OPBS-Images folder …` line on single-partition media). Network
+  probe reports WARN — this stick's WIM carries no NIC driver, which is what
+  `media create --driver` is for. Covers the classic single-partition media
+  path that field users run; the dual-partition layout's boot test is a
+  separate item below.
 - ✅ Network drivers: the first probe run reported `ipv4=none` (the stock
   WinPE image carries no driver for the host NIC), so the host's Intel
   Ethernet packages (`e1d.inf` 12.19.2.60/62) were injected into the media's
