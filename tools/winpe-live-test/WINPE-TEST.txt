@@ -64,9 +64,11 @@ How to run
    then:
         wmic logicaldisk get caption,volumename
    The stick is the one labeled:
-        OPBS-RECOVERY   dual-partition media (FAT32 boot partition)
+        OPBS-BOOT       dual-partition media (FAT32 boot partition)
         WINPE           classic single-partition media
-   (its data partition, if present, is labeled OPBS-DATA)
+   (its data partition, if present, is labeled OPBS-DATA. FAT32 labels are
+    capped at 11 characters, so the boot label is OPBS-BOOT, not
+    OPBS-RECOVERY.)
 4. Run the test from that drive:
         F:\OPBS\test-vhd.cmd
    (F: is the stick's letter here - use yours) or open the OPBS folder in

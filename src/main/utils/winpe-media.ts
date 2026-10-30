@@ -476,6 +476,15 @@ export const DUAL_BOOT_DEFAULT_MB = 4096;
 export const DUAL_BOOT_MIN_MB = 1024;
 /** FAT32-formatable ceiling: Windows refuses larger FAT32 volumes. */
 export const DUAL_BOOT_MAX_MB = 32 * 1024;
+/**
+ * Volume labels on the dual-partition stick. The boot partition is FAT32,
+ * whose labels are capped at 11 characters (longer ones fail with VDS "The
+ * label is illegal" — MakeWinPEMedia uses the short "WinPE" for the same
+ * reason); the data partition is NTFS but keeps the same short style so both
+ * are easy to spot in a drive picker.
+ */
+export const FAT32_BOOT_LABEL = 'OPBS-BOOT';
+export const NTFS_DATA_LABEL = 'OPBS-DATA';
 
 /**
  * Partitioning + copy steps for the opt-in dual-partition USB layout: a small
@@ -531,15 +540,19 @@ export function buildDualPartitionLines(options: {
   lines.push(`  'convert mbr',`);
   lines.push(`  ('create partition primary size=${bootSizeMb}'),`);
   lines.push(`  'active',`);
-  lines.push(`  'format fs=fat32 quick label="OPBS-RECOVERY"',`);
+  // FAT volume labels are limited to 11 characters (VDS: "The label is
+  // illegal") — the same reason MakeWinPEMedia uses the short "WinPE".
+  lines.push(`  'format fs=fat32 quick label="${FAT32_BOOT_LABEL}"',`);
   lines.push(`  ('assign letter=${letter}'),`);
   lines.push(`  'create partition primary',`);
-  lines.push(`  'format fs=ntfs quick label="OPBS-DATA"',`);
+  lines.push(`  'format fs=ntfs quick label="${NTFS_DATA_LABEL}"',`);
   lines.push(`  'assign'`);
   lines.push(') | Set-Content -Path $dp -Encoding ASCII');
   lines.push(`Write-Step 'Repartitioning the stick (this erases the whole drive)...'`);
   lines.push(`& diskpart /s $dp`);
-  lines.push(`if ($LASTEXITCODE -ne 0) { Fail-Media "diskpart failed with exit code $LASTEXITCODE" }`);
+  lines.push(
+    `if ($LASTEXITCODE -ne 0) { Fail-Media "diskpart failed with exit code $LASTEXITCODE - DiskPart's own message is in elevated.log next to this script" }`
+  );
   // Windows normally re-uses the letter, but a stale letter reservation can
   // leave the new volumes unlettered — assign on demand and discover.
   lines.push(`$boot = Get-Partition -DiskNumber $diskNum -PartitionNumber 1`);

@@ -13,6 +13,8 @@ import {
   planRestoreConfigCopy,
   buildElevatedScript,
   buildDualPartitionLines,
+  FAT32_BOOT_LABEL,
+  NTFS_DATA_LABEL,
   smokeMediaPayload,
   stagePayloadFiles,
   copyPath,
@@ -483,12 +485,23 @@ describe('winpe-media', () => {
       expect(s).toContain(`'convert mbr',`);
       expect(s).toContain(`('create partition primary size=4096'),`);
       expect(s).toContain(`'active',`);
-      expect(s).toContain(`'format fs=fat32 quick label="OPBS-RECOVERY"',`);
+      expect(s).toContain(`'format fs=fat32 quick label="${FAT32_BOOT_LABEL}"',`);
       expect(s).toContain(`('assign letter=E'),`);
       expect(s).toContain(`'create partition primary',`);
-      expect(s).toContain(`'format fs=ntfs quick label="OPBS-DATA"',`);
+      expect(s).toContain(`'format fs=ntfs quick label="${NTFS_DATA_LABEL}"',`);
       // diskpart next to the running script, so a re-run is inspectable.
       expect(s).toContain(`Join-Path $PSScriptRoot 'diskpart.txt'`);
+    });
+
+    it('keeps the FAT32 boot label within the 11-character FAT limit', () => {
+      // Longer labels fail in diskpart with "Virtual Disk Service error: The
+      // label is illegal" (the first dual-partition build died exactly there).
+      expect(FAT32_BOOT_LABEL.length).toBeLessThanOrEqual(11);
+      expect(NTFS_DATA_LABEL.length).toBeLessThanOrEqual(32);
+      const s = lines();
+      const fatLabel = /format fs=fat32 quick label="([^"]+)"/.exec(s);
+      expect(fatLabel).not.toBeNull();
+      expect(fatLabel![1].length).toBeLessThanOrEqual(11);
     });
 
     it('clamps the boot size to the supported range', () => {
