@@ -26,6 +26,19 @@ The source of truth for this harness is the OPBS repo (tools/winpe-live-test/);
 after editing it there, copy the files back onto the media root next to
 node.exe and winpe-entry.js.
 
+Preparing the stick (once, from Windows)
+---------------------------------------
+`media create` does NOT put the test harness on the stick - it only builds
+the bootable media. Copy the harness onto the payload folder and stage the
+test VHD first (F: is the stick's letter here - use yours):
+
+  xcopy /E /I tools\winpe-live-test\* F:\OPBS\
+  F:\OPBS\node.exe F:\OPBS\prep-src.js        (elevated)
+
+prep-src.js creates F:\OPBS\test\src.vhdx (256 MB dynamic VHDX, GPT, one
+200 MB FAT32 partition labeled OPBSTEST) - the source the live test backs
+up and restores. Re-run it any time to regenerate a clean source.
+
 Safety: no step writes to a physical disk. Everything (image files,
 vhdx files, logs) stays inside <this stick>\OPBS\test\. The interactive
 recovery wizard that may open at boot can restore to physical disks -
@@ -46,17 +59,22 @@ How to run
 2. Windows PE loads (this can take a minute). An "OPBS recovery wizard"
    window may open automatically - CLOSE it (or ignore it). This test
    does not use the wizard.
-3. Run the test, either:
-   a) Easy: open File Explorer (WinPE: "This PC"), find the drive with
-      label WINPE, open the OPBS folder, double-click test-vhd.cmd.
-   b) Console: press Shift+F10, then run:
-        D:\OPBS\test-vhd.cmd
-      (the drive letter may differ - check with:  wmic logicaldisk
-       get caption,volumename   and use the WINPE drive)
-4. Watch the console. Expected ending line: "ALL PASS".
+3. Find the stick's drive letter. X: is the WinPE RAM drive (the "Windows"
+   drive) - the OPBS payload is NOT there on a stick boot. Press Shift+F10,
+   then:
+        wmic logicaldisk get caption,volumename
+   The stick is the one labeled:
+        OPBS-RECOVERY   dual-partition media (FAT32 boot partition)
+        WINPE           classic single-partition media
+   (its data partition, if present, is labeled OPBS-DATA)
+4. Run the test from that drive:
+        F:\OPBS\test-vhd.cmd
+   (F: is the stick's letter here - use yours) or open the OPBS folder in
+   File Explorer (WinPE: "This PC") and double-click test-vhd.cmd.
+5. Watch the console. Expected ending line: "ALL PASS".
    The run takes roughly 1-5 minutes (backup + restore of a 200 MB
    FAT32 partition).
-5. Press any key at the final "pause", then shut down
+6. Press any key at the final "pause", then shut down
    (Start menu -> power -> shutdown, or:  wpeutil shutdown).
 
 After the test
