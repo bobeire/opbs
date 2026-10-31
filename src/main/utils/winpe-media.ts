@@ -53,7 +53,7 @@ export interface MediaCreateOptions {
    * FAT32 partition MakeWinPEMedia produces.
    */
   dualPartition?: boolean;
-  /** Boot partition size in MiB for `dualPartition` (default 4096). */
+  /** Boot partition size in MiB for `dualPartition` (default 2048). */
   bootSizeMb?: number;
   /** Files/directories copied onto the NTFS data partition after the build. */
   copyToData?: string[];
@@ -479,8 +479,13 @@ function base64(value: string): string {
   return Buffer.from(value, 'utf-8').toString('base64');
 }
 
-/** Default size of the FAT32 boot partition on a dual-partition stick. */
-export const DUAL_BOOT_DEFAULT_MB = 4096;
+/**
+ * Default size of the FAT32 boot partition on a dual-partition stick. The
+ * media itself is roughly 700 MB (boot.wim + the OPBS payload); 2 GiB leaves
+ * room for injected drivers and future growth without wasting half of a
+ * small stick, which the old 4 GiB default did (field report 2026-10-31).
+ */
+export const DUAL_BOOT_DEFAULT_MB = 2048;
 /** Smallest boot partition that still holds a WinPE tree plus the payload. */
 export const DUAL_BOOT_MIN_MB = 1024;
 /** FAT32-formatable ceiling: Windows refuses larger FAT32 volumes. */

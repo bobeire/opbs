@@ -15,6 +15,7 @@ import {
   buildDualPartitionLines,
   FAT32_BOOT_LABEL,
   NTFS_DATA_LABEL,
+  DUAL_BOOT_DEFAULT_MB,
   smokeMediaPayload,
   stagePayloadFiles,
   copyPath,
@@ -498,7 +499,7 @@ describe('winpe-media', () => {
       expect(s).toContain(`('select disk ' + $diskNum),`);
       expect(s).toContain(`'clean',`);
       expect(s).toContain(`'convert mbr',`);
-      expect(s).toContain(`('create partition primary size=4096'),`);
+      expect(s).toContain(`('create partition primary size=${DUAL_BOOT_DEFAULT_MB}'),`);
       expect(s).toContain(`'active',`);
       expect(s).toContain(`'format fs=fat32 quick label="${FAT32_BOOT_LABEL}"',`);
       expect(s).toContain(`('assign letter=E'),`);
@@ -523,7 +524,7 @@ describe('winpe-media', () => {
       expect(lines({ bootSizeMb: 100 })).toContain('create partition primary size=1024');
       expect(lines({ bootSizeMb: 999_999 })).toContain('create partition primary size=32768');
       expect(lines({ bootSizeMb: 2048 })).toContain('create partition primary size=2048');
-      expect(lines({ bootSizeMb: undefined })).toContain('create partition primary size=4096');
+      expect(lines({ bootSizeMb: undefined })).toContain('create partition primary size=2048');
     });
 
     it('refuses the system disk and discovers the letters Windows assigns', () => {

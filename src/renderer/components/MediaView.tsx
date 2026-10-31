@@ -65,7 +65,7 @@ function MediaView({ onComplete }: MediaViewProps) {
   // Opt-in dual-partition layout (FAT32 boot + NTFS data); the default stays
   // the single FAT32 partition for the one-click flow.
   const [dualPartition, setDualPartition] = useState(false);
-  const [bootSizeMb, setBootSizeMb] = useState('4096');
+  const [bootSizeMb, setBootSizeMb] = useState('2048');
   const [dataFolder, setDataFolder] = useState('');
   const [arch, setArch] = useState('amd64');
   const [restoreConfig, setRestoreConfig] = useState('');
@@ -430,10 +430,10 @@ function MediaView({ onComplete }: MediaViewProps) {
                       type="text"
                       value={bootSizeMb}
                       onChange={(e) => setBootSizeMb(e.target.value)}
-                      placeholder="4096"
+                      placeholder="2048"
                     />
                     {bootSizeInvalid && (
-                      <p className="error-text">Enter 1024–32768 MiB (default 4096).</p>
+                      <p className="error-text">Enter 1024–32768 MiB (default 2048).</p>
                     )}
                   </div>
                 )}

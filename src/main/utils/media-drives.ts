@@ -214,7 +214,7 @@ export function dualPartitionGuard(
   bootSizeMb: number | undefined,
   diskSizeBytes: number | undefined | null
 ): string | null {
-  const bootMb = bootSizeMb ?? 4096;
+  const bootMb = bootSizeMb ?? 2048;
   if (!Number.isFinite(bootMb) || bootMb < 1024 || bootMb > 32 * 1024) {
     return `Boot partition size ${bootSizeMb} MiB is out of range (1024–32768 MiB).`;
   }
