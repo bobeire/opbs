@@ -598,6 +598,21 @@ AES-256/3DES/DES/DESX sector decryption in `src/main/imaging/fs/efs.ts`).
 Without a matching key, single-file reads refuse with `EFS_ENCRYPTED` and
 folder extraction skips that file instead of aborting.
 
+**What extraction carries, and what it does not.** Extracted files are written
+as *new* files in the folder you pick: contents and alternate data streams
+come from the image, but **NTFS permissions and ownership do not** — the new
+files simply inherit the destination folder's ACLs and the current user as
+owner. That is deliberate: copying `$SECURITY_DESCRIPTOR`s from a backup of
+one Windows installation onto another re-creates SIDs that do not exist there
+and can silently take ownership of the folder you extract into (a trap that
+applies to every tool that restores ACLs across installations). File
+timestamps are not rewritten either. A **partition restore** is different by
+nature: it writes raw blocks, so the filesystem's permissions travel with the
+data exactly as captured. If you move a user profile between installations,
+`migrate` is built for that case — it maps the source account to the target
+one and rewrites the copied folders' owner (`icacls /setowner /T`) instead of
+leaving foreign SIDs behind.
+
 The GUI's Browse page exposes the same actions: every row has an **Extract**
 button — for a folder this extracts the whole subtree recursively into a
 folder you pick — and **Extract folder** in the breadcrumb bar extracts the
