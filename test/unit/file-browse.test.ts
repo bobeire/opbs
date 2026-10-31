@@ -5,8 +5,26 @@ import * as path from 'path';
 import { readImageInfo, COMPRESSION_NONE, newImageCipher } from '../../src/main/imaging/image-format';
 import { ChainPartitionReader, partitionReaderForChain } from '../../src/main/imaging/image-browse';
 import { openBrowse, listDirectory, readPath, resolvePath, extractPath } from '../../src/main/imaging/fs/file-browse';
-import { buildNtfsVolume, CLUSTER } from '../helpers/ntfs-fixture';
+import { buildNtfsVolume, CLUSTER, FOREIGN_OWNER_SID } from '../helpers/ntfs-fixture';
 import { writeImageFromBytes } from '../helpers/opbs-image';
+import { spawnSync } from 'child_process';
+
+/** Read a file's security descriptor as SDDL (Windows only). */
+function readSddl(file: string): string {
+  const ps = path.join(
+    process.env.SystemRoot ?? 'C:\\Windows',
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe'
+  );
+  const quoted = `'${file.replace(/'/g, "''")}'`;
+  const r = spawnSync(ps, ['-NoProfile', '-Command', `(Get-Acl -LiteralPath ${quoted}).Sddl`], {
+    encoding: 'utf8',
+    windowsHide: true
+  });
+  return String(r.stdout ?? '').trim();
+}
 
 describe('image browse', () => {
   let dir: string;
@@ -149,6 +167,41 @@ describe('image browse', () => {
       fs.rmSync(out, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform !== 'win32')(
+    'extracts as new files: no ACL or owner carry-over from the image',
+    () => {
+      // hello.txt in the fixture carries a security descriptor whose owner is
+      // a SID that exists on no installation. Extraction must not copy it:
+      // the extracted file is a NEW file that inherits the destination
+      // folder's ACLs and is owned by the current user (README: "What
+      // extraction carries, and what it does not").
+      const volume = buildNtfsVolume({ alienOwner: true });
+      writeImageFromBytes(imagePath, volume.read(0, volume.size), CLUSTER, COMPRESSION_NONE);
+
+      const session = openBrowse(imagePath, 0);
+      const out = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-acl-'));
+      try {
+        const extracted = path.join(out, 'hello.txt');
+        expect(extractPath(session, 'hello.txt', extracted)).toBe(1);
+        // Control: a plain file created in the same folder by the same
+        // process. A fresh file carries exactly the destination's ACLs, so
+        // any descriptor copied from the image shows up as a difference.
+        const control = path.join(out, 'control.txt');
+        fs.writeFileSync(control, 'control');
+
+        const extractedSddl = readSddl(extracted);
+        const controlSddl = readSddl(control);
+        // Guard the comparison itself: a failed SDDL read would make two
+        // empty strings look equal.
+        expect(controlSddl).toMatch(/^O:.+D:/);
+        expect(extractedSddl).not.toContain(FOREIGN_OWNER_SID);
+        expect(extractedSddl).toBe(controlSddl);
+      } finally {
+        fs.rmSync(out, { recursive: true, force: true });
+      }
+    }
+  );
 
   it('falls back to the directory tree when index entries miss the MFT cache', () => {
     const volume = buildNtfsVolume();

@@ -158,6 +158,45 @@ export function buildFileRecord(recordNumber: number, opts: { inUse?: boolean; d
 }
 
 /** Build a deterministic synthetic NTFS volume as an in-memory PartitionReader. */
+/**
+ * Owner SID that exists on NO installation (well-known shape, made-up IDs).
+ * The fixture stamps it into a file's security descriptor so a test can prove
+ * that extraction never carries it onto the destination filesystem.
+ */
+export const FOREIGN_OWNER_SID = 'S-1-5-21-1111111111-2222222222-3333333333-1001';
+
+function sidBytes(sid: string): Buffer {
+  const parts = sid.split('-').map(Number);
+  const subCount = parts.length - 3;
+  const buf = Buffer.alloc(8 + subCount * 4);
+  buf.writeUInt8(1, 0); // revision
+  buf.writeUInt8(subCount, 1);
+  buf.writeUIntBE(parts[2], 2, 6); // identifier authority (48-bit BE)
+  for (let i = 0; i < subCount; i++) {
+    buf.writeUInt32LE(parts[3 + i] >>> 0, 8 + i * 4);
+  }
+  return buf;
+}
+
+/**
+ * A minimal self-relative SECURITY_DESCRIPTOR (type 0x50) carrying only an
+ * owner SID. Real images have richer ones; the point of this fixture is that
+ * the owner is deliberately foreign, so any code path that copies security
+ * descriptors onto an extracted file shows up as a wrong owner.
+ */
+export function alienSecurityDescriptor(sid: string = FOREIGN_OWNER_SID): Buffer {
+  const sidBuf = sidBytes(sid);
+  const header = Buffer.alloc(20);
+  header.writeUInt8(1, 0); // revision
+  header.writeUInt8(0, 1); // Sbz1
+  header.writeUInt16LE(0x8000, 2); // SE_SELF_RELATIVE
+  header.writeUInt32LE(header.length, 4); // owner offset
+  header.writeUInt32LE(0, 8); // group
+  header.writeUInt32LE(0, 12); // sacl
+  header.writeUInt32LE(0, 16); // dacl
+  return Buffer.concat([header, sidBuf]);
+}
+
 /** Build the value of an $ATTRIBUTE_LIST attribute (type 0x20). */
 export function attributeListValue(entries: Array<{ type: number; lowestVcn: number; fileReference: number }>): Buffer {
   const chunks: Buffer[] = [];
@@ -296,7 +335,13 @@ export interface NtfsEfsFileFixture {
   plainSize: number;
 }
 
-export function buildNtfsVolume(opts?: { includeEfsFile?: boolean; efsFile?: NtfsEfsFileFixture }): PartitionReader {  const totalClusters = 64;
+export function buildNtfsVolume(opts?: {
+  includeEfsFile?: boolean;
+  efsFile?: NtfsEfsFileFixture;
+  /** Stamp a security descriptor with a foreign owner SID on hello.txt. */
+  alienOwner?: boolean;
+}): PartitionReader {
+  const totalClusters = 64;
   const data = Buffer.alloc(totalClusters * CLUSTER);
 
   data.write('NTFS    ', 3, 'ascii');
@@ -343,6 +388,7 @@ export function buildNtfsVolume(opts?: { includeEfsFile?: boolean; efsFile?: Ntf
     attrs: [
       { type: 0x10, nonResident: false, resident: standardInfo(3000) },
       { type: 0x30, nonResident: false, resident: fileNameAttr(5, 'hello.txt', 1) },
+      ...(opts?.alienOwner ? [{ type: 0x50, nonResident: false, resident: alienSecurityDescriptor() }] : []),
       { type: 0x80, nonResident: false, resident: Buffer.from('Hello, OPBS world!', 'utf8') }
     ]
   });

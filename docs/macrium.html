@@ -398,6 +398,20 @@
       (implemented from Macrium's own published format documentation, so a
       real-world image that won't open is a bug worth reporting).
     </div>
+    <div class="note">
+      <strong>Permissions across installations.</strong> Restoring files with
+      their NTFS permissions from one Windows installation onto another is a
+      known trap: the two installs do not share account SIDs, so the restored
+      folder can end up owned by an account that does not exist on the target
+      machine. OPBS file extraction therefore does <em>not</em> copy security
+      descriptors — extracted files are new files that inherit the destination
+      folder's permissions and owner (and its timestamps, not the image's). A
+      full partition restore writes raw blocks, so the filesystem's
+      permissions travel exactly as captured; and if you are moving a user
+      profile to a new installation, <code>OPBS.exe --cli migrate</code>
+      rewrites the copied folders' owner to the target account instead of
+      leaving foreign SIDs behind.
+    </div>
   </div>
 </section>
 
