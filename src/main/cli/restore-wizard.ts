@@ -390,6 +390,15 @@ export async function runRestoreWizard(io: WizardIO, deps: WizardDeps): Promise<
       }
       io.print('  Enter y or n.');
     }
+    // The check that answers "did the restore actually land": read every
+    // written block back and compare it against the backup. Without it a
+    // write that silently went wrong only shows up when the machine fails to
+    // behave afterwards (field report 2026-10-31).
+    const verifyAfterRestore = await askYesNo(
+      io,
+      '  Verify the restore after writing? (reads every written block back and compares) [Y/n] > ',
+      true
+    );
 
     // [4/4] review + preflight + confirm ------------------------------------
     io.print();
@@ -406,6 +415,9 @@ export async function runRestoreWizard(io: WizardIO, deps: WizardDeps): Promise<
     io.print(`  Overwrite : ALL current data on disk ${targetDisk.index}`);
     io.print(`  Verify    : ${verifyBeforeWrite ? 'yes (before writing)' : 'no'}`);
     io.print(
+      `  Verify write: ${verifyAfterRestore ? 'yes (every written block read back and compared)' : 'no'}`
+    );
+    io.print(
       `  Clear free: ${clearFreeSpace ? 'yes (zeroes every block not in the image — slower)' : 'no'}`
     );
     if (passphrase !== undefined) {
@@ -418,6 +430,7 @@ export async function runRestoreWizard(io: WizardIO, deps: WizardDeps): Promise<
       targetDiskIndex: targetDisk.index,
       targetPartitions,
       verifyBeforeWrite,
+      verifyAfterRestore,
       clearFreeSpace
     };
     if (passphrase !== undefined) {

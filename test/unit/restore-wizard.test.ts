@@ -102,7 +102,7 @@ function makeDeps(overrides: Partial<WizardDeps> = {}): WizardDeps {
 
 describe('runRestoreWizard', () => {
   it('restores the whole disk after image/disk selection, defaults and RESTORE confirm', async () => {
-    const { io, text } = fakeIO(['1', '0', '', '', '', 'RESTORE']);
+    const { io, text } = fakeIO(['1', '0', '', '', '', '', 'RESTORE']);
     const deps = makeDeps();
 
     const code = await runRestoreWizard(io, deps);
@@ -115,6 +115,7 @@ describe('runRestoreWizard', () => {
         targetDiskIndex: 0,
         targetPartitions: [0, 1],
         verifyBeforeWrite: true,
+        verifyAfterRestore: true,
         clearFreeSpace: true
       },
       expect.any(Function)
@@ -133,7 +134,7 @@ describe('runRestoreWizard', () => {
   });
 
   it('asks for a passphrase on encrypted images and passes it through', async () => {
-    const { io } = fakeIO(['1', 'hunter2', '0', 'w', '', '', 'RESTORE']);
+    const { io } = fakeIO(['1', 'hunter2', '0', 'w', '', '', '', 'RESTORE']);
     const deps = makeDeps({
       describeImage: vi.fn(async () => ({
         encrypted: true,
@@ -153,7 +154,7 @@ describe('runRestoreWizard', () => {
   });
 
   it('re-asks after an invalid disk number', async () => {
-    const { io, prompts, text } = fakeIO(['1', '9', '1', 'w', 'n', '', 'RESTORE']);
+    const { io, prompts, text } = fakeIO(['1', '9', '1', 'w', 'n', '', '', 'RESTORE']);
     const deps = makeDeps();
 
     const code = await runRestoreWizard(io, deps);
@@ -168,7 +169,7 @@ describe('runRestoreWizard', () => {
   });
 
   it('supports selecting specific partitions and rejects invalid ones first', async () => {
-    const { io, text } = fakeIO(['1', '1', 'p', '7', '0,1', '', '', 'RESTORE']);
+    const { io, text } = fakeIO(['1', '1', 'p', '7', '0,1', '', '', '', 'RESTORE']);
     const deps = makeDeps();
 
     const code = await runRestoreWizard(io, deps);
@@ -182,7 +183,7 @@ describe('runRestoreWizard', () => {
   });
 
   it('cancels without executing when the confirmation is not RESTORE', async () => {
-    const { io, text } = fakeIO(['1', '0', 'w', 'y', '', 'no']);
+    const { io, text } = fakeIO(['1', '0', 'w', 'y', '', '', 'no']);
     const deps = makeDeps();
 
     const code = await runRestoreWizard(io, deps);
@@ -204,8 +205,23 @@ describe('runRestoreWizard', () => {
     expect(text()).toContain('Aborted — nothing was written');
   });
 
+  it('verifies the written blocks only when asked to', async () => {
+    // The after-write check is the one that proves a restore actually landed
+    // (field report: a restore that "succeeded" but left the volume needing
+    // chkdsk). On by default; say n to skip it.
+    const { io, text } = fakeIO(['1', '0', '', '', '', 'n', 'RESTORE']);
+    const deps = makeDeps();
+
+    expect(await runRestoreWizard(io, deps)).toBe(0);
+    expect(deps.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ verifyAfterRestore: false }),
+      expect.any(Function)
+    );
+    expect(text()).toContain('Verify write: no');
+  });
+
   it('returns 1 and explains a failed preflight without executing', async () => {
-    const { io, text } = fakeIO(['1', '0', 'w', '', '']);
+    const { io, text } = fakeIO(['1', '0', 'w', '', '', '']);
     const deps = makeDeps({
       preflight: vi.fn(async () => {
         throw new Error('target disk too small');
@@ -221,7 +237,7 @@ describe('runRestoreWizard', () => {
   });
 
   it('reports a failed restore result', async () => {
-    const { io, text } = fakeIO(['1', '0', 'w', '', '', 'RESTORE']);
+    const { io, text } = fakeIO(['1', '0', 'w', '', '', '', 'RESTORE']);
     const deps = makeDeps({
       execute: vi.fn(async () => ({ ok: false, error: 'write failed' }))
     });
@@ -233,7 +249,7 @@ describe('runRestoreWizard', () => {
   });
 
   it('treats a thrown execute as a failed restore', async () => {
-    const { io, text } = fakeIO(['1', '0', 'w', '', '', 'RESTORE']);
+    const { io, text } = fakeIO(['1', '0', 'w', '', '', '', 'RESTORE']);
     const deps = makeDeps({
       execute: vi.fn(async () => {
         throw new Error('disk vanished');
@@ -247,7 +263,7 @@ describe('runRestoreWizard', () => {
   });
 
   it('renders live progress from the execute callback', async () => {
-    const { io, text } = fakeIO(['1', '0', 'w', '', '', 'RESTORE']);
+    const { io, text } = fakeIO(['1', '0', 'w', '', '', '', 'RESTORE']);
     const deps = makeDeps({
       execute: vi.fn(async (_config, onProgress) => {
         onProgress({
@@ -271,7 +287,7 @@ describe('runRestoreWizard', () => {
   });
 
   it('accepts a typed .opbs path when the drive scan finds nothing', async () => {
-    const { io } = fakeIO(['D:\\backups\\sys.opbs', '0', 'w', '', '', 'RESTORE']);
+    const { io } = fakeIO(['D:\\backups\\sys.opbs', '0', 'w', '', '', '', 'RESTORE']);
     const deps = makeDeps({ scanDrives: vi.fn(async () => []) });
 
     const code = await runRestoreWizard(io, deps);
@@ -285,7 +301,7 @@ describe('runRestoreWizard', () => {
   });
 
   it('accepts a typed Macrium .mrimgx path when the drive scan finds nothing', async () => {
-    const { io } = fakeIO(['D:\\backups\\win.mrimgx', '0', 'w', '', '', 'RESTORE']);
+    const { io } = fakeIO(['D:\\backups\\win.mrimgx', '0', 'w', '', '', '', 'RESTORE']);
     const deps = makeDeps({ scanDrives: vi.fn(async () => []) });
 
     const code = await runRestoreWizard(io, deps);
@@ -299,7 +315,7 @@ describe('runRestoreWizard', () => {
   });
 
   it('lists a typed folder and lets the user pick one of its images', async () => {
-    const { io } = fakeIO(['D:\\backups', '2', '1', 'w', '', '', 'RESTORE']);
+    const { io } = fakeIO(['D:\\backups', '2', '1', 'w', '', '', '', 'RESTORE']);
     const deps = makeDeps({ scanDrives: vi.fn(async () => []) });
 
     const code = await runRestoreWizard(io, deps);
@@ -313,7 +329,7 @@ describe('runRestoreWizard', () => {
   });
 
   it('rejects an unreadable image and re-prompts', async () => {
-    const { io, text } = fakeIO(['1', '1', '0', 'w', '', '', 'RESTORE']);
+    const { io, text } = fakeIO(['1', '1', '0', 'w', '', '', '', 'RESTORE']);
     const describeCalls: string[] = [];
     let shouldFail = true;
     const deps = makeDeps({
@@ -344,7 +360,7 @@ describe('runRestoreWizard', () => {
   });
 
   it('nudges a numeric answer when the scan found no images', async () => {
-    const { io, text } = fakeIO(['3', 'D:\\backups\\sys.opbs', '0', 'w', '', '', 'RESTORE']);
+    const { io, text } = fakeIO(['3', 'D:\\backups\\sys.opbs', '0', 'w', '', '', '', 'RESTORE']);
     const deps = makeDeps({ scanDrives: vi.fn(async () => []) });
 
     const code = await runRestoreWizard(io, deps);
@@ -354,7 +370,7 @@ describe('runRestoreWizard', () => {
   });
 
   it('rescans when r is entered', async () => {
-    const { io } = fakeIO(['r', '1', '0', 'w', '', '', 'RESTORE']);
+    const { io } = fakeIO(['r', '1', '0', 'w', '', '', '', 'RESTORE']);
     const deps = makeDeps();
 
     const code = await runRestoreWizard(io, deps);

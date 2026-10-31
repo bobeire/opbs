@@ -265,6 +265,36 @@ src/
 7. If requested, the image is verified by re-reading and re-CRC-checking every
     block (decrypting as needed). The final outcome is written to `result.json`.
 
+### What a backup of a running system contains
+
+A backup taken while Windows is running is a **VSS snapshot**: the filesystem
+is consistent at one instant, and the image is a faithful copy of the volume
+at that moment. Two consequences worth knowing before you rely on one:
+
+- **It is not an application-level rollback.** A program that was mid-write
+  when the snapshot was taken — a browser profile, a mail store, a database,
+  a virtual disk in use — can be *internally* inconsistent inside the image
+  even though the filesystem around it is intact. Restoring such an image
+  gives the machine back exactly the state it was in, including that
+  half-written file. (Symptom: the app starts and immediately exits, or asks
+  to rebuild its profile.) The same caveat applies to every snapshot-based
+  backup tool; the fix is to close the applications you care about before the
+  backup, or to take the image after a full shutdown.
+- **The NTFS dirty flag travels with the image.** The volume was mounted when
+  it was captured, so the restored volume may be flagged "not cleanly
+  unmounted". Windows handles that at boot; if it reports filesystem problems
+  afterwards, `chkdsk X: /f` repairs them.
+
+For the cleanest possible image, shut the machine down fully first (note that
+Windows' Fast Startup makes "Shut down" a hybrid one — `shutdown /s /t 0`
+really does it) and back up from the recovery media.
+
+**Verify after restore** (offered by the recovery wizard and the CLI config
+as `verifyAfterRestore`) reads every written block back and compares it
+against the image. That proves the restore *landed*; it says nothing about
+whether the image's contents were internally consistent to begin with — those
+are two different questions, and it helps to know which one you are asking.
+
 ### Used-blocks-only capture (`usedBlocksOnly`)
 
 A backup (or clone) can drop free space: `usedBlocksOnly` reads the NTFS
