@@ -350,6 +350,11 @@ to date has shipped; **Investigate** items need spike work first.
   600000 iterations): the passphrase HMAC verifies, every one of the 122,864
   blocks decrypts (per-block IV) and decompresses to MD5s matching Macrium's
   own stored digests, and the NTFS volume browses and extracts files. The
+  round trip closed end to end on 2026-10-31: `restore` of that image into a
+  scratch VHDX reported `Job OK (7.5 GB)` in ~2 minutes and the post-restore
+  read-back verified **every** restored block against the image's MD5s with
+  zero mismatches (`verifyAfterRestore`; any failure prints a per-block
+  warning and none appeared). The
   suite is `test/unit/mrimgx-encrypted-real.test.ts`, gated on
   `OPBS_MRIMGX_ENC_PASSPHRASE` (+ optional `OPBS_MRIMGX_ENC_SAMPLE`) because
   the sample is gitignored and the passphrase must never be committed.
