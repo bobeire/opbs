@@ -417,6 +417,28 @@ export class RestoreEngine implements RestoreCoordinator {
     } else if (!vhd) {
       throw new Error('No target disk selected');
     }
+
+    // Refuse to restore over the volume the running Windows lives on. From
+    // inside the OS it can never be locked or written — Windows holds it open
+    // and it is the system volume — so the retry that "fails to lock" is a
+    // dead end by construction. The fix is to boot the recovery media, and
+    // saying so here beats a generic "volume in use" from the write path.
+    const systemDrive = (process.env.SystemDrive || 'C:').replace(':', '').toUpperCase();
+    const overRunningSystem = targetDisk?.partitions?.some(
+      (p) =>
+        (p.isSystem === true ||
+          p.isBoot === true ||
+          (p.driveLetter ?? '').replace(':', '').toUpperCase() === systemDrive) &&
+        targets.some((t) => t.offset === p.offset)
+    );
+    if (overRunningSystem) {
+      throw new Error(
+        `Refusing to restore onto ${systemDrive}: — the volume Windows is running from. ` +
+          `Windows holds that volume open, so it cannot be overwritten from inside the running ` +
+          `system (this is why it "cannot be locked"). Boot the OPBS recovery media and run the ` +
+          `restore from there.`
+      );
+    }
     const targetDiskSize = targetDisk ? targetDisk.size : resolveVirtualDiskSize(vhd!);
     const targetLabel = targetDisk ? `target disk ${config.targetDiskIndex}` : `virtual disk ${vhd!.path}`;
     for (const target of targets) {

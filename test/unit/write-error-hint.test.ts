@@ -35,6 +35,10 @@ describe('lockFailureMessage', () => {
     expect(msg).toContain('chkdsk');
     expect(msg).toContain('remove letter');
     expect(msg).toContain('manage-bde -status');
+    // The most common real cause: the wizard run from inside Windows against
+    // the volume Windows itself runs on. Name it before the generic remedies.
+    expect(msg).toContain('running OPBS inside Windows');
+    expect(msg).toContain('recovery media');
     // The promise that matters most to someone restoring: the disk is intact.
     expect(msg).toContain('Nothing has been written to the disk');
   });

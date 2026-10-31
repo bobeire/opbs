@@ -856,6 +856,52 @@ describe('RestoreEngine Macrium images', () => {
     expect(unlocked.partitions[0].fsType).toBe('NTFS');
   });
 
+  it('refuses to restore over the volume the running Windows lives on', async () => {
+    // Field report (kelper, 2026-10-31): the wizard was run from inside
+    // Windows against the live system volume and the restore died at "cannot
+    // lock" - a dead end by construction. The plan must refuse it up front
+    // with the recovery-media answer instead.
+    writeMacrium();
+    const enumerator = createFakeEnumerator();
+    (enumerator as unknown as { getDisks: ReturnType<typeof vi.fn> }).getDisks = vi.fn(async () => [
+      {
+        index: 1,
+        model: 'TEST',
+        size: 1_000_000_000,
+        serial: 'TEST',
+        partitions: [
+          { partitionIndex: 0, offset: GEOM_OFFSET, size: PART_SIZE, type: 7, driveLetter: 'C:', isBoot: true, isSystem: true }
+        ]
+      }
+    ]);
+    const engine = new RestoreEngine(enumerator);
+    await expect(
+      engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] })
+    ).rejects.toThrow(/recovery media/);
+  });
+
+  it('still restores a data partition on the system disk', async () => {
+    // Only the live system/boot volume is off limits - a data partition that
+    // merely shares the disk is a legitimate restore target.
+    writeMacrium();
+    const enumerator = createFakeEnumerator();
+    (enumerator as unknown as { getDisks: ReturnType<typeof vi.fn> }).getDisks = vi.fn(async () => [
+      {
+        index: 1,
+        model: 'TEST',
+        size: 1_000_000_000,
+        serial: 'TEST',
+        partitions: [
+          { partitionIndex: 0, offset: GEOM_OFFSET, size: PART_SIZE, type: 7, driveLetter: 'D:', isBoot: false, isSystem: false },
+          { partitionIndex: 1, offset: 2_000_000_000, size: PART_SIZE, type: 7, driveLetter: 'C:', isBoot: true, isSystem: true }
+        ]
+      }
+    ]);
+    const engine = new RestoreEngine(enumerator);
+    const job = await engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] });
+    expect(job.targets[0].offset).toBe(GEOM_OFFSET);
+  });
+
   it('grows a partition when targetLayout requests a larger size (fresh table planned)', async () => {
     writeMacrium();
     const engine = new RestoreEngine(createFakeEnumerator());

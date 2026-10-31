@@ -1037,9 +1037,13 @@ export function lockFailureMessage(label: string, volumePath?: string, detail?: 
     `(open files, chkdsk/autochk, or a mounted filesystem), is mounted read-only because its ` +
     `dirty flag is set (writes to it then say "Access is denied"), or is BitLocker-encrypted ` +
     `and locked here. Nothing has been written to the disk.${why} ` +
-    `Ways out: \`chkdsk X: /f\` clears the dirty flag; \`diskpart\` → \`select volume X\` → ` +
-    `\`remove letter=X\` frees a volume that something in this environment holds open; and ` +
-    `\`manage-bde -status\` shows BitLocker ("Protection On" means unlock or suspend it first).`
+    `If you are running OPBS inside Windows and this is the volume Windows itself runs from, ` +
+    `that is the cause: it can never be overwritten from inside the running system - boot the ` +
+    `OPBS recovery media and restore from there. ` +
+    `Ways out for any other volume: \`chkdsk X: /f\` clears the dirty flag; \`diskpart\` → ` +
+    `\`select volume X\` → \`remove letter=X\` frees a volume that something in this environment ` +
+    `holds open; and \`manage-bde -status\` shows BitLocker ("Protection On" means unlock or ` +
+    `suspend it first).`
   );
 }
 
