@@ -633,19 +633,24 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
           <div className="wizard-step">
             <h2>Select Source Disk</h2>
 
-            <div className="setting-item bitlocker-status-row">
-              <span>BitLocker:</span>
-              {blChecking ? (
-                <span className="field-hint">Checking status…</span>
-              ) : blVolumes ? (
-                <span className="field-hint">
-                  {blVolumes.length === 0
-                    ? 'No BitLocker volumes found.'
-                    : blWarnings.length > 0
-                      ? `${blVolumes.length} volume${blVolumes.length === 1 ? '' : 's'} checked — see notes below.`
-                      : `${blVolumes.length} volume${blVolumes.length === 1 ? '' : 's'} checked — no issues found.`}
-                </span>
-              ) : blNeedsElevation ? (
+            {/* Only surfaced when it can matter: something to unlock or store
+                keys for, the check needs elevation, or it failed. On a plain
+                unencrypted machine it is pure noise (field report: "Why do I
+                need the BitLocker stuff in a backup?" - you don't). */}
+            {(blChecking || blNeedsElevation || blError || blWarnings.length > 0) && (
+              <div className="setting-item bitlocker-status-row">
+                <span>BitLocker:</span>
+                {blChecking ? (
+                  <span className="field-hint">Checking status…</span>
+                ) : blVolumes ? (
+                  <span className="field-hint">
+                    {blVolumes.length === 0
+                      ? 'No BitLocker volumes found.'
+                      : blWarnings.length > 0
+                        ? `${blVolumes.length} volume${blVolumes.length === 1 ? '' : 's'} checked — see notes below.`
+                        : `${blVolumes.length} volume${blVolumes.length === 1 ? '' : 's'} checked — no issues found.`}
+                  </span>
+                ) : blNeedsElevation ? (
                 <>
                   <span className="field-hint">Administrator rights required to read status.</span>
                   <button
@@ -668,13 +673,16 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
               ) : (
                 <span className="field-hint">Not checked</span>
               )}
-            </div>
+              </div>
+            )}
             {blWarnings.map((w, i) => (
               <div key={i} className="warning-box">
                 <p>{w}</p>
               </div>
             ))}
-            {blWarnings.length === 0 &&
+            {/* Context for the volumes that are fine, shown alongside the
+                ones that are not - never on its own. */}
+            {blWarnings.length > 0 &&
               blOkNotes.map((n, i) => (
                 <div key={i} className="bl-ok-note">
                   <p>{n}</p>
