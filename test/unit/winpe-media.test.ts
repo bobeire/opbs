@@ -247,6 +247,21 @@ describe('winpe-media', () => {
       expect(s).not.toMatch(/^\s*start\s+"/m);
     });
 
+    it('leaves a shell behind instead of a black screen', () => {
+      // When winpeshl's command finishes the console closes and there is no
+      // way to open one again (Shift+F10 is a Windows Setup gesture, not a
+      // WinPE one) — a dead end for anyone running test-vhd.cmd or diskpart.
+      // Both the finished and the payload-not-found paths must end in `cmd /k`.
+      const s = buildStartnetCmd();
+      expect(s).toContain('cmd /k');
+      expect(s).not.toContain('exit /b 0');
+      expect(s).not.toContain('exit /b 1');
+      // The shell is the last thing that happens in each path.
+      const lines = s.split('\r\n');
+      expect(lines[lines.length - 1]).toBe('cmd /k');
+      expect(lines.filter((l) => l.trim() === 'cmd /k')).toHaveLength(2);
+    });
+
     it('both scripts neutralize OPENSSL_CONF before node.exe starts', () => {
       // A stale OPENSSL_CONF (installer leftover) makes node exit fatally at
       // startup with "openssl configuration error ... BIO_new_file" before any

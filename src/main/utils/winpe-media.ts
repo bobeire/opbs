@@ -326,13 +326,22 @@ export function buildStartnetCmd(): string {
     // would parse the quoted path as the window TITLE (classic cmd gotcha)
     // and open a bare second prompt — restore.cmd never ran, so no wizard.
     'call "%OPBS_ROOT%\\restore.cmd"',
-    'exit /b 0',
+    // Leave a shell instead of exiting: when winpeshl's command finishes the
+    // console closes and the machine sits on a black screen with no way to
+    // open one (Shift+F10 is a Windows Setup gesture, not a WinPE one). A
+    // recovery stick owes the user a prompt for test-vhd.cmd, diskpart or
+    // copying files out.
+    'echo.',
+    'echo  OPBS is finished. This prompt stays open for manual recovery work',
+    'echo  (test-vhd.cmd, diskpart, copying files out). Type  exit  or run',
+    'echo  wpeutil shutdown  when you are done.',
+    'cmd /k',
     ':notfound',
     'echo.',
     'echo  ERROR: OPBS payload not found on this media.',
     'echo  Burn/copy the ISO and boot it again, or mount the added drive.',
-    'pause',
-    'exit /b 1'
+    'echo  This prompt stays open so you can look around.',
+    'cmd /k'
   ].join('\r\n');
 }
 

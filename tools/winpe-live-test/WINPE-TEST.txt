@@ -60,9 +60,13 @@ How to run
    window may open automatically - CLOSE it (or ignore it). This test
    does not use the wizard.
 3. Find the stick's drive letter. X: is the WinPE RAM drive (the "Windows"
-   drive) - the OPBS payload is NOT there on a stick boot. Press Shift+F10,
-   then:
-        wmic logicaldisk get caption,volumename
+   drive) - the OPBS payload is NOT there on a stick boot. Shift+F10 is a
+   Windows Setup gesture that plain WinPE does not handle: the console the
+   OPBS wizard ran in is yours to use, and after the wizard ends it stays at
+   a prompt (on media built before that fix it closed to a black screen -
+   break out there with Ctrl+C and Y to "Terminate batch job (Y/N)?"). To
+   find the drive (wmic is not shipped with recent WinPE images, use `vol`):
+        for %D in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do @vol %D: 2>nul | find /i "OPBS"
    The stick is the one labeled:
         OPBS-BOOT       dual-partition media (FAT32 boot partition)
         WINPE           classic single-partition media
