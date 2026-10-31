@@ -161,6 +161,9 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [acknowledge, setAcknowledge] = useState(false);
+  // The "this is the disk Windows runs from" block is a choice; the
+  // boot-from-media option expands its steps on demand.
+  const [showMediaSteps, setShowMediaSteps] = useState(false);
   // BitLocker unlock box (shown when preflight reports the image's volume is
   // locked). Bumping the nonce re-runs the preflight after a successful unlock.
   const [unlockPassword, setUnlockPassword] = useState('');
@@ -929,13 +932,12 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                           <div className="error-message">
                             <p>
                               <strong>This is the disk Windows is running from.</strong> A restore
-                              cannot be performed from inside a live Windows session — the system
-                              volume cannot be unlocked for writing, so the restore would fail (and
-                              could leave the disk partially written).
+                              cannot run from inside a live Windows session — the system volume
+                              cannot be unlocked for writing, so it would fail (and could leave the
+                              disk partially written).
                             </p>
                             <p>
-                              To restore this disk, build a bootable recovery media under{' '}
-                              <strong>Media</strong>, boot from it, and run the restore there.
+                              <strong>Choose how to continue:</strong>
                             </p>
                             <div className="wizard-actions">
                               <button
@@ -946,6 +948,34 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                                 {recoveryPhase === 'staging'
                                   ? 'Staging…'
                                   : 'Restore after reboot into recovery…'}
+                              </button>
+                              <button
+                                className="btn-secondary"
+                                onClick={() => setShowMediaSteps((v) => !v)}
+                              >
+                                {showMediaSteps
+                                  ? 'Hide the boot-from-media steps'
+                                  : 'Boot from recovery media instead'}
+                              </button>
+                            </div>
+                            {showMediaSteps && (
+                              <ol className="field-hint" style={{ margin: '8px 0 0 18px' }}>
+                                <li>
+                                  Build a bootable recovery stick under <strong>Media</strong>.
+                                </li>
+                                <li>Boot this machine from that stick.</li>
+                                <li>
+                                  Run the restore from the wizard it starts — nothing in Windows is
+                                  running then, so the disk can be written.
+                                </li>
+                              </ol>
+                            )}
+                            <div className="wizard-actions">
+                              <button
+                                className="btn-secondary"
+                                onClick={() => setCurrentStep('select_target')}
+                              >
+                                Choose a different target
                               </button>
                             </div>
                           </div>

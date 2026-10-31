@@ -59,6 +59,21 @@ export function normalizeLogLevel(level: LogLevel | string): LogLevel {
 }
 
 /**
+ * Local wall-clock stamp for log lines. Deliberately NOT `toISOString()`: that
+ * appends "Z" and claims UTC, while in a recovery environment the machine's
+ * clock is the hardware clock read as-is - so the printed time looked "in the
+ * future" to a user comparing it against theirs. Local time is what people
+ * mean when they say when something happened.
+ */
+export function logTimestamp(d: Date = new Date()): string {
+  const p = (n: number, w = 2): string => String(n).padStart(w, '0');
+  return (
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`
+  );
+}
+
+/**
  * Logger that prefers electron-log (crash/file handling, rotation) but falls
  * back to a minimal file+console logger when electron-log is not bundled,
  * e.g. inside the WinPE smoke/restore payload.
@@ -86,7 +101,7 @@ class Logger {
   }
 
   private format(level: LogLevel, message: string, data?: unknown): string {
-    const timestamp = new Date().toISOString();
+    const timestamp = logTimestamp();
     let entry = `[${timestamp}] [${level}] ${message}`;
     if (data !== undefined) {
       entry += ` | ${JSON.stringify(data)}`;

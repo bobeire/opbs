@@ -14,6 +14,7 @@ import { registerScheduledTask, removeScheduledTask, listScheduledTasks } from '
 import { decryptSecret } from '../utils/secret-store';
 import { dispatchHelperJob } from '../helper/job-runner';
 import { launchElevatedJob } from '../helper/launcher';
+import type { PipeClient } from '../utils/pipe-ipc';
 import { winfspAvailable } from '../imaging/mount-manager';
 import { JobResult } from '../imaging/imaging-job';
 import type { RestoreJobProgress, RestoreJob, RestoreTarget } from '../imaging/imaging-job';
@@ -1360,9 +1361,38 @@ async function runJobInProcess(
   const resultPath = path.join(dir, 'result.json');
   const progressPath = path.join(dir, 'progress.json');
   const cancelPath = path.join(dir, 'cancel');
+  // The job normally reports progress over a named pipe to the launcher that
+  // spawned it; here it runs in-process, so hand it a stand-in that prints.
+  // Without this an elevated/inline restore is a silent console for minutes -
+  // exactly what a user in the recovery environment asked for feedback on.
+  let printedProgress = false;
+  // Only `send` is ever called on it - the rest of the PipeClient surface
+  // (socket, connect, ...) is the real transport, which this stand-in replaces.
+  const progressPipe = {
+    send: (msg: unknown): boolean => {
+      const m = msg as {
+        type?: string;
+        phase?: string;
+        percent?: number;
+        bytesDone?: number;
+        speed?: number;
+        currentPartition?: string;
+      };
+      if (m && m.type === 'progress' && !ctx.opts.json) {
+        printedProgress = true;
+        process.stdout.write(
+          `\r[${m.phase ?? 'working'}] ${Number(m.percent ?? 0).toFixed(0)}%  ` +
+            `${m.currentPartition || ''}  ${formatBytes(Number(m.bytesDone ?? 0))} at ` +
+            `${formatBytes(Number(m.speed ?? 0))}/s     `
+        );
+      }
+      return true;
+    }
+  } as unknown as PipeClient;
   try {
     fs.writeFileSync(jobPath, JSON.stringify(job));
-    await dispatchHelperJob(jobPath, resultPath, progressPath, cancelPath);
+    await dispatchHelperJob(jobPath, resultPath, progressPath, cancelPath, undefined, progressPipe);
+    if (printedProgress) process.stdout.write('\n');
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
     if (ctx.opts.json) {
       console.log(JSON.stringify(result, null, 2));

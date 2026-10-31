@@ -1,5 +1,21 @@
 import { describe, it, expect } from 'vitest';
-import { LogLevel, normalizeLogLevel } from '../../src/main/utils/logger';
+import { LogLevel, normalizeLogLevel, logTimestamp } from '../../src/main/utils/logger';
+
+describe('logTimestamp', () => {
+  it('is local wall-clock time with no UTC claim', () => {
+    // toISOString() appends "Z" and claims UTC. In a recovery environment the
+    // clock is the hardware clock read as-is, so the printed time looked "in
+    // the future" to a user comparing it with theirs (field report 2026-10-31).
+    const stamp = logTimestamp(new Date(2026, 9, 31, 18, 27, 32, 455));
+    expect(stamp).toBe('2026-10-31 18:27:32.455');
+    expect(stamp).not.toContain('Z');
+    expect(stamp).not.toContain('T');
+  });
+
+  it('pads every field so lines sort chronologically', () => {
+    expect(logTimestamp(new Date(2026, 0, 2, 3, 4, 5, 6))).toBe('2026-01-02 03:04:05.006');
+  });
+});
 
 describe('normalizeLogLevel', () => {
   it('accepts the enum values as-is', () => {
