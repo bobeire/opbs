@@ -224,9 +224,19 @@ to date has shipped; **Investigate** items need spike work first.
   the boot size (1024–32768 MiB) and that the stick holds boot + 1 GiB; the
   elevated script refuses the system disk and re-discovers both drive letters
   after `diskpart`. Unit tests cover the generated script and the guards, and
-  the emitted PowerShell is syntax-checked — but the **physical boot test is
-  still pending** (same `tools/winpe-live-test/` drill as the single-partition
-  media) before this ships.
+  the emitted PowerShell is syntax-checked. **Boot test PASSED (2026-10-31)**:
+  built onto an 8 GB stick, booted on a laptop (via firmware "boot from file"
+  → `\EFI\BOOT\BOOTX64.EFI` — some firmware creates no menu entry for
+  removable media), `test-vhd.cmd` reports `ALL PASS` and `judge.js` reports
+  `JUDGE ALL PASS` (both partitions byte-exact). The media-layout probe sees
+  the layout end to end from inside WinPE:
+  `media: volumes C: D: E: X:` → `media: data partition at E:\OPBS-Images` →
+  `media: data image E:\OPBS-Images\8EB50E7B9F6BEDB2-00-00.mrimgx` →
+  `PASS: data-partition image parses` — that image is the real
+  password-protected Reflect X sample, so the locked-parse path is exercised
+  from the NTFS data partition too. Two build bugs were found and fixed by
+  this round (FAT32's 11-character label cap, and judging the stick by disk
+  size rather than the leftover volume), both now regression-tested.
 - 🚧 **Media boot leaves no shell after the wizard** (found 2026-10-31 while
   guiding a live test): `restore.cmd` runs the wizard and then `exit /b`, so
   when it finishes the console closes and WinPE is left on a black screen —
@@ -248,8 +258,8 @@ to date has shipped; **Investigate** items need spike work first.
   `INFO: no OPBS-Images folder …` line on single-partition media). Network
   probe reports WARN — this stick's WIM carries no NIC driver, which is what
   `media create --driver` is for. Covers the classic single-partition media
-  path that field users run; the dual-partition layout's boot test is a
-  separate item below.
+  path that field users run; the dual-partition layout passed the same drill
+  the same day (see the item above).
 - ✅ Network drivers: the first probe run reported `ipv4=none` (the stock
   WinPE image carries no driver for the host NIC), so the host's Intel
   Ethernet packages (`e1d.inf` 12.19.2.60/62) were injected into the media's
