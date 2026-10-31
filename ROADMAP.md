@@ -227,6 +227,15 @@ to date has shipped; **Investigate** items need spike work first.
   the emitted PowerShell is syntax-checked — but the **physical boot test is
   still pending** (same `tools/winpe-live-test/` drill as the single-partition
   media) before this ships.
+- 🚧 **Media boot leaves no shell after the wizard** (found 2026-10-31 while
+  guiding a live test): `restore.cmd` runs the wizard and then `exit /b`, so
+  when it finishes the console closes and WinPE is left on a black screen —
+  and Shift+F10 is a Windows Setup gesture that plain WinPE does not handle,
+  so there is no way to open one. Manual recovery work (`test-vhd.cmd`,
+  `diskpart`, copying files out) currently needs the Ctrl+C → "Terminate
+  batch job (Y/N)?" → Y trick to break out of the batch. Fix: end the media
+  flow with `cmd /k` (as the recovery-after-reboot flow already does on its
+  failure path) so a shell is left behind.
 - ✅ **Media live test, 0.6.94 round (2026-10-31)**: `test-vhd.cmd` run from
   the booted stick on a second machine (laptop, Patriot M.2 P320 512GB,
   WinPE) reports `ALL PASS` — `backup --source-vhd` of `test\src.vhdx` →
