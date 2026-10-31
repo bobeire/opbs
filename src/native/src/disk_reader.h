@@ -52,6 +52,10 @@ public:
     // Lock + dismount a mounted volume and hold the lock handle so raw
     // physical-drive writes are not racing the filesystem cache.
     static bool LockAndDismountVolume(const std::string& volumePath);
+    // Why the last LockAndDismountVolume call failed (empty when it did not).
+    // Field reports read like "the volume is still in use" for three very
+    // different causes; this names the step and the Windows error code.
+    static std::string LastLockNote();
     // Unlock/close every volume held by LockAndDismountVolume.
     static void ReleaseLockedVolumes();
     // Ask Windows to re-read the partition table after a raw restore.
@@ -69,5 +73,6 @@ private:
     static HANDLE GetCachedHandle(const std::string& devicePath, DWORD access);
     static std::unordered_map<std::string, HANDLE> s_handleCache;
     static std::vector<HANDLE> s_lockedVolumes;
+    static std::string s_lastLockNote;
 #endif
 };

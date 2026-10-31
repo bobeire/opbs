@@ -38,4 +38,17 @@ describe('lockFailureMessage', () => {
     // The promise that matters most to someone restoring: the disk is intact.
     expect(msg).toContain('Nothing has been written to the disk');
   });
+
+  it('embeds the native step that failed, so a report identifies the cause', () => {
+    const msg = lockFailureMessage(
+      'Partition 2',
+      '\\\\?\\Volume{c33d64ca-495d-4e5a-8d0a-5aeebfa59c61}\\',
+      'the volume stayed in use for 10s (lock error 5) and the forced dismount was refused too (error 32)'
+    );
+    expect(msg).toContain('\\\\?\\Volume{c33d64ca');
+    expect(msg).toContain('Step that failed: the volume stayed in use for 10s');
+    expect(msg).toContain('forced dismount was refused');
+    // Without a note from the native layer, nothing is invented.
+    expect(lockFailureMessage('Partition 2')).not.toContain('Step that failed');
+  });
 });

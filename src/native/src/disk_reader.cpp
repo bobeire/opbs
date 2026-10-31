@@ -30,9 +30,17 @@ static std::string FormatWinError(DWORD code) {
 std::unordered_map<std::string, HANDLE> DiskReader::s_handleCache;
 // Volumes locked for restore; held open until ReleaseLockedVolumes.
 std::vector<HANDLE> DiskReader::s_lockedVolumes;
+// Diagnostic for the last LockAndDismountVolume failure (see LastLockNote).
+std::string DiskReader::s_lastLockNote;
+
+std::string DiskReader::LastLockNote() {
+    return s_lastLockNote;
+}
 
 bool DiskReader::LockAndDismountVolume(const std::string& volumePath) {
+    s_lastLockNote.clear();
     if (volumePath.empty()) {
+        s_lastLockNote = "no volume path for this partition (nothing to lock)";
         return false;
     }
     std::wstring wide(volumePath.begin(), volumePath.end());
@@ -67,11 +75,15 @@ bool DiskReader::LockAndDismountVolume(const std::string& volumePath) {
         );
     }
     if (hVolume == INVALID_HANDLE_VALUE) {
+        s_lastLockNote =
+            "cannot open the volume at all (error " + std::to_string(GetLastError()) +
+            ") - the device is gone, or Windows denies access to it";
         return false;
     }
 
     DWORD bytesReturned = 0;
     bool locked = false;
+    DWORD lockError = 0;
     // A volume frees up within seconds once autochk/Explorer lets go of it, so
     // retry long enough to outlast that instead of refusing a restore that is
     // about to overwrite the volume anyway.
@@ -80,10 +92,13 @@ bool DiskReader::LockAndDismountVolume(const std::string& volumePath) {
             locked = true;
             break;
         }
+        lockError = GetLastError();
         Sleep(250);
     }
     if (locked) {
         if (!DeviceIoControl(hVolume, FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &bytesReturned, nullptr)) {
+            s_lastLockNote =
+                "locked, but the dismount failed (error " + std::to_string(GetLastError()) + ")";
             DeviceIoControl(hVolume, FSCTL_UNLOCK_VOLUME, nullptr, 0, nullptr, 0, &bytesReturned, nullptr);
             CloseHandle(hVolume);
             return false;
@@ -95,9 +110,16 @@ bool DiskReader::LockAndDismountVolume(const std::string& volumePath) {
         // attempted afterwards (it usually succeeds once the FS is gone) and
         // the handle is held either way, so nothing re-mounts under us.
         if (!DeviceIoControl(hVolume, FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &bytesReturned, nullptr)) {
+            s_lastLockNote =
+                "the volume stayed in use for 10s (lock error " + std::to_string(lockError) +
+                ") and the forced dismount was refused too (error " + std::to_string(GetLastError()) +
+                ") - some process is holding it open";
             CloseHandle(hVolume);
             return false;
         }
+        s_lastLockNote =
+            "the volume was in use for 10s (lock error " + std::to_string(lockError) +
+            "); it was taken by forced dismount instead";
         DeviceIoControl(hVolume, FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &bytesReturned, nullptr);
     }
 

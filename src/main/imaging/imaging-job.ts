@@ -17,6 +17,11 @@ export interface NativeImagingApi {
   lockAndDismountVolume?(volumePath: string): boolean;
   /** Unlock/close volumes held by lockAndDismountVolume. */
   releaseLockedVolumes?(): void;
+  /**
+   * Why the last lockAndDismountVolume failed, or how it won (e.g. a forced
+   * dismount because something held the volume). Empty when it just worked.
+   */
+  getLastLockNote?(): string;
   /** Ask Windows to re-read the partition table after a raw restore. */
   updateDiskProperties?(devicePath: string): boolean;
   /** Windows' current view of a disk's partitions (post-rescan layout). */

@@ -1029,13 +1029,14 @@ export function writeErrorHint(message: string): string {
  * letter clears it. `volumePath` is included so a report identifies exactly
  * which volume (GUID path) was refused.
  */
-export function lockFailureMessage(label: string, volumePath?: string): string {
+export function lockFailureMessage(label: string, volumePath?: string, detail?: string): string {
   const where = volumePath ? ` (${volumePath})` : '';
+  const why = detail ? ` Step that failed: ${detail}.` : '';
   return (
     `Cannot lock ${label}${where} for writing — the volume is still in use in this environment ` +
     `(open files, chkdsk/autochk, or a mounted filesystem), is mounted read-only because its ` +
     `dirty flag is set (writes to it then say "Access is denied"), or is BitLocker-encrypted ` +
-    `and locked here. Nothing has been written to the disk. ` +
+    `and locked here. Nothing has been written to the disk.${why} ` +
     `Ways out: \`chkdsk X: /f\` clears the dirty flag; \`diskpart\` → \`select volume X\` → ` +
     `\`remove letter=X\` frees a volume that something in this environment holds open; and ` +
     `\`manage-bde -status\` shows BitLocker ("Protection On" means unlock or suspend it first).`
@@ -1340,16 +1341,24 @@ export async function runRestoreJob(
         for (const target of job.targets) {
           const volumePath = native.getVolumePath(target.diskIndex, target.offset);
           if (!volumePath) continue;
-          if (!native.lockAndDismountVolume(volumePath)) {
+          const taken = native.lockAndDismountVolume(volumePath);
+          // The native layer names the step that failed (open vs lock vs
+          // dismount) and the Windows error code — field reports need that.
+          const note = native.getLastLockNote?.() ?? '';
+          if (!taken) {
             if (phase === 'before restore') {
               // Refuse to start: a raw write to a held volume dies partway
               // through and leaves the disk partially written. Fail here
               // instead — nothing has been touched yet.
-              throw new Error(lockFailureMessage(target.label, volumePath));
+              throw new Error(lockFailureMessage(target.label, volumePath, note));
             }
             warnings.push(
-              `Could not dismount ${target.label} ${phase}; eject and reinsert the drive (or reboot) if Explorer still shows stale files.`
+              `Could not dismount ${target.label} ${phase}${note ? ` (${note})` : ''}; eject and reinsert the drive (or reboot) if Explorer still shows stale files.`
             );
+          } else if (note) {
+            // Won the hard way (e.g. forced dismount after 10s in use) — say so
+            // instead of pretending it was routine.
+            warnings.push(`${target.label}: ${note}`);
           }
         }
       }
@@ -2082,16 +2091,24 @@ async function runMacriumRestoreJob(
         for (const target of job.targets) {
           const volumePath = native.getVolumePath(target.diskIndex, target.offset);
           if (!volumePath) continue;
-          if (!native.lockAndDismountVolume(volumePath)) {
+          const taken = native.lockAndDismountVolume(volumePath);
+          // The native layer names the step that failed (open vs lock vs
+          // dismount) and the Windows error code — field reports need that.
+          const note = native.getLastLockNote?.() ?? '';
+          if (!taken) {
             if (phase === 'before restore') {
               // Refuse to start: a raw write to a held volume dies partway
               // through and leaves the disk partially written. Fail here
               // instead — nothing has been touched yet.
-              throw new Error(lockFailureMessage(target.label, volumePath));
+              throw new Error(lockFailureMessage(target.label, volumePath, note));
             }
             warnings.push(
-              `Could not dismount ${target.label} ${phase}; eject and reinsert the drive (or reboot) if Explorer still shows stale files.`
+              `Could not dismount ${target.label} ${phase}${note ? ` (${note})` : ''}; eject and reinsert the drive (or reboot) if Explorer still shows stale files.`
             );
+          } else if (note) {
+            // Won the hard way (e.g. forced dismount after 10s in use) — say so
+            // instead of pretending it was routine.
+            warnings.push(`${target.label}: ${note}`);
           }
         }
       }

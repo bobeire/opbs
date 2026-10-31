@@ -96,6 +96,11 @@ Napi::Value ReleaseLockedVolumes(const Napi::CallbackInfo& info) {
     return info.Env().Undefined();
 }
 
+// Why the last lockAndDismountVolume failed, or how it won (forced dismount).
+Napi::Value GetLastLockNote(const Napi::CallbackInfo& info) {
+    return Napi::String::New(info.Env(), DiskReader::LastLockNote());
+}
+
 // Ask Windows to re-read the partition table after a raw restore.
 Napi::Value UpdateDiskProperties(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
@@ -385,6 +390,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set("getPhysicalDrivePath", Napi::Function::New(env, GetPhysicalDrivePath));
     exports.Set("getVolumePath", Napi::Function::New(env, GetVolumePath));
     exports.Set("lockAndDismountVolume", Napi::Function::New(env, LockAndDismountVolume));
+    exports.Set("getLastLockNote", Napi::Function::New(env, GetLastLockNote));
     exports.Set("releaseLockedVolumes", Napi::Function::New(env, ReleaseLockedVolumes));
     exports.Set("updateDiskProperties", Napi::Function::New(env, UpdateDiskProperties));
     exports.Set("queryUsnJournal", Napi::Function::New(env, QueryUsnJournal));
