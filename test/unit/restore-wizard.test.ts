@@ -1,11 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   runRestoreWizard,
+  runBackupWizard,
+  runRecoveryMenu,
   scanDrivesForImages,
   fmtBytes,
   type WizardIO,
   type WizardDeps,
-  type WizardImage
+  type WizardImage,
+  type BackupWizardDeps
 } from '../../src/main/cli/restore-wizard';
 
 interface FakeIo {
@@ -385,5 +388,105 @@ describe('fmtBytes', () => {
     expect(fmtBytes(5 * 1024 ** 3)).toBe('5.0 GB');
     expect(fmtBytes(-1)).toBe('0 B');
     expect(fmtBytes(Number.NaN)).toBe('0 B');
+  });
+});
+
+describe('runRecoveryMenu', () => {
+  it('offers restore, backup and a shell', async () => {
+    const { io, text } = fakeIO(['2']);
+    expect(await runRecoveryMenu(io)).toBe('backup');
+    expect(text()).toContain('Back up this machine');
+    expect(text()).toContain('Restore this machine');
+    expect(text()).toContain('Command prompt');
+  });
+
+  it('accepts the short answers and re-prompts on nonsense', async () => {
+    const nonsense = fakeIO(['what', 'r']);
+    expect(await runRecoveryMenu(nonsense.io)).toBe('restore');
+    expect(nonsense.text()).toContain('Enter 1, 2 or 3.');
+    expect(await runRecoveryMenu(fakeIO(['3']).io)).toBe('shell');
+    expect(await runRecoveryMenu(fakeIO(['q']).io)).toBe('shell');
+  });
+});
+
+describe('runBackupWizard', () => {
+  function makeBackupDeps(overrides: Partial<BackupWizardDeps> = {}): BackupWizardDeps {
+    return {
+      getDisks: vi.fn(async () => [
+        { index: 0, size: 512_000_000_000, model: 'Samsung SSD 980', serial: 'S123' }
+      ]),
+      getPartitions: vi.fn(async () => [
+        { partitionIndex: 0, size: 104_857_600, fsType: 'fat32', label: 'EFI' },
+        { partitionIndex: 1, size: 511_000_000_000, fsType: 'ntfs', label: 'Windows' }
+      ]),
+      listDestinations: vi.fn(async () => [
+        { path: 'E:\\', label: 'E: Image files', freeBytes: 1_400_000_000_000 }
+      ]),
+      execute: vi.fn(async () => ({ ok: true, bytesWritten: 46_000_000_000 })),
+      ...overrides
+    };
+  }
+
+  it('backs up the whole disk to the chosen destination on defaults', async () => {
+    // source disk, mode (default = whole disk), destination, then three
+    // option prompts left at their defaults, then BACKUP.
+    const { io, text } = fakeIO(['0', '', '0', '', '', '', 'BACKUP']);
+    const deps = makeBackupDeps();
+
+    const code = await runBackupWizard(io, deps);
+
+    expect(code).toBe(0);
+    expect(deps.execute).toHaveBeenCalledWith(
+      {
+        sourceDiskIndex: 0,
+        sourcePartitions: [],
+        destinationPath: 'E:\\',
+        compressionLevel: 1,
+        verificationEnabled: true,
+        usedBlocksOnly: true
+      },
+      expect.any(Function)
+    );
+    expect(text()).toContain('Backup complete');
+    expect(text()).toContain('The image is in E:\\');
+  });
+
+  it('writes nothing when the confirmation is not BACKUP', async () => {
+    const { io, text } = fakeIO(['0', '', '0', '', '', '', 'nope']);
+    const deps = makeBackupDeps();
+
+    expect(await runBackupWizard(io, deps)).toBe(1);
+    expect(deps.execute).not.toHaveBeenCalled();
+    expect(text()).toContain('nothing was written');
+  });
+
+  it('re-prompts for partitions the disk does not have', async () => {
+    const { io, text } = fakeIO(['0', 'p', '7', '0,1', '0', '', '', '', 'BACKUP']);
+    const deps = makeBackupDeps();
+
+    expect(await runBackupWizard(io, deps)).toBe(0);
+    expect(deps.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ sourcePartitions: [0, 1] }),
+      expect.any(Function)
+    );
+    expect(text()).toContain('Invalid selection');
+  });
+
+  it('reports a failed backup instead of claiming success', async () => {
+    const { io, text } = fakeIO(['0', '', '0', '', '', '', 'BACKUP']);
+    const deps = makeBackupDeps({ execute: vi.fn(async () => ({ ok: false, error: 'disk full' })) });
+
+    expect(await runBackupWizard(io, deps)).toBe(1);
+    expect(text()).toContain('Backup FAILED: disk full');
+    expect(text()).not.toContain('Backup complete');
+  });
+
+  it('says so when there is nowhere to write', async () => {
+    const { io, text } = fakeIO(['0', '']);
+    const deps = makeBackupDeps({ listDestinations: vi.fn(async () => []) });
+
+    expect(await runBackupWizard(io, deps)).toBe(1);
+    expect(deps.execute).not.toHaveBeenCalled();
+    expect(text()).toContain('No destination volume found');
   });
 });

@@ -364,7 +364,7 @@ export function buildRestoreCmd(): string {
     'if exist "%~dp0OPBS-restore.json" set CFG=%~dp0OPBS-restore.json',
     'if defined CFG goto :run',
     'echo  No restore config is staged on this media.',
-    'echo  Starting the interactive recovery wizard...',
+    'echo  Starting the recovery menu (restore / backup / command prompt)...',
     'echo.',
     '"%~dp0node.exe" "%~dp0winpe-entry.js" wizard',
     'set RC=%ERRORLEVEL%',

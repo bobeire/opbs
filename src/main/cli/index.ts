@@ -1039,9 +1039,72 @@ async function cmdWizard(ctx: CommandContext): Promise<number> {
     console.error('The wizard is interactive; --json is not supported.');
     return 1;
   }
-  const { runRestoreWizard, createConsoleIO, scanDrivesForImages } = await import('./restore-wizard');
+  const { runRestoreWizard, runBackupWizard, runRecoveryMenu, createConsoleIO, scanDrivesForImages } = await import(
+    './restore-wizard'
+  );
   const io = createConsoleIO();
   try {
+    // The recovery media used to open the restore wizard directly, so a user
+    // who wanted to SAVE a machine that would not boot had no path. Offer the
+    // choice first.
+    const choice = await runRecoveryMenu(io);
+    if (choice === 'shell') return 0;
+    if (choice === 'backup') {
+      return await runBackupWizard(io, {
+        getDisks: async () =>
+          (await diskEnumerator.getDisks()).map((d) => ({
+            index: d.index,
+            size: d.size,
+            model: d.model ?? '',
+            serial: d.serial ?? ''
+          })),
+        getPartitions: async (diskIndex) =>
+          (await diskEnumerator.getPartitions(diskIndex)).map((p) => ({
+            partitionIndex: p.partitionIndex,
+            size: p.size,
+            fsType: p.fsType ?? '',
+            label: p.label ?? ''
+          })),
+        listDestinations: async () => {
+          const { listMediaDrives } = await import('../utils/media-drives');
+          const groups = listMediaDrives();
+          return [...groups.primary, ...groups.others]
+            .filter((d) => !d.isSystem)
+            .map((d) => ({
+              path: `${d.letter}:\\`,
+              label: `${d.letter}: ${d.volumeLabel || d.model || 'Local disk'}`,
+              freeBytes: d.sizeBytes
+            }));
+        },
+        execute: async (config, onProgress) => {
+          const result = await imagingEngine.runBackup(
+            {
+              sourceDiskIndex: config.sourceDiskIndex,
+              sourcePartitions: config.sourcePartitions,
+              destinationPath: config.destinationPath,
+              compressionLevel: config.compressionLevel,
+              verificationEnabled: config.verificationEnabled,
+              usedBlocksOnly: config.usedBlocksOnly
+            },
+            (progress) =>
+              onProgress({
+                phase: progress.phase,
+                percent: progress.percent,
+                bytesDone: progress.bytesDone,
+                totalBytes: progress.totalBytes,
+                speed: progress.speed,
+                currentPartition: progress.currentPartition
+              })
+          );
+          return {
+            ok: result.ok,
+            bytesWritten: result.bytesWritten,
+            error: result.error,
+            warnings: result.warnings
+          };
+        }
+      });
+    }
     return await runRestoreWizard(io, {
       scanDrives: async () => scanDrivesForImages(),
       scanDir: async (dir) => {

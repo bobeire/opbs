@@ -552,6 +552,258 @@ export function scanDrivesForImages(options: DriveScanOptions = {}): WizardImage
   return found;
 }
 
+/** Where a backup wizard run writes its image: an existing folder on a volume. */
+export interface BackupWizardDestination {
+  path: string;
+  label: string;
+  freeBytes: number;
+}
+
+/** The backup job the wizard builds (CLI `backup` config shape). */
+export interface BackupWizardJob {
+  sourceDiskIndex: number;
+  /** Empty = every partition on the source disk. */
+  sourcePartitions: number[];
+  destinationPath: string;
+  compressionLevel: number;
+  verificationEnabled: boolean;
+  usedBlocksOnly: boolean;
+}
+
+export interface BackupWizardDeps {
+  getDisks(): Promise<WizardDisk[]>;
+  getPartitions(diskIndex: number): Promise<WizardPartition[]>;
+  /** Volumes that can hold an image: letter, label, free space. */
+  listDestinations(): Promise<BackupWizardDestination[]>;
+  /** Run the backup, streaming progress; must resolve even on failure. */
+  execute(
+    config: BackupWizardJob,
+    onProgress: (p: {
+      phase?: string;
+      percent: number;
+      bytesDone: number;
+      totalBytes: number;
+      speed: number;
+      currentPartition?: string;
+    }) => void
+  ): Promise<{ ok: boolean; bytesWritten?: number; error?: string; warnings?: string[] }>;
+}
+
+export type RecoveryChoice = 'restore' | 'backup' | 'shell';
+
+/**
+ * First screen of the recovery media. Historically it went straight into the
+ * restore wizard, so a user who wanted to *save* a machine that would not
+ * boot had no path (field report: "why does the booted version not offer to
+ * do a backup?"). The CLI could always do it; now the menu says so.
+ */
+export async function runRecoveryMenu(io: WizardIO): Promise<RecoveryChoice> {
+  io.print('What would you like to do?');
+  io.print('  [1] Restore this machine from a backup image');
+  io.print('  [2] Back up this machine (save an image before reinstalling)');
+  io.print('  [3] Command prompt');
+  for (;;) {
+    const answer = (await io.ask('Choice [1-3] > ')).trim().toLowerCase();
+    if (answer === '1' || answer === 'r' || answer === 'restore') return 'restore';
+    if (answer === '2' || answer === 'b' || answer === 'backup') return 'backup';
+    if (answer === '3' || answer === 'c' || answer === 'cmd' || answer === 'shell') return 'shell';
+    if (answer === 'q') return 'shell';
+    io.print('  Enter 1, 2 or 3.');
+  }
+}
+
+/**
+ * Guided backup for the recovery environment: pick a disk, pick somewhere to
+ * write the image, confirm. Nothing on the source disk is touched — this is
+ * for saving a machine before reinstalling it. Deliberately whole-disk by
+ * default (a rescue medium should be hard to get wrong), with an explicit
+ * partition list for the cases that need it.
+ */
+export async function runBackupWizard(io: WizardIO, deps: BackupWizardDeps): Promise<number> {
+  try {
+    io.print('================================================');
+    io.print('OPBS Recovery - back up this computer');
+    io.print('================================================');
+    io.print();
+    io.print('  Writes an image of a disk to another drive. Nothing on the source');
+    io.print('  disk is changed - use this to save a machine before reinstalling.');
+
+    // [1/3] what to back up -------------------------------------------------
+    io.print();
+    io.print('[1/3] What to back up');
+    const disks = await deps.getDisks();
+    if (disks.length === 0) {
+      io.print('  No disks found.');
+      return 1;
+    }
+    io.print('  Disks:');
+    for (const d of disks) {
+      const serial = d.serial ? `  ${d.serial}` : '';
+      io.print(`    ${d.index}) ${fmtBytes(d.size).padEnd(10)} ${d.model}${serial}`);
+    }
+    let sourceDisk: WizardDisk | undefined;
+    for (;;) {
+      io.print();
+      const raw = (await io.ask('Source disk > ')).trim();
+      if (raw.toLowerCase() === 'q') throw new AbortWizard();
+      sourceDisk = disks.find((d) => String(d.index) === raw);
+      if (sourceDisk) break;
+      io.print(`  Enter a disk number from this list (e.g. ${disks[0].index}).`);
+    }
+
+    const currentPartitions = await deps.getPartitions(sourceDisk.index);
+    if (currentPartitions.length > 0) {
+      io.print(`  Partitions on disk ${sourceDisk.index}:`);
+      for (const part of currentPartitions) {
+        const label = part.label ? `  "${part.label}"` : '';
+        io.print(`    ${part.partitionIndex}) ${fmtBytes(part.size).padEnd(10)} ${part.fsType}${label}`);
+      }
+    }
+
+    let sourcePartitions: number[];
+    for (;;) {
+      io.print();
+      io.print('  Back up [w] whole disk (recommended), [p] specific partitions, or (q) quit.');
+      const mode = (await io.ask('Mode > ')).trim().toLowerCase();
+      if (mode === 'q') throw new AbortWizard();
+      if (mode === '' || mode === 'w') {
+        sourcePartitions = [];
+        break;
+      }
+      if (mode !== 'p') {
+        io.print('  Enter w or p.');
+        continue;
+      }
+      for (;;) {
+        const raw = (await io.ask('Partitions > ')).trim();
+        if (raw.toLowerCase() === 'q') throw new AbortWizard();
+        const parsed = raw
+          .split(',')
+          .map((s) => Number(s.trim()))
+          .filter((n) => Number.isInteger(n));
+        const valid =
+          parsed.length > 0 &&
+          parsed.every((n) => currentPartitions.some((p) => p.partitionIndex === n)) &&
+          new Set(parsed).size === parsed.length;
+        if (valid) {
+          sourcePartitions = parsed.sort((a, b) => a - b);
+          break;
+        }
+        io.print(
+          `  Invalid selection; use comma-separated indexes from: ${currentPartitions
+            .map((p) => p.partitionIndex)
+            .join(', ')}`
+        );
+      }
+      break;
+    }
+
+    // [2/3] where to write it ------------------------------------------------
+    io.print();
+    io.print('[2/3] Where to write the image');
+    const destinations = await deps.listDestinations();
+    if (destinations.length === 0) {
+      io.print('  No destination volume found (plug in a USB drive or another disk).');
+      return 1;
+    }
+    io.print('  Destinations:');
+    destinations.forEach((d, i) => {
+      io.print(`    ${i}) ${d.label}  ${fmtBytes(d.freeBytes)} free`);
+    });
+    let destination: BackupWizardDestination | undefined;
+    for (;;) {
+      io.print();
+      const raw = (await io.ask('Destination > ')).trim();
+      if (raw.toLowerCase() === 'q') throw new AbortWizard();
+      destination = destinations[Number(raw)];
+      if (destination && Number.isInteger(Number(raw))) break;
+      io.print(`  Enter a number from 0 to ${destinations.length - 1}.`);
+    }
+
+    // [3/3] options ----------------------------------------------------------
+    io.print();
+    io.print('[3/3] Options');
+    let compressionLevel = 1;
+    for (;;) {
+      const raw = (await io.ask('  Compression level 0-3 (1 = fast, 2 = smaller) [1] > ')).trim();
+      if (raw.toLowerCase() === 'q') throw new AbortWizard();
+      if (raw === '') break;
+      const n = Number(raw);
+      if (Number.isInteger(n) && n >= 0 && n <= 3) {
+        compressionLevel = n;
+        break;
+      }
+      io.print('  Enter 0, 1, 2 or 3.');
+    }
+    const verificationEnabled = await askYesNo(io, '  Verify the image after writing? [Y/n] > ', true);
+    const usedBlocksOnly = await askYesNo(io, '  Back up only used blocks (faster, smaller image)? [Y/n] > ', true);
+
+    // [4/4] review -----------------------------------------------------------
+    io.print();
+    io.print('[4/4] Review and confirm');
+    io.print(`  Source : disk ${sourceDisk.index} - ${sourceDisk.model} (${fmtBytes(sourceDisk.size)})`);
+    io.print(`           ${sourcePartitions.length ? `partitions ${sourcePartitions.join(', ')}` : 'whole disk (all partitions)'}`);
+    io.print(`  Target : ${destination.label} (${fmtBytes(destination.freeBytes)} free)`);
+    io.print(`  Verify : ${verificationEnabled ? 'yes' : 'no'}   Used blocks only: ${usedBlocksOnly ? 'yes' : 'no'}`);
+    io.print();
+    io.print('  Type BACKUP to start, anything else to cancel.');
+    const confirm = (await io.ask('Confirm > ')).trim();
+    if (confirm !== 'BACKUP') {
+      io.print('  Cancelled - nothing was written.');
+      return 1;
+    }
+
+    io.print();
+    io.print('  Starting backup - do not power off this machine.');
+    const result = await deps.execute(
+      {
+        sourceDiskIndex: sourceDisk.index,
+        sourcePartitions,
+        destinationPath: destination.path,
+        compressionLevel,
+        verificationEnabled,
+        usedBlocksOnly
+      },
+      (p) => {
+        const pct = Number.isFinite(p.percent) ? p.percent.toFixed(0) : '0';
+        io.write(
+          `\r  [${p.phase || 'working'}] ${pct}%  ${p.currentPartition || ''}  ` +
+            `${fmtBytes(p.bytesDone)} at ${fmtBytes(p.speed)}/s     `
+        );
+      }
+    );
+    io.print('');
+    if (!result.ok) {
+      io.print(`  Backup FAILED: ${result.error ?? 'unknown error'}`);
+      return 1;
+    }
+    io.print(`  Backup complete (${result.bytesWritten ? fmtBytes(result.bytesWritten) : 'written'}).`);
+    for (const warning of result.warnings ?? []) {
+      io.print(`  warning: ${warning}`);
+    }
+    io.print(`  The image is in ${destination.path}.`);
+    return 0;
+  } catch (error) {
+    if (error instanceof AbortWizard) {
+      io.print('  Cancelled - nothing was written.');
+      return 1;
+    }
+    io.print(`  Backup failed: ${errMsg(error)}`);
+    return 1;
+  }
+}
+
+async function askYesNo(io: WizardIO, prompt: string, def: boolean): Promise<boolean> {
+  for (;;) {
+    const input = (await io.ask(prompt)).trim().toLowerCase();
+    if (input === 'q') throw new AbortWizard();
+    if (input === '') return def;
+    if (input === 'y' || input === 'yes') return true;
+    if (input === 'n' || input === 'no') return false;
+    io.print('  Enter y or n.');
+  }
+}
+
 /**
  * Real console-backed WizardIO.
  *
