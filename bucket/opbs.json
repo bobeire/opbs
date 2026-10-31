@@ -1,5 +1,5 @@
 {
-    "version": "0.6.94",
+    "version": "0.6.95",
     "description": "Free and open-source disk imaging backup for Windows with Macrium image restore, differential chains and self-verifying repositories",
     "homepage": "https://github.com/bobeire/opbs",
     "license": "GPL-3.0-only",
@@ -9,8 +9,8 @@
     ],
     "architecture": {
         "64bit": {
-            "url": "https://github.com/bobeire/opbs/releases/download/0.6.94/OPBS-Setup-0.6.94.exe#/dl.7z",
-            "hash": "sha512:b895086b9a0f6e5265403a3dca76e11dbac9ccab3b9d5cd952000261d23a17a803828532f91f1efc81277a462b68d0896791b890ad78e26cf51ac946f29f5581",
+            "url": "https://github.com/bobeire/opbs/releases/download/0.6.95/OPBS-Setup-0.6.95.exe#/dl.7z",
+            "hash": "sha512:ebfcb057fcdd47065fc8ffb7d030bb307703bfe8add4b3b55448b6facd25fe8aa0f584194f5fd86995bc67dbb0afc53902610270642e0ae6e1fe7a9418df5ad2",
             "pre_install": [
                 "Expand-7zipArchive \"$dir\\`$PLUGINSDIR\\app-64.7z\" \"$dir\" -Removal",
                 "Remove-Item \"$dir\\`$*\" -Recurse"

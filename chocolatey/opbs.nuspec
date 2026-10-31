@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>opbs</id>
-    <version>0.6.94</version>
+    <version>0.6.95</version>
     <title>OPBS - Open Pickle Backup System</title>
     <authors>RHITCS</authors>
     <projectUrl>https://github.com/bobeire/opbs</projectUrl>
@@ -33,7 +33,7 @@ tool for Windows.
 Installs per-user (no admin rights required, no machine-wide changes).
 Silent install: `choco install opbs` (installer runs with `/S /currentuser`).
     </description>
-    <releaseNotes>https://github.com/bobeire/opbs/releases/tag/0.6.94</releaseNotes>
+    <releaseNotes>https://github.com/bobeire/opbs/releases/tag/0.6.95</releaseNotes>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />
