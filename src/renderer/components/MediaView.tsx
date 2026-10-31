@@ -199,6 +199,12 @@ function MediaView({ onComplete }: MediaViewProps) {
 
   const allDrives = drives ? [...drives.primary, ...drives.others] : [];
   const selectedDrive = allDrives.find((d) => d.letter === usbDrive);
+  // The picker text carries a "TOO LARGE FOR FAT32" warning for big drives —
+  // which is exactly what the dual-partition layout removes. Saying it while
+  // that layout is selected (and having the build succeed anyway) is just
+  // confusing, so drop the warning in dual mode.
+  const driveLabel = (d: MediaDriveOption): string =>
+    dualPartition ? d.text.replace(/ — TOO LARGE FOR FAT32 \(>32 GB\).*$/, '') : d.text;
   // Windows can only FAT32-format drives up to 32 GB, and the default build
   // formats the whole stick as FAT32 — larger sticks fail at the format step.
   // A dual-partition stick is FAT32 only on its small boot partition, so the
@@ -359,7 +365,7 @@ function MediaView({ onComplete }: MediaViewProps) {
                     <optgroup label="USB / removable drives">
                       {drives.primary.map((d) => (
                         <option key={d.letter} value={d.letter}>
-                          {d.text}
+                          {driveLabel(d)}
                         </option>
                       ))}
                     </optgroup>
@@ -368,7 +374,7 @@ function MediaView({ onComplete }: MediaViewProps) {
                     <optgroup label="Other drives — double-check before selecting">
                       {drives.others.map((d) => (
                         <option key={d.letter} value={d.letter}>
-                          {d.text}
+                          {driveLabel(d)}
                         </option>
                       ))}
                     </optgroup>
@@ -465,7 +471,7 @@ function MediaView({ onComplete }: MediaViewProps) {
                       checked={usbConfirmed}
                       onChange={(e) => setUsbConfirmed(e.target.checked)}
                     />
-                    I understand: erase everything on {selectedDrive.text}
+                    I understand: erase everything on {driveLabel(selectedDrive)}
                   </label>
                 </div>
               </>
@@ -505,6 +511,21 @@ function MediaView({ onComplete }: MediaViewProps) {
                   ? ` — boot ${result.bootLetter}:, data ${result.dataLetter}: (images in OPBS-Images)`
                   : ''}
               </p>
+              <p>
+                <strong>What next:</strong>
+              </p>
+              <ol className="field-hint" style={{ margin: '6px 0 0 18px' }}>
+                <li>
+                  Unplug the drive and boot the machine you want to restore from it (the firmware
+                  boot menu, or <em>Boot from file</em> → <code>\EFI\BOOT\BOOTX64.EFI</code>).
+                </li>
+                <li>
+                  In the recovery environment, the stick is the volume labelled{' '}
+                  <strong>OPBS-BOOT</strong>
+                  {result.bootLetter ? ` (${result.bootLetter}:)` : ''} — run the restore from the
+                  wizard it starts.
+                </li>
+              </ol>
             </div>
           ) : (
             <div className="error-message">
@@ -519,9 +540,22 @@ function MediaView({ onComplete }: MediaViewProps) {
               Back
             </button>
           )}
-          <button className="btn-primary" disabled={!canCreate} onClick={() => void handleCreate()}>
-            {building ? 'Building…' : format === 'iso' ? 'Create ISO' : 'Create USB Drive'}
-          </button>
+          {result?.ok ? (
+            <>
+              <button className="btn-secondary" onClick={() => void handleCreate()}>
+                Rebuild the media
+              </button>
+              {onComplete ? (
+                <button className="btn-primary" onClick={onComplete}>
+                  Done
+                </button>
+              ) : null}
+            </>
+          ) : (
+            <button className="btn-primary" disabled={!canCreate} onClick={() => void handleCreate()}>
+              {building ? 'Building…' : format === 'iso' ? 'Create ISO' : 'Create USB Drive'}
+            </button>
+          )}
         </div>
 
         {building && (
