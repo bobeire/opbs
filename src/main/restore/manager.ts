@@ -210,7 +210,14 @@ export class RestoreManager extends EventEmitter {
 
       await this.validateConfig(config);
 
-      const job = await this.coordinator.buildJob(config);
+      // Build the plan even when it covers the running system volume: this is
+      // a dry run, and the UI needs `targetsIncludeSystemVolume` to offer
+      // "restore after reboot into recovery". The refusal belongs to the
+      // write path, which still enforces it (startRestore -> runRestore ->
+      // buildJob without this option). Field report 2026-11-01: the refusal
+      // here preempted the preflight, so the app's own answer to the problem
+      // was unreachable and all the user saw was "boot the recovery media".
+      const job = await this.coordinator.buildJob(config, { allowRunningSystemVolume: true });
 
       const summary = this.getImageSummary(config.imagePath, config.passphrase);
       const sizeByIndex = new Map<number, number>(summary.partitions.map((p) => [p.index, p.size]));

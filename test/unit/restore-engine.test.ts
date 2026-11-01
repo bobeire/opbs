@@ -1212,3 +1212,86 @@ describe('RestoreEngine encrypted chain keys', () => {
     }
   });
 });
+
+/**
+ * The running-system-volume refusal was added in 0.6.95 so the wizard could
+ * stop before writing. It also has to be escapable for a DRY RUN: the app's
+ * preflight needs to report `targetsIncludeSystemVolume` so it can offer
+ * "restore after reboot into recovery" instead of only "boot the media"
+ * (field report 2026-11-01).
+ */
+describe('RestoreEngine running-system-volume guard', () => {
+  let dir: string;
+  let imagePath: string;
+
+  function systemDiskEnumerator(): DiskEnumerator {
+    return {
+      getDisks: vi.fn(async () => [
+        {
+          index: 1,
+          model: 'SYSDISK',
+          size: 1_000_000_000,
+          serial: 'SYS',
+          partitions: [
+            { partitionIndex: 1, offset: 1048576, size: 8192, isSystem: true, isBoot: true, driveLetter: 'C:' }
+          ]
+        }
+      ]),
+      getPartitions: vi.fn(async () => []),
+      isDiskBlank: vi.fn(() => false),
+      getPhysicalDrivePath: vi.fn((i: number) => `\\.\PhysicalDrive${i}`),
+      getVolumePath: vi.fn(async () => null)
+    } as unknown as DiskEnumerator;
+  }
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-restore-sysvol-'));
+    imagePath = path.join(dir, 'image.opbs');
+    writeImage(imagePath);
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refuses to plan a restore over the volume Windows is running from', async () => {
+    const engine = new RestoreEngine(systemDiskEnumerator());
+    await expect(engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] })).rejects.toThrow(
+      /Refusing to restore onto/
+    );
+  });
+
+  it('names the ways out, not just the recovery media', async () => {
+    const engine = new RestoreEngine(systemDiskEnumerator());
+    const error = await engine
+      .buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] })
+      .then(() => null)
+      .catch((e: Error) => e);
+    expect(error?.message).toMatch(/Restore after reboot into recovery/);
+    expect(error?.message).toMatch(/recovery stage/);
+    expect(error?.message).toMatch(/recovery media/);
+  });
+
+  it('builds the plan when the caller asked for it (preflight)', async () => {
+    const engine = new RestoreEngine(systemDiskEnumerator());
+    const job = await engine.buildJob(
+      { imagePath, targetDiskIndex: 1, targetPartitions: [0] },
+      { allowRunningSystemVolume: true }
+    );
+    expect(job.targets).toHaveLength(1);
+    expect(job.targets[0].offset).toBe(1048576);
+  });
+
+  it('still allows a data partition that merely shares the system disk', async () => {
+    const engine = new RestoreEngine(systemDiskEnumerator());
+    // Same disk, different offset: not the live volume, so no guard at all.
+    const job = await engine.buildJob({
+      imagePath,
+      targetDiskIndex: 1,
+      targetPartitions: [0],
+      targetLayout: [{ partitionIndex: 0, offset: 5_242_880 }],
+      acknowledgeLayout: true
+    });
+    expect(job.targets[0].offset).toBe(5_242_880);
+  });
+});

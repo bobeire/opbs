@@ -95,8 +95,22 @@ export interface RestoreCoordinator {
   runRestore(config: RestoreJobConfig, onProgress: (p: RestoreJobProgress) => void): Promise<RestoreJobResult>;
   /** Build a restore job without writing anything: validates the image, the
    *  target disk size and the layout gates. Used for preflight/dry-run. */
-  buildJob(config: RestoreJobConfig): Promise<RestoreJob>;
+  buildJob(config: RestoreJobConfig, opts?: BuildJobOptions): Promise<RestoreJob>;
   cancel(): Promise<void>;
+}
+
+export interface BuildJobOptions {
+  /**
+   * Build the plan even when the targets cover the volume Windows is running
+   * from. Preflight passes this so it can *report* the condition instead of
+   * returning a bare refusal — the app has a real answer for it ("restore
+   * after reboot into recovery"), and a refusal that preempts the preflight
+   * made that answer unreachable (field report 2026-11-01).
+   *
+   * Execution never passes it: the write path still refuses, because that
+   * volume cannot be locked or written from inside the running system.
+   */
+  allowRunningSystemVolume?: boolean;
 }
 
 export interface ImageSummary {
@@ -281,7 +295,7 @@ export class RestoreEngine implements RestoreCoordinator {
 
   constructor(private diskEnumerator: DiskEnumerator) {}
 
-  async buildJob(config: RestoreJobConfig): Promise<RestoreJob> {
+  async buildJob(config: RestoreJobConfig, opts?: BuildJobOptions): Promise<RestoreJob> {
     if (!fs.existsSync(config.imagePath)) {
       throw new Error(`Image file does not exist: ${config.imagePath}`);
     }
@@ -431,12 +445,15 @@ export class RestoreEngine implements RestoreCoordinator {
           (p.driveLetter ?? '').replace(':', '').toUpperCase() === systemDrive) &&
         targets.some((t) => t.offset === p.offset)
     );
-    if (overRunningSystem) {
+    if (overRunningSystem && !opts?.allowRunningSystemVolume) {
       throw new Error(
         `Refusing to restore onto ${systemDrive}: — the volume Windows is running from. ` +
           `Windows holds that volume open, so it cannot be overwritten from inside the running ` +
-          `system (this is why it "cannot be locked"). Boot the OPBS recovery media and run the ` +
-          `restore from there.`
+          `system (this is why it "cannot be locked"). Three ways to do it: in the app, choose ` +
+          `"Restore after reboot into recovery" (it stages the restore and restarts into the ` +
+          `OPBS recovery environment); from a terminal, stage it with ` +
+          `"opbs recovery stage <config.json>" then "opbs recovery reboot"; or boot the OPBS ` +
+          `recovery media and run the restore from there.`
       );
     }
     const targetDiskSize = targetDisk ? targetDisk.size : resolveVirtualDiskSize(vhd!);
