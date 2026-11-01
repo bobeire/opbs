@@ -7,6 +7,8 @@ import {
   usbTargetGuard,
   usbSizeGuard,
   dualPartitionGuard,
+  parseVolLabel,
+  listVolumesFs,
   FAT32_FORMAT_LIMIT_BYTES,
   listMediaDrives,
   MediaDriveInfo
@@ -199,6 +201,39 @@ describe('protectedDriveLetters', () => {
   it('tolerates missing values', () => {
     expect(protectedDriveLetters({ systemDrive: null, execPath: undefined, appData: '' })).toEqual([]);
     expect(protectedDriveLetters()).toContain('C');
+  });
+});
+
+describe('parseVolLabel', () => {
+  it('reads the label from `vol` output', () => {
+    expect(parseVolLabel('Volume in drive E is OPBS-DATA\r\n Volume Serial Number is 1234')).toBe('OPBS-DATA');
+    expect(parseVolLabel('Volume in drive E has no label.')).toBe('');
+    expect(parseVolLabel('garbage')).toBe('');
+    expect(parseVolLabel('')).toBe('');
+  });
+});
+
+describe('listVolumesFs', () => {
+  it('lists lettered volumes with free space and labels, without PowerShell', () => {
+    // The whole point: this must work in WinPE, where `listMediaDrives`
+    // dies with "spawnSync powershell.exe ENOENT" (field report 2026-11-01).
+    const roots = new Set(['E:\\', 'F:\\', 'X:\\']);
+    const volumes = listVolumesFs({
+      exists: (root) => roots.has(root),
+      freeBytes: (root) => (root === 'E:\\' ? 3_500_000_000 : 100),
+      label: (letter) => (letter === 'E' ? 'OPBS-DATA' : '')
+    });
+    expect(volumes.map((v) => v.letter)).toEqual(['E', 'F', 'X']);
+    expect(volumes[0]).toEqual({ letter: 'E', label: 'OPBS-DATA', freeBytes: 3_500_000_000 });
+  });
+
+  it('reports zero free space rather than throwing when a volume cannot be measured', () => {
+    const volumes = listVolumesFs({
+      exists: (root) => root === 'Z:\\',
+      freeBytes: () => 0,
+      label: () => ''
+    });
+    expect(volumes).toEqual([{ letter: 'Z', label: '', freeBytes: 0 }]);
   });
 });
 

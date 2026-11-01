@@ -87,6 +87,36 @@ export interface WizardDeps {
   execute(config: RestoreJobConfig, onProgress: (p: RestoreJobProgress) => void): Promise<WizardRestoreResult>;
 }
 
+/**
+ * Ask for a partition selection. `initial` lets a caller pass what was typed
+ * at the previous prompt — reaching for the list itself ("0,1,2,3") is the
+ * natural first try, and bouncing it teaches people a menu they didn't need
+ * (field report 2026-11-01).
+ */
+async function askPartitionList(io: WizardIO, valid: number[], initial?: string): Promise<number[]> {
+  let raw = initial;
+  for (;;) {
+    if (raw === undefined) {
+      raw = (await io.ask('Partitions > ')).trim();
+      if (raw.toLowerCase() === 'q') throw new AbortWizard();
+    }
+    const parsed = raw
+      .split(',')
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isInteger(n));
+    const ok =
+      parsed.length > 0 && parsed.every((n) => valid.includes(n)) && new Set(parsed).size === parsed.length;
+    if (ok) return parsed.sort((a, b) => a - b);
+    io.print(`  Invalid selection; use comma-separated indexes from: ${valid.join(', ')}`);
+    raw = undefined;
+  }
+}
+
+/** True for "0", "0,1,2,3", "0, 1" — a partition list typed at a mode prompt. */
+function looksLikePartitionList(answer: string): boolean {
+  return /^\d+(\s*,\s*\d+)*$/.test(answer);
+}
+
 /** Thrown when the user types q at any prompt. */
 class AbortWizard extends Error {
   constructor() {
@@ -326,8 +356,13 @@ export async function runRestoreWizard(io: WizardIO, deps: WizardDeps): Promise<
         targetPartitions = details.partitions.map((p) => p.index);
         break;
       }
+      const valid = details.partitions.map((p) => p.index);
+      if (looksLikePartitionList(mode)) {
+        targetPartitions = await askPartitionList(io, valid, mode);
+        break;
+      }
       if (mode !== 'p') {
-        io.print('  Enter w or p.');
+        io.print('  Enter w or p, or type the partition list directly (e.g. 0,1,2,3).');
         continue;
       }
       io.print(
@@ -335,23 +370,7 @@ export async function runRestoreWizard(io: WizardIO, deps: WizardDeps): Promise<
           .map((p) => `${p.index} (${fmtBytes(p.size)})`)
           .join(', ')}`
       );
-      for (;;) {
-        const raw = (await io.ask('Partitions > ')).trim();
-        if (raw.toLowerCase() === 'q') throw new AbortWizard();
-        const parsed = raw
-          .split(',')
-          .map((s) => Number(s.trim()))
-          .filter((n) => Number.isInteger(n));
-        const valid =
-          parsed.length > 0 &&
-          parsed.every((n) => details.partitions.some((p) => p.index === n)) &&
-          new Set(parsed).size === parsed.length;
-        if (valid) {
-          targetPartitions = parsed.sort((a, b) => a - b);
-          break;
-        }
-        io.print(`  Invalid selection; use comma-separated indexes from: ${details.partitions.map((p) => p.index).join(', ')}`);
-      }
+      targetPartitions = await askPartitionList(io, valid);
       break;
     }
 
@@ -683,31 +702,16 @@ export async function runBackupWizard(io: WizardIO, deps: BackupWizardDeps): Pro
         sourcePartitions = [];
         break;
       }
+      const valid = currentPartitions.map((p) => p.partitionIndex);
+      if (looksLikePartitionList(mode)) {
+        sourcePartitions = await askPartitionList(io, valid, mode);
+        break;
+      }
       if (mode !== 'p') {
-        io.print('  Enter w or p.');
+        io.print('  Enter w or p, or type the partition list directly (e.g. 0,1,2,3).');
         continue;
       }
-      for (;;) {
-        const raw = (await io.ask('Partitions > ')).trim();
-        if (raw.toLowerCase() === 'q') throw new AbortWizard();
-        const parsed = raw
-          .split(',')
-          .map((s) => Number(s.trim()))
-          .filter((n) => Number.isInteger(n));
-        const valid =
-          parsed.length > 0 &&
-          parsed.every((n) => currentPartitions.some((p) => p.partitionIndex === n)) &&
-          new Set(parsed).size === parsed.length;
-        if (valid) {
-          sourcePartitions = parsed.sort((a, b) => a - b);
-          break;
-        }
-        io.print(
-          `  Invalid selection; use comma-separated indexes from: ${currentPartitions
-            .map((p) => p.partitionIndex)
-            .join(', ')}`
-        );
-      }
+      sourcePartitions = await askPartitionList(io, valid);
       break;
     }
 

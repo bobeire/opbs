@@ -488,6 +488,21 @@ describe('runBackupWizard', () => {
     expect(text()).toContain('Invalid selection');
   });
 
+  it('accepts the partition list typed straight at the mode prompt', async () => {
+    // Reaching for "0,1,2,3" is the natural first try; bouncing it with
+    // "Enter w or p" teaches a menu nobody asked for (field report
+    // 2026-11-01: "Mode > 0,1,2,3" -> "Enter w or p.").
+    const { io, text } = fakeIO(['0', '0,1', '0', '', '', '', 'BACKUP']);
+    const deps = makeBackupDeps();
+
+    expect(await runBackupWizard(io, deps)).toBe(0);
+    expect(deps.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ sourcePartitions: [0, 1] }),
+      expect.any(Function)
+    );
+    expect(text()).not.toContain('Enter w or p');
+  });
+
   it('reports a failed backup instead of claiming success', async () => {
     const { io, text } = fakeIO(['0', '', '0', '', '', '', 'BACKUP']);
     const deps = makeBackupDeps({ execute: vi.fn(async () => ({ ok: false, error: 'disk full' })) });

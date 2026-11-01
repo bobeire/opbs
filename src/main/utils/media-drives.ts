@@ -1,4 +1,5 @@
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
+import * as fs from 'fs';
 import { resolvePowershell } from './elevated';
 import { logger } from './logger';
 
@@ -229,6 +230,74 @@ export function dualPartitionGuard(
     }
   }
   return null;
+}
+
+/**
+ * Parse `vol X:` output into the volume label. `vol` is a cmd built-in, which
+ * makes it the one label source that exists in a recovery environment —
+ * PowerShell (and therefore listMediaDrives) does not.
+ */
+export function parseVolLabel(output: string): string {
+  const m = /Volume in drive [A-Za-z] is (.+)/i.exec(String(output ?? ''));
+  if (!m) return '';
+  const label = m[1].trim();
+  return /^has no label\.?$/i.test(label) ? '' : label;
+}
+
+export interface FsVolume {
+  letter: string;
+  label: string;
+  /** Free bytes available to the current user (0 when unknown). */
+  freeBytes: number;
+}
+
+/**
+ * Lettered volumes with free space, using only Node's fs plus `vol` for the
+ * label. `listMediaDrives` is richer (bus, model, system flags) but shells out
+ * to PowerShell, which does not exist in WinPE — a destination picker built on
+ * it finds nothing on the recovery media (field report 2026-11-01:
+ * "spawnSync powershell.exe ENOENT"). The `probe` seam exists so the logic is
+ * testable without a real volume.
+ */
+export function listVolumesFs(probe?: {
+  exists(root: string): boolean;
+  freeBytes(root: string): number;
+  label(letter: string): string;
+}): FsVolume[] {
+  const exists = probe?.exists ?? ((root: string) => fs.existsSync(root));
+  const freeBytes =
+    probe?.freeBytes ??
+    ((root: string) => {
+      try {
+        const st = fs.statfsSync(root, { bigint: true });
+        return Number(st.bavail * st.bsize);
+      } catch {
+        return 0;
+      }
+    });
+  const label =
+    probe?.label ??
+    ((letter: string) => {
+      try {
+        const res = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', `vol ${letter}:`], {
+          encoding: 'utf8',
+          windowsHide: true,
+          timeout: 5000
+        });
+        return parseVolLabel(String(res.stdout ?? ''));
+      } catch {
+        return '';
+      }
+    });
+
+  const out: FsVolume[] = [];
+  for (let i = 0; i < 26; i++) {
+    const letter = String.fromCharCode(65 + i);
+    const root = `${letter}:\\`;
+    if (!exists(root)) continue;
+    out.push({ letter, label: label(letter), freeBytes: freeBytes(root) });
+  }
+  return out;
 }
 
 /**

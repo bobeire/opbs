@@ -1066,14 +1066,16 @@ async function cmdWizard(ctx: CommandContext): Promise<number> {
             label: p.label ?? ''
           })),
         listDestinations: async () => {
-          const { listMediaDrives } = await import('../utils/media-drives');
-          const groups = listMediaDrives();
-          return [...groups.primary, ...groups.others]
-            .filter((d) => !d.isSystem)
-            .map((d) => ({
-              path: `${d.letter}:\\`,
-              label: `${d.letter}: ${d.volumeLabel || d.model || 'Local disk'}`,
-              freeBytes: d.sizeBytes
+          // NOT listMediaDrives(): that shells out to PowerShell, which does
+          // not exist in WinPE - the recovery environment then saw "no
+          // destination volume" for a partition diskpart could see plainly.
+          const { listVolumesFs } = await import('../utils/media-drives');
+          return listVolumesFs()
+            .filter((v) => v.letter !== 'X') // the WinPE RAM drive
+            .map((v) => ({
+              path: `${v.letter}:\\`,
+              label: `${v.letter}: ${v.label || 'Local disk'}`,
+              freeBytes: v.freeBytes
             }));
         },
         execute: async (config, onProgress) => {
