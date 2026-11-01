@@ -293,11 +293,34 @@ describe('winpe-media', () => {
       expect(s.indexOf('winpe-entry.js" wizard')).toBeGreaterThan(s.indexOf('if defined CFG goto :run'));
     });
 
-    it('README documents the wizard as the primary recovery flow', () => {
+    it('restore.cmd reopens the menu after the command prompt exits', () => {
+      // Field report 2026-11-01: option 3 was a one-way door. Closing the
+      // console was the only obvious way out, and that dropped the machine
+      // into Windows repair mode.
+      const s = buildRestoreCmd();
+      const lines = s.split('\r\n');
+      // The menu needs to know a batch script is waiting to hand a shell to.
+      expect(s).toContain('set "OPBS_WINPE=1"');
+      expect(s).toContain('if "%RC%"=="90" goto :shell');
+      const shell = lines.indexOf(':shell');
+      expect(shell).toBeGreaterThan(-1);
+      expect(lines).toContain(':wizard');
+      // The shell is opened by the batch script, never by node.
+      const loop = lines.indexOf('goto :wizard', shell);
+      expect(loop).toBeGreaterThan(shell);
+      expect(lines.slice(shell, loop)).toContain('cmd');
+    });
+
+    it('README documents the menu as the primary recovery flow', () => {
       const readme = buildReadme();
-      expect(readme).toContain('interactive recovery wizard');
+      expect(readme).toContain('interactive recovery menu');
       expect(readme).toContain('node.exe winpe-entry.js wizard');
-      expect(readme).toContain('asks you to type');
+      expect(readme).toContain('you to type RESTORE');
+      // The three ways out of the media must be written down somewhere the
+      // user will actually read (field report 2026-11-01).
+      expect(readme).toContain('[3] Command prompt');
+      expect(readme).toContain('[4] Reboot');
+      expect(readme).toContain('[5] Shut down');
     });
 
     it('example restore config uses canonical CLI keys', () => {

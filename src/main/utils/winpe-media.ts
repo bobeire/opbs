@@ -333,8 +333,8 @@ export function buildStartnetCmd(): string {
     // copying files out.
     'echo.',
     'echo  OPBS is finished. This prompt stays open for manual recovery work',
-    'echo  (test-vhd.cmd, diskpart, copying files out). Type  exit  or run',
-    'echo  wpeutil shutdown  when you are done.',
+    'echo  (diskpart, copying files out). Run  restore.cmd  to open the menu',
+    'echo  again, or  wpeutil reboot  /  wpeutil shutdown  to leave Windows PE.',
     'cmd /k',
     ':notfound',
     'echo.',
@@ -355,6 +355,9 @@ export function buildRestoreCmd(): string {
     // before running winpe-entry.js (this also covers double-click runs on a
     // normal Windows where some installer left a stale OPENSSL_CONF behind).
     'set "OPENSSL_CONF="',
+    // Marks this console as the recovery media, so the menu knows a batch
+    // script is waiting to hand a shell to and loop back afterwards.
+    'set "OPBS_WINPE=1"',
     'cd /d "%~dp0"',
     'echo =============================================================',
     'echo  OPBS - Open Pickle Backup System by RHITCS - Recovery Media',
@@ -364,20 +367,33 @@ export function buildRestoreCmd(): string {
     'if exist "%~dp0OPBS-restore.json" set CFG=%~dp0OPBS-restore.json',
     'if defined CFG goto :run',
     'echo  No restore config is staged on this media.',
-    'echo  Starting the recovery menu (restore / backup / command prompt)...',
+    'echo  Starting the recovery menu (restore / backup / command prompt / reboot / shut down)...',
     'echo.',
+    // Node exits with SHELL_EXIT_CODE (90) when the user picks "Command
+    // prompt". Opening the shell here, after node is gone, means the two
+    // never share a console handle - and `exit` in the shell loops back to
+    // the menu instead of ending the tool (field report 2026-11-01: closing
+    // the console was the only obvious way out, and that dropped the machine
+    // into Windows repair mode).
+    ':wizard',
     '"%~dp0node.exe" "%~dp0winpe-entry.js" wizard',
     'set RC=%ERRORLEVEL%',
+    'if "%RC%"=="90" goto :shell',
     'echo.',
     'if not "%RC%"=="0" (',
     '  echo  The wizard ended with code %RC%.',
     '  pause',
     '  exit /b %RC%',
     ')',
-    'echo.',
-    'pause',
+    // No pause here: the menu loops, so reaching this point means the user
+    // typed q on purpose. A "Press any key" after a deliberate quit is noise.
     'endlocal',
     'exit /b 0',
+    ':shell',
+    'echo.',
+    'echo  Type  exit  to come back to the OPBS menu.',
+    'cmd',
+    'goto :wizard',
     ':run',
     '"%~dp0node.exe" "%~dp0winpe-entry.js" restore "%CFG%" --elevated',
     'set RC=%ERRORLEVEL%',
@@ -418,12 +434,18 @@ export function buildReadme(): string {
     'How to restore',
     '--------------',
     '1. Boot this media on the target machine.',
-    '2. The interactive recovery wizard starts automatically. It scans the',
-    '   drives for .opbs images, lets you pick the image, target disk and',
-    '   partitions, runs a preflight check (no writes), asks you to type',
-    '   RESTORE, and then restores with a live progress line.',
+    '2. The interactive recovery menu starts automatically:',
+    '     [1] Restore this machine from a backup image',
+    '     [2] Back up this machine (save an image before reinstalling)',
+    '     [3] Command prompt  (type  exit  to come back to the menu)',
+    '     [4] Reboot',
+    '     [5] Shut down',
+    '   Restore scans the drives for .opbs images, lets you pick the image,',
+    '   target disk and partitions, runs a preflight check (no writes), asks',
+    '   you to type RESTORE, and then restores with a live progress line.',
     '   (If OPBS-restore.json is staged on the media, that config runs',
-    '   directly instead of the wizard.)',
+    '   directly instead of the menu.)',
+    '   Every action returns to the menu, so nothing here is a dead end.',
     '3. Headless / scripted:  node.exe winpe-entry.js restore <config> --elevated',
     '',
     'The restore config fields (sourceImagePath / destinationDiskIndex are',

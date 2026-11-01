@@ -621,7 +621,16 @@ export interface BackupWizardDeps {
   ): Promise<{ ok: boolean; bytesWritten?: number; error?: string; warnings?: string[] }>;
 }
 
-export type RecoveryChoice = 'restore' | 'backup' | 'shell';
+/**
+ * Exit code that means "the user asked for a command prompt". The recovery
+ * media's restore.cmd sees it, opens a shell, and loops back to the menu when
+ * that shell exits. Doing it in batch rather than spawning a child from here
+ * keeps the two processes off the same console handle: node has fully exited
+ * before the shell starts, so nothing can swallow what the user types.
+ */
+export const SHELL_EXIT_CODE = 90;
+
+export type RecoveryChoice = 'restore' | 'backup' | 'shell' | 'reboot' | 'shutdown' | 'exit';
 
 /**
  * First screen of the recovery media. Historically it went straight into the
@@ -633,15 +642,37 @@ export async function runRecoveryMenu(io: WizardIO): Promise<RecoveryChoice> {
   io.print('What would you like to do?');
   io.print('  [1] Restore this machine from a backup image');
   io.print('  [2] Back up this machine (save an image before reinstalling)');
-  io.print('  [3] Command prompt');
+  io.print('  [3] Command prompt  (type  exit  to come back to this menu)');
+  io.print('  [4] Reboot');
+  io.print('  [5] Shut down');
+  io.print('  [q] Quit to a command prompt without the menu');
   for (;;) {
-    const answer = (await io.ask('Choice [1-3] > ')).trim().toLowerCase();
+    const answer = (await io.ask('Choice [1-5] > ')).trim().toLowerCase();
     if (answer === '1' || answer === 'r' || answer === 'restore') return 'restore';
     if (answer === '2' || answer === 'b' || answer === 'backup') return 'backup';
     if (answer === '3' || answer === 'c' || answer === 'cmd' || answer === 'shell') return 'shell';
-    if (answer === 'q') return 'shell';
-    io.print('  Enter 1, 2 or 3.');
+    if (answer === '4' || answer === 'reboot' || answer === 'restart') return 'reboot';
+    if (answer === '5' || answer === 'shutdown' || answer === 'shut' || answer === 'off') return 'shutdown';
+    if (answer === 'q' || answer === 'quit' || answer === 'exit') return 'exit';
+    io.print('  Enter 1, 2, 3, 4, 5 or q.');
   }
+}
+
+/**
+ * Confirm a power action, and give the user a chance to pull the recovery
+ * media out first: rebooting with the stick still inserted just boots Windows
+ * PE again, which is the loop the tester was trying to escape by closing the
+ * console (field report 2026-11-01).
+ */
+export async function askPowerNow(io: WizardIO, action: 'reboot' | 'shutdown'): Promise<boolean> {
+  io.print();
+  if (action === 'reboot') {
+    io.print('  Remove the recovery media before the machine restarts, or it boots');
+    io.print('  straight back into Windows PE.');
+  }
+  const verb = action === 'reboot' ? 'reboot' : 'shut down';
+  const answer = (await io.ask(`  Press Enter to ${verb} now (q to stay here) > `)).trim().toLowerCase();
+  return answer !== 'q';
 }
 
 /**

@@ -3,6 +3,7 @@ import {
   runRestoreWizard,
   runBackupWizard,
   runRecoveryMenu,
+  askPowerNow,
   scanDrivesForImages,
   fmtBytes,
   type WizardIO,
@@ -408,20 +409,56 @@ describe('fmtBytes', () => {
 });
 
 describe('runRecoveryMenu', () => {
-  it('offers restore, backup and a shell', async () => {
+  it('offers restore, backup, a shell and a way out of Windows PE', async () => {
     const { io, text } = fakeIO(['2']);
     expect(await runRecoveryMenu(io)).toBe('backup');
-    expect(text()).toContain('Back up this machine');
     expect(text()).toContain('Restore this machine');
+    expect(text()).toContain('Back up this machine');
     expect(text()).toContain('Command prompt');
+    // Closing the console used to be the only way off the media, and that
+    // dropped the machine into Windows repair mode (field report 2026-11-01).
+    expect(text()).toContain('[4] Reboot');
+    expect(text()).toContain('[5] Shut down');
+  });
+
+  it('says that exit returns from the shell to the menu', async () => {
+    const { io, text } = fakeIO(['3']);
+    expect(await runRecoveryMenu(io)).toBe('shell');
+    expect(text()).toContain('type  exit  to come back to this menu');
   });
 
   it('accepts the short answers and re-prompts on nonsense', async () => {
     const nonsense = fakeIO(['what', 'r']);
     expect(await runRecoveryMenu(nonsense.io)).toBe('restore');
-    expect(nonsense.text()).toContain('Enter 1, 2 or 3.');
+    expect(nonsense.text()).toContain('Enter 1, 2, 3, 4, 5 or q.');
     expect(await runRecoveryMenu(fakeIO(['3']).io)).toBe('shell');
-    expect(await runRecoveryMenu(fakeIO(['q']).io)).toBe('shell');
+    expect(await runRecoveryMenu(fakeIO(['4']).io)).toBe('reboot');
+    expect(await runRecoveryMenu(fakeIO(['5']).io)).toBe('shutdown');
+    expect(await runRecoveryMenu(fakeIO(['reboot']).io)).toBe('reboot');
+    expect(await runRecoveryMenu(fakeIO(['shutdown']).io)).toBe('shutdown');
+    // q leaves the menu for a plain prompt instead of looping.
+    expect(await runRecoveryMenu(fakeIO(['q']).io)).toBe('exit');
+  });
+});
+
+describe('askPowerNow', () => {
+  it('warns that the media must come out before a reboot', async () => {
+    const { io, prompts, text } = fakeIO(['']);
+    expect(await askPowerNow(io, 'reboot')).toBe(true);
+    expect(text()).toContain('Remove the recovery media');
+    expect(prompts[prompts.length - 1]).toContain('Press Enter to reboot now');
+  });
+
+  it('does not nag about media when shutting down', async () => {
+    const { io, prompts, text } = fakeIO(['']);
+    expect(await askPowerNow(io, 'shutdown')).toBe(true);
+    expect(text()).not.toContain('Remove the recovery media');
+    expect(prompts[prompts.length - 1]).toContain('Press Enter to shut down now');
+  });
+
+  it('lets the user back out', async () => {
+    const { io } = fakeIO(['q']);
+    expect(await askPowerNow(io, 'reboot')).toBe(false);
   });
 });
 

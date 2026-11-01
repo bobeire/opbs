@@ -38,6 +38,7 @@ import { buildStorageHealthReport } from '../utils/storage-health';
 import { runDiskPerfTest, assessWriteSpeed } from '../utils/disk-perf';
 import { queryVssServiceState, normalizeVolumeRoot, VssJob, VssJobResult } from '../utils/vss';
 import { flagValue, flagValues } from './flags';
+import { systemPower } from '../utils/system-power';
 import { resolvePassphrase } from './passphrase';
 import { cmdRepo, finalizeBackupRepo, parseLockDays } from './repo';
 import { cmdFleet } from './fleet';
@@ -1039,135 +1040,176 @@ async function cmdWizard(ctx: CommandContext): Promise<number> {
     console.error('The wizard is interactive; --json is not supported.');
     return 1;
   }
-  const { runRestoreWizard, runBackupWizard, runRecoveryMenu, createConsoleIO, scanDrivesForImages } = await import(
-    './restore-wizard'
-  );
+  const {
+    runRestoreWizard,
+    runBackupWizard,
+    runRecoveryMenu,
+    askPowerNow,
+    createConsoleIO,
+    scanDrivesForImages,
+    SHELL_EXIT_CODE
+  } = await import('./restore-wizard');
   const io = createConsoleIO();
   try {
     // The recovery media used to open the restore wizard directly, so a user
     // who wanted to SAVE a machine that would not boot had no path. Offer the
-    // choice first.
-    const choice = await runRecoveryMenu(io);
-    if (choice === 'shell') return 0;
-    if (choice === 'backup') {
-      return await runBackupWizard(io, {
+    // choice first - and keep offering it: every action comes back here, so
+    // the command prompt is not a one-way door out of the tool, and leaving
+    // the machine does not depend on knowing that `wpeutil shutdown` exists
+    // (field report 2026-11-01: the tester closed the console instead, which
+    // dropped the machine into Windows repair mode).
+    for (;;) {
+      const choice = await runRecoveryMenu(io);
+      if (choice === 'exit') return 0;
+
+      if (choice === 'shell') {
+        if (!process.env.OPBS_WINPE) {
+          // Not the recovery media, so there is no batch script to hand the
+          // console to. The user already has a prompt; leave it.
+          io.print('');
+          io.print('  Leaving the wizard - your own command prompt is still open.');
+          return 0;
+        }
+        // Hand the console to restore.cmd, which opens the shell and comes
+        // back here when it exits. Spawning cmd from inside this process
+        // would put node and the shell on the same console handle.
+        io.print('');
+        io.print('  Type  exit  to come back to this menu.');
+        return SHELL_EXIT_CODE;
+      }
+
+      if (choice === 'reboot' || choice === 'shutdown') {
+        if (!(await askPowerNow(io, choice))) continue;
+        io.print(choice === 'reboot' ? '  Rebooting...' : '  Shutting down...');
+        const power = await systemPower(choice);
+        if (power.ok) return 0;
+        io.print(`  Could not ${choice === 'reboot' ? 'reboot' : 'shut down'}: ${power.error}`);
+        io.print('  Nothing was changed - pick another option.');
+        continue;
+      }
+
+      if (choice === 'backup') {
+        await runBackupWizard(io, {
+          getDisks: async () =>
+            (await diskEnumerator.getDisks()).map((d) => ({
+              index: d.index,
+              size: d.size,
+              model: d.model ?? '',
+              serial: d.serial ?? ''
+            })),
+          getPartitions: async (diskIndex) =>
+            (await diskEnumerator.getPartitions(diskIndex)).map((p) => ({
+              partitionIndex: p.partitionIndex,
+              size: p.size,
+              fsType: p.fsType ?? '',
+              label: p.label ?? ''
+            })),
+          listDestinations: async () => {
+            // NOT listMediaDrives(): that shells out to PowerShell, which does
+            // not exist in WinPE - the recovery environment then saw "no
+            // destination volume" for a partition diskpart could see plainly.
+            const { listVolumesFs } = await import('../utils/media-drives');
+            return listVolumesFs()
+              .filter((v) => v.letter !== 'X') // the WinPE RAM drive
+              .map((v) => ({
+                path: `${v.letter}:\\`,
+                label: `${v.letter}: ${v.label || 'Local disk'}`,
+                freeBytes: v.freeBytes
+              }));
+          },
+          execute: async (config, onProgress) => {
+            const result = await imagingEngine.runBackup(
+              {
+                sourceDiskIndex: config.sourceDiskIndex,
+                sourcePartitions: config.sourcePartitions,
+                destinationPath: config.destinationPath,
+                compressionLevel: config.compressionLevel,
+                verificationEnabled: config.verificationEnabled,
+                usedBlocksOnly: config.usedBlocksOnly
+              },
+              (progress) =>
+                onProgress({
+                  phase: progress.phase,
+                  percent: progress.percent,
+                  bytesDone: progress.bytesDone,
+                  totalBytes: progress.totalBytes,
+                  speed: progress.speed,
+                  currentPartition: progress.currentPartition
+                })
+            );
+            return {
+              ok: result.ok,
+              bytesWritten: result.bytesWritten,
+              error: result.error,
+              warnings: result.warnings
+            };
+          }
+        });
+        continue;
+      }
+
+      await runRestoreWizard(io, {
+        scanDrives: async () => scanDrivesForImages(),
+        scanDir: async (dir) => {
+          const entries = scanBackupDirectory(dir).map((entry) => ({
+            path: entry.path,
+            name: entry.name,
+            size: entry.size,
+            timestamp: entry.timestamp,
+            incremental: entry.incremental,
+            encrypted: entry.encrypted
+          }));
+          // Macrium containers are not prune/chain entries, so
+          // scanBackupDirectory skips them; list them for restore selection.
+          for (const name of fs.readdirSync(dir)) {
+            const lower = name.toLowerCase();
+            if (!lower.endsWith('.mrimgx') && !lower.endsWith('.mrimg')) continue;
+            try {
+              const filePath = path.join(dir, name);
+              const stat = fs.statSync(filePath);
+              entries.push({
+                path: filePath,
+                name,
+                size: stat.size,
+                timestamp: stat.mtimeMs,
+                incremental: false,
+                encrypted: false
+              });
+            } catch {
+              /* unreadable - skip */
+            }
+          }
+          return entries.sort((a, b) => b.timestamp - a.timestamp);
+        },
+        describeImage: async (imagePath) => {
+          const summary = summarizeImage(imagePath);
+          return {
+            encrypted: summary.encrypted,
+            incremental: summary.incremental,
+            totalSize: summary.totalSize,
+            partitions: summary.partitions.map((p) => ({ index: p.index, size: p.size, fsType: p.fsType })),
+            sourceDisk: summary.sourceDisk
+          };
+        },
         getDisks: async () =>
-          (await diskEnumerator.getDisks()).map((d) => ({
-            index: d.index,
-            size: d.size,
-            model: d.model ?? '',
-            serial: d.serial ?? ''
+          (await diskEnumerator.getDisks()).map((disk) => ({
+            index: disk.index,
+            size: disk.size,
+            model: disk.model ?? '',
+            serial: disk.serial ?? ''
           })),
         getPartitions: async (diskIndex) =>
-          (await diskEnumerator.getPartitions(diskIndex)).map((p) => ({
-            partitionIndex: p.partitionIndex,
-            size: p.size,
-            fsType: p.fsType ?? '',
-            label: p.label ?? ''
+          (await diskEnumerator.getPartitions(diskIndex)).map((part) => ({
+            partitionIndex: part.partitionIndex,
+            size: part.size,
+            fsType: part.fsType ?? '',
+            label: part.label ?? ''
           })),
-        listDestinations: async () => {
-          // NOT listMediaDrives(): that shells out to PowerShell, which does
-          // not exist in WinPE - the recovery environment then saw "no
-          // destination volume" for a partition diskpart could see plainly.
-          const { listVolumesFs } = await import('../utils/media-drives');
-          return listVolumesFs()
-            .filter((v) => v.letter !== 'X') // the WinPE RAM drive
-            .map((v) => ({
-              path: `${v.letter}:\\`,
-              label: `${v.letter}: ${v.label || 'Local disk'}`,
-              freeBytes: v.freeBytes
-            }));
-        },
-        execute: async (config, onProgress) => {
-          const result = await imagingEngine.runBackup(
-            {
-              sourceDiskIndex: config.sourceDiskIndex,
-              sourcePartitions: config.sourcePartitions,
-              destinationPath: config.destinationPath,
-              compressionLevel: config.compressionLevel,
-              verificationEnabled: config.verificationEnabled,
-              usedBlocksOnly: config.usedBlocksOnly
-            },
-            (progress) =>
-              onProgress({
-                phase: progress.phase,
-                percent: progress.percent,
-                bytesDone: progress.bytesDone,
-                totalBytes: progress.totalBytes,
-                speed: progress.speed,
-                currentPartition: progress.currentPartition
-              })
-          );
-          return {
-            ok: result.ok,
-            bytesWritten: result.bytesWritten,
-            error: result.error,
-            warnings: result.warnings
-          };
-        }
+        preflight: (config) => restoreEngine.buildJob(config),
+        renderPlan: (plan) => renderRestorePlan(plan),
+        execute: (config, onProgress) => executeWizardRestore(config, onProgress)
       });
     }
-    return await runRestoreWizard(io, {
-      scanDrives: async () => scanDrivesForImages(),
-      scanDir: async (dir) => {
-        const entries = scanBackupDirectory(dir).map((entry) => ({
-          path: entry.path,
-          name: entry.name,
-          size: entry.size,
-          timestamp: entry.timestamp,
-          incremental: entry.incremental,
-          encrypted: entry.encrypted
-        }));
-        // Macrium containers are not prune/chain entries, so
-        // scanBackupDirectory skips them; list them for restore selection.
-        for (const name of fs.readdirSync(dir)) {
-          const lower = name.toLowerCase();
-          if (!lower.endsWith('.mrimgx') && !lower.endsWith('.mrimg')) continue;
-          try {
-            const filePath = path.join(dir, name);
-            const stat = fs.statSync(filePath);
-            entries.push({
-              path: filePath,
-              name,
-              size: stat.size,
-              timestamp: stat.mtimeMs,
-              incremental: false,
-              encrypted: false
-            });
-          } catch {
-            /* unreadable — skip */
-          }
-        }
-        return entries.sort((a, b) => b.timestamp - a.timestamp);
-      },
-      describeImage: async (imagePath) => {
-        const summary = summarizeImage(imagePath);
-        return {
-          encrypted: summary.encrypted,
-          incremental: summary.incremental,
-          totalSize: summary.totalSize,
-          partitions: summary.partitions.map((p) => ({ index: p.index, size: p.size, fsType: p.fsType })),
-          sourceDisk: summary.sourceDisk
-        };
-      },
-      getDisks: async () =>
-        (await diskEnumerator.getDisks()).map((disk) => ({
-          index: disk.index,
-          size: disk.size,
-          model: disk.model ?? '',
-          serial: disk.serial ?? ''
-        })),
-      getPartitions: async (diskIndex) =>
-        (await diskEnumerator.getPartitions(diskIndex)).map((part) => ({
-          partitionIndex: part.partitionIndex,
-          size: part.size,
-          fsType: part.fsType ?? '',
-          label: part.label ?? ''
-        })),
-      preflight: (config) => restoreEngine.buildJob(config),
-      renderPlan: (plan) => renderRestorePlan(plan),
-      execute: (config, onProgress) => executeWizardRestore(config, onProgress)
-    });
   } finally {
     io.close();
   }
