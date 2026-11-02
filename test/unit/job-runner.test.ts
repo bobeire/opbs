@@ -2211,3 +2211,174 @@ describe.skipIf(!V7_SAMPLE)('runRestoreJob with a real Reflect .mrimg image (OPB
     }
   });
 });
+
+/**
+ * The free-space clear is the one mechanism in a restore that can destroy data
+ * it must not touch: after writing the data it zeroes every block the image
+ * chain does not contain. If the block-presence set ever misses a block that
+ * some chain member holds, the clear silently wipes a block the restore just
+ * wrote — the writer reports success, the volume has errors on boot, and files
+ * are gone. Two field reports (2026-11-01, 2026-11-02) are exactly that shape,
+ * so the safety property is pinned here rather than assumed.
+ */
+describe('free-space clear never zeroes a block the chain contains', () => {
+  const PART_OFFSET = 1048576;
+  const PART_BLOCKS = 6;
+  const TARGET_OFFSET = 4096;
+
+  /**
+   * Write an image holding exactly `blocks` (blockIndex -> seed) of a
+   * PART_BLOCKS partition, so the chain's present-set is entirely under the
+   * test's control. `baseImagePath` makes it a delta member.
+   */
+  function writePartialImage(
+    imagePath: string,
+    blocks: Array<[number, number]>,
+    baseImagePath?: string
+  ): void {
+    const partition: PartitionEntryMeta = {
+      partitionIndex: 0,
+      size: BLOCK * PART_BLOCKS,
+      offsetOnDisk: PART_OFFSET,
+      firstBlockFileOffset: 0,
+      blockCount: PART_BLOCKS
+    };
+    const header: ImageHeader = {
+      version: IMAGE_VERSION,
+      timestamp: Date.now(),
+      totalBytes: partition.size,
+      blockSize: BLOCK,
+      compressionId: 0,
+      partitionCount: 1,
+      flags: FLAG_HAS_BLOCK_INDEX | FLAG_VERIFIED | (baseImagePath ? FLAG_INCREMENTAL : 0),
+      blockIndexOffset: 0,
+      cipherId: 0,
+      kdfIterations: 0,
+      salt: Buffer.alloc(16),
+      baseImagePath: baseImagePath ?? ''
+    };
+    const fd = fs.openSync(imagePath, 'w+');
+    fs.writeSync(fd, encodeHeader(header), 0, HEADER_SIZE, 0);
+    fs.writeSync(fd, Buffer.alloc(PARTITION_TABLE_ENTRY_SIZE), 0, PARTITION_TABLE_ENTRY_SIZE, HEADER_SIZE);
+    let cursor = HEADER_SIZE + PARTITION_TABLE_ENTRY_SIZE;
+    partition.firstBlockFileOffset = cursor;
+    const records: BlockRecord[] = [];
+    for (const [blockIndex, seed] of blocks) {
+      const raw = blockPattern(seed, BLOCK);
+      const frame = encodeBlockFrame(raw, raw);
+      fs.writeSync(fd, frame, 0, frame.length, cursor);
+      records.push({
+        partitionIndex: 0,
+        blockIndex,
+        fileOffset: cursor,
+        rawSize: BLOCK,
+        compSize: frame.length,
+        rawCrc32: crc32(raw)
+      });
+      cursor += frame.length;
+    }
+    const bi = cursor;
+    const countBuf = Buffer.alloc(8);
+    countBuf.writeBigUInt64LE(BigInt(records.length));
+    fs.writeSync(fd, countBuf, 0, 8, cursor);
+    cursor += 8;
+    for (const r of records) {
+      fs.writeSync(fd, encodeBlockIndexEntry(r), 0, BLOCK_INDEX_ENTRY_SIZE, cursor);
+      cursor += BLOCK_INDEX_ENTRY_SIZE;
+    }
+    fs.writeSync(fd, encodePartitionEntry(partition), 0, PARTITION_TABLE_ENTRY_SIZE, HEADER_SIZE);
+    const patched = Buffer.alloc(HEADER_SIZE);
+    fs.readSync(fd, patched, 0, HEADER_SIZE, 0);
+    patched.writeBigUInt64LE(BigInt(bi), 40);
+    fs.writeSync(fd, patched, 0, HEADER_SIZE, 0);
+    fs.closeSync(fd);
+  }
+
+  /** What the target partition looks like once every write has landed. */
+  function restoredBytes(native: NativeImagingApi): Buffer {
+    const disk = Buffer.alloc(PART_BLOCKS * BLOCK);
+    const calls = (native.writeBlocks as any).mock.calls as Array<[string, bigint, Buffer]>;
+    for (const [, offset, buf] of calls) {
+      const start = Number(offset) - TARGET_OFFSET;
+      if (start < 0 || start >= disk.length) continue;
+      buf.copy(disk, start, 0, Math.min(buf.length, disk.length - start));
+    }
+    return disk;
+  }
+
+  let dir: string;
+  let basePath: string;
+  let deltaPath: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-clear-audit-'));
+    basePath = path.join(dir, 'full.opbs');
+    deltaPath = path.join(dir, 'delta.opbs');
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keeps every block held by the base or the delta, and zeroes only the gaps', async () => {
+    // Base holds 0, 2, 4. The delta holds 3 - only in the newest member, which
+    // is exactly the case a broken present-set would drop and then wipe.
+    writePartialImage(basePath, [[0, 3], [2, 5], [4, 7]]);
+    writePartialImage(deltaPath, [[3, 11]], basePath);
+
+    const native = createMockNative();
+    fs.writeFileSync(
+      path.join(dir, 'job.json'),
+      JSON.stringify({
+        type: 'restore',
+        imagePath: basePath,
+        verifyBeforeWrite: false,
+        applyDeltas: [deltaPath],
+        targets: [{ partitionIndex: 0, diskIndex: 1, offset: TARGET_OFFSET, label: 'Partition 0' }]
+      } as RestoreJob)
+    );
+    await runRestoreJob(path.join(dir, 'job.json'), path.join(dir, 'result.json'), path.join(dir, 'progress.json'), path.join(dir, 'cancel'), native);
+
+    const result = JSON.parse(fs.readFileSync(path.join(dir, 'result.json'), 'utf-8')) as RestoreJobResult;
+    expect(result.ok).toBe(true);
+
+    const disk = restoredBytes(native);
+    // Present blocks keep the content the chain describes - including block 3,
+    // which exists only in the delta.
+    for (const [blockIndex, seed] of [[0, 3], [2, 5], [3, 11], [4, 7]] as Array<[number, number]>) {
+      expect(disk.subarray(blockIndex * BLOCK, (blockIndex + 1) * BLOCK)).toEqual(blockPattern(seed, BLOCK));
+    }
+    // Only the true gaps are cleared.
+    for (const gap of [1, 5]) {
+      expect(disk.subarray(gap * BLOCK, (gap + 1) * BLOCK).every((b) => b === 0)).toBe(true);
+    }
+    expect(result.freeBlocksCleared).toBe(2);
+  });
+
+  it('clears nothing at all when the whole partition is covered by the chain', async () => {
+    writePartialImage(basePath, [[0, 3], [1, 4], [2, 5]]);
+    writePartialImage(deltaPath, [[3, 11], [4, 12], [5, 13]], basePath);
+
+    const native = createMockNative();
+    fs.writeFileSync(
+      path.join(dir, 'job.json'),
+      JSON.stringify({
+        type: 'restore',
+        imagePath: basePath,
+        verifyBeforeWrite: false,
+        applyDeltas: [deltaPath],
+        targets: [{ partitionIndex: 0, diskIndex: 1, offset: TARGET_OFFSET, label: 'Partition 0' }]
+      } as RestoreJob)
+    );
+    await runRestoreJob(path.join(dir, 'job.json'), path.join(dir, 'result.json'), path.join(dir, 'progress.json'), path.join(dir, 'cancel'), native);
+
+    const result = JSON.parse(fs.readFileSync(path.join(dir, 'result.json'), 'utf-8')) as RestoreJobResult;
+    expect(result.ok).toBe(true);
+    expect(result.freeBlocksCleared ?? 0).toBe(0);
+
+    const disk = restoredBytes(native);
+    for (let b = 0; b < PART_BLOCKS; b++) {
+      expect(disk.subarray(b * BLOCK, (b + 1) * BLOCK).every((x) => x === 0)).toBe(false);
+    }
+  });
+});

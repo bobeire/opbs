@@ -9,6 +9,8 @@ import { DiskEnumerator } from '../../src/main/utils/disk-enumerator';
 import { launchElevatedJob } from '../../src/main/helper/launcher';
 import { encodeHeader, encodePartitionEntry, encodeBlockIndexEntry, encodeBlockFrame, compressBlock, crc32, newImageCipher, deriveImageKey, ImageCipher, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, FLAG_INCREMENTAL, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, PartitionEntryMeta, BlockRecord, ImageHeader, parseHeader, clearImageInfoCache } from '../../src/main/imaging/image-format';
 import { buildMrimgxImage } from '../helpers/mrimg-image';
+import { buildCanonicalNtfsVolumeData } from '../helpers/ntfs-resize-fixture';
+import { VOLUME_FLAG_DIRTY } from '../../src/main/imaging/fs/ntfs';
 
 vi.mock('../../src/main/helper/launcher', () => ({
   launchElevatedJob: vi.fn(() => ({
@@ -67,12 +69,18 @@ function writeImage(
   identity?: { model: string; serial: string },
   opts?: { partitionPayload?: Buffer; cipher?: ImageCipher }
 ): void {
+  // A payload larger than one block spans several: the NTFS fixtures used to
+  // check what a restore *does* with filesystem metadata need the whole
+  // volume, not just its boot sector.
+  const payload = opts?.partitionPayload ? Buffer.from(opts.partitionPayload) : undefined;
+  const multiBlock = !!payload && payload.length > BLOCK;
+  const blockCount = multiBlock ? Math.ceil(payload!.length / BLOCK) : 2;
   const partition: PartitionEntryMeta = {
     partitionIndex: 0,
-    size: BLOCK * 2,
+    size: blockCount * BLOCK,
     offsetOnDisk: 1048576,
     firstBlockFileOffset: 0,
-    blockCount: 2
+    blockCount
   };
   const header: ImageHeader = {
     version: IMAGE_VERSION,
@@ -97,7 +105,14 @@ function writeImage(
   let cursor = HEADER_SIZE + PARTITION_TABLE_ENTRY_SIZE;
   partition.firstBlockFileOffset = cursor;
   for (let b = 0; b < partition.blockCount; b++) {
-    const raw = b === 0 && opts?.partitionPayload ? Buffer.from(opts.partitionPayload) : Buffer.alloc(BLOCK, 0x41 + b);
+    let raw: Buffer;
+    if (multiBlock) {
+      const start = b * BLOCK;
+      const chunk = payload!.subarray(start, Math.min(payload!.length, start + BLOCK));
+      raw = chunk.length === BLOCK ? chunk : Buffer.concat([chunk, Buffer.alloc(BLOCK - chunk.length)]);
+    } else {
+      raw = b === 0 && payload ? payload : Buffer.alloc(BLOCK, 0x41 + b);
+    }
     const comp = compressBlock(raw, 0, 3);
     const frame = encodeBlockFrame(raw, comp, opts?.cipher);
     fs.writeSync(fd, frame, 0, frame.length, cursor);
@@ -1239,7 +1254,7 @@ describe('RestoreEngine running-system-volume guard', () => {
       ]),
       getPartitions: vi.fn(async () => []),
       isDiskBlank: vi.fn(() => false),
-      getPhysicalDrivePath: vi.fn((i: number) => `\\.\PhysicalDrive${i}`),
+      getPhysicalDrivePath: vi.fn((i: number) => `\\\\.\\PhysicalDrive${i}`),
       getVolumePath: vi.fn(async () => null)
     } as unknown as DiskEnumerator;
   }
@@ -1293,5 +1308,56 @@ describe('RestoreEngine running-system-volume guard', () => {
       acknowledgeLayout: true
     });
     expect(job.targets[0].offset).toBe(5_242_880);
+  });
+});
+
+/**
+ * NTFS's dirty bit travels with the image: a capture of a mounted volume has
+ * it set, so the restored volume is one Windows considers dirty and the first
+ * boot schedules a repair. A tester who hit this (2026-11-02) read the
+ * resulting "Restart to repair drive errors" prompt as the restore having
+ * broken their disk. Warn when the plan is built, where the decision is made.
+ */
+describe('RestoreEngine dirty-flag warning', () => {
+  let dir: string;
+  let imagePath: string;
+
+  function writeWithVolumeFlags(flags: number): void {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-restore-dirty-'));
+    imagePath = path.join(dir, 'image.opbs');
+    const vol = buildCanonicalNtfsVolumeData({ totalClusters: 64, volumeFlags: flags });
+    vol.writeUInt16LE(0x55aa, 510);
+    writeImage(imagePath, undefined, { partitionPayload: vol });
+  }
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('warns up front that the first boot will want a repair', async () => {
+    writeWithVolumeFlags(VOLUME_FLAG_DIRTY);
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const job = await engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] });
+
+    const warning = (job.warnings ?? []).find((w) => /dirty/i.test(w));
+    expect(warning).toBeDefined();
+    // Name the prompt the user will actually see, or the warning is useless.
+    expect(warning).toContain('Restart to repair drive errors');
+    expect(warning).toContain('not the restore');
+  });
+
+  it('says nothing for a volume captured clean', async () => {
+    writeWithVolumeFlags(0);
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const job = await engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] });
+
+    expect((job.warnings ?? []).some((w) => /dirty/i.test(w))).toBe(false);
+  });
+
+  it('does not fail the plan — a dirty image is a fact to report, not a gate', async () => {
+    writeWithVolumeFlags(VOLUME_FLAG_DIRTY);
+    const engine = new RestoreEngine(createFakeEnumerator());
+    const job = await engine.buildJob({ imagePath, targetDiskIndex: 1, targetPartitions: [0] });
+    expect(job.targets).toHaveLength(1);
   });
 });
