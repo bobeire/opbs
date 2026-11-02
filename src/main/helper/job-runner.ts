@@ -1852,6 +1852,17 @@ export async function runRestoreJob(
           }
         );
         fsValidation.push(check);
+        // The dirty flag is a property of the image, not of our write: a
+        // capture of a mounted volume always has it set. Say so before the
+        // user meets "Restart to repair drive errors" at first boot and
+        // assumes the restore broke their disk (field report 2026-11-02).
+        if (check.checks.volumeDirty === true) {
+          warnings.push(
+            `${target.label}: the restored volume is marked dirty (its image was captured from a running Windows). ` +
+              `Windows will run a repair at first boot and may say "Restart to repair drive errors". That is the ` +
+              `live capture, not the restore.`
+          );
+        }
         writeProgress('writing');
       }
     }

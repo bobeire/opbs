@@ -72,6 +72,18 @@ export function standardInfo(created: number): Buffer {
   return b;
 }
 
+/**
+ * $Volume's resident VOLUME_INFORMATION value (attribute 0x70): major/minor
+ * version then the flags word, where bit 0 is VOLUME_IS_DIRTY.
+ */
+export function volumeInfoAttr(flags: number): Buffer {
+  const b = Buffer.alloc(12);
+  b.writeUInt8(3, 0); // NTFS major
+  b.writeUInt8(1, 1); // NTFS minor
+  b.writeUInt16LE(flags, 2);
+  return b;
+}
+
 export function fileNameAttr(parentRecord: number, name: string, namespace: number): Buffer {
   const nameBuf = Buffer.from(name, 'utf16le');
   const b = Buffer.alloc(0x42 + nameBuf.length);

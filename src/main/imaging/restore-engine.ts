@@ -10,6 +10,7 @@ import {
   CIPHER_NONE
 } from './image-format';
 import { detectPartitionFilesystem, inferMbrTypes, inferTableTypeGuids } from './fs/file-browse';
+import { parseBootSector, readVolumeFlags } from './fs/ntfs';
 import { ntfsShrinkMinimum, type NtfsShrinkMinimum } from './fs/ntfs-shrink';
 import { fat32ShrinkMinimum, type Fat32ShrinkMinimum } from './fs/fat32-shrink';
 import { detectFatType } from './fs/fat32';
@@ -611,6 +612,33 @@ export class RestoreEngine implements RestoreCoordinator {
         );
       }
     }
+    // NTFS's dirty flag travels with the image. A capture of a mounted volume
+    // always has it set, so the restored volume is one Windows considers dirty
+    // and the first boot schedules a repair — the user is told to "Restart to
+    // repair drive errors" and reads it as the restore having broken their
+    // disk (field report 2026-11-02). Say it up front, where the decision is
+    // made. Only .opbs chains: the Macrium readers do not expose the raw
+    // partition bytes cheaply, and the post-restore check covers them.
+    if (!isMacrium) {
+      const dirtyTargets: string[] = [];
+      for (const t of targets) {
+        try {
+          const { reader } = partitionReaderForChain(chain, t.partitionIndex, config.passphrase);
+          const flags = readVolumeFlags(reader, parseBootSector(reader));
+          if (flags?.dirty) dirtyTargets.push(t.label);
+        } catch {
+          /* not NTFS, or unreadable here — the post-restore check covers it */
+        }
+      }
+      if (dirtyTargets.length > 0) {
+        warnings.push(
+          `${dirtyTargets.join(', ')}: the image was captured from a running Windows, so its volume is marked ` +
+            `dirty. Windows will run a repair at first boot and may say "Restart to repair drive errors". ` +
+            `That prompt is the live capture, not the restore.`
+        );
+      }
+    }
+
     if (warnings.length > 0) {
       logger.warn(warnings.join(' '));
     }
@@ -675,7 +703,7 @@ export class RestoreEngine implements RestoreCoordinator {
       macriumKey,
       compressionThreads,
       writeTable,
-      validateAfterWrite: config.validateAfterWrite,
+      validateAfterWrite: config.validateAfterWrite !== false,
       verifyAfterRestore: config.verifyAfterRestore,
       clearFreeSpace: config.clearFreeSpace !== false,
       shrinkInfo: shrinkInfo.length > 0 ? shrinkInfo : undefined,

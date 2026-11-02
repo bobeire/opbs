@@ -1,4 +1,6 @@
 import { parseNtfsBootSector } from './fs/ntfs-resize';
+import { parseBootSector, readVolumeFlags } from './fs/ntfs';
+import type { PartitionReader } from './image-browse';
 import type { NativeImagingApi } from './imaging-job';
 
 export interface FsValidation {
@@ -92,6 +94,15 @@ export function validateRestoredFilesystem(
         const flags = mft.readUInt16LE(0x16);
         checks.mftInUse = (flags & 0x01) === 1;
       }
+
+      // $Volume's dirty flag. An image captured from a mounted volume carries
+      // it set, so restoring one schedules a repair at first boot and the user
+      // is told to "Restart to repair drive errors". Report it rather than
+      // letting that prompt be the first they hear of it (2026-11-02).
+      // `unknown` when the record cannot be read - never silently "clean".
+      const readerShim: PartitionReader = { read, size: capturedSize };
+      const volumeFlags = readVolumeFlags(readerShim, parseBootSector(readerShim));
+      checks.volumeDirty = volumeFlags ? volumeFlags.dirty : 'unknown';
 
       return { partitionIndex, label, ok: true, checks };
     }

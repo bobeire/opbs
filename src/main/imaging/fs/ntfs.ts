@@ -566,6 +566,68 @@ function readFileRecordRaw(reader: PartitionReader, layout: NtfsLayout, recordNu
   );
 }
 
+/** $Volume's VOLUME_INFORMATION attribute (type 0x70) in FILE record 3. */
+const ATTR_VOLUME_INFORMATION = 0x70;
+/** VOLUME_INFORMATION.Flags bit 0: the volume is dirty. */
+export const VOLUME_FLAG_DIRTY = 0x0001;
+
+export interface VolumeFlags {
+  majorVersion: number;
+  minorVersion: number;
+  flags: number;
+  /** VOLUME_IS_DIRTY — Windows runs a repair on the next boot when it is set. */
+  dirty: boolean;
+}
+
+/**
+ * Parse the VOLUME_INFORMATION attribute out of a $Volume FILE record
+ * (record 3).
+ *
+ * The dirty bit is the whole point. NTFS sets it while the volume is mounted
+ * and clears it on a clean dismount, so every image captured from a running
+ * Windows carries it set. Restoring that image puts back a volume Windows
+ * considers dirty, the first boot schedules a repair, and the user is told to
+ * "Restart to repair drive errors" — which reads like the restore broke
+ * something (field report 2026-11-02). Knowing it before the restore is the
+ * difference between "expected" and "alarming".
+ */
+export function parseVolumeFlags(raw: Buffer): VolumeFlags | null {
+  if (raw.length < 0x30 || raw.toString('ascii', 0, 4) !== 'FILE') return null;
+  const buf = applyFixup(raw);
+  let pos = buf.readUInt16LE(0x14);
+  while (pos + 8 <= buf.length) {
+    const attrType = buf.readUInt32LE(pos);
+    if (attrType === 0xffffffff) break;
+    const attrLength = buf.readUInt32LE(pos + 4);
+    if (attrLength < 8 || pos + attrLength > buf.length) break;
+    const nonResident = buf.readUInt8(pos + 8) !== 0;
+    if (attrType === ATTR_VOLUME_INFORMATION && !nonResident) {
+      const valLen = buf.readUInt32LE(pos + 0x10);
+      const valOffset = buf.readUInt16LE(pos + 0x14);
+      if (valLen < 4 || valOffset + 4 > buf.length) return null;
+      const majorVersion = buf.readUInt8(pos + valOffset);
+      const minorVersion = buf.readUInt8(pos + valOffset + 1);
+      const flags = buf.readUInt16LE(pos + valOffset + 2);
+      return { majorVersion, minorVersion, flags, dirty: (flags & VOLUME_FLAG_DIRTY) !== 0 };
+    }
+    pos += attrLength;
+  }
+  return null;
+}
+
+/**
+ * Read $Volume's flags straight from a partition, without loading the whole
+ * MFT. Returns `null` when the volume is not NTFS or the record cannot be
+ * read — callers treat that as "unknown", never as "clean".
+ */
+export function readVolumeFlags(reader: PartitionReader, layout: NtfsLayout): VolumeFlags | null {
+  try {
+    return parseVolumeFlags(readFileRecordRaw(reader, layout, 3));
+  } catch {
+    return null;
+  }
+}
+
 export interface NtfsBitmapInfo {
   clusterSize: number;
   /** Number of clusters covered by the $Bitmap (its logical size in bits). */

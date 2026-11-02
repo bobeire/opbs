@@ -1,4 +1,4 @@
-import { buildFileRecord, FILE_RECORD, standardInfo, fileNameAttr } from './ntfs-fixture';
+import { buildFileRecord, FILE_RECORD, standardInfo, fileNameAttr, volumeInfoAttr } from './ntfs-fixture';
 import { DataRun } from '../../src/main/imaging/fs/ntfs';
 
 export const GR_SECTOR = 512;
@@ -21,6 +21,8 @@ export function buildCanonicalNtfsVolumeData(opts?: {
   bitmapRuns?: DataRun[];
   bitmapRealSize?: number;
   badClusAllocated?: boolean;
+  /** $Volume's VOLUME_INFORMATION flags (bit 0 = dirty). Defaults to clean. */
+  volumeFlags?: number;
 }): Buffer {
   const totalClusters = opts?.totalClusters ?? 64;
   const buf = Buffer.alloc(totalClusters * GR_CLUSTER);
@@ -48,6 +50,17 @@ export function buildCanonicalNtfsVolumeData(opts?: {
     ]
   });
   rec0.copy(buf, mftBase);
+
+  // $Volume (record 3) — its VOLUME_INFORMATION flags carry the dirty bit.
+  const rec3 = buildFileRecord(3, {
+    inUse: true,
+    attrs: [
+      { type: 0x10, nonResident: false, resident: standardInfo(2000) },
+      { type: 0x30, nonResident: false, resident: fileNameAttr(5, '$Volume', 1) },
+      { type: 0x70, nonResident: false, resident: volumeInfoAttr(opts?.volumeFlags ?? 0) }
+    ]
+  });
+  rec3.copy(buf, mftBase + 3 * FILE_RECORD);
 
   const rec6 = buildFileRecord(6, {
     inUse: true,
