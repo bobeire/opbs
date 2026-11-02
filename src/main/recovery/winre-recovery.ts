@@ -50,6 +50,8 @@ import {
 export const RECOVERY_STAGE_DIRNAME = path.join('Recovery', 'OPBS');
 /** Result marker written at the system-drive root after the PE restore. */
 export const RECOVERY_RESULT_FILENAME = 'OPBS-restore-result.json';
+/** The recovery run's log, copied onto the restored volume by restore.cmd. */
+export const RECOVERY_LOG_FILENAME = 'OPBS-restore.log';
 
 const STAGE_TIMEOUT_MS = 30 * 60 * 1000;
 const CLOSE_GRACE_MS = 15_000;
@@ -152,6 +154,8 @@ export interface RecoveryPendingResult {
   /** Failure reason, when the restore reported one. */
   error?: string;
   bytesWritten?: number;
+  /** Where the recovery run's own log was preserved on this machine. */
+  logPath?: string;
 }
 
 export interface RecoveryStatusResult {
@@ -282,6 +286,13 @@ export function buildRecoveryRestoreCmd(): string {
     'if not defined VOLROOT if defined OPBS_STAGED for %%I in ("%OPBS_STAGED%\\..\\..") do set "VOLROOT=%%~fI"',
     'if defined VOLROOT if "%VOLROOT:~-1%"=="\\" set "VOLROOT=%VOLROOT:~0,-1%"',
     'if not defined VOLROOT set "VOLROOT=%SystemDrive%"',
+    // Node logs to OPBS_LOG_DIR. In the recovery environment that folder is
+    // on the RAM disk, so the log has to be copied onto the restored volume
+    // afterwards - writing it there during the restore would be writing into
+    // the area being overwritten (field report 2026-11-02: "the logs don't say
+    // much", and the recovery run's log was gone by the time anyone looked).
+    'set "OPBS_LOG_DIR=%~dp0logs"',
+    'mkdir "%OPBS_LOG_DIR%" >nul 2>&1',
     'echo Running the staged restore from OPBS-restore.json ...',
     'echo.',
     // --result writes the job outcome (warnings included) as JSON on the
@@ -290,6 +301,7 @@ export function buildRecoveryRestoreCmd(): string {
     // lost (field report 2026-11-01).
     'node.exe winpe-entry.js restore "OPBS-restore.json" --elevated --acknowledge-same-disk --result "%VOLROOT%\\OPBS-restore-result.json"',
     'set "RC=%ERRORLEVEL%"',
+    'if defined OPBS_LOG_DIR for %%F in ("%OPBS_LOG_DIR%\\*.log") do copy /y "%%~fF" "%VOLROOT%\\OPBS-restore.log" >nul',
     'if exist "%VOLROOT%\\OPBS-restore-result.json" exit /b %RC%',
     // Fallback marker if the CLI died before it could write its own result.
     'if "%RC%"=="0" (',
@@ -405,6 +417,24 @@ function transcriptStart(logPath: string): string {
 
 const transcriptStop = `Stop-Transcript -ErrorAction SilentlyContinue | Out-Null`;
 
+/**
+ * Keep a log past its source location's lifetime and report where it went.
+ * "Kept in a temp folder" or "on the volume root" is not a place anyone will
+ * look — the app's log directory is.
+ */
+export function preserveLog(source: string, label: string): string | null {
+  try {
+    if (!fs.existsSync(source)) return null;
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const dest = path.join(logDirectory(), `${label}-${stamp}.log`);
+    fs.mkdirSync(logDirectory(), { recursive: true });
+    fs.copyFileSync(source, dest);
+    return dest;
+  } catch {
+    return null;
+  }
+}
+
 /** Where an elevated script writes its transcript (inside the kept work dir). */
 export function elevatedLogPath(work: string): string {
   return path.join(work, 'elevated.log');
@@ -417,17 +447,7 @@ export function elevatedLogPath(work: string): string {
  * directory is.
  */
 export function preserveElevatedLog(work: string, label: string): string | null {
-  const source = elevatedLogPath(work);
-  try {
-    if (!fs.existsSync(source)) return null;
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const dest = path.join(logDirectory(), `${label}-${stamp}.log`);
-    fs.mkdirSync(logDirectory(), { recursive: true });
-    fs.copyFileSync(source, dest);
-    return dest;
-  } catch {
-    return null;
-  }
+  return preserveLog(elevatedLogPath(work), label);
 }
 
 export interface StageScriptParams {
@@ -892,9 +912,27 @@ export async function cleanupRecovery(opts?: { onProgress?: (msg: string) => voi
  * a result marker? The marker is consumed (deleted) on read.
  */
 export function readRecoveryStatus(): RecoveryStatusResult {
-  const stageRoot = path.join(process.env.SystemDrive ?? 'C:', RECOVERY_STAGE_DIRNAME);
+  const root = process.env.SystemDrive ?? 'C:';
+  const stageRoot = path.join(root, RECOVERY_STAGE_DIRNAME);
   const staged = fs.existsSync(stageRoot);
-  const resultPath = path.join(process.env.SystemDrive ?? 'C:', RECOVERY_RESULT_FILENAME);
+  const resultPath = path.join(root, RECOVERY_RESULT_FILENAME);
+
+  // The recovery run's own log is copied onto the restored volume by
+  // restore.cmd, because the folder it is written to lives on the RAM disk
+  // and dies with it. Preserve it into the app's log directory first: the
+  // volume root is where stray files get cleaned up, and this log is the only
+  // record of what the run actually did (field report 2026-11-02).
+  let preservedLog: string | null = null;
+  try {
+    preservedLog = preserveLog(path.join(root, RECOVERY_LOG_FILENAME), 'recovery-restore');
+    if (preservedLog) {
+      fs.rmSync(path.join(root, RECOVERY_LOG_FILENAME), { force: true });
+      logger.info(`Recovery run log preserved at ${preservedLog}`);
+    }
+  } catch {
+    /* unpreservable — the run's log stays where it is */
+  }
+
   let pendingResult: RecoveryPendingResult | null = null;
   try {
     if (fs.existsSync(resultPath)) {
@@ -921,7 +959,8 @@ export function readRecoveryStatus(): RecoveryStatusResult {
         ...(raw.finishedAt ? { finishedAt: String(raw.finishedAt) } : {}),
         ...(warnings.length > 0 ? { warnings } : {}),
         ...(typeof raw.error === 'string' && raw.error ? { error: raw.error.slice(0, 500) } : {}),
-        ...(typeof raw.bytesWritten === 'number' ? { bytesWritten: raw.bytesWritten } : {})
+        ...(typeof raw.bytesWritten === 'number' ? { bytesWritten: raw.bytesWritten } : {}),
+        ...(preservedLog ? { logPath: preservedLog } : {})
       };
       fs.rmSync(resultPath, { force: true });
     }

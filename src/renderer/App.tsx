@@ -127,6 +127,7 @@ function App() {
         const result = status?.pendingResult;
         if (!alive || !result) return;
         const warnings = result.warnings ?? [];
+        const logNote = result.logPath ? ` Full log: ${result.logPath}.` : '';
         setRecoveryNotice(
           result.ok
             ? {
@@ -136,9 +137,9 @@ function App() {
                     ? `Recovery restore completed with ${warnings.length} warning${warnings.length === 1 ? '' : 's'}`
                     : 'Recovery restore completed',
                 body:
-                  warnings.length > 0
+                  (warnings.length > 0
                     ? 'The restore finished. These are the messages the recovery environment reported:'
-                    : 'The recovery restore completed successfully.',
+                    : 'The recovery restore completed successfully.') + logNote,
                 details: warnings.length > 0 ? warnings : undefined
               }
             : {
@@ -146,7 +147,7 @@ function App() {
                 title: 'Recovery restore failed',
                 body: `The recovery restore did not complete${
                   typeof result.exitCode === 'number' ? ` (exit code ${result.exitCode})` : ''
-                }.${result.error ? ` ${result.error}` : ''} Try the restore again, or run it from the recovery media.`,
+                }.${result.error ? ` ${result.error}` : ''} Try the restore again, or run it from the recovery media.${logNote}`,
                 details: warnings.length > 0 ? warnings : undefined
               }
         );

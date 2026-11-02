@@ -426,7 +426,7 @@ declare global {
       recoveryStatus: () => Promise<{
         staged: boolean;
         stagedPath?: string;
-        pendingResult?: { ok: boolean; exitCode?: number; finishedAt?: string; warnings?: string[]; error?: string; bytesWritten?: number } | null;
+        pendingResult?: { ok: boolean; exitCode?: number; finishedAt?: string; warnings?: string[]; error?: string; bytesWritten?: number; logPath?: string } | null;
       }>;
       recoveryReboot: () => Promise<{ ok: boolean; error?: string }>;
       adkInstall: (options: any) => Promise<{ ok: boolean; adkRoot: string | null; steps: Array<{ name: string; exitCode: number }>; error?: string }>;

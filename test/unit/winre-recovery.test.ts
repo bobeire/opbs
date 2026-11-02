@@ -598,3 +598,62 @@ describe('elevated scripts record their own output', () => {
     expect(preserveElevatedLog(path.join(os.tmpdir(), 'opbs-no-such-dir-xyz'), 'x')).toBeNull();
   });
 });
+
+/**
+ * The recovery run itself logs to a folder on the RAM disk, which dies with
+ * the environment. restore.cmd copies it onto the restored volume; the app
+ * then preserves it into its own log directory. Without that chain the only
+ * record of what a recovery run did was a console that has already gone
+ * (field report 2026-11-02: "the logs don't say much").
+ */
+describe('recovery run log survives the reboot', () => {
+  const script = buildRecoveryRestoreCmd();
+
+  it('points node at a log folder it owns', () => {
+    expect(script).toContain('set "OPBS_LOG_DIR=%~dp0logs"');
+  });
+
+  it('copies that log onto the restored volume alongside the result', () => {
+    // Writing it there during the restore would be writing into the area
+    // being overwritten, so it is copied after the run instead.
+    expect(script).toContain('for %%F in ("%OPBS_LOG_DIR%\\*.log") do copy /y "%%~fF" "%VOLROOT%\\OPBS-restore.log" >nul');
+    // And it happens before any exit path leaves the script.
+    expect(script.indexOf('OPBS-restore.log')).toBeGreaterThan(script.indexOf('winpe-entry.js restore'));
+    expect(script.indexOf('OPBS-restore.log')).toBeLessThan(script.indexOf('exit /b %RC%'));
+  });
+});
+
+describe('readRecoveryStatus preserves the recovery run log', () => {
+  let dir: string;
+  const originalSystemDrive = process.env.SystemDrive;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-recovery-log-'));
+    process.env.SystemDrive = dir;
+  });
+
+  afterEach(() => {
+    process.env.SystemDrive = originalSystemDrive;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('moves the run log into the app log directory and reports where', () => {
+    fs.writeFileSync(path.join(dir, 'OPBS-restore.log'), 'recovery run output');
+    fs.writeFileSync(path.join(dir, 'OPBS-restore-result.json'), JSON.stringify({ ok: true, warnings: ['w1'] }));
+
+    const status = readRecoveryStatus();
+
+    expect(status.pendingResult?.logPath).toBeTruthy();
+    expect(fs.existsSync(status.pendingResult!.logPath!)).toBe(true);
+    expect(fs.readFileSync(status.pendingResult!.logPath!, 'utf-8')).toBe('recovery run output');
+    // Consumed, so a stale log is not re-reported on every launch.
+    expect(fs.existsSync(path.join(dir, 'OPBS-restore.log'))).toBe(false);
+  });
+
+  it('still reports a result when there is no log', () => {
+    fs.writeFileSync(path.join(dir, 'OPBS-restore-result.json'), JSON.stringify({ ok: true }));
+    const status = readRecoveryStatus();
+    expect(status.pendingResult?.ok).toBe(true);
+    expect(status.pendingResult?.logPath).toBeUndefined();
+  });
+});

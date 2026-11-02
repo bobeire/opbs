@@ -77,8 +77,15 @@ export function logTimestamp(d: Date = new Date()): string {
  * The directory the app's logs live in. Elevated helpers write their
  * transcripts here too: a failure report is useless if the output only ever
  * existed in a window that closed (field report 2026-11-02).
+ *
+ * `OPBS_LOG_DIR` overrides it. The recovery payload sets it to a folder on
+ * its RAM disk and copies the result onto the restored volume afterwards —
+ * writing to the target during a restore would be writing into the area being
+ * overwritten.
  */
 export function logDirectory(): string {
+  const override = process.env.OPBS_LOG_DIR;
+  if (override && override.trim()) return override.trim();
   return path.join(getUserDataDir(), 'logs');
 }
 
@@ -95,7 +102,7 @@ class Logger {
 
   constructor(level: LogLevel = LogLevel.INFO) {
     this.el = loadElectronLog();
-    const logDir = path.join(getUserDataDir(), 'logs');
+    const logDir = logDirectory();
     if (!fs.existsSync(logDir)) {
       try {
         fs.mkdirSync(logDir, { recursive: true });
