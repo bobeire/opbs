@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Your PC will not start and you have an OPBS backup. What to do first, how to boot the recovery media, how to get your files back or restore the whole machine, and what to expect afterwards." />
+  <title>My PC won't start — get my files back — OPBS guide</title>
+  <link rel="canonical" href="https://opbs.rhitcs.com/wont-boot.html" />
+  <link rel="stylesheet" href="guide.css" />
+</head>
+<body>
+
+<header>
+  <div class="wrapper">
+    <nav>
+      <a href="index.html" class="logo">
+        <img src="https://raw.githubusercontent.com/bobeire/opbs/master/resources/icon.png" alt="OPBS icon" />
+        OPBS
+      </a>
+      <ul>
+        <li><a href="guide.html" class="active">Guide</a></li>
+        <li><a href="index.html#features">Features</a></li>
+        <li><a href="macrium.html">Macrium</a></li>
+        <li><a href="migrate.html">Migrate</a></li>
+        <li><a href="prove-your-restore.html">Prove It</a></li>
+        <li><a href="index.html#download">Download</a></li>
+        <li><a href="releases.html">Releases</a></li>
+        <li><a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrapper">
+    <span class="hero-badge">Guide &middot; for when it matters</span>
+    <h1>My PC won't start</h1>
+    <p class="lead">
+      Nothing here is urgent enough to rush. The order below is the order that
+      loses the least — read it once before you change anything.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="wrapper">
+    <div class="callout warn">
+      <p><strong>Stop before you reinstall Windows.</strong></p>
+      <p>
+        Reinstalling, "resetting" the PC, or letting a repair tool repartition
+        the disk will overwrite the very thing you are trying to recover. If
+        someone is about to do any of those, stop them.
+      </p>
+    </div>
+
+    <h2 style="margin-top:32px">What you need</h2>
+    <ul class="plain" style="margin-top:16px">
+      <li><strong style="color:#d0d7e3">Your backup</strong> — the <code>.opbs</code> file on the external drive or network share where you put it.</li>
+      <li><strong style="color:#d0d7e3">The OPBS recovery USB</strong> — the stick you made after the first backup.</li>
+      <li>If you never made the stick: make one on <strong>any other Windows PC</strong> that can run OPBS. It does not have to be the broken machine. Open OPBS → <strong>Recovery Media</strong> and write it to a spare stick.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrapper">
+    <h2>Step 1 — Boot from the recovery USB</h2>
+    <ol class="steps">
+      <li>
+        <h3>Plug in the stick and turn the machine on</h3>
+        <p>
+          Press the boot-menu key while it starts. Which key depends on the
+          machine — <code>Esc</code>, <code>F12</code>, <code>F10</code>,
+          <code>F2</code> or <code>Del</code> are the common ones, and it is
+          usually shown on the first screen.
+        </p>
+      </li>
+      <li>
+        <h3>Pick the USB stick from the list</h3>
+        <p>
+          It may appear as the stick's name, or as "UEFI: …". Choose the UEFI
+          entry if there are two.
+        </p>
+        <div class="callout warn">
+          <p><strong>No USB entry in the boot menu?</strong></p>
+          <p>
+            Some machines do not add removable drives to the menu. Use
+            <strong>Boot from File</strong> instead (often in the same menu, or
+            in the firmware setup), then browse to
+            <code>\EFI\BOOT\BOOTX64.EFI</code> on the stick and select it. That
+            file is the bootloader; running it starts OPBS's recovery
+            environment exactly as the menu entry would.
+          </p>
+        </div>
+      </li>
+      <li>
+        <h3>Wait for the OPBS Recovery menu</h3>
+        <p>
+          The first minute is device initialisation and can look like nothing is
+          happening. It is not stuck.
+        </p>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section>
+  <div class="wrapper">
+    <h2>Step 2 — Decide what you actually need</h2>
+    <p class="lead">
+      Two very different jobs. Do not do the second one if the first one is what
+      you want.
+    </p>
+    <table class="guide">
+      <tr>
+        <th>If you want…</th>
+        <th>Do this</th>
+        <th>Time</th>
+      </tr>
+      <tr>
+        <td><strong style="color:#d0d7e3">Your files back</strong></td>
+        <td>Option 1, then browse the image and copy files out. Nothing is overwritten.</td>
+        <td>Minutes</td>
+      </tr>
+      <tr>
+        <td><strong style="color:#d0d7e3">The whole machine as it was</strong></td>
+        <td>Option 1, restore the partitions you backed up.</td>
+        <td>Tens of minutes to hours</td>
+      </tr>
+    </table>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrapper">
+    <h2>Step 3 — Get your files back, without restoring anything</h2>
+    <p class="lead">
+      Safest option first. Nothing on the broken machine is touched.
+    </p>
+    <ol class="steps">
+      <li>
+        <h3>Choose <strong>[1] Restore this machine from a backup image</strong></h3>
+        <p>
+          The wizard will ask for an image. Point it at your backup on the
+          external drive — the recovery environment gives drives different
+          letters than Windows did, so look for the drive by size and name
+          rather than assuming <code>D:</code>.
+        </p>
+      </li>
+      <li>
+        <h3>Browse the image instead of restoring</h3>
+        <p>
+          Open the image and you will see the partitions it contains, and the
+          files inside them, exactly as they were. Copy what you need onto
+          another drive — a different one from the backup.
+        </p>
+      </li>
+      <li>
+        <h3>Copy out what matters first</h3>
+        <p>
+          Documents, photos, the desktop, browser profiles if you want your
+          bookmarks and passwords. Then, if you want the machine back, come back
+          here and do the restore.
+        </p>
+      </li>
+    </ol>
+
+    <div class="callout">
+      <p><strong>Why files first</strong></p>
+      <p>
+        A restore overwrites the target. If anything about the backup or the
+        target is not what you expected, having the important files already out
+        means the mistake costs you nothing.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrapper">
+    <h2>Step 4 — Restore the whole machine</h2>
+    <ol class="steps">
+      <li>
+        <h3>Choose [1], pick the image, then pick the partitions</h3>
+        <p>
+          Restore the same partitions you backed up — usually all of them. The
+          wizard shows the captured layout and where each partition will land.
+        </p>
+      </li>
+      <li>
+        <h3>Keep verification on</h3>
+        <p>
+          It checks each block against the checksum stored in the image as it
+          writes. On a day like this you want to know, not hope.
+        </p>
+      </li>
+      <li>
+        <h3>Read the confirmation, then let it run</h3>
+        <p>
+          The target is overwritten. Everything else is left alone. The screen
+          shows progress and speed throughout, and it stays open at the end —
+          including any warnings — before the machine restarts.
+        </p>
+      </li>
+      <li>
+        <h3>Take the USB stick out when it restarts</h3>
+        <p>
+          The menu's <strong>[4] Reboot</strong> asks you to do this and waits
+          for you. If the stick is still in, the machine boots the recovery
+          environment again instead of Windows.
+        </p>
+      </li>
+    </ol>
+
+    <div class="callout warn">
+      <p><strong>What you may see on the first boot back</strong></p>
+      <p>
+        Windows may say <em>"Restart to repair drive errors"</em> and run a disk
+        check. If the backup was taken from a running Windows — which is normal —
+        the image carries NTFS's dirty flag and Windows wants to repair what it
+        sees. That prompt is the live capture, not the restore.
+      </p>
+      <p>
+        The repair can also discard files that were being written when the
+        backup was taken. That is why closing applications before backing up
+        matters.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrapper">
+    <h2>If it still won't start</h2>
+    <ul class="plain" style="margin-top:16px">
+      <li><strong style="color:#d0d7e3">Try the boot menu again.</strong> After a restore the firmware sometimes keeps booting the old entry. Re-select the internal disk.</li>
+      <li><strong style="color:#d0d7e3">Check the restore finished.</strong> Reboot the USB and look at the report OPBS leaves — the recovery run's log is preserved on the restored drive and shown when OPBS next starts.</li>
+      <li><strong style="color:#d0d7e3">A missing boot partition is a common cause.</strong> Restoring only <code>C:</code> does not repair the small partitions Windows starts from. Restore those too if you backed them up.</li>
+      <li><strong style="color:#d0d7e3">Your files are not gone.</strong> If the machine will not boot but you got here, Step 3 still works: browse the image and copy out.</li>
+    </ul>
+
+    <div class="callout" style="margin-top:28px">
+      <p><strong>For next time</strong></p>
+      <p>
+        <a href="first-backup.html">Make your first backup</a> covers the
+        choices that make this day easy — where to put the image, and the USB
+        stick that turns a broken machine into an afternoon.
+      </p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrapper">
+    &copy; 2026 RHITCS &middot;
+    <a href="https://github.com/bobeire/opbs/blob/master/COPYING" target="_blank">GPL-3.0</a> &middot;
+    <a href="index.html">Home</a> &middot;
+    <a href="guide.html">Guide</a> &middot;
+    <a href="releases.html">Releases</a> &middot;
+    <a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a>
+  </div>
+</footer>
+
+</body>
+</html>
