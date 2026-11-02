@@ -10,7 +10,7 @@
     "architecture": {
         "64bit": {
             "url": "https://github.com/bobeire/opbs/releases/download/0.6.102/OPBS-Setup-0.6.102.exe#/dl.7z",
-            "hash": "sha512:3c76c6115774fc87dd0765b0196056765b51f4529789fe14b74c498e414a12987b80272e8ffad7f7e5805d88693fae6e32b0d65e3454089ffdbc31f7b2ad8887",
+            "hash": "sha512:3a343720fc619d32626177390b2381975310fb8a29dd0f8500f509d3c7f0a526fe0ef6facf630fb244617867db0bd1cbf16dd66c89be55122f20f9d0d994aa37",
             "pre_install": [
                 "Expand-7zipArchive \"$dir\\`$PLUGINSDIR\\app-64.7z\" \"$dir\" -Removal",
                 "Remove-Item \"$dir\\`$*\" -Recurse"
