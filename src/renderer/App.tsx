@@ -51,6 +51,8 @@ interface RecoveryNotice {
   kind: 'success' | 'error';
   title: string;
   body: string;
+  /** Warnings reported by the restore that ran in the recovery environment. */
+  details?: string[];
 }
 
 /** Payload of the 'backup-progress' IPC event (mirrors BackupProgress in main; feeds BackupWizard's activeProgress). */
@@ -124,19 +126,28 @@ function App() {
       .then((status) => {
         const result = status?.pendingResult;
         if (!alive || !result) return;
+        const warnings = result.warnings ?? [];
         setRecoveryNotice(
           result.ok
             ? {
                 kind: 'success',
-                title: 'Recovery restore completed',
-                body: 'The recovery restore completed successfully. Open Logs for the full report.'
+                title:
+                  warnings.length > 0
+                    ? `Recovery restore completed with ${warnings.length} warning${warnings.length === 1 ? '' : 's'}`
+                    : 'Recovery restore completed',
+                body:
+                  warnings.length > 0
+                    ? 'The restore finished. These are the messages the recovery environment reported:'
+                    : 'The recovery restore completed successfully.',
+                details: warnings.length > 0 ? warnings : undefined
               }
             : {
                 kind: 'error',
                 title: 'Recovery restore failed',
                 body: `The recovery restore did not complete${
                   typeof result.exitCode === 'number' ? ` (exit code ${result.exitCode})` : ''
-                }. Check Logs for details, then try the restore again.`
+                }.${result.error ? ` ${result.error}` : ''} Try the restore again, or run it from the recovery media.`,
+                details: warnings.length > 0 ? warnings : undefined
               }
         );
       })
@@ -413,12 +424,19 @@ function App() {
         // recovery report reuses the same toast classes (offset below the
         // ToastHost stack) and stays until dismissed — a restore result is
         // too important to auto-hide.
-        <div className="toast-host" style={{ top: 'auto', bottom: 16 }}>
+        <div className="toast-host" style={{ top: 'auto', bottom: 16, maxWidth: recoveryNotice.details?.length ? 560 : undefined }}>
           <div
             className={`toast ${recoveryNotice.kind === 'success' ? 'toast-success' : 'toast-error'}`}
           >
             <div className="toast-title">{recoveryNotice.title}</div>
             <div className="toast-body">{recoveryNotice.body}</div>
+            {recoveryNotice.details?.length ? (
+              <ul className="toast-list">
+                {recoveryNotice.details.map((detail, index) => (
+                  <li key={index}>{detail}</li>
+                ))}
+              </ul>
+            ) : null}
             <button className="toast-close" onClick={() => setRecoveryNotice(null)}>
               ×
             </button>

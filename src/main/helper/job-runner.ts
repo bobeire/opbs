@@ -1047,6 +1047,19 @@ export function lockFailureMessage(label: string, volumePath?: string, detail?: 
   );
 }
 
+/**
+ * Turn the native layer's terse lock note into something a user can act on.
+ * "the volume was in use for 10s (lock error 5); it was taken" is accurate but
+ * reads like a failure; in fact the restore waited, forced the dismount and
+ * carried on. Saying so turns a scary line into a non-event (field report
+ * 2026-11-01: a tester re-ran a 131 GB restore just to re-read this line).
+ */
+export function lockNoteHint(note: string): string {
+  return /in use for \d+\s*s/i.test(note)
+    ? ' — the volume was held open, so the restore waited for it and then forced the dismount. The write proceeded normally.'
+    : '';
+}
+
 export async function writeRawWithRetry(
   attemptWrite: () => void | Promise<unknown>,
   attempts = 20,
@@ -1362,7 +1375,7 @@ export async function runRestoreJob(
           } else if (note) {
             // Won the hard way (e.g. forced dismount after 10s in use) — say so
             // instead of pretending it was routine.
-            warnings.push(`${target.label}: ${note}`);
+            warnings.push(`${target.label}: ${note}${lockNoteHint(note)}`);
           }
         }
       }
@@ -1844,8 +1857,12 @@ export async function runRestoreJob(
     }
 
     if (freeBlocksCleared > 0) {
+      // Routine, not a problem: clearFreeSpace is on by default and this is
+      // what it does. Phrased so nobody reads it as damage (field report
+      // 2026-11-01: a tester ran a whole second restore just to re-read it).
       warnings.push(
-        `Cleared ${freeBlocksCleared} free-space block(s) not present in the image so post-backup data cannot remain`
+        `Free space cleared on the target: ${freeBlocksCleared} block(s) absent from the image were zeroed, ` +
+          `so files created after this backup cannot survive the restore (clearFreeSpace). This is expected.`
       );
     }
 
@@ -2112,7 +2129,7 @@ async function runMacriumRestoreJob(
           } else if (note) {
             // Won the hard way (e.g. forced dismount after 10s in use) — say so
             // instead of pretending it was routine.
-            warnings.push(`${target.label}: ${note}`);
+            warnings.push(`${target.label}: ${note}${lockNoteHint(note)}`);
           }
         }
       }

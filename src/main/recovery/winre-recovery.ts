@@ -147,6 +147,11 @@ export interface RecoveryPendingResult {
   ok: boolean;
   exitCode?: number;
   finishedAt?: string;
+  /** Warnings reported by the restore that ran in the recovery environment. */
+  warnings?: string[];
+  /** Failure reason, when the restore reported one. */
+  error?: string;
+  bytesWritten?: number;
 }
 
 export interface RecoveryStatusResult {
@@ -210,6 +215,10 @@ export function buildRecoveryStartnetCmd(): string {
     'xcopy "%STAGED%\\media\\OPBS" "X:\\OPBS\\" /E /I /Q /Y >nul',
     'if not exist "X:\\OPBS\\node.exe" goto :notfound',
     'set "OPBS_STAGED=%STAGED%"',
+    // The result marker belongs on the volume the staged payload was found on
+    // (the freshly restored system volume), not on the RAM copy it runs from.
+    'for %%I in ("%STAGED%\\..\\..") do set "VOLROOT=%%~fI"',
+    'if "%VOLROOT:~-1%"=="\\" set "VOLROOT=%VOLROOT:~0,-1%"',
     'echo.',
     'echo The restore will start automatically in 10 seconds.',
     'echo Press any key within 10 seconds to cancel and open a command prompt instead.',
@@ -218,8 +227,23 @@ export function buildRecoveryStartnetCmd(): string {
     'call "X:\\OPBS\\restore.cmd"',
     'if errorlevel 1 goto :failed',
     'echo.',
-    'echo Restore completed. Rebooting back into Windows...',
+    'echo Restore completed.',
+    'if exist "%VOLROOT%\\OPBS-restore-result.json" echo Full result, warnings included: %VOLROOT%\\OPBS-restore-result.json',
+    'echo.',
+    // Do not reboot over the output. The restore's warnings scroll past in a
+    // fraction of a second and the screen used to close with them, so the only
+    // way to read them was to run the whole restore again (field report
+    // 2026-11-01). Hold, then reboot; any key stays in this window.
+    'echo Rebooting back into Windows in 30 seconds.',
+    'echo Press any key to stay in this window and read the output instead.',
+    'X:\\OPBS\\node.exe X:\\OPBS\\cancel-window.js 30',
+    'if errorlevel 1 goto :stay',
     'wpeutil reboot',
+    'goto :eof',
+    ':stay',
+    'echo.',
+    'echo Staying in this window. Reboot when ready with: wpeutil reboot',
+    'cmd /k',
     'goto :eof',
     ':cancelled',
     'echo.',
@@ -254,12 +278,20 @@ export function buildRecoveryRestoreCmd(): string {
     'title OPBS Restore',
     'cd /d "%~dp0"',
     'if not exist "%~dp0OPBS-restore.json" goto :wizard',
+    // startnet.cmd computes this; recompute for a direct run of restore.cmd.
+    'if not defined VOLROOT if defined OPBS_STAGED for %%I in ("%OPBS_STAGED%\\..\\..") do set "VOLROOT=%%~fI"',
+    'if defined VOLROOT if "%VOLROOT:~-1%"=="\\" set "VOLROOT=%VOLROOT:~0,-1%"',
+    'if not defined VOLROOT set "VOLROOT=%SystemDrive%"',
     'echo Running the staged restore from OPBS-restore.json ...',
     'echo.',
-    'node.exe winpe-entry.js restore "OPBS-restore.json" --elevated --acknowledge-same-disk',
+    // --result writes the job outcome (warnings included) as JSON on the
+    // restored volume. stdout is not durable here: the console scrolls and the
+    // machine reboots seconds later, so warnings that only exist on screen are
+    // lost (field report 2026-11-01).
+    'node.exe winpe-entry.js restore "OPBS-restore.json" --elevated --acknowledge-same-disk --result "%VOLROOT%\\OPBS-restore-result.json"',
     'set "RC=%ERRORLEVEL%"',
-    'if defined OPBS_STAGED for %%I in ("%OPBS_STAGED%\\..\\..") do set "VOLROOT=%%~fI"',
-    'if not defined VOLROOT set "VOLROOT=%SystemDrive%\\."',
+    'if exist "%VOLROOT%\\OPBS-restore-result.json" exit /b %RC%',
+    // Fallback marker if the CLI died before it could write its own result.
     'if "%RC%"=="0" (',
     '  >"%VOLROOT%\\OPBS-restore-result.json" echo {"ok":true,"finishedAt":"%DATE% %TIME%"}',
     '  exit /b 0',
@@ -346,7 +378,12 @@ export function buildCancelWindowJs(): string {
     "rl.emitKeypressEvents(process.stdin);",
     "if (process.stdin.isTTY && process.stdin.setRawMode) process.stdin.setRawMode(true);",
     "process.stdin.resume();",
-    "const timer = setTimeout(() => process.exit(0), 10000);",
+    // Seconds as argv[2] (default 10). The same window serves two jobs: the
+    // pre-restore cancel prompt, and the post-restore hold that keeps the
+    // warnings on screen instead of rebooting over them (field report
+    // 2026-11-01). choice.exe is absent from winre.wim, node travels with us.
+    "const seconds = Number(process.argv[2]) > 0 ? Number(process.argv[2]) : 10;",
+    "const timer = setTimeout(() => process.exit(0), seconds * 1000);",
     "process.stdin.on('keypress', () => { clearTimeout(timer); process.exit(1); });",
     ''
   ].join('\n');
@@ -786,11 +823,30 @@ export function readRecoveryStatus(): RecoveryStatusResult {
   let pendingResult: RecoveryPendingResult | null = null;
   try {
     if (fs.existsSync(resultPath)) {
-      const raw = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as RecoveryPendingResult;
+      const raw = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as {
+        ok?: boolean;
+        exitCode?: number;
+        finishedAt?: string;
+        warnings?: unknown;
+        error?: unknown;
+        bytesWritten?: number;
+      };
+      // Warnings are the point of this file: the recovery console scrolls and
+      // reboots, so this is the only place they survive. Bound them so a
+      // pathological run cannot turn the startup toast into a wall of text.
+      const warnings = Array.isArray(raw.warnings)
+        ? raw.warnings
+            .filter((w): w is string => typeof w === 'string')
+            .slice(0, 20)
+            .map((w) => w.slice(0, 500))
+        : [];
       pendingResult = {
         ok: !!raw.ok,
         ...(typeof raw.exitCode === 'number' ? { exitCode: raw.exitCode } : {}),
-        ...(raw.finishedAt ? { finishedAt: raw.finishedAt } : {})
+        ...(raw.finishedAt ? { finishedAt: String(raw.finishedAt) } : {}),
+        ...(warnings.length > 0 ? { warnings } : {}),
+        ...(typeof raw.error === 'string' && raw.error ? { error: raw.error.slice(0, 500) } : {}),
+        ...(typeof raw.bytesWritten === 'number' ? { bytesWritten: raw.bytesWritten } : {})
       };
       fs.rmSync(resultPath, { force: true });
     }

@@ -630,7 +630,7 @@ describe('runRestoreJob', () => {
     expect(result.ok).toBe(true);
     expect(result.blocksWritten).toBe(1);
     expect(result.freeBlocksCleared).toBe(2);
-    expect(result.warnings.some((w) => w.includes('Cleared 2 free-space block'))).toBe(true);
+    expect(result.warnings.some((w) => w.includes('Free space cleared on the target: 2 block(s)'))).toBe(true);
     // totalBytes includes image bytes + gap zeros.
     expect(result.totalBytes).toBe(BLOCK + BLOCK * 2);
     expect(result.bytesWritten).toBe(BLOCK * 3);

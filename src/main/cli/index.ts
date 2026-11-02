@@ -846,7 +846,7 @@ function renderRestorePlan(plan: RestoreJob): string {
 async function cmdRestore(ctx: CommandContext): Promise<number> {
   const configPath = ctx.argv[0];
   if (!configPath) {
-    console.error('Usage: restore <config.json> [--preflight] [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk] [--region R]');
+    console.error('Usage: restore <config.json> [--preflight] [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk] [--region R] [--result <path>]');
     console.error('imagePath accepts a local .opbs/.mrimgx/.mrimg file, or an s3://, sftp://, ftp:// .opbs URI (the chain is staged to a temp dir first).');
     return 1;
   }
@@ -1501,6 +1501,22 @@ async function runJobInProcess(
     await dispatchHelperJob(jobPath, resultPath, progressPath, cancelPath, undefined, progressPipe);
     if (printedProgress) process.stdout.write('\n');
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
+    // --result <path>: persist the outcome, warnings included. A caller that
+    // reboots or closes the console seconds later (the recovery environment)
+    // cannot rely on stdout, and a warning nobody can read is not a warning.
+    const resultOut = flagValue(ctx.argv, '--result');
+    if (resultOut) {
+      try {
+        fs.writeFileSync(
+          resultOut,
+          JSON.stringify({ ...result, finishedAt: new Date().toISOString() }, null, 2)
+        );
+      } catch (error) {
+        console.error(
+          `warning: could not write ${resultOut}: ${error instanceof Error ? error.message : error}`
+        );
+      }
+    }
     if (ctx.opts.json) {
       console.log(JSON.stringify(result, null, 2));
     } else {

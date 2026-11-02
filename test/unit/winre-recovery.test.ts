@@ -7,6 +7,8 @@ import {
   parseReagentcWinreDir,
   buildRecoveryStartnetCmd,
   buildRecoveryRestoreCmd,
+  buildCancelWindowJs,
+  readRecoveryStatus,
   recoveryPayloadTextFiles,
   resolveStagedImagePath,
   buildStageScript,
@@ -110,8 +112,29 @@ describe('buildRecoveryStartnetCmd', () => {
 
   it('reboots back to Windows only after a successful restore', () => {
     expect(script).toContain('wpeutil reboot');
-    expect(script.match(/wpeutil reboot/g)).toHaveLength(1);
+    // Exactly one reboot *command* (the hold prompt mentions the command too).
+    expect(script.match(/^wpeutil reboot$/gm)).toHaveLength(1);
     expect(script.indexOf('wpeutil reboot')).toBeGreaterThan(script.indexOf('call "X:\\OPBS\\restore.cmd"'));
+  });
+
+  it('holds the screen after a successful restore instead of rebooting over the output', () => {
+    // Field report 2026-11-01: the restore finished, the console closed before
+    // the warnings could be read, and the only way to see them was to run the
+    // whole restore again. Hold for 30s; any key stays in the window.
+    const hold = script.indexOf('Rebooting back into Windows in 30 seconds.');
+    expect(hold).toBeGreaterThan(script.indexOf('call "X:\\OPBS\\restore.cmd"'));
+    expect(script).toContain('Press any key to stay in this window');
+    expect(script).toContain('X:\\OPBS\\node.exe X:\\OPBS\\cancel-window.js 30');
+    expect(script).toContain('if errorlevel 1 goto :stay');
+    // The reboot command must come after the hold, not before it.
+    expect(script.indexOf('wpeutil reboot')).toBeGreaterThan(script.indexOf('cancel-window.js 30'));
+    const stay = script.slice(script.lastIndexOf(':stay'));
+    expect(stay).toContain('cmd /k');
+  });
+
+  it('points at the result file that survives the reboot', () => {
+    expect(script).toContain('echo Full result, warnings included: %VOLROOT%\\OPBS-restore-result.json');
+    expect(script).toContain('for %%I in ("%STAGED%\\..\\..") do set "VOLROOT=%%~fI"');
   });
 
   it('does NOT reboot on the failure path', () => {
@@ -128,15 +151,29 @@ describe('buildRecoveryRestoreCmd', () => {
   const script = buildRecoveryRestoreCmd();
 
   it('runs the staged restore config through the CLI', () => {
-    expect(script).toContain('node.exe winpe-entry.js restore "OPBS-restore.json" --elevated --acknowledge-same-disk');
+    expect(script).toContain('node.exe winpe-entry.js restore "OPBS-restore.json" --elevated --acknowledge-same-disk --result "%VOLROOT%\\OPBS-restore-result.json"');
     expect(script).toContain('if not exist "%~dp0OPBS-restore.json" goto :wizard');
+  });
+
+  it('asks the CLI to persist the warnings, not just print them', () => {
+    // The console scrolls and the machine reboots; a warning that only exists
+    // on screen is lost (field report 2026-11-01).
+    expect(script).toContain('--result "%VOLROOT%\\OPBS-restore-result.json"');
   });
 
   it('writes the result marker on both the success and the failure path', () => {
     expect(script).toContain('OPBS-restore-result.json');
-    expect(script.match(/OPBS-restore-result\.json/g)).toHaveLength(2);
     expect(script).toContain('{"ok":true');
     expect(script).toContain('{"ok":false,"exitCode":%RC%');
+  });
+
+  it('falls back to its own marker only when the CLI wrote no result', () => {
+    expect(script).toContain('if exist "%VOLROOT%\\OPBS-restore-result.json" exit /b %RC%');
+  });
+
+  it('resolves the marker volume from the staged payload location', () => {
+    expect(script).toContain('if not defined VOLROOT if defined OPBS_STAGED for %%I in ("%OPBS_STAGED%\\..\\..") do set "VOLROOT=%%~fI"');
+    expect(script).toContain('if not defined VOLROOT set "VOLROOT=%SystemDrive%"');
   });
 
   it('exits 0 on success and 1 on failure', () => {
@@ -402,5 +439,84 @@ describe('stageRecoveryRestore validation (early exits — nothing machine-level
     const r = await stageRecoveryRestore({ imagePath: 'D:\\x.opbs', targetDiskIndex: 0, targetPartitions: [] });
     expect(r.ok).toBe(false);
     expect(r.error).toContain('No partitions');
+  });
+});
+
+describe('cancel-window.js', () => {
+  it('takes its duration from argv so one script serves cancel and hold', () => {
+    const js = buildCancelWindowJs();
+    expect(js).toContain('const seconds = Number(process.argv[2]) > 0 ? Number(process.argv[2]) : 10;');
+    expect(js).toContain('seconds * 1000');
+    // A keypress must still exit non-zero - that is how batch tells "stay".
+    expect(js).toContain('process.exit(1)');
+  });
+});
+
+describe('readRecoveryStatus', () => {
+  let dir: string;
+  const originalSystemDrive = process.env.SystemDrive;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-recovery-status-'));
+    // readRecoveryStatus resolves paths against SystemDrive; pointing it at a
+    // temp directory keeps the test off the real C: root.
+    process.env.SystemDrive = dir;
+  });
+
+  afterEach(() => {
+    process.env.SystemDrive = originalSystemDrive;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const resultPath = () => path.join(dir, 'OPBS-restore-result.json');
+
+  it('returns the warnings the recovery restore reported', () => {
+    // Field report 2026-11-01: the console closed before these could be read.
+    fs.writeFileSync(
+      resultPath(),
+      JSON.stringify({
+        ok: true,
+        bytesWritten: 141_000_000_000,
+        warnings: [
+          'Partition 2: the volume was in use for 10s (lock error 5); it was taken — the volume was held open, so the restore waited for it and then forced the dismount. The write proceeded normally.',
+          'Free space cleared on the target: 52528 block(s) absent from the image were zeroed, so files created after this backup cannot survive the restore (clearFreeSpace). This is expected.'
+        ],
+        finishedAt: '2026-11-01T19:19:16.947Z'
+      })
+    );
+
+    const status = readRecoveryStatus();
+
+    expect(status.pendingResult?.ok).toBe(true);
+    expect(status.pendingResult?.warnings).toHaveLength(2);
+    expect(status.pendingResult?.warnings?.[0]).toContain('lock error 5');
+    expect(status.pendingResult?.bytesWritten).toBe(141_000_000_000);
+    // Consumed on read so the toast does not nag on every launch.
+    expect(fs.existsSync(resultPath())).toBe(false);
+  });
+
+  it('still reads the batch fallback marker, which has no warnings', () => {
+    fs.writeFileSync(resultPath(), '{"ok":true,"finishedAt":"2026-11-01 19:19:16"}');
+    const status = readRecoveryStatus();
+    expect(status.pendingResult?.ok).toBe(true);
+    expect(status.pendingResult?.warnings).toBeUndefined();
+  });
+
+  it('bounds a pathological warning list and entry length', () => {
+    fs.writeFileSync(
+      resultPath(),
+      JSON.stringify({
+        ok: true,
+        warnings: Array.from({ length: 50 }, (_, i) => `${i}:` + 'x'.repeat(2000))
+      })
+    );
+    const status = readRecoveryStatus();
+    expect(status.pendingResult?.warnings).toHaveLength(20);
+    expect(status.pendingResult?.warnings?.[0].length).toBe(500);
+  });
+
+  it('treats an unreadable marker as absent instead of throwing', () => {
+    fs.writeFileSync(resultPath(), 'not json');
+    expect(readRecoveryStatus().pendingResult).toBeNull();
   });
 });
