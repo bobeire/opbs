@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://opbs.rhitcs.com/sitemap.xml

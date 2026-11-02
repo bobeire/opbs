@@ -3,8 +3,71 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="Macrium Reflect Free is gone. OPBS reads, browses, mounts and restores your existing .mrimg and .mrimgx images — including differential and incremental chains — free and open source." />
-  <title>Restore Macrium Reflect images for free — OPBS</title>
+  <meta name="description" content="Restore a Macrium Reflect image without Macrium installed. OPBS opens .mrimg (Reflect 7/8) and .mrimgx (Reflect X) files — full, differential and incremental, encrypted Reflect X included — and browses, mounts or restores them. Free, open source, Windows." />
+  <title>Restore .mrimg and .mrimgx without Macrium — OPBS</title>
+  <link rel="canonical" href="https://opbs.rhitcs.com/macrium.html" />
+  <meta property="og:type" content="article" />
+  <meta property="og:site_name" content="OPBS" />
+  <meta property="og:title" content="Restore .mrimg and .mrimgx without Macrium — OPBS" />
+  <meta property="og:description" content="Macrium Reflect Free is gone, but your images still restore. OPBS reads Reflect 7/8 and Reflect X containers, including encrypted Reflect X and delta chains — free and open source." />
+  <meta property="og:url" content="https://opbs.rhitcs.com/macrium.html" />
+  <meta name="twitter:card" content="summary" />
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      {
+        "@type": "Question",
+        "name": "Can I restore a Macrium image without Macrium installed?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Yes. OPBS reads both Macrium containers — .mrimg from Reflect 7/8 and .mrimgx from Reflect X — and restores full, differential and incremental members. No Reflect install, licence or account is needed. Every block is decompressed and checked against the MD5 digests Macrium stored inside the image before it reaches the target."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Does OPBS open password-protected Macrium images?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Reflect X (.mrimgx) yes: enter the passphrase and browse, extract, mount or restore, delta sets included — implemented from Macrium's published format documentation. Password-protected Reflect 7/8 (.mrimg) images are not supported, because that container's encryption has no published specification; OPBS detects them and refuses before writing anything."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Do I need the whole backup set to restore a differential or incremental?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Yes. A differential or incremental member is only half the picture, so the base image and any earlier members must be on disk. OPBS resolves the chain automatically — Reflect 7/8 by the -00-00/-01-01 naming, Reflect X by the backup-set manifest — and shows the full logical volume state. A missing member is refused up front rather than discovered halfway through a restore."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Can I extract one file instead of restoring a whole disk?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Yes. Browse and extract a single path from the CLI, or mount a partition read-only to a drive letter via WinFsp, which decompresses only the blocks it needs and uses no extra disk space. NTFS sparse runs, LZNT1 compression and alternate data streams are handled."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Can I restore onto the disk Windows is running from?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Not while Windows is running — that volume cannot be locked or overwritten from inside the OS. Boot the OPBS recovery media, or use the in-app restore after reboot into recovery, which stages the restore and reboots into the Windows Recovery Environment where the volume is free."
+        }
+      },
+      {
+        "@type": "Question",
+        "name": "Is OPBS really free?",
+        "acceptedAnswer": {
+          "@type": "Answer",
+          "text": "Yes. GPL-3.0, source on GitHub, no account, no telemetry, no expiry. Restoring your own Macrium images costs nothing and always will."
+        }
+      }
+    ]
+  }
+  </script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html { scroll-behavior: smooth; }
@@ -144,6 +207,25 @@
     ul.plain li::before { content: "✓"; position: absolute; left: 0; color: #3ecf8e; font-weight: 700; }
     ul.plain.limit li::before { content: "—"; color: #e0a030; }
 
+    details.faq {
+      background: #0f1929; border: 1px solid #1e2d44; border-radius: 12px;
+      margin-top: 12px; max-width: 840px;
+    }
+    details.faq summary {
+      cursor: pointer; list-style: none; position: relative;
+      padding: 18px 52px 18px 22px; font-weight: 600; color: #d0d7e3;
+    }
+    details.faq summary::-webkit-details-marker { display: none; }
+    details.faq summary::after {
+      content: "+"; position: absolute; right: 22px; top: 50%;
+      transform: translateY(-50%); color: #61d0ff; font-size: 1.15rem;
+    }
+    details.faq[open] summary::after { content: "−"; }
+    details.faq .answer {
+      padding: 0 22px 20px; color: #8fa5c0; font-size: 0.93rem; max-width: 760px;
+    }
+    details.faq .answer p + p { margin-top: 10px; }
+
     .download-box {
       background: linear-gradient(135deg, #152238, #0f1929);
       border: 1px solid #2a4467; border-radius: 16px; padding: 48px;
@@ -190,7 +272,7 @@
 
 <section class="hero">
   <div class="wrapper">
-    <span class="hero-badge">For Macrium Reflect users</span>
+    <span class="hero-badge">Restore .mrimg / .mrimgx without Macrium</span>
     <h1>Your Macrium images still work.<br />Keep them free.</h1>
     <p>
       Macrium Reflect Free is discontinued. OPBS is a free, open-source
@@ -517,6 +599,106 @@ OPBS.exe --cli browse "D:\Images\win11-01-01.mrimg" --partition 2</pre>
     <ul class="plain limit" style="margin-top:8px">
       <li>If you need enterprise support contracts or certified compliance, a paid vendor is the right call.</li>
     </ul>
+  </div>
+</section>
+
+<section class="alt" id="faq">
+  <div class="wrapper">
+    <h2>Restoring a Macrium image without Macrium</h2>
+    <p class="lead">
+      The questions people actually ask when the free edition is gone and the
+      images are still on the shelf.
+    </p>
+
+    <details class="faq" open>
+      <summary>Can I restore a Macrium image without Macrium installed?</summary>
+      <div class="answer">
+        <p>
+          Yes. OPBS reads both containers — <code>.mrimg</code> from Reflect
+          7/8 and <code>.mrimgx</code> from Reflect X — and restores full,
+          differential and incremental members. No Reflect install, licence or
+          account is involved.
+        </p>
+        <p>
+          Every block is decompressed and checked against the MD5 digests
+          Macrium stored inside the image before it reaches the target, so a
+          damaged image is a clean refusal rather than a half-written disk.
+        </p>
+      </div>
+    </details>
+
+    <details class="faq">
+      <summary>Does it open password-protected Macrium images?</summary>
+      <div class="answer">
+        <p>
+          <strong style="color:#d0d7e3">Reflect X (<code>.mrimgx</code>): yes.</strong>
+          Enter the passphrase and browse, extract, mount or restore — delta
+          sets included. This is implemented from Macrium's published format
+          documentation and validated against a real encrypted image: every one
+          of its 122,864 blocks decrypts to the digest Macrium itself stored.
+        </p>
+        <p>
+          <strong style="color:#d0d7e3">Reflect 7/8 (<code>.mrimg</code>): no.</strong>
+          That container's encryption has no published specification, so OPBS
+          detects it from the file contents and refuses before touching a disk
+          instead of failing halfway through.
+        </p>
+      </div>
+    </details>
+
+    <details class="faq">
+      <summary>Do I need the whole backup set for a differential or incremental?</summary>
+      <div class="answer">
+        <p>
+          Yes — a differential or incremental member is only half the picture,
+          so the base image and any earlier members have to be on disk. OPBS
+          resolves the chain automatically (Reflect 7/8 by the
+          <code>-00-00</code> / <code>-01-01</code> naming, Reflect X by the
+          backup-set manifest) and shows the full logical volume state, not just
+          the delta.
+        </p>
+        <p>
+          If a member is missing, the restore is refused up front with the
+          filename it needs.
+        </p>
+      </div>
+    </details>
+
+    <details class="faq">
+      <summary>Can I pull out one file instead of restoring a whole disk?</summary>
+      <div class="answer">
+        <p>
+          Yes. Browse and extract a single path from the CLI, or mount a
+          partition read-only to a drive letter via WinFsp — reads are served on
+          demand by decompressing only the blocks needed, so there is no extra
+          disk usage. NTFS sparse runs, LZNT1 compression and alternate data
+          streams are handled.
+        </p>
+      </div>
+    </details>
+
+    <details class="faq">
+      <summary>Can I restore onto the disk Windows is running from?</summary>
+      <div class="answer">
+        <p>
+          Not while Windows is running — that volume cannot be locked or
+          overwritten from inside the OS. Boot the OPBS recovery media, or use
+          the in-app <strong style="color:#d0d7e3">restore after reboot into
+          recovery</strong>, which stages the restore and reboots into the
+          Windows Recovery Environment where the volume is free.
+        </p>
+      </div>
+    </details>
+
+    <details class="faq">
+      <summary>Is OPBS really free?</summary>
+      <div class="answer">
+        <p>
+          Yes. GPL-3.0, source on GitHub, no account, no telemetry, no expiry.
+          Restoring your own Macrium images costs nothing and always will.
+        </p>
+      </div>
+    </details>
   </div>
 </section>
 
