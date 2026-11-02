@@ -13,6 +13,8 @@ import {
   resolveStagedImagePath,
   buildStageScript,
   buildCleanupScript,
+  elevatedLogPath,
+  preserveElevatedLog,
   buildWinpeshlIni,
   stageRecoveryRestore,
   type RecoveryStageConfig,
@@ -518,5 +520,81 @@ describe('readRecoveryStatus', () => {
   it('treats an unreadable marker as absent instead of throwing', () => {
     fs.writeFileSync(resultPath(), 'not json');
     expect(readRecoveryStatus().pendingResult).toBeNull();
+  });
+});
+
+/**
+ * Field report 2026-11-02 (kelper, on the forum): "The logs don't say much.
+ * I think it would be better to capture all the output in the PowerShell
+ * window." He was right, on two counts. The elevated wrapper cannot redirect
+ * output from outside (Start-Process -Verb RunAs plus -RedirectStandard* is
+ * an ambiguous parameter set), so a script has to record its own session —
+ * and the staging/cleanup scripts did not. Worse, the commands themselves
+ * were piped to Out-Null, so even a transcript would have shown nothing.
+ */
+describe('elevated scripts record their own output', () => {
+  it('staging captures the whole elevated session', () => {
+    const script = buildStageScript(stageParams());
+    expect(script).toContain('Start-Transcript -Path');
+    expect(script).toContain('elevated.log');
+    expect(script).toContain('Stop-Transcript');
+    // The transcript opens before any work and closes after the result.
+    expect(script.indexOf('Start-Transcript')).toBeLessThan(script.indexOf('Write-Step'));
+    expect(script.indexOf('Stop-Transcript')).toBeGreaterThan(script.lastIndexOf('Write-Result'));
+  });
+
+  it('cleanup captures it too', () => {
+    const script = buildCleanupScript({
+      progressFile: 'C:\Users\me\AppData\Local\Temp\opbs-recovery-clean-x\progress.txt',
+      resultFile: 'C:\Users\me\AppData\Local\Temp\opbs-recovery-clean-x\result.json',
+      entryGuid: '{11111111-2222-3333-4444-555555555555}',
+      ramdiskGuid: '{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}'
+    });
+    expect(script).toContain('Start-Transcript -Path');
+    expect(script).toContain('Stop-Transcript');
+  });
+
+  it('does not silence the tools whose output the transcript exists for', () => {
+    // Piping to Out-Null is what made the logs say nothing.
+    for (const script of [
+      buildStageScript(stageParams()),
+      buildCleanupScript({
+        progressFile: 'C:\\x\\progress.txt',
+        resultFile: 'C:\\x\\result.json',
+        entryGuid: '{1}',
+        ramdiskGuid: '{2}'
+      })
+    ]) {
+      const silenced = script
+        .split('\n')
+        .filter((line) => /& (dism|bcdedit|manage-bde)/.test(line) && line.includes('Out-Null'));
+      expect(silenced).toEqual([]);
+    }
+  });
+
+  it('keeps the transcript in the work dir the caller can reach', () => {
+    expect(elevatedLogPath('C:\\tmp\\opbs-recovery-x')).toBe(path.join('C:\\tmp\\opbs-recovery-x', 'elevated.log'));
+  });
+
+  it('preserves the transcript where a person will actually find it', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-log-keep-'));
+    try {
+      const work = path.join(dir, 'work');
+      fs.mkdirSync(work);
+      fs.writeFileSync(elevatedLogPath(work), 'transcript body');
+
+      const kept = preserveElevatedLog(work, 'recovery-stage');
+
+      expect(kept).not.toBeNull();
+      expect(fs.existsSync(kept!)).toBe(true);
+      expect(fs.readFileSync(kept!, 'utf-8')).toBe('transcript body');
+      expect(path.basename(kept!)).toMatch(/^recovery-stage-/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null instead of throwing when there is nothing to keep', () => {
+    expect(preserveElevatedLog(path.join(os.tmpdir(), 'opbs-no-such-dir-xyz'), 'x')).toBeNull();
   });
 });

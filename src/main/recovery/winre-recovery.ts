@@ -32,7 +32,7 @@ import path from 'path';
 import os from 'os';
 import { spawn } from 'child_process';
 import { runElevatedPowerShell } from '../utils/elevated';
-import { logger } from '../utils/logger';
+import { logger, logDirectory } from '../utils/logger';
 import {
   PayloadItem,
   planPayloadCopies,
@@ -389,6 +389,47 @@ export function buildCancelWindowJs(): string {
   ].join('\n');
 }
 
+/**
+ * PowerShell transcript lines for an elevated session.
+ *
+ * The outer wrapper cannot combine `Start-Process -Verb RunAs` with
+ * `-RedirectStandard*` (AmbiguousParameterSet), so an elevated script has to
+ * record its own output. Without these lines the window's output vanishes
+ * with the window and the app's log says almost nothing about what the
+ * elevated step actually did (field report 2026-11-02: "the logs don't say
+ * much — capture the output in the PowerShell window").
+ */
+function transcriptStart(logPath: string): string {
+  return `Start-Transcript -Path ${psSingle(logPath)} -Append -ErrorAction SilentlyContinue | Out-Null`;
+}
+
+const transcriptStop = `Stop-Transcript -ErrorAction SilentlyContinue | Out-Null`;
+
+/** Where an elevated script writes its transcript (inside the kept work dir). */
+export function elevatedLogPath(work: string): string {
+  return path.join(work, 'elevated.log');
+}
+
+/**
+ * Keep the elevated transcript past the work dir's lifetime and report where
+ * it went. The temp folder is deleted on success and kept on failure, but
+ * "kept in a temp folder" is not a place a user will find — the app's log
+ * directory is.
+ */
+export function preserveElevatedLog(work: string, label: string): string | null {
+  const source = elevatedLogPath(work);
+  try {
+    if (!fs.existsSync(source)) return null;
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const dest = path.join(logDirectory(), `${label}-${stamp}.log`);
+    fs.mkdirSync(logDirectory(), { recursive: true });
+    fs.copyFileSync(source, dest);
+    return dest;
+  } catch {
+    return null;
+  }
+}
+
 export interface StageScriptParams {
   work: string;
   progressFile: string;
@@ -424,6 +465,10 @@ export function buildStageScript(p: StageScriptParams): string {
     .join('\n');
   return [
     `$ErrorActionPreference = 'Stop'`,
+    // Record the whole elevated session: the wrapper cannot capture it from
+    // outside (see transcriptStart), and a step that fails in the dark is a
+    // step nobody can debug.
+    transcriptStart(elevatedLogPath(p.work)),
     `$work = ${psSingle(p.work)}`,
     `$progressFile = ${psSingle(p.progressFile)}`,
     `$resultFile = ${psSingle(p.resultFile)}`,
@@ -494,15 +539,15 @@ export function buildStageScript(p: StageScriptParams): string {
     `  $wimTarget = Join-Path $stageRoot 'winre.wim'`,
     `  $mount = Join-Path $env:TEMP ('opbs-wim-' + [guid]::NewGuid().ToString('N'))`,
     `  New-Item -ItemType Directory -Path $mount | Out-Null`,
-    `  & dism /English /Mount-Wim /WimFile:"$wimTarget" /Index:1 /MountDir:"$mount" | Out-Null`,
+    `  & dism /English /Mount-Wim /WimFile:"$wimTarget" /Index:1 /MountDir:"$mount"`,
     `  if ($LASTEXITCODE -ne 0) { throw "dism /Mount-Wim failed with exit code $LASTEXITCODE" }`,
     `  try {`,
     `    [System.IO.File]::WriteAllText((Join-Path $mount 'Windows\\System32\\startnet.cmd'), [System.Text.Encoding]::ASCII.GetString([System.Convert]::FromBase64String('${p.startnetB64}')))`,
     `    [System.IO.File]::WriteAllText((Join-Path $mount 'Windows\\System32\\winpeshl.ini'), [System.Text.Encoding]::ASCII.GetString([System.Convert]::FromBase64String('${p.winpeshlB64}')))`,
-    `    & dism /English /Unmount-Wim /MountDir:"$mount" /Commit | Out-Null`,
+    `    & dism /English /Unmount-Wim /MountDir:"$mount" /Commit`,
     `    if ($LASTEXITCODE -ne 0) { throw "dism /Unmount-Wim /Commit failed with exit code $LASTEXITCODE" }`,
     `  } catch {`,
-    `    & dism /English /Unmount-Wim /MountDir:"$mount" /Discard | Out-Null`,
+    `    & dism /English /Unmount-Wim /MountDir:"$mount" /Discard`,
     `    throw`,
     `  }`,
     `  Remove-Item -Recurse -Force $mount`,
@@ -514,13 +559,13 @@ export function buildStageScript(p: StageScriptParams): string {
     `  $ramOut = (& bcdedit /create /d 'OPBS ramdisk options' /device | Out-String)`,
     `  if ($ramOut -match '\\{[0-9a-fA-F-]+\\}') { $ramdiskGuid = $matches[0] } else { throw "bcdedit /create /device failed: $ramOut" }`,
     `  $sys = $env:SystemDrive.TrimEnd('\\')`,
-    `  & bcdedit /set $ramdiskGuid ramdisksdidevice "partition=$sys" | Out-Null`,
-    `  & bcdedit /set $ramdiskGuid ramdisksdipath '\\Recovery\\OPBS\\boot.sdi' | Out-Null`,
+    `  & bcdedit /set $ramdiskGuid ramdisksdidevice "partition=$sys"`,
+    `  & bcdedit /set $ramdiskGuid ramdisksdipath '\\Recovery\\OPBS\\boot.sdi'`,
     `  $entryOut = (& bcdedit /create /d 'OPBS Recovery' /application osloader | Out-String)`,
     `  if ($entryOut -match '\\{[0-9a-fA-F-]+\\}') { $entryGuid = $matches[0] } else { throw "bcdedit /create /application osloader failed: $entryOut" }`,
     `  $wimDev = '[' + $sys + ']\\Recovery\\OPBS\\winre.wim'`,
-    `  & bcdedit /set $entryGuid device "ramdisk=$wimDev,$ramdiskGuid" | Out-Null`,
-    `  & bcdedit /set $entryGuid osdevice "ramdisk=$wimDev,$ramdiskGuid" | Out-Null`,
+    `  & bcdedit /set $entryGuid device "ramdisk=$wimDev,$ramdiskGuid"`,
+    `  & bcdedit /set $entryGuid osdevice "ramdisk=$wimDev,$ramdiskGuid"`,
     `  # The loader path comes from {current}: PEFirmwareType only exists in`,
     `  # WinPE's registry, so probing it from Windows silently picks the BIOS`,
     `  # loader (winload.exe) on UEFI machines - a black screen right after the`,
@@ -529,20 +574,20 @@ export function buildStageScript(p: StageScriptParams): string {
     `  $enumCur = (& bcdedit /enum '{current}' | Out-String)`,
     `  if ($enumCur -match '(?m)^\\s*path\\s+(\\S+)\\s*$') { $loader = $matches[1] }`,
     `  if (-not $loader) { $loader = '\\windows\\system32\\winload.efi' }`,
-    `  & bcdedit /set $entryGuid path $loader | Out-Null`,
-    `  & bcdedit /set $entryGuid systemroot '\\windows' | Out-Null`,
-    `  & bcdedit /set $entryGuid inherit '{bootloadersettings}' | Out-Null`,
-    `  & bcdedit /set $entryGuid nx OptIn | Out-Null`,
-    `  & bcdedit /set $entryGuid bootmenupolicy Standard | Out-Null`,
-    `  & bcdedit /set $entryGuid detecthal Yes | Out-Null`,
-    `  & bcdedit /set $entryGuid winpe Yes | Out-Null`,
-    `  & bcdedit /bootsequence $entryGuid | Out-Null`,
+    `  & bcdedit /set $entryGuid path $loader`,
+    `  & bcdedit /set $entryGuid systemroot '\\windows'`,
+    `  & bcdedit /set $entryGuid inherit '{bootloadersettings}'`,
+    `  & bcdedit /set $entryGuid nx OptIn`,
+    `  & bcdedit /set $entryGuid bootmenupolicy Standard`,
+    `  & bcdedit /set $entryGuid detecthal Yes`,
+    `  & bcdedit /set $entryGuid winpe Yes`,
+    `  & bcdedit /bootsequence $entryGuid`,
     ``,
     `  Write-Step 'Checking BitLocker...'`,
     `  $bl = (& manage-bde -status $env:SystemDrive 2>$null | Out-String)`,
     `  if ($bl -match 'Protection Status:\\s*Protection On') {`,
     `    Write-Step 'Suspending BitLocker protection for one boot...'`,
-    `    & manage-bde -protectors -disable $env:SystemDrive -RebootCount 1 | Out-Null`,
+    `    & manage-bde -protectors -disable $env:SystemDrive -RebootCount 1`,
     `    if ($LASTEXITCODE -ne 0) { throw "manage-bde -protectors -disable failed with exit code $LASTEXITCODE - suspend BitLocker manually, then retry." }`,
     `    $bitLockerSuspended = $true`,
     `  }`,
@@ -551,7 +596,8 @@ export function buildStageScript(p: StageScriptParams): string {
     `  Write-Result $true $null`,
     `} catch {`,
     `  Write-Result $false ($_.Exception.Message)`,
-    `}`
+    `}`,
+    transcriptStop
   ].join('\n');
 }
 
@@ -559,6 +605,9 @@ export function buildStageScript(p: StageScriptParams): string {
 export function buildCleanupScript(p: { progressFile: string; resultFile: string; entryGuid: string; ramdiskGuid: string }): string {
   return [
     `$ErrorActionPreference = 'Continue'`,
+    // Same reason as the staging script: capture what this elevated session
+    // does, so a failure is readable afterwards.
+    transcriptStart(elevatedLogPath(path.dirname(p.progressFile))),
     `$progressFile = ${psSingle(p.progressFile)}`,
     `$resultFile = ${psSingle(p.resultFile)}`,
     `$stageRoot = Join-Path $env:SystemDrive ${psSingle(RECOVERY_STAGE_DIRNAME)}`,
@@ -569,11 +618,11 @@ export function buildCleanupScript(p: { progressFile: string; resultFile: string
     `}`,
     `try {`,
     `  Write-Step 'Removing the OPBS Recovery boot entry...'`,
-    `  & bcdedit /deletevalue {bootmgr} bootsequence | Out-Null`,
-    `  & bcdedit /delete ${psSingle(p.entryGuid)} | Out-Null`,
+    `  & bcdedit /deletevalue {bootmgr} bootsequence`,
+    `  & bcdedit /delete ${psSingle(p.entryGuid)}`,
     `  # Never touch the canonical {ramdiskoptions} (shared with Windows RE).`,
     `  if (${psSingle(p.ramdiskGuid)} -ne '{ae5534e0-a924-466c-b836-758539a3ee3a}') {`,
-    `    & bcdedit /delete ${psSingle(p.ramdiskGuid)} | Out-Null`,
+    `    & bcdedit /delete ${psSingle(p.ramdiskGuid)}`,
     `  }`,
     `  Write-Step 'Removing the staged recovery files...'`,
     `  if (Test-Path $stageRoot) { Remove-Item -Recurse -Force $stageRoot }`,
@@ -581,7 +630,8 @@ export function buildCleanupScript(p: { progressFile: string; resultFile: string
     `  (@{ ok = $true; cleaned = $true } | ConvertTo-Json) | Set-Content -Path $resultFile -Encoding UTF8`,
     `} catch {`,
     `  (@{ ok = $false; cleaned = $false; error = $_.Exception.Message } | ConvertTo-Json) | Set-Content -Path $resultFile -Encoding UTF8`,
-    `}`
+    `}`,
+    transcriptStop
   ].join('\n');
 }
 
@@ -678,6 +728,21 @@ async function runRecoveryScript(
  * Stage "restore after reboot into recovery". Requires one UAC confirmation
  * (DISM, BCD and BitLocker changes are machine-level).
  */
+/**
+ * Turn an elevated step's output into something a person can act on: the tail
+ * of the transcript plus where the whole thing was kept. "It failed" with no
+ * output is exactly the report nobody can act on (field report 2026-11-02:
+ * "the logs don't say much").
+ */
+function transcriptDetail(work: string, label: string): string {
+  const kept = preserveElevatedLog(work, label);
+  const tail = readLogTail(elevatedLogPath(work), 1500);
+  const parts: string[] = [];
+  if (tail) parts.push(`PowerShell output:\n${tail}`);
+  if (kept) parts.push(`Full transcript: ${kept}`);
+  return parts.length > 0 ? ` ${parts.join('. ')}` : '';
+}
+
 export async function stageRecoveryRestore(
   config: RecoveryStageConfig,
   opts?: { onProgress?: (msg: string) => void }
@@ -737,14 +802,21 @@ export async function stageRecoveryRestore(
     opts?.onProgress?.('Starting the elevated staging (DISM/BCD)...');
     const { parsed, error } = await runRecoveryScript(work, scriptPath, resultFile, progressFile, opts?.onProgress);
     if (!parsed) {
-      logger.error(`Recovery staging failed: ${error}`);
-      return { ok: false, error: error ?? 'Recovery staging failed.' };
+      const detail = transcriptDetail(work, 'recovery-stage');
+      logger.error(`Recovery staging failed: ${error}${detail}`);
+      return { ok: false, error: `${error ?? 'Recovery staging failed.'}${detail}` };
     }
     if (!parsed.ok) {
-      const message = `${String(parsed.error ?? 'Recovery staging failed.')} (work kept at ${work} for inspection)`;
+      const detail = transcriptDetail(work, 'recovery-stage');
+      const message = `${String(parsed.error ?? 'Recovery staging failed.')} (work kept at ${work} for inspection)${detail}`;
       logger.error(`Recovery staging failed: ${message}`);
       return { ok: false, error: message };
     }
+    // Keep the transcript on success too: it is the only record of what the
+    // elevated steps actually said, and a staging run is rare enough that one
+    // small log per run costs nothing.
+    const keptLog = preserveElevatedLog(work, 'recovery-stage');
+    if (keptLog) logger.info(`Recovery staging transcript: ${keptLog}`);
 
     const result: RecoveryStageResult = {
       ok: true,
@@ -804,9 +876,12 @@ export async function cleanupRecovery(opts?: { onProgress?: (msg: string) => voi
     );
     opts?.onProgress?.('Removing the staged restore (UAC)...');
     const { parsed, error } = await runRecoveryScript(work, scriptPath, resultFile, progressFile, opts?.onProgress);
-    if (!parsed) return { ok: false, error: error ?? 'Cleanup failed.' };
+    // Keep the transcript before the work dir goes: it is the only record of
+    // what the elevated step said, on success as well as on failure.
+    const detail = transcriptDetail(work, 'recovery-cleanup');
+    if (!parsed) return { ok: false, error: `${error ?? 'Cleanup failed.'}${detail}` };
     fs.rmSync(work, { recursive: true, force: true });
-    return parsed.ok ? { ok: true, cleaned: true } : { ok: false, error: String(parsed.error ?? 'Cleanup failed.') };
+    return parsed.ok ? { ok: true, cleaned: true } : { ok: false, error: `${String(parsed.error ?? 'Cleanup failed.')}${detail}` };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

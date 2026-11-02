@@ -74,6 +74,15 @@ export function logTimestamp(d: Date = new Date()): string {
 }
 
 /**
+ * The directory the app's logs live in. Elevated helpers write their
+ * transcripts here too: a failure report is useless if the output only ever
+ * existed in a window that closed (field report 2026-11-02).
+ */
+export function logDirectory(): string {
+  return path.join(getUserDataDir(), 'logs');
+}
+
+/**
  * Logger that prefers electron-log (crash/file handling, rotation) but falls
  * back to a minimal file+console logger when electron-log is not bundled,
  * e.g. inside the WinPE smoke/restore payload.
