@@ -55,6 +55,24 @@ interface RecoveryNotice {
   details?: string[];
 }
 
+/**
+ * When a recovery restore actually ran, for a report shown at the next
+ * launch. Returns null when the marker has no usable time (the batch
+ * fallback writes a locale date string we cannot reliably parse) — the
+ * caller then says it is an earlier restore without naming a time.
+ */
+function formatRecoveryWhen(finishedAt?: string): string | null {
+  if (!finishedAt) return null;
+  const parsed = new Date(finishedAt);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toLocaleString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
 /** Payload of the 'backup-progress' IPC event (mirrors BackupProgress in main; feeds BackupWizard's activeProgress). */
 interface BackupProgress {
   phase: string;
@@ -128,24 +146,36 @@ function App() {
         if (!alive || !result) return;
         const warnings = result.warnings ?? [];
         const logNote = result.logPath ? ` Full log: ${result.logPath}.` : '';
+        // This reports something that already happened, often hours ago. The
+        // toast never auto-hides, so without a time in it the user reads it as
+        // belonging to whatever job they just ran (field report 2026-11-02:
+        // "at the end of a successful backup, I get a message saying the
+        // restore was successful"). Say when, and say it is not now.
+        const when = formatRecoveryWhen(result.finishedAt);
+        const history = when
+          ? `This restore ran ${when} — before this session. `
+          : 'This is a report from an earlier restore, not from anything you just ran. ';
         setRecoveryNotice(
           result.ok
             ? {
                 kind: 'success',
                 title:
-                  warnings.length > 0
-                    ? `Recovery restore completed with ${warnings.length} warning${warnings.length === 1 ? '' : 's'}`
-                    : 'Recovery restore completed',
-                body:
+                  'Earlier: recovery restore ' +
                   (warnings.length > 0
-                    ? 'The restore finished. These are the messages the recovery environment reported:'
-                    : 'The recovery restore completed successfully.') + logNote,
+                    ? `finished with ${warnings.length} warning${warnings.length === 1 ? '' : 's'}`
+                    : 'finished'),
+                body:
+                  history +
+                  (warnings.length > 0
+                    ? 'These are the messages the recovery environment reported:'
+                    : 'It completed successfully.') +
+                  logNote,
                 details: warnings.length > 0 ? warnings : undefined
               }
             : {
                 kind: 'error',
-                title: 'Recovery restore failed',
-                body: `The recovery restore did not complete${
+                title: 'Earlier: recovery restore failed',
+                body: `${history}It did not complete${
                   typeof result.exitCode === 'number' ? ` (exit code ${result.exitCode})` : ''
                 }.${result.error ? ` ${result.error}` : ''} Try the restore again, or run it from the recovery media.${logNote}`,
                 details: warnings.length > 0 ? warnings : undefined
