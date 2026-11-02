@@ -616,6 +616,25 @@ export function parseVolumeFlags(raw: Buffer): VolumeFlags | null {
 }
 
 /**
+ * The warning for restoring an image whose NTFS volume is marked dirty.
+ *
+ * Shared by the plan and the restore so the two can never drift, and it must
+ * name the consequence rather than only the symptom: a tester (2026-11-02)
+ * lost a browser profile to the repair this warning announces, and the
+ * earlier wording said a repair would run without saying what it could take
+ * with it.
+ */
+export function dirtyVolumeWarning(label: string): string {
+  return (
+    `${label}: the image was captured from a running Windows, so its volume is marked dirty. ` +
+    `Windows will run a repair at first boot and may say "Restart to repair drive errors" — that ` +
+    `prompt is the live capture, not the restore. The repair can also discard files that were still ` +
+    `being written when the backup was taken (a browser profile captured mid-write is the usual ` +
+    `case). Close open applications before taking a backup you mean to restore in place.`
+  );
+}
+
+/**
  * Read $Volume's flags straight from a partition, without loading the whole
  * MFT. Returns `null` when the volume is not NTFS or the record cannot be
  * read — callers treat that as "unknown", never as "clean".

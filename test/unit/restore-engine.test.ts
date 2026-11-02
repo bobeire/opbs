@@ -1344,6 +1344,11 @@ describe('RestoreEngine dirty-flag warning', () => {
     // Name the prompt the user will actually see, or the warning is useless.
     expect(warning).toContain('Restart to repair drive errors');
     expect(warning).toContain('not the restore');
+    // And the consequence, not just the symptom: a tester lost a browser
+    // profile to this repair (2026-11-02) and the earlier wording did not say
+    // it could happen.
+    expect(warning).toContain('discard files');
+    expect(warning).toContain('Close open applications');
   });
 
   it('says nothing for a volume captured clean', async () => {

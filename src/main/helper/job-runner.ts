@@ -45,6 +45,7 @@ import { CompressionPool } from '../imaging/compression-pool';
 import { validateRestoredFilesystem, FsValidation } from '../imaging/drill-validation';
 import { computeChangedBlockIndices } from '../imaging/usn-tracking';
 import { planNtfsGrow, MAX_METADATA_BYTES } from '../imaging/fs/ntfs-resize';
+import { dirtyVolumeWarning } from '../imaging/fs/ntfs';
 import { planNtfsShrink, NtfsShrinkPlan } from '../imaging/fs/ntfs-shrink';
 import { planFat32Shrink, Fat32ShrinkPlan } from '../imaging/fs/fat32-shrink';
 import { detectFatType } from '../imaging/fs/fat32';
@@ -1857,11 +1858,7 @@ export async function runRestoreJob(
         // user meets "Restart to repair drive errors" at first boot and
         // assumes the restore broke their disk (field report 2026-11-02).
         if (check.checks.volumeDirty === true) {
-          warnings.push(
-            `${target.label}: the restored volume is marked dirty (its image was captured from a running Windows). ` +
-              `Windows will run a repair at first boot and may say "Restart to repair drive errors". That is the ` +
-              `live capture, not the restore.`
-          );
+          warnings.push(dirtyVolumeWarning(target.label));
         }
         writeProgress('writing');
       }

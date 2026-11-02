@@ -10,7 +10,7 @@ import {
   CIPHER_NONE
 } from './image-format';
 import { detectPartitionFilesystem, inferMbrTypes, inferTableTypeGuids } from './fs/file-browse';
-import { parseBootSector, readVolumeFlags } from './fs/ntfs';
+import { parseBootSector, readVolumeFlags, dirtyVolumeWarning } from './fs/ntfs';
 import { ntfsShrinkMinimum, type NtfsShrinkMinimum } from './fs/ntfs-shrink';
 import { fat32ShrinkMinimum, type Fat32ShrinkMinimum } from './fs/fat32-shrink';
 import { detectFatType } from './fs/fat32';
@@ -631,11 +631,7 @@ export class RestoreEngine implements RestoreCoordinator {
         }
       }
       if (dirtyTargets.length > 0) {
-        warnings.push(
-          `${dirtyTargets.join(', ')}: the image was captured from a running Windows, so its volume is marked ` +
-            `dirty. Windows will run a repair at first boot and may say "Restart to repair drive errors". ` +
-            `That prompt is the live capture, not the restore.`
-        );
+        warnings.push(dirtyVolumeWarning(dirtyTargets.join(', ')));
       }
     }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseVolumeFlags, readVolumeFlags, VOLUME_FLAG_DIRTY, parseBootSector } from '../../src/main/imaging/fs/ntfs';
+import { parseVolumeFlags, readVolumeFlags, VOLUME_FLAG_DIRTY, parseBootSector, dirtyVolumeWarning } from '../../src/main/imaging/fs/ntfs';
 import { validateRestoredFilesystem } from '../../src/main/imaging/drill-validation';
 import { buildCanonicalNtfsVolumeData, GR_CLUSTER } from '../helpers/ntfs-resize-fixture';
 import { buildFileRecord, standardInfo, fileNameAttr, volumeInfoAttr, FILE_RECORD } from '../helpers/ntfs-fixture';
@@ -136,5 +136,21 @@ describe('validateRestoredFilesystem — dirty flag reporting', () => {
 
     expect(check.ok).toBe(true);
     expect(check.checks.volumeDirty).toBeUndefined();
+  });
+});
+
+describe('dirtyVolumeWarning', () => {
+  it('names the consequence and the way to avoid it, not just the prompt', () => {
+    // A tester lost a browser profile to this repair (2026-11-02). The
+    // earlier wording said a repair would run; it did not say what the repair
+    // could take with it, which is the part that decides whether someone
+    // closes their browser before backing up.
+    const message = dirtyVolumeWarning('Partition 2');
+
+    expect(message).toContain('Partition 2');
+    expect(message).toContain('Restart to repair drive errors');
+    expect(message).toContain('discard files');
+    expect(message).toContain('Close open applications');
+    expect(message).toContain('not the restore');
   });
 });
