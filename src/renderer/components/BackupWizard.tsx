@@ -1236,7 +1236,21 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                 <li>Encryption: {passphrase.trim() ? 'AES-256-GCM' : 'None'}</li>
               </ul>
             </div>
-            
+
+            {/* The one thing a user can still change before clicking Start.
+                A live capture is crash-consistent, and the restore's first-boot
+                repair can discard application data that was mid-write — a
+                tester lost a browser profile that way (2026-11-02). Telling
+                them at restore time is telling them after the choice. */}
+            <div className="advice-box">
+              <strong>Close open applications first</strong>
+              This backup is taken from a live Windows, so it captures a crash-consistent state —
+              the same one a power cut leaves behind, not a clean shutdown. Anything an application
+              was writing at that moment (a browser profile is the usual case) can come back
+              unusable after a restore, and Windows may discard what looks broken on first boot.
+              Documents and applications you have closed are fine.
+            </div>
+
             <div className="wizard-actions">
               <button className="btn-secondary" onClick={() => setCurrentStep('select_destination')}>
                 Back

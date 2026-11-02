@@ -1198,6 +1198,20 @@ body {
   color: var(--text-color);
 }
 
+/* Advisory shown before an action rather than a problem report: something
+   the user can still act on, so it is informative rather than alarming. */
+.advice-box {
+  border-left: 4px solid var(--primary-color, #2563eb);
+  background-color: var(--card-bg);
+  padding: 10px 12px;
+  border-radius: 4px;
+  margin-top: 12px;
+  color: var(--text-color);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.advice-box strong { display: block; margin-bottom: 4px; color: var(--text-color); }
+
 .acknowledge-box {
   border: 1px solid var(--danger-color);
   background-color: rgba(220, 38, 38, 0.08);
