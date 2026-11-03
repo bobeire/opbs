@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Backups that keep working: full versus incremental, schedules so you do not have to remember, retention so the disk does not fill, and verification so you find out before you need it." />
+  <title>Backups that keep working — OPBS guide</title>
+  <link rel="canonical" href="https://opbs.rhitcs.com/keep-it-working.html" />
+  <link rel="stylesheet" href="guide.css" />
+</head>
+<body>
+
+<header>
+  <div class="wrapper">
+    <nav>
+      <a href="index.html" class="logo">
+        <img src="https://raw.githubusercontent.com/bobeire/opbs/master/resources/icon.png" alt="OPBS icon" />
+        OPBS
+      </a>
+      <ul>
+        <li><a href="guide.html" class="active">Guide</a></li>
+        <li><a href="index.html#features">Features</a></li>
+        <li><a href="macrium.html">Macrium</a></li>
+        <li><a href="migrate.html">Migrate</a></li>
+        <li><a href="prove-your-restore.html">Prove It</a></li>
+        <li><a href="index.html#download">Download</a></li>
+        <li><a href="releases.html">Releases</a></li>
+        <li><a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrapper">
+    <span class="hero-badge">Guide &middot; the ongoing routine</span>
+    <h1>Backups that keep working</h1>
+    <p class="lead">
+      The first backup is the easy part. What protects you is the twentieth
+      one, taken automatically, on a Tuesday, when nothing was wrong.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="wrapper">
+    <h2>The smallest routine that actually protects you</h2>
+    <ol class="steps">
+      <li>
+        <h3>One full backup, then incrementals</h3>
+        <p>
+          A full backup captures everything. An incremental captures only what
+          changed since the last one &mdash; so it is much smaller and much
+          faster, and it is what makes a nightly backup practical.
+        </p>
+        <p>
+          Both are needed: an incremental on its own is only a list of
+          differences. Keep them together and OPBS resolves the chain
+          automatically when you restore.
+        </p>
+      </li>
+
+      <li>
+        <h3>Schedule it, so nobody has to remember</h3>
+        <p>
+          <strong>Schedules</strong> run the same backup unattended &mdash;
+          nightly, weekly, whatever suits. A backup you meant to take is worth
+          nothing; a backup that runs at 2am while you are asleep is worth a
+          great deal.
+        </p>
+        <div class="callout">
+          <p>
+            <strong>Close the browser before a backup you might restore in
+            place.</strong> A scheduled backup cannot do that for you, so if
+            you rely on schedules, accept that an application's files may come
+            back mid-write &mdash; the usual case is a browser profile. See
+            <a href="first-backup.html">Make your first backup</a> for why.
+          </p>
+        </div>
+      </li>
+
+      <li>
+        <h3>Set a retention policy, so the disk does not fill up</h3>
+        <p>
+          Keep the newest few full chains and let OPBS prune the rest. Without
+          it, backups accumulate until the destination is full &mdash; and a
+          backup destination that is full silently stops being a backup
+          destination.
+        </p>
+      </li>
+
+      <li>
+        <h3>Leave verification on</h3>
+        <p>
+          Verification reads the image back and checks it block by block. It
+          costs time on the day. It is the only thing that tells you a backup
+          is bad <em>before</em> the day you need it.
+        </p>
+      </li>
+
+      <li>
+        <h3>Check it occasionally</h3>
+        <p>
+          Open <strong>Repositories</strong> to see what you have, and
+          <a href="prove-your-restore.html">prove a restore works</a> now and
+          then. The dashboard's scrub health also tells you when the last
+          integrity scrub ran.
+        </p>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrapper">
+    <h2>Full or incremental?</h2>
+    <table class="guide">
+      <tr>
+        <th></th>
+        <th>Full</th>
+        <th>Incremental</th>
+      </tr>
+      <tr>
+        <td>What it captures</td>
+        <td>Everything</td>
+        <td>Only what changed</td>
+      </tr>
+      <tr>
+        <td>Size</td>
+        <td>Large</td>
+        <td>Small</td>
+      </tr>
+      <tr>
+        <td>Speed</td>
+        <td>Slower</td>
+        <td>Much faster</td>
+      </tr>
+      <tr>
+        <td>On its own</td>
+        <td>Restorable</td>
+        <td>Not restorable &mdash; it needs its chain</td>
+      </tr>
+      <tr>
+        <td>Use it for</td>
+        <td>The first one, and the occasional reset</td>
+        <td>Everything in between</td>
+      </tr>
+    </table>
+
+    <div class="callout">
+      <p><strong>Keep the whole chain together.</strong></p>
+      <p>
+        An incremental is only useful alongside the images it builds on. Keep
+        them in the same folder, and do not delete the older ones by hand while
+        newer ones depend on them. Retention does this correctly for you.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrapper">
+    <h2>What this will not save you from</h2>
+    <ul class="plain limit" style="margin-top:16px">
+      <li><strong style="color:#d0d7e3">A backup on the same disk as the data.</strong> If the disk dies, it takes the backup with it.</li>
+      <li><strong style="color:#d0d7e3">A fire, theft or flood that takes the computer and the backup together.</strong> One copy somewhere else is the difference between a bad afternoon and a bad year.</li>
+      <li><strong style="color:#d0d7e3">Ransomware that encrypts the backup too.</strong> An attached external drive is reachable by whatever is running on the machine. Rotate drives, or keep one offline.</li>
+      <li><strong style="color:#d0d7e3">A backup you have never restored.</strong> The rest of this guide is about that one.</li>
+    </ul>
+
+    <div class="callout do" style="margin-top:28px">
+      <p><strong>Do this today, and then stop thinking about it.</strong></p>
+      <p>
+        One full backup to a different disk. An incremental schedule. A
+        retention policy. Verification on. That is the whole routine, and it
+        is about fifteen minutes of setup for the thing that decides whether a
+        bad day is survivable.
+      </p>
+      <p>
+        <a href="first-backup.html">Make your first backup</a> &middot;
+        <a href="prove-your-restore.html">Prove your restore works</a> &middot;
+        <a href="one-file.html">I only need one file back</a>
+      </p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrapper">
+    &copy; 2026 RHITCS &middot;
+    <a href="https://github.com/bobeire/opbs/blob/master/COPYING" target="_blank">GPL-3.0</a> &middot;
+    <a href="index.html">Home</a> &middot;
+    <a href="guide.html">Guide</a> &middot;
+    <a href="releases.html">Releases</a> &middot;
+    <a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a>
+  </div>
+</footer>
+
+</body>
+</html>
