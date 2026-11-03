@@ -258,7 +258,8 @@ export async function runBackupJob(
                 `while Windows is still writing to it, and the image could be internally inconsistent - ` +
                 `it would restore as a filesystem that looks corrupt. Fix VSS (see the VSS diagnostics), ` +
                 `or retry with --allow-inconsistent if you accept that risk for this partition. No ` +
-                `partitions have been captured.`
+                `partitions have been captured.`,
+              { cause: error }
             );
           }
           warnings.push(
