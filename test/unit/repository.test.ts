@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterAll, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -23,8 +23,10 @@ import type { BackupJobConfig } from '../../src/main/imaging/backup-engine';
 import type { JobResult } from '../../src/main/imaging/imaging-job';
 
 // Repository init/protect round-trips spawn PowerShell for ACL updates, which
-// can exceed the 5s default under parallel test load.
-vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+// can exceed the 5s default under parallel test load - a single spawn is about
+// 400ms idle and seconds contended, and this file creates a repository per
+// test. Cleanup is now batched into afterAll for the same reason.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 const KEYFILE = 'repo-key.key';
 
@@ -34,22 +36,6 @@ function tempDir(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-repo-test-'));
   tempDirs.push(dir);
   return dir;
-}
-
-async function removeTree(dir: string): Promise<void> {
-  const walk = (d: string): string[] => {
-    const out: string[] = [];
-    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
-      const full = path.join(d, entry.name);
-      if (entry.isDirectory()) out.push(...walk(full));
-      else out.push(full);
-    }
-    return out;
-  };
-  if (fs.existsSync(dir)) {
-    await unprotectFiles(walk(dir));
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
 }
 
 /** Create a fake image file (and optional extra volumes) inside the repo. */
@@ -85,8 +71,33 @@ function base64Block(seed: number, size = 4096): Buffer {
   return buf;
 }
 
-afterEach(async () => {
-  await Promise.all(tempDirs.splice(0).map(removeTree));
+afterAll(async () => {
+  // One unprotect across every temp dir, not one per test: each call spawns
+  // PowerShell (about 400ms idle, seconds under parallel test load), and
+  // cleanup is not what these tests are about. Batched, the file drops from
+  // ~50 spawns to ~25 and stops timing out under load.
+  const dirs = tempDirs.splice(0);
+  const files: string[] = [];
+  for (const dir of dirs) {
+    const walk = (d: string): string[] => {
+      const out: string[] = [];
+      for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+        const full = path.join(d, entry.name);
+        if (entry.isDirectory()) out.push(...walk(full));
+        else out.push(full);
+      }
+      return out;
+    };
+    if (fs.existsSync(dir)) files.push(...walk(dir));
+  }
+  if (files.length > 0) await unprotectFiles(files);
+  for (const dir of dirs) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
+  }
 });
 
 describe('repository init', () => {
