@@ -46,6 +46,12 @@ import { validateRestoredFilesystem, FsValidation } from '../imaging/drill-valid
 import { computeChangedBlockIndices } from '../imaging/usn-tracking';
 import { planNtfsGrow, MAX_METADATA_BYTES } from '../imaging/fs/ntfs-resize';
 import { dirtyVolumeWarning } from '../imaging/fs/ntfs';
+import {
+  readAllocationMap,
+  allocationChanged,
+  captureChangedMessage,
+  type AllocationMap
+} from '../imaging/capture-consistency';
 import { writeRestoreMarker, clearRestoreMarker } from '../utils/restore-marker';
 import { planNtfsShrink, NtfsShrinkPlan } from '../imaging/fs/ntfs-shrink';
 import { planFat32Shrink, Fat32ShrinkPlan } from '../imaging/fs/fat32-shrink';
@@ -431,6 +437,41 @@ export async function runBackupJob(
     } catch (error) {
       deleteSnapshots();
       throw new Error(`Failed to create VSS snapshot: ${errorMessage(error)}`, { cause: error });
+    }
+
+    // Consistency probes: read each partition's allocation map before the
+    // capture and again after. A shadow copy freezes the volume, so the two
+    // are identical by construction; a live read moves under us and the map
+    // proves it. This is the check that would have caught the images from the
+    // 2026-11-03 field report — every block verified, and the filesystem they
+    // formed was corrupt because the bitmap and the file records came from
+    // different moments.
+    const consistencyProbes = new Map<
+      number,
+      { device: string; baseOffset: bigint; size: number; label: string; before: AllocationMap | null }
+    >();
+    for (const p of job.partitions) {
+      const snap = p.volumeDevicePath ? snapshotCache.get(p.volumeDevicePath) : undefined;
+      // Only worth probing when we are reading a live volume. A shadow copy is
+      // frozen: its map cannot change, so the check would cost I/O to prove
+      // nothing. The live read is exactly where the risk is.
+      if (snap) continue;
+      const device =
+        p.readSource === 'volume' && p.volumeDevicePath
+          ? p.volumeDevicePath
+          : native.getPhysicalDrivePath(p.diskIndex);
+      const baseOffset = p.readSource === 'volume' ? 0n : BigInt(p.offset);
+      const reader = {
+        size: p.size,
+        read: (o: number, l: number) => Buffer.from(native.readBlocks(device, baseOffset + BigInt(o), BigInt(l)))
+      };
+      let before: AllocationMap | null = null;
+      try {
+        before = readAllocationMap(reader);
+      } catch {
+        before = null;
+      }
+      consistencyProbes.set(p.partitionIndex, { device, baseOffset, size: p.size, label: p.label, before });
     }
 
     // BitLocker recovery-key custody (encrypted backups only). Runs now while
@@ -928,6 +969,37 @@ export async function runBackupJob(
         }
       } catch {
         /* best-effort: USN tracking falls back to a full scan next time */
+      }
+    }
+
+    // Did the volume move while we were reading it? A shadow copy freezes it,
+    // so this is a no-op for a proper backup; a live read moves under us and
+    // the map proves it. Better to fail here than to hand over an image that
+    // restores as a corrupt filesystem.
+    for (const p of job.partitions) {
+      const probe = consistencyProbes.get(p.partitionIndex);
+      if (!probe?.before) continue;
+      let after: AllocationMap | null = null;
+      try {
+        after = readAllocationMap({
+          size: probe.size,
+          read: (o: number, l: number) =>
+            Buffer.from(native.readBlocks(probe.device, probe.baseOffset + BigInt(o), BigInt(l)))
+        });
+      } catch {
+        after = null;
+      }
+      if (!after) continue;
+      const change = allocationChanged(probe.before, after);
+      if (change.changed) {
+        const message = captureChangedMessage(probe.label, change.clustersChanged);
+        if (!job.allowInconsistentCapture) {
+          throw new Error(
+            `${message} The backup has been stopped and this image should not be used. Retry with ` +
+              `--allow-inconsistent if you accept an image captured without a point in time.`
+          );
+        }
+        warnings.push(message);
       }
     }
 
