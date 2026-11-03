@@ -427,6 +427,7 @@ declare global {
         staged: boolean;
         stagedPath?: string;
         pendingResult?: { ok: boolean; exitCode?: number; finishedAt?: string; warnings?: string[]; error?: string; bytesWritten?: number; logPath?: string } | null;
+        interruptedRestore?: { imagePath: string; targetDiskIndex?: number; targetPartitions: number[]; startedAt: string } | null;
       }>;
       recoveryReboot: () => Promise<{ ok: boolean; error?: string }>;
       adkInstall: (options: any) => Promise<{ ok: boolean; adkRoot: string | null; steps: Array<{ name: string; exitCode: number }>; error?: string }>;

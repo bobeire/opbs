@@ -33,6 +33,7 @@ import os from 'os';
 import { spawn } from 'child_process';
 import { runElevatedPowerShell } from '../utils/elevated';
 import { logger, logDirectory } from '../utils/logger';
+import { readRestoreMarker } from '../utils/restore-marker';
 import {
   PayloadItem,
   planPayloadCopies,
@@ -163,6 +164,17 @@ export interface RecoveryStatusResult {
   stagedPath?: string;
   /** Result of the last PE restore, consumed (deleted) on read. */
   pendingResult?: RecoveryPendingResult | null;
+  /**
+   * A restore that started and never finished — power cut, crash, a closed
+   * console. Consumed on read. Never acted on automatically: re-running a
+   * restore is a decision for a person.
+   */
+  interruptedRestore?: {
+    imagePath: string;
+    targetDiskIndex?: number;
+    targetPartitions: number[];
+    startedAt: string;
+  } | null;
 }
 
 /** Extract the GUID bcdedit prints on /create or /copy ("The entry {…} was …"). */
@@ -993,7 +1005,12 @@ export function readRecoveryStatus(): RecoveryStatusResult {
   } catch {
     /* unreadable marker — treat as absent */
   }
-  return { staged, stagedPath: staged ? stageRoot : undefined, pendingResult };
+  return {
+    staged,
+    stagedPath: staged ? stageRoot : undefined,
+    pendingResult,
+    interruptedRestore: readRestoreMarker() ?? null
+  };
 }
 
 /** Reboot into the staged recovery environment (one-shot boot entry). */

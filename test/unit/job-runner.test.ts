@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -13,6 +13,17 @@ import { buildNtfsVolumeData, CLUSTER as NTFS_CLUSTER } from '../helpers/ntfs-fi
 import { buildCanonicalNtfsVolumeData, GR_CLUSTER, GR_SPC } from '../helpers/ntfs-resize-fixture';
 
 const BLOCK = 16 * 1024;
+
+// The restore path writes an interruption marker to %SystemDrive% before it
+// touches anything, and clears it when the run ends. Point that at a temp
+// directory so these tests do not try to write to the real system drive root.
+const markerRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-marker-root-'));
+const savedSystemDrive = process.env.SystemDrive;
+process.env.SystemDrive = markerRoot;
+afterAll(() => {
+  process.env.SystemDrive = savedSystemDrive;
+  fs.rmSync(markerRoot, { recursive: true, force: true });
+});
 
 function blockPattern(seed: number, size: number): Buffer {
   const buf = Buffer.alloc(size);

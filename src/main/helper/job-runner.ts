@@ -46,6 +46,7 @@ import { validateRestoredFilesystem, FsValidation } from '../imaging/drill-valid
 import { computeChangedBlockIndices } from '../imaging/usn-tracking';
 import { planNtfsGrow, MAX_METADATA_BYTES } from '../imaging/fs/ntfs-resize';
 import { dirtyVolumeWarning } from '../imaging/fs/ntfs';
+import { writeRestoreMarker, clearRestoreMarker } from '../utils/restore-marker';
 import { planNtfsShrink, NtfsShrinkPlan } from '../imaging/fs/ntfs-shrink';
 import { planFat32Shrink, Fat32ShrinkPlan } from '../imaging/fs/fat32-shrink';
 import { detectFatType } from '../imaging/fs/fat32';
@@ -1124,11 +1125,29 @@ export async function runRestoreJob(
   const job = readAndConsumeJob<RestoreJob>(jobPath);
   const native: NativeImagingApi = nativeApi ?? loadNative<NativeImagingApi>();
 
+  // Record that a restore has started, before anything is written. If this
+  // machine does not come back cleanly — power cut, crash, someone closing
+  // the console — the next start finds this marker and says so, instead of
+  // leaving a person with an unexplained half-written disk. Cleared when the
+  // run ends, whatever the outcome.
+  //
+  // Deliberately not acted on automatically: re-running a restore without a
+  // person deciding is exactly what the invariants forbid.
+  writeRestoreMarker({
+    imagePath: job.imagePath,
+    targetDiskIndex: job.targets[0]?.diskIndex,
+    targetPartitions: job.targets.map((t) => t.partitionIndex)
+  });
+
   // Macrium containers (.mrimgx / .mrimg) restore through their own reader
   // path — every block is decompressed and MD5-verified by the partition
   // reader instead of the .opbs frame/CRC machinery below.
   if (detectMacriumFormat(job.imagePath)) {
-    await runMacriumRestoreJob(job, native, start, resultPath, progressPath, cancelPath, pipeClient);
+    try {
+      await runMacriumRestoreJob(job, native, start, resultPath, progressPath, cancelPath, pipeClient);
+    } finally {
+      clearRestoreMarker();
+    }
     return;
   }
 
@@ -1916,6 +1935,9 @@ export async function runRestoreJob(
     };
     fs.writeFileSync(resultPath, JSON.stringify(result));
   } finally {
+    // The run ended in some way — success, failure or cancellation. Only an
+    // *interrupted* run leaves the marker behind.
+    clearRestoreMarker();
     try {
       native.releaseLockedVolumes?.();
     } catch {

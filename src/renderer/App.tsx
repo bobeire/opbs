@@ -142,6 +142,24 @@ function App() {
     void window.electronAPI
       .recoveryStatus()
       .then((status) => {
+        // An interrupted restore outranks an ordinary report: it can mean a
+        // half-written disk, and it is the thing a person needs to know about
+        // first.
+        const interrupted = status?.interruptedRestore;
+        if (alive && interrupted) {
+          const target =
+            typeof interrupted.targetDiskIndex === 'number' ? `disk ${interrupted.targetDiskIndex}` : 'its target';
+          setRecoveryNotice({
+            kind: 'error',
+            title: 'A restore was interrupted',
+            body:
+              `A restore of ${interrupted.imagePath} onto ${target} started but did not finish. ` +
+              'That target may be partially written and may not start Windows. Nothing has been ' +
+              'changed now — re-run the restore from the Restore page when you are ready.',
+            details: interrupted.startedAt ? [`Started ${interrupted.startedAt}`] : undefined
+          });
+          return;
+        }
         const result = status?.pendingResult;
         if (!alive || !result) return;
         const warnings = result.warnings ?? [];
