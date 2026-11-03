@@ -111,6 +111,63 @@
   </div>
 </section>
 
+<section>
+  <div class="wrapper">
+    <h2>What OPBS will not do</h2>
+    <p class="lead">
+      Tools you trust with your disks should say what they promise. These are
+      invariants — no version of OPBS is allowed to weaken them.
+    </p>
+
+    <ol class="steps" style="margin-top:28px">
+      <li>
+        <h3>Never write to a disk we cannot identify</h3>
+        <p>
+          If OPBS cannot resolve exactly which disk and which partitions it is
+          about to change, it stops and says which one it could not resolve. It
+          will not guess, and it will not write to a target it is unsure about.
+        </p>
+      </li>
+      <li>
+        <h3>Never write without showing you the plan first</h3>
+        <p>
+          Every restore runs a preflight that writes nothing and reports what
+          would happen — where each partition lands, what gets overwritten, what
+          gets cleared. You then type a word to confirm. Nothing is written
+          before that.
+        </p>
+      </li>
+      <li>
+        <h3>Never leave the machine worse than we found it</h3>
+        <p>
+          A refusal is a success: OPBS turns down restores it cannot prove safe
+          and tells you why, before touching the disk. If something cannot be
+          done safely, the answer is no — not a partial attempt.
+        </p>
+      </li>
+      <li>
+        <h3>Do no work that isn't needed</h3>
+        <p>
+          A backup that changes nothing does not rewrite anything. A restore
+          that does not need a new partition table does not write one. Work is
+          proportional to the job.
+        </p>
+      </li>
+    </ol>
+
+    <div class="callout warn" style="margin-top:28px">
+      <p><strong>Where these are tested</strong></p>
+      <p>
+        They are not a promise in a document only. The refusal paths have
+        regression tests, and the free-space clearing — the one mechanism that
+        could destroy data it should not touch — has tests that reconstruct the
+        target from the actual write calls and assert every block the backup
+        contains survives.
+      </p>
+    </div>
+  </div>
+</section>
+
 <section class="alt">
   <div class="wrapper">
     <h2>What these guides are not</h2>

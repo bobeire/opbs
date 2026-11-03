@@ -268,12 +268,16 @@ async function selectImage(
 }
 
 /** Run the full wizard. Returns the process exit code. */
-export async function runRestoreWizard(io: WizardIO, deps: WizardDeps): Promise<number> {
+export async function runRestoreWizard(
+  io: WizardIO,
+  deps: WizardDeps,
+  style: Style = createStyle()
+): Promise<number> {
   try {
-    io.print('='.repeat(64));
-    io.print('  OPBS Recovery Wizard');
+    io.print(style.dim('='.repeat(64)));
+    io.print(`  ${style.bold('OPBS Recovery Wizard')}`);
     io.print('  Restore a backup image onto a disk, step by step.');
-    io.print('='.repeat(64));
+    io.print(style.dim('='.repeat(64)));
     io.print();
 
     // [1/4] image ------------------------------------------------------------
@@ -320,7 +324,7 @@ export async function runRestoreWizard(io: WizardIO, deps: WizardDeps): Promise<
       io.print(`  ${index} ${size} ${model} ${disk.serial}`);
     }
     io.print();
-    io.print('  WARNING: everything on the selected disk will be overwritten.');
+    io.print(`  ${style.red('WARNING')}: everything on the selected disk will be overwritten.`);
     let targetDisk: WizardDisk;
     for (;;) {
       const input = (await io.ask('Disk > ')).trim();
@@ -422,7 +426,7 @@ export async function runRestoreWizard(io: WizardIO, deps: WizardDeps): Promise<
 
     // [4/4] review + preflight + confirm ------------------------------------
     io.print();
-    io.print('[4/4] Review and confirm');
+    io.print(style.bold('[4/4] Review and confirm'));
     io.print();
     io.print(`  Image     : ${image.path}`);
     const allPartitions =
@@ -432,7 +436,7 @@ export async function runRestoreWizard(io: WizardIO, deps: WizardDeps): Promise<
       `  Partitions: ${targetPartitions.join(', ')}${allPartitions ? ' (all image partitions)' : ' (selected)'}`
     );
     io.print(`  Target    : disk ${targetDisk.index} - ${targetDisk.model || 'unknown'} (${fmtBytes(targetDisk.size)})`);
-    io.print(`  Overwrite : ALL current data on disk ${targetDisk.index}`);
+    io.print(`  Overwrite : ${style.red(`ALL current data on disk ${targetDisk.index}`)}`);
     io.print(`  Verify    : ${verifyBeforeWrite ? 'yes (before writing)' : 'no'}`);
     io.print(
       `  Verify write: ${verifyAfterRestore ? 'yes (every written block read back and compared)' : 'no'}`
@@ -457,14 +461,14 @@ export async function runRestoreWizard(io: WizardIO, deps: WizardDeps): Promise<
       config.passphrase = passphrase;
     }
 
-    io.print('  Validating the plan (preflight — nothing is written)...');
+    io.print(`  ${style.dim('Validating the plan (preflight — nothing is written)...')}`);
     let plan: RestoreJob;
     try {
       plan = await deps.preflight(config);
     } catch (error) {
       io.print();
-      io.print(`  Preflight FAILED: ${errMsg(error)}`);
-      io.print('  Nothing was written. Run the wizard again to choose different options.');
+      io.print(`  ${style.red('Preflight FAILED')}: ${errMsg(error)}`);
+      io.print(`  ${style.green('Nothing was written.')} Run the wizard again to choose different options.`);
       return 1;
     }
     const rendered = deps.renderPlan(plan);
@@ -475,15 +479,15 @@ export async function runRestoreWizard(io: WizardIO, deps: WizardDeps): Promise<
       }
     }
     io.print();
-    io.print('  Type RESTORE to start the restore, anything else to cancel.');
+    io.print(`  ${style.amber('Type RESTORE to start the restore, anything else to cancel.')}`);
     const confirm = (await io.ask('Confirm > ')).trim();
     if (confirm !== 'RESTORE') {
-      io.print('  Cancelled — nothing was written.');
+      io.print(`  ${style.green('Cancelled')} — nothing was written.`);
       return 0;
     }
 
     io.print();
-    io.print('  Starting restore — do not power off this machine.');
+    io.print(`  ${style.amber('Starting restore')} — do not power off this machine.`);
     let result: WizardRestoreResult;
     try {
       result = await deps.execute(config, (progress) => {
@@ -491,25 +495,25 @@ export async function runRestoreWizard(io: WizardIO, deps: WizardDeps): Promise<
       });
     } catch (error) {
       io.write('\n');
-      io.print(`  Restore FAILED: ${errMsg(error)}`);
+      io.print(`  ${style.red('Restore FAILED')}: ${errMsg(error)}`);
       return 1;
     }
     io.write('\n');
     if (result.ok) {
-      io.print(`  Restore OK (${fmtBytes(result.bytesWritten ?? 0)} written)`);
+      io.print(`  ${style.green('Restore OK')} (${fmtBytes(result.bytesWritten ?? 0)} written)`);
       io.print('  Done. Remove the recovery media and reboot.');
       return 0;
     }
-    io.print(`  Restore FAILED: ${result.error ?? 'unknown error'}`);
+    io.print(`  ${style.red('Restore FAILED')}: ${result.error ?? 'unknown error'}`);
     return 1;
   } catch (error) {
     if (error instanceof AbortWizard) {
       io.print();
-      io.print('  Aborted — nothing was written.');
+      io.print(`  ${style.green('Aborted')} — nothing was written.`);
       return 0;
     }
     io.print();
-    io.print(`  Wizard failed: ${errMsg(error)}`);
+    io.print(`  ${style.red('Wizard failed')}: ${errMsg(error)}`);
     return 1;
   }
 }
@@ -820,11 +824,15 @@ export async function askPowerNow(io: WizardIO, action: 'reboot' | 'shutdown'): 
  * default (a rescue medium should be hard to get wrong), with an explicit
  * partition list for the cases that need it.
  */
-export async function runBackupWizard(io: WizardIO, deps: BackupWizardDeps): Promise<number> {
+export async function runBackupWizard(
+  io: WizardIO,
+  deps: BackupWizardDeps,
+  style: Style = createStyle()
+): Promise<number> {
   try {
-    io.print('================================================');
-    io.print('OPBS Recovery - back up this computer');
-    io.print('================================================');
+    io.print(style.dim('================================================'));
+    io.print(`  ${style.bold('OPBS Recovery')} - back up this computer`);
+    io.print(style.dim('================================================'));
     io.print();
     io.print('  Writes an image of a disk to another drive. Nothing on the source');
     io.print('  disk is changed - use this to save a machine before reinstalling.');
@@ -932,7 +940,7 @@ export async function runBackupWizard(io: WizardIO, deps: BackupWizardDeps): Pro
     io.print(`  Target : ${destination.label} (${fmtBytes(destination.freeBytes)} free)`);
     io.print(`  Verify : ${verificationEnabled ? 'yes' : 'no'}   Used blocks only: ${usedBlocksOnly ? 'yes' : 'no'}`);
     io.print();
-    io.print('  Type BACKUP to start, anything else to cancel.');
+    io.print(`  ${style.amber('Type BACKUP to start, anything else to cancel.')}`);
     const confirm = (await io.ask('Confirm > ')).trim();
     if (confirm !== 'BACKUP') {
       io.print('  Cancelled - nothing was written.');
@@ -960,21 +968,21 @@ export async function runBackupWizard(io: WizardIO, deps: BackupWizardDeps): Pro
     );
     io.print('');
     if (!result.ok) {
-      io.print(`  Backup FAILED: ${result.error ?? 'unknown error'}`);
+      io.print(`  ${style.red('Backup FAILED')}: ${result.error ?? 'unknown error'}`);
       return 1;
     }
-    io.print(`  Backup complete (${result.bytesWritten ? fmtBytes(result.bytesWritten) : 'written'}).`);
+    io.print(`  ${style.green('Backup complete')} (${result.bytesWritten ? fmtBytes(result.bytesWritten) : 'written'}).`);
     for (const warning of result.warnings ?? []) {
-      io.print(`  warning: ${warning}`);
+      io.print(`  ${style.amber('warning')}: ${warning}`);
     }
     io.print(`  The image is in ${destination.path}.`);
     return 0;
   } catch (error) {
     if (error instanceof AbortWizard) {
-      io.print('  Cancelled - nothing was written.');
+      io.print(`  ${style.green('Cancelled')} - nothing was written.`);
       return 1;
     }
-    io.print(`  Backup failed: ${errMsg(error)}`);
+    io.print(`  ${style.red('Backup failed')}: ${errMsg(error)}`);
     return 1;
   }
 }

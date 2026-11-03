@@ -1186,7 +1186,7 @@ async function cmdWizard(ctx: CommandContext): Promise<number> {
               warnings: result.warnings
             };
           }
-        });
+        }, style);
         continue;
       }
 
@@ -1250,7 +1250,7 @@ async function cmdWizard(ctx: CommandContext): Promise<number> {
         preflight: (config) => restoreEngine.buildJob(config),
         renderPlan: (plan) => renderRestorePlan(plan),
         execute: (config, onProgress) => executeWizardRestore(config, onProgress)
-      });
+      }, style);
     }
   } finally {
     io.close();
