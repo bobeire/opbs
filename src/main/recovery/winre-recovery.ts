@@ -192,10 +192,13 @@ function b64(value: string): string {
  * source volume), an automatic restore can be cancelled within 10 seconds,
  * and success reboots back to Windows.
  */
-export function buildRecoveryStartnetCmd(): string {
+export function buildRecoveryStartnetCmd(version?: string): string {
   return [
     '@echo off',
     'title OPBS Recovery',
+    // The menu's status header reports the version it is running. The staged
+    // payload is a bare dist/ copy with no package.json to ask.
+    ...(version ? [`set "OPBS_VERSION=${version}"`] : ['set "OPBS_VERSION=unknown"']),
     // Banner BEFORE everything else (incl. wpeinit): a hang must show what
     // is running instead of a silent black console. No `mode con` - the
     // mode switch is a blank-output suspect on some displays.
@@ -763,6 +766,29 @@ function transcriptDetail(work: string, label: string): string {
   return parts.length > 0 ? ` ${parts.join('. ')}` : '';
 }
 
+/**
+ * The app version for the recovery menu's status header. The staged payload
+ * is a bare dist/ copy with no package.json, so it is resolved here and baked
+ * into startnet.cmd at stage time.
+ */
+async function resolveAppVersion(): Promise<string | undefined> {
+  try {
+    const { app } = await import('electron');
+    if (app && typeof app.getVersion === 'function') return app.getVersion();
+  } catch {
+    /* not running under Electron (CLI/tests) */
+  }
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf-8')) as {
+      version?: string;
+    };
+    return pkg.version;
+  } catch {
+    /* packaged without a reachable package.json */
+  }
+  return undefined;
+}
+
 export async function stageRecoveryRestore(
   config: RecoveryStageConfig,
   opts?: { onProgress?: (msg: string) => void }
@@ -813,7 +839,7 @@ export async function stageRecoveryRestore(
         resultFile,
         payload: stagedCopies,
         textFiles,
-        startnetB64: b64(buildRecoveryStartnetCmd()),
+        startnetB64: b64(buildRecoveryStartnetCmd(await resolveAppVersion())),
         winpeshlB64: b64(buildWinpeshlIni())
       }),
       'utf-8'

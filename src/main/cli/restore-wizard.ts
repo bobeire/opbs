@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { RestoreJob, RestoreJobProgress } from '../imaging/imaging-job';
 import type { RestoreJobConfig } from '../imaging/restore-engine';
+import { Style, createStyle } from './console-style';
 
 /**
  * Interactive, text-only restore wizard for the recovery console.
@@ -630,32 +631,169 @@ export interface BackupWizardDeps {
  */
 export const SHELL_EXIT_CODE = 90;
 
-export type RecoveryChoice = 'restore' | 'backup' | 'shell' | 'reboot' | 'shutdown' | 'exit';
+export type RecoveryChoice = 'check' | 'restore' | 'backup' | 'shell' | 'reboot' | 'shutdown' | 'exit';
+
+/** What the machine looks like, for the menu header and the read-only check. */
+export interface RecoveryMenuStatus {
+  opbsVersion: string;
+  disks: Array<{ index: number; model: string; size: number; partitions: number }>;
+  imagesFound: number;
+}
+
+export interface RecoveryMenuDeps {
+  /** Read-only summary of this machine. Omitted in tests and when unavailable. */
+  collectStatus?: () => Promise<RecoveryMenuStatus | null>;
+  /** Read-only listing of disks and their partitions. */
+  listPartitions?: (diskIndex: number) => Promise<Array<{ partitionIndex: number; size: number; driveLetter?: string }>>;
+  /** Read-only scan for backup images on attached drives. */
+  scanImages?: () => Array<WizardImage>;
+}
+
+function formatSize(bytes: number): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value >= 100 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
 
 /**
- * First screen of the recovery media. Historically it went straight into the
- * restore wizard, so a user who wanted to *save* a machine that would not
- * boot had no path (field report: "why does the booted version not offer to
- * do a backup?"). The CLI could always do it; now the menu says so.
+ * The first screen of the recovery media.
+ *
+ * It now opens with what this machine actually is before asking for a
+ * decision. A user at this screen has a machine that will not start; being
+ * told "1 disk, 4 partitions, 2 images found" before being asked to choose is
+ * the difference between a tool that seems to know where it is and one that
+ * does not (WinRE-Manager's menu does this, and it is why it feels calm).
  */
-export async function runRecoveryMenu(io: WizardIO): Promise<RecoveryChoice> {
-  io.print('What would you like to do?');
-  io.print('  [1] Restore this machine from a backup image');
-  io.print('  [2] Back up this machine (save an image before reinstalling)');
-  io.print('  [3] Command prompt  (type  exit  to come back to this menu)');
-  io.print('  [4] Reboot');
-  io.print('  [5] Shut down');
-  io.print('  [q] Quit to a command prompt without the menu');
+export async function runRecoveryMenu(
+  io: WizardIO,
+  opts?: { style?: Style; deps?: RecoveryMenuDeps }
+): Promise<RecoveryChoice> {
+  const style = opts?.style ?? createStyle();
+
+  let status: RecoveryMenuStatus | null;
+  try {
+    status = (await opts?.deps?.collectStatus?.()) ?? null;
+  } catch {
+    status = null;
+  }
+
+  if (status) {
+    io.print(style.dim('------------------------------------------------'));
+    io.print(`  ${style.bold('OPBS Recovery')}  ${style.dim(`v${status.opbsVersion}`)}`);
+    io.print(
+      `  ${status.disks.length} disk${status.disks.length === 1 ? '' : 's'}` +
+        `${status.disks.length > 0 ? ` (${status.disks.map((d) => `${d.model || 'disk'} ${formatSize(d.size)}`).join(', ')})` : ''}`
+    );
+    io.print(
+      `  ${status.imagesFound} backup image${status.imagesFound === 1 ? '' : 's'} found on attached drives` +
+        `${status.imagesFound === 0 ? style.amber('  - none yet') : ''}`
+    );
+    io.print(style.dim('------------------------------------------------'));
+  }
+
+  io.print();
+  io.print(style.bold('What would you like to do?'));
+  io.print(`  [${style.cyan('0')}] Check this machine  ${style.dim('(read-only: disks, partitions, images)')}`);
+  io.print(`  [${style.cyan('1')}] Restore this machine from a backup image`);
+  io.print(`  [${style.cyan('2')}] Back up this machine ${style.dim('(save an image before reinstalling)')}`);
+  io.print(`  [${style.cyan('3')}] Command prompt  ${style.dim('(type  exit  to come back to this menu)')}`);
+  io.print(`  [${style.cyan('4')}] Reboot`);
+  io.print(`  [${style.cyan('5')}] Shut down`);
+  io.print(`  [${style.dim('q')}] Quit to a command prompt without the menu`);
   for (;;) {
-    const answer = (await io.ask('Choice [1-5] > ')).trim().toLowerCase();
+    const answer = (await io.ask('Choice [0-5] > ')).trim().toLowerCase();
+    if (answer === '0' || answer === 'check' || answer === 'c' || answer === 'status') return 'check';
     if (answer === '1' || answer === 'r' || answer === 'restore') return 'restore';
     if (answer === '2' || answer === 'b' || answer === 'backup') return 'backup';
-    if (answer === '3' || answer === 'c' || answer === 'cmd' || answer === 'shell') return 'shell';
+    if (answer === '3' || answer === 'cmd' || answer === 'shell') return 'shell';
     if (answer === '4' || answer === 'reboot' || answer === 'restart') return 'reboot';
     if (answer === '5' || answer === 'shutdown' || answer === 'shut' || answer === 'off') return 'shutdown';
     if (answer === 'q' || answer === 'quit' || answer === 'exit') return 'exit';
-    io.print('  Enter 1, 2, 3, 4, 5 or q.');
+    io.print(`  ${style.amber('Enter')} 0, 1, 2, 3, 4, 5 ${style.amber('or q.')}`);
   }
+}
+
+/**
+ * Read-only report on this machine. Nothing here writes, locks or dismounts
+ * anything — it exists so a user can see what the machine has before being
+ * asked what to do with it, and so a support conversation can start from
+ * facts rather than guesses.
+ *
+ * Modelled on the "test harness" idea from WinRE-Manager: every destructive
+ * flow should have a read-only equivalent that runs first.
+ */
+export async function runMachineCheck(
+  io: WizardIO,
+  deps: RecoveryMenuDeps,
+  style: Style = createStyle()
+): Promise<void> {
+  io.print();
+  io.print(style.bold('Checking this machine (nothing is changed)'));
+  io.print(style.dim('------------------------------------------------'));
+
+  let status: RecoveryMenuStatus | null;
+  try {
+    status = (await deps.collectStatus?.()) ?? null;
+  } catch {
+    status = null;
+  }
+
+  if (status) {
+    io.print(`  OPBS version : ${status.opbsVersion}`);
+    io.print(`  Disks        : ${status.disks.length}`);
+    io.print(`  Images found : ${status.imagesFound}`);
+    io.print();
+  }
+
+  if (deps.listPartitions && status) {
+    for (const disk of status.disks) {
+      io.print(`  ${style.bold(`Disk ${disk.index}`)}  ${disk.model || '(unknown model)'}  ${formatSize(disk.size)}`);
+      try {
+        const parts = await deps.listPartitions(disk.index);
+        if (parts.length === 0) {
+          io.print(`      ${style.dim('(no partitions readable)')}`);
+        }
+        for (const p of parts) {
+          const where = p.driveLetter ? ` -> ${p.driveLetter}` : '';
+          io.print(`      partition ${p.partitionIndex}  ${formatSize(p.size)}${where}`);
+        }
+      } catch (error) {
+        io.print(`      ${style.amber('could not read partitions')}: ${error instanceof Error ? error.message : error}`);
+      }
+      io.print();
+    }
+  }
+
+  if (deps.scanImages) {
+    let images: WizardImage[];
+    try {
+      images = deps.scanImages();
+    } catch {
+      images = [];
+    }
+    if (images.length === 0) {
+      io.print(`  ${style.amber('No backup images found')} on the attached drives.`);
+      io.print(`  ${style.dim('If your backup is on a drive that is not plugged in, plug it in and check again.')}`);
+    } else {
+      io.print(`  ${style.green(`Found ${images.length} backup image${images.length === 1 ? '' : 's'}:`)}`);
+      for (const image of images.slice(0, 20)) {
+        const kind = image.incremental === true ? 'delta' : image.incremental === false ? 'full' : 'image';
+        const enc = image.encrypted ? ', encrypted' : '';
+        io.print(`      ${image.path}  ${style.dim(`(${kind}, ${formatSize(image.size)}${enc})`)}`);
+      }
+      if (images.length > 20) {
+        io.print(`      ${style.dim(`... and ${images.length - 20} more`)}`);
+      }
+    }
+    io.print();
+  }
+
+  io.print(style.dim('Nothing was changed. Choose 1 to restore, 2 to back up.'));
 }
 
 /**

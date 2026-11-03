@@ -430,7 +430,7 @@ describe('runRecoveryMenu', () => {
   it('accepts the short answers and re-prompts on nonsense', async () => {
     const nonsense = fakeIO(['what', 'r']);
     expect(await runRecoveryMenu(nonsense.io)).toBe('restore');
-    expect(nonsense.text()).toContain('Enter 1, 2, 3, 4, 5 or q.');
+    expect(nonsense.text()).toContain('Enter 0, 1, 2, 3, 4, 5 or q.');
     expect(await runRecoveryMenu(fakeIO(['3']).io)).toBe('shell');
     expect(await runRecoveryMenu(fakeIO(['4']).io)).toBe('reboot');
     expect(await runRecoveryMenu(fakeIO(['5']).io)).toBe('shutdown');

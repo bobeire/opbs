@@ -13,6 +13,8 @@ import { checkDiskHealth } from '../utils/disk-health';
 import { registerScheduledTask, removeScheduledTask, listScheduledTasks } from '../utils/task-scheduler';
 import { decryptSecret } from '../utils/secret-store';
 import { dispatchHelperJob } from '../helper/job-runner';
+import { createStyle } from './console-style';
+import type { RecoveryMenuDeps } from './restore-wizard';
 import { launchElevatedJob } from '../helper/launcher';
 import type { PipeClient } from '../utils/pipe-ipc';
 import { winfspAvailable } from '../imaging/mount-manager';
@@ -1044,12 +1046,44 @@ async function cmdWizard(ctx: CommandContext): Promise<number> {
     runRestoreWizard,
     runBackupWizard,
     runRecoveryMenu,
+    runMachineCheck,
     askPowerNow,
     createConsoleIO,
     scanDrivesForImages,
     SHELL_EXIT_CODE
   } = await import('./restore-wizard');
   const io = createConsoleIO();
+  // Console colour, resolved once: the recovery environment must never show
+  // escape sequences at someone whose machine is already broken.
+  const style = createStyle();
+  const menuDeps: RecoveryMenuDeps = {
+    collectStatus: async () => {
+      const disks = await diskEnumerator.getDisks();
+      let imagesFound: number;
+      try {
+        imagesFound = scanDrivesForImages().length;
+      } catch {
+        imagesFound = 0;
+      }
+      return {
+        opbsVersion: process.env.OPBS_VERSION || 'unknown',
+        disks: disks.map((d) => ({
+          index: d.index,
+          model: d.model ?? '',
+          size: d.size,
+          partitions: d.partitions?.length ?? 0
+        })),
+        imagesFound
+      };
+    },
+    listPartitions: async (diskIndex) =>
+      (await diskEnumerator.getPartitions(diskIndex)).map((p) => ({
+        partitionIndex: p.partitionIndex,
+        size: p.size,
+        driveLetter: p.driveLetter ?? undefined
+      })),
+    scanImages: () => scanDrivesForImages()
+  };
   try {
     // The recovery media used to open the restore wizard directly, so a user
     // who wanted to SAVE a machine that would not boot had no path. Offer the
@@ -1059,8 +1093,16 @@ async function cmdWizard(ctx: CommandContext): Promise<number> {
     // (field report 2026-11-01: the tester closed the console instead, which
     // dropped the machine into Windows repair mode).
     for (;;) {
-      const choice = await runRecoveryMenu(io);
+      const choice = await runRecoveryMenu(io, { style, deps: menuDeps });
       if (choice === 'exit') return 0;
+
+      // Read-only report on this machine. Nothing here writes, locks or
+      // dismounts — it exists so a user can see what they have before being
+      // asked what to do with it (the "test harness first" idea).
+      if (choice === 'check') {
+        await runMachineCheck(io, menuDeps, style);
+        continue;
+      }
 
       if (choice === 'shell') {
         if (!process.env.OPBS_WINPE) {
