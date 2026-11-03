@@ -53,6 +53,7 @@ import {
   type AllocationMap
 } from '../imaging/capture-consistency';
 import { writeRestoreMarker, clearRestoreMarker } from '../utils/restore-marker';
+import { vssBrokenMessage, adviseVssFailure } from '../utils/vss-health';
 import { planNtfsShrink, NtfsShrinkPlan } from '../imaging/fs/ntfs-shrink';
 import { planFat32Shrink, Fat32ShrinkPlan } from '../imaging/fs/fat32-shrink';
 import { detectFatType } from '../imaging/fs/fat32';
@@ -246,31 +247,18 @@ export async function runBackupJob(
           // consistent?" (field report 2026-11-03).
           logger.info(`${p.label}: VSS snapshot ${snap.id} -> ${snap.devicePath}`);
         } catch (error) {
-          // No silent downgrade. Reading a live disk while Windows writes to
-          // it produces an image with no single moment in it: the allocation
-          // bitmap and the file records can come from different times, and a
-          // restore of that gives a filesystem chkdsk reports as corrupt.
-          // Every block still passes its checksum, so nothing else catches it.
-          //
-          // FAT32/exFAT genuinely cannot be snapshotted, so there is an
-          // explicit escape hatch — but it is never the default, and choosing
-          // it is recorded as a warning rather than a shrug.
-          // (Field report 2026-11-03: broken VSS on a tester's machine produced
-          // silently inconsistent images for days.)
-          const reason = `no VSS snapshot for ${p.label} (${errorMessage(error)})`;
+          const detail = errorMessage(error);
           if (!job2.allowInconsistentCapture) {
-            throw new Error(
-              `${reason}. The backup has been stopped: without a snapshot this partition would be read ` +
-                `while Windows is still writing to it, and the image could be internally inconsistent - ` +
-                `it would restore as a filesystem that looks corrupt. Fix VSS (see the VSS diagnostics), ` +
-                `or retry with --allow-inconsistent if you accept that risk for this partition. No ` +
-                `partitions have been captured.`,
-              { cause: error }
-            );
+            // The refusal distinguishes "VSS is broken on this machine" from
+            // "this volume cannot be snapshotted" — they need different fixes,
+            // and conflating them is part of why the 2026-11-03 report took
+            // three days to understand.
+            throw new Error(vssBrokenMessage(p.label, detail), { cause: error });
           }
           warnings.push(
-            `${reason}; capturing WITHOUT a consistent point in time. This image may be internally ` +
-              `inconsistent and may restore as a filesystem that looks corrupt.`
+            `${p.label}: no VSS snapshot (${detail}); capturing WITHOUT a consistent point in time. ` +
+              `This image may be internally inconsistent and may restore as a filesystem that looks ` +
+              `corrupt. ${adviseVssFailure(detail)}`
           );
           p.readSource = 'physical';
           p.volumeDevicePath = undefined;

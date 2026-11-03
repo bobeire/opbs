@@ -306,7 +306,7 @@ describe('runBackupJob', () => {
     await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
     const refused = readResult();
     expect(refused.ok).toBe(false);
-    expect(refused.error ?? '').toMatch(/no VSS snapshot/);
+    expect(refused.error ?? '').toMatch(/shadow copy of/);
     // It refuses rather than quietly capturing live.
   });
 
@@ -2505,7 +2505,7 @@ describe('a backup without a consistent snapshot', () => {
     await runBackupJob(jobPath, resultPath, progressPath, cancelPath, vssNative(true));
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
     expect(result.ok).toBe(false);
-    expect(result.error ?? '').toMatch(/no VSS snapshot/);
+    expect(result.error ?? '').toMatch(/shadow copy of/);
   });
 
   it('names the consequence and the way out in the refusal', async () => {
@@ -2513,7 +2513,7 @@ describe('a backup without a consistent snapshot', () => {
     await runBackupJob(jobPath, resultPath, progressPath, cancelPath, vssNative(true));
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
     // The user has to be able to act on it, not just be told "failed".
-    expect(result.error ?? '').toContain('internally inconsistent');
+    expect(result.error ?? '').toContain('no single point in time');
     expect(result.error ?? '').toContain('--allow-inconsistent');
   });
 
