@@ -722,6 +722,13 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   if (ctx.argv.includes('--used-blocks-only')) {
     config.usedBlocksOnly = true;
   }
+  // Escape hatch, never the default: capture partitions that cannot be
+  // snapshotted by reading them live. Without a shadow copy the image has no
+  // single point in time and may be internally inconsistent — every block can
+  // verify while the filesystem it forms is broken.
+  if (ctx.argv.includes('--allow-inconsistent')) {
+    config.allowInconsistentCapture = true;
+  }
   if (ctx.argv.includes('--usn')) {
     config.useUsnJournal = true;
   }

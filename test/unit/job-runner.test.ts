@@ -273,7 +273,12 @@ describe('runBackupJob', () => {
     expect(result.warnings).toHaveLength(2);
   });
 
-  it('falls back to a raw physical read when a snapshot cannot be created', async () => {
+  it('refuses when a snapshot cannot be created', async () => {
+    // This test used to assert the opposite: that the backup "falls back to a
+    // raw physical read" and succeeds. That fallback silently produced images
+    // with no single point in time — every block verified, and the filesystem
+    // they formed was corrupt (field report 2026-11-03). Refusing is the
+    // correct behaviour; the escape hatch is tested separately.
     writeJob({
       type: 'backup',
       imagePath,
@@ -299,11 +304,44 @@ describe('runBackupJob', () => {
     });
 
     await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+    const refused = readResult();
+    expect(refused.ok).toBe(false);
+    expect(refused.error ?? '').toMatch(/no VSS snapshot/);
+    // It refuses rather than quietly capturing live.
+  });
+
+  it('writes live only when the caller explicitly accepts the risk', async () => {
+    writeJob({
+      type: 'backup',
+      imagePath,
+      blockSize: BLOCK,
+      compressionLevel: 3,
+      verificationEnabled: false,
+      allowInconsistentCapture: true,
+      partitions: [
+        {
+          diskIndex: 0,
+          partitionIndex: 2,
+          size: BLOCK,
+          offset: 122683392,
+          label: 'Partition 2',
+          readSource: 'volume',
+          volumeDevicePath: '\\\\?\\Volume{vol-1}\\'
+        }
+      ]
+    });
+
+    const native = createMockNative();
+    native.createSnapshot = vi.fn(() => {
+      throw new Error('VSS_E_VOLUME_NOT_SUPPORTED');
+    });
+
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
 
     const result = readResult();
     expect(result.ok).toBe(true);
-    expect(result.warnings.join(' ')).toMatch(/VSS snapshot unavailable/i);
-    expect(fs.existsSync(imagePath)).toBe(true);
+    // The decision is on the record, not buried.
+    expect(result.warnings.join(' ')).toMatch(/WITHOUT a consistent point in time/);
   });
 
   describe('runBackupJob with resume', () => {
@@ -2391,5 +2429,115 @@ describe('free-space clear never zeroes a block the chain contains', () => {
     for (let b = 0; b < PART_BLOCKS; b++) {
       expect(disk.subarray(b * BLOCK, (b + 1) * BLOCK).every((x) => x === 0)).toBe(false);
     }
+  });
+});
+
+/**
+ * Field report 2026-11-03: a tester's machine had broken VSS, so every backup
+ * silently read the live disk while Windows wrote to it. The images passed
+ * every block checksum and were still internally inconsistent — the allocation
+ * bitmap and the file records came from different moments — and a restore of
+ * one produced a filesystem chkdsk described as corrupt. Nothing warned him.
+ *
+ * A backup that cannot obtain a snapshot must stop. Reading live is an
+ * explicit, recorded decision, never a fallback.
+ */
+describe('a backup without a consistent snapshot', () => {
+  let dir: string;
+  let jobPath: string;
+  let resultPath: string;
+  let progressPath: string;
+  let cancelPath: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-nosnap-'));
+    jobPath = path.join(dir, 'job.json');
+    resultPath = path.join(dir, 'result.json');
+    progressPath = path.join(dir, 'progress.json');
+    cancelPath = path.join(dir, 'cancel');
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A backup of one partition that *needs* a shadow copy. */
+  function jobFor(imagePath: string, allowInconsistentCapture?: boolean) {
+    return {
+      type: 'backup',
+      imagePath,
+      blockSize: BLOCK,
+      compressionLevel: 3,
+      verificationEnabled: false,
+      ...(allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
+      partitions: [
+        {
+          diskIndex: 0,
+          partitionIndex: 2,
+          size: BLOCK * 3,
+          offset: 122683392,
+          label: 'Real',
+          readSource: 'volume',
+          volumeDevicePath: '\\\\.\\Volume{deadbeef-0000-0000-0000-000000000000}\\'
+        }
+      ]
+    };
+  }
+
+  /** A minimal backup native: snapshotting works unless told to throw. */
+  function vssNative(snapshotThrows: boolean) {
+    return {
+      createSnapshot: vi.fn((volumePath: string) => {
+        if (snapshotThrows) throw new Error('VSS_E_UNEXPECTED_PROVIDER_ERROR');
+        return { id: 'snap-1', devicePath: volumePath };
+      }),
+      deleteSnapshot: vi.fn(() => true),
+      getPhysicalDrivePath: vi.fn((i: number) => `\\\\.\\PhysicalDrive${i}`),
+      readBlocks: vi.fn((_d: string, _o: bigint, length: bigint) => Buffer.alloc(Number(length), 7)),
+      writeBlocks: vi.fn(() => 0)
+    } as unknown as NativeImagingApi;
+  }
+
+  it('stops and says so, instead of silently reading a live disk', async () => {
+    const imagePath = path.join(dir, 'should-not-exist.opbs');
+    fs.writeFileSync(jobPath, JSON.stringify(jobFor(imagePath)));
+
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, vssNative(true));
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
+    expect(result.ok).toBe(false);
+    expect(result.error ?? '').toMatch(/no VSS snapshot/);
+  });
+
+  it('names the consequence and the way out in the refusal', async () => {
+    fs.writeFileSync(jobPath, JSON.stringify(jobFor(path.join(dir, 'x.opbs'))));
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, vssNative(true));
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
+    // The user has to be able to act on it, not just be told "failed".
+    expect(result.error ?? '').toContain('internally inconsistent');
+    expect(result.error ?? '').toContain('--allow-inconsistent');
+  });
+
+  it('proceeds, loudly, when the caller accepts the risk', async () => {
+    const imagePath = path.join(dir, 'accepted.opbs');
+    fs.writeFileSync(jobPath, JSON.stringify(jobFor(imagePath, true)));
+
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, vssNative(true));
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
+    expect(result.ok).toBe(true);
+    // The decision is recorded, not buried.
+    expect(result.warnings.some((w) => w.includes('WITHOUT a consistent point in time'))).toBe(true);
+    expect(result.warnings.some((w) => w.includes('no VSS snapshot'))).toBe(true);
+  });
+
+  it('never fires when a snapshot is taken', async () => {
+    const imagePath = path.join(dir, 'fine.opbs');
+    fs.writeFileSync(jobPath, JSON.stringify(jobFor(imagePath)));
+
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, vssNative(false));
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
+    expect(result.ok).toBe(true);
+    expect(result.warnings.some((w) => w.includes('no VSS snapshot'))).toBe(false);
   });
 });

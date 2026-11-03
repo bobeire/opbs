@@ -235,12 +235,35 @@ export async function runBackupJob(
           const snap = native.createSnapshot(p.volumeDevicePath);
           snapshotCache.set(p.volumeDevicePath, snap);
           snapshotsCreated++;
+          // Self-evidencing: the log must show, per partition, that a snapshot
+          // was actually taken. Its absence is the answer to "was this backup
+          // consistent?" (field report 2026-11-03).
+          logger.info(`${p.label}: VSS snapshot ${snap.id} -> ${snap.devicePath}`);
         } catch (error) {
-          // VSS doesn't support every filesystem (FAT32/exFAT volumes are not
-          // snapshot-able by the System Provider). Fall back to a raw physical
-          // read for this partition instead of failing the whole backup.
+          // No silent downgrade. Reading a live disk while Windows writes to
+          // it produces an image with no single moment in it: the allocation
+          // bitmap and the file records can come from different times, and a
+          // restore of that gives a filesystem chkdsk reports as corrupt.
+          // Every block still passes its checksum, so nothing else catches it.
+          //
+          // FAT32/exFAT genuinely cannot be snapshotted, so there is an
+          // explicit escape hatch — but it is never the default, and choosing
+          // it is recorded as a warning rather than a shrug.
+          // (Field report 2026-11-03: broken VSS on a tester's machine produced
+          // silently inconsistent images for days.)
+          const reason = `no VSS snapshot for ${p.label} (${errorMessage(error)})`;
+          if (!job2.allowInconsistentCapture) {
+            throw new Error(
+              `${reason}. The backup has been stopped: without a snapshot this partition would be read ` +
+                `while Windows is still writing to it, and the image could be internally inconsistent - ` +
+                `it would restore as a filesystem that looks corrupt. Fix VSS (see the VSS diagnostics), ` +
+                `or retry with --allow-inconsistent if you accept that risk for this partition. No ` +
+                `partitions have been captured.`
+            );
+          }
           warnings.push(
-            `${p.label}: VSS snapshot unavailable (${errorMessage(error)}); using raw block read`
+            `${reason}; capturing WITHOUT a consistent point in time. This image may be internally ` +
+              `inconsistent and may restore as a filesystem that looks corrupt.`
           );
           p.readSource = 'physical';
           p.volumeDevicePath = undefined;

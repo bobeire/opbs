@@ -87,6 +87,23 @@ export interface ImagingJob {
   compressionLevel: number;
   verificationEnabled: boolean;
   partitions: ImagingPartition[];
+  /**
+   * Proceed even though one or more partitions cannot be captured from a
+   * consistent point in time (no VSS snapshot available).
+   *
+   * A capture without a snapshot reads a live disk while Windows and every
+   * running application keep writing to it. The resulting image is a smear
+   * across time: the allocation bitmap and the file records can come from
+   * different moments, and a restore of it produces a filesystem chkdsk
+   * describes as corrupt. Every block can still pass its checksum.
+   *
+   * This is an explicit escape hatch for filesystems VSS cannot snapshot
+   * (FAT32/exFAT) and for people who understand the consequence. It is never
+   * the default: a backup that cannot obtain a snapshot stops and says so.
+   * (Field report 2026-11-03: a machine with broken VSS produced silently
+   * inconsistent images for days, and only chkdsk on a restore revealed it.)
+   */
+  allowInconsistentCapture?: boolean;
   /** For incremental backups: path to the base image this delta builds on. */
   baseImagePath?: string;
   encryption?: JobEncryption;

@@ -43,6 +43,13 @@ export interface BackupJobConfig {
   passphrase?: string;
   /** Compression algorithm (defaults to deflate when level > 0). */
   compressionType?: 'deflate' | 'zstd';
+  /**
+   * Capture partitions that cannot be snapshotted by reading them live, and
+   * say so loudly. Never the default: without a shadow copy the image has no
+   * single point in time and may be internally inconsistent. See
+   * `ImagingJob.allowInconsistentCapture` for why this exists at all.
+   */
+  allowInconsistentCapture?: boolean;
   /** Worker threads for multithreaded compression (0/unset = synchronous). */
   compressionThreads?: number;
   /** Use the USN journal to read only changed blocks for an incremental. */
@@ -138,6 +145,20 @@ export class ImagingEngine implements BackupCoordinator {
       const volumeDevicePath = ineligibleRawType
         ? null
         : await this.diskEnumerator.getVolumePath(diskIndex, part.offset);
+      // A partition we cannot resolve a volume path for cannot be snapshotted,
+      // and reading it live is a smear across time. That is not a fallback we
+      // take quietly: either the caller accepts it explicitly, or we stop here
+      // before writing anything (field report 2026-11-03).
+      if (!ineligibleRawType && !volumeDevicePath && !config.allowInconsistentCapture) {
+        throw new Error(
+          `Partition ${part.partitionIndex}${part.label ? ` (${part.label})` : ''}: no volume path could be ` +
+            `resolved, so no shadow copy can be taken and the partition would be read while Windows is still ` +
+            `writing to it. The image could be internally inconsistent - it would restore as a filesystem that ` +
+            `looks corrupt, even though every block verifies. The backup has been stopped before writing ` +
+            `anything. Fix VSS (see the VSS diagnostics), or retry with --allow-inconsistent if you accept ` +
+            `that risk for this partition.`
+        );
+      }
       items.push({
         diskIndex,
         partitionIndex: part.partitionIndex,
@@ -326,6 +347,7 @@ export class ImagingEngine implements BackupCoordinator {
       ...(config.resume ? { resume: true } : {}),
       ...(resumeCheckpoint ? { resumeCheckpoint } : {}),
       ...(config.usedBlocksOnly ? { usedBlocksOnly: true } : {}),
+      ...(config.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
       ...(useUsnJournal && perPartitionUsn
         ? {
             useUsnJournal: true,
