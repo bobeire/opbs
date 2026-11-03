@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { readImageInfo, COMPRESSION_NONE, newImageCipher } from '../../src/main/imaging/image-format';
 import { ChainPartitionReader, partitionReaderForChain } from '../../src/main/imaging/image-browse';
-import { openBrowse, listDirectory, readPath, resolvePath, extractPath } from '../../src/main/imaging/fs/file-browse';
+import { openBrowse, listDirectory, readPath, resolvePath, extractPath, detectPartitionFilesystem, sanitizeOemId } from '../../src/main/imaging/fs/file-browse';
 import { buildNtfsVolume, CLUSTER, FOREIGN_OWNER_SID } from '../helpers/ntfs-fixture';
 import { writeImageFromBytes } from '../helpers/opbs-image';
 import { spawnSync } from 'child_process';
@@ -227,5 +227,64 @@ describe('image browse', () => {
 
     const root = listDirectory(session, '');
     expect(root.map((n) => n.name)).toContain('hello.txt');
+  });
+});
+
+/**
+ * Not every partition has a filesystem. A Microsoft Reserved partition (16 MB,
+ * no boot sector) has bytes at the OEM-id offset that are not an identifier at
+ * all, and rendering them produced "(??????PcFP)" in the restore wizard on a
+ * real machine (field report 2026-11-03). A partition with no filesystem must
+ * say so, not print whatever is lying there.
+ */
+describe('filesystem detection on a partition that has no filesystem', () => {
+  let dir: string;
+  let imagePath: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-browse-none-'));
+    imagePath = path.join(dir, 'raw.opbs');
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reports None instead of the raw bytes', () => {
+    const raw = Buffer.alloc(CLUSTER * 4);
+    // Bytes where an OEM id would live, copied from a real MSR capture.
+    raw.write('??????PcFP', 3, 'latin1');
+    writeImageFromBytes(imagePath, raw, CLUSTER);
+
+    const result = detectPartitionFilesystem(imagePath, 0);
+    expect(result.fsType).toBe('None');
+    expect(result.browsable).toBe(false);
+    // The whole point: nothing unreadable reaches the UI.
+    expect(result.fsType).not.toMatch(/[^\x20-\x7e]/);
+  });
+
+  it('still recognises a real filesystem', () => {
+    const raw = Buffer.alloc(CLUSTER * 4);
+    raw.write('NTFS    ', 3, 'ascii');
+    writeImageFromBytes(imagePath, raw, CLUSTER);
+    expect(detectPartitionFilesystem(imagePath, 0).fsType).toBe('NTFS');
+  });
+});
+
+describe('sanitizeOemId', () => {
+  it('keeps plausible identifiers', () => {
+    expect(sanitizeOemId('NTFS    ')).toBe('NTFS');
+    expect(sanitizeOemId('MSDOS5.0')).toBe('MSDOS5.0');
+    expect(sanitizeOemId('FAT32   ')).toBe('FAT32');
+    expect(sanitizeOemId('EXFAT   ')).toBe('EXFAT');
+  });
+
+  it('rejects bytes that are not an identifier', () => {
+    expect(sanitizeOemId('??????PcF')).toBeNull();
+    expect(sanitizeOemId('')).toBeNull();
+    expect(sanitizeOemId('   ')).toBeNull();
+    expect(sanitizeOemId('\u0000\u0000\u0000')).toBeNull();
+    expect(sanitizeOemId('way too long to be an oem id')).toBeNull();
+    expect(sanitizeOemId('bad\u0001chars')).toBeNull();
   });
 });

@@ -1212,6 +1212,15 @@ body {
 }
 .advice-box strong { display: block; margin-bottom: 4px; color: var(--text-color); }
 
+/* Why a button is unavailable. A disabled button with no explanation reads as
+   a broken app; this makes the reason visible in the same place. */
+.option-hint {
+  font-size: 13px;
+  color: var(--text-muted, #9ca3af);
+  line-height: 1.5;
+  max-width: 720px;
+}
+
 .acknowledge-box {
   border: 1px solid var(--danger-color);
   background-color: rgba(220, 38, 38, 0.08);

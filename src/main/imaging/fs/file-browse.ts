@@ -191,6 +191,18 @@ export function openAnyBrowse(imagePath: string, partitionIndex: number, passphr
  * Cheap relative to a full browse-session parse. Returns the filesystem name
  * and whether the built-in browser can read it (NTFS or FAT32).
  */
+/**
+ * A filesystem OEM id is a short printable identifier ("NTFS    ", "MSDOS5.0").
+ * Anything else is bytes that happen to sit where an OEM id would be, and
+ * rendering them as a name produces mojibake. Returns null when the bytes are
+ * not a plausible identifier.
+ */
+export function sanitizeOemId(raw: string): string | null {
+  const trimmed = (raw ?? '').replace(/\0+$/, '').trim();
+  if (trimmed.length === 0 || trimmed.length > 11) return null;
+  return /^[A-Za-z0-9 ._-]+$/.test(trimmed) ? trimmed : null;
+}
+
 export function detectPartitionFilesystem(
   imagePath: string,
   partitionIndex: number,
@@ -217,7 +229,12 @@ export function detectPartitionFilesystem(
     if (fatType === 'FAT16') return { fsType: 'FAT16', browsable: false };
     if (fatType === 'FAT12') return { fsType: 'FAT12', browsable: false };
     if (detectExfat(bpb)) return { fsType: 'exFAT', browsable: true };
-    return { fsType: oem.trim() || 'Unknown', browsable: false };
+    // Not every partition has a filesystem. A Microsoft Reserved partition (or
+    // any raw/reserved region) has no boot sector, so bytes 3..10 are just
+    // whatever the partition table left there — printing them as an OEM id
+    // produced "(??????PcFP)" on a real machine (field report 2026-11-03).
+    // Only accept a plausible identifier.
+    return { fsType: sanitizeOemId(oem) ?? 'None', browsable: false };
   } catch (e) {
     if (e instanceof MacriumPasswordError) {
       // Wrong/missing passphrase for a password-protected Macrium image: keep

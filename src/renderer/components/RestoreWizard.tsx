@@ -583,6 +583,20 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     !(imageInfo?.encrypted && !passphrase.trim()) &&
     (!destructiveAckNeeded || acknowledge);
 
+  // Why the button is unavailable, in words. A disabled button with no
+  // explanation is a dead end — it looks like the app is broken.
+  const startBlockedReason = !preflight
+    ? 'Waiting for the plan to be validated…'
+    : !preflight.ok
+      ? (preflight.error ?? 'This plan cannot run — see the message above.')
+      : !targetReady
+        ? 'Choose a target first.'
+        : imageInfo?.encrypted && !passphrase.trim()
+          ? 'Enter the image passphrase above to restore.'
+          : destructiveAckNeeded && !acknowledge
+            ? 'Tick the acknowledgement above to continue.'
+            : 'This restore cannot start yet.';
+
   const renderStep = () => {
     switch (currentStep) {
       case 'select_image':
@@ -1201,10 +1215,47 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
               <button className="btn-secondary" onClick={() => setCurrentStep('select_target')}>
                 Back
               </button>
-              <button className="btn-danger" onClick={handleStartRestore} disabled={!canStart}>
-                {isClone ? 'Start Clone' : 'Start Restore'}
-              </button>
+              {systemDiskBlocked ? (
+                // The one action that cannot work must not be the one on the
+                // button. This is the disk Windows is running from, so a
+                // restore from inside Windows is impossible — but the options
+                // chosen above still apply, and are carried into the recovery
+                // run. (Field report 2026-11-03: "clicking Start Restore does
+                // nothing" — it was a disabled button on a screen the wizard
+                // let him reach.)
+                <button
+                  className="btn-primary"
+                  onClick={() => {
+                    void handleStageForRecovery();
+                    // The staging progress and the restart button live on the
+                    // previous step's panel; show them rather than sitting here.
+                    setCurrentStep('select_target');
+                  }}
+                  disabled={recoveryPhase !== 'idle'}
+                >
+                  {recoveryPhase === 'staging' ? 'Staging…' : 'Restore after reboot into recovery…'}
+                </button>
+              ) : (
+                <button className="btn-danger" onClick={handleStartRestore} disabled={!canStart}>
+                  {isClone ? 'Start Clone' : 'Start Restore'}
+                </button>
+              )}
             </div>
+
+            {systemDiskBlocked ? (
+              <p className="option-hint" style={{ marginTop: 10 }}>
+                A restore cannot run from inside Windows onto this disk, so that button offers the
+                way that can: the restore is staged and runs in the recovery environment after one
+                restart. Your options above go with it. To use the recovery media instead, go
+                <strong> Back</strong> and choose &ldquo;Boot from recovery media instead&rdquo;.
+              </p>
+            ) : (
+              !canStart && (
+                <p className="option-hint" style={{ marginTop: 10 }}>
+                  {startBlockedReason}
+                </p>
+              )
+            )}
           </div>
         );
         
