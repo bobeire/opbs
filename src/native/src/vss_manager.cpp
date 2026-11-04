@@ -89,20 +89,37 @@ HRESULT WaitForAsync(IVssAsync* pAsync, DWORD timeoutMs = 120000) {
 } // namespace
 
 /**
- * Check writer state and fail with a name instead of a bare HRESULT.
+ * Check writer state and report a name instead of a bare HRESULT.
  *
- * A requester that asks for component selection and bootable-system-state
- * participation has to gather writer metadata first, and it has to look at
- * what the writers said. A writer in VSS_WS_FAILED will make DoSnapshotSet
- * fail later with an HRESULT that names nobody, which is how a user ends up
- * told "VSS is broken on this machine" when the problem is one writer and
- * the fix is one word.
+ * Two rules, both learned the hard way on 2026-11-04:
+ *
+ *   - Writer status is not available until `GatherWriterStatus` has run.
+ *     Querying it earlier fails with VSS_E_BAD_STATE (0x80042301), and this
+ *     check was doing exactly that — refusing every backup on the first
+ *     machine that ran it.
+ *   - A check must never break the thing it is checking. Any failure of the
+ *     check itself means "no verdict" and is swallowed: an aborted backup is
+ *     far worse than a missing warning.
+ *
+ * A writer that is genuinely in a failed state is still reported as an error,
+ * because DoSnapshotSet would fail anyway and this names the culprit.
  */
 void CheckWriterState(IVssBackupComponents* components, const wchar_t* phase) {
+    // Gather the status first. Without this, GetWriterStatusCount returns
+    // VSS_E_BAD_STATE and nothing below can run.
+    IVssAsync* pStatusAsync = nullptr;
+    HRESULT gatherHr = components->GatherWriterStatus(&pStatusAsync);
+    if (FAILED(gatherHr)) {
+        return; // no verdict — never a failure of the snapshot itself
+    }
+    if (pStatusAsync) {
+        WaitForAsync(pStatusAsync); // releases the async
+        pStatusAsync = nullptr;
+    }
+
     UINT count = 0;
-    HRESULT hr = components->GetWriterStatusCount(&count);
-    if (FAILED(hr)) {
-        VssErrorWithHr(L"GetWriterStatusCount", hr);
+    if (FAILED(components->GetWriterStatusCount(&count))) {
+        return; // no verdict
     }
     for (UINT i = 0; i < count; i++) {
         VSS_ID instanceId = GUID_NULL;
@@ -112,12 +129,10 @@ void CheckWriterState(IVssBackupComponents* components, const wchar_t* phase) {
         HRESULT writerHr = S_OK;
         // Every out-parameter is a real variable. This SDK declares them
         // `_Out_` rather than `_Out_opt_`, and an implementation that
-        // dereferences unconditionally would crash us mid-backup — which is a
-        // far worse outcome than not printing a writer's name. The BSTR is
+        // dereferences unconditionally would crash us mid-backup. The BSTR is
         // intentionally not freed: the documented free function is not
         // available in every SDK we build against, and one short string per
         // writer per snapshot is not worth getting wrong.
-        // `vssadmin list writers` prints every name with its status anyway.
         if (FAILED(components->GetWriterStatus(i, &instanceId, &writerId, &writerName, &state, &writerHr))) {
             continue;
         }

@@ -286,47 +286,36 @@ export async function runBackupJob(
     }
 
     if (snapshots) {
-      // Probe each one before trusting it: a shadow copy that exists but
-      // cannot be read is useless, and finding that out at the first data
-      // block is the worst moment.
-      const usable: Array<{ id: string; devicePath: string }> = [];
+      // A probe read, ADVISORY ONLY. Treating a probe failure as fatal would
+      // discard good snapshots: a shadow copy device can report "the device
+      // is not ready" for a moment after creation even though the capture
+      // reads from it fine. Observed directly on 2026-11-04 — createSnapshotSet
+      // succeeded and the very next 512-byte read returned error 21. A
+      // genuinely unusable snapshot is caught by the capture itself, which
+      // aborts on a read failure instead of writing a truncated image.
       for (const snap of snapshots) {
         try {
           const probe = native.readBlocks(snap.devicePath, 0n, 512n);
-          if (!probe || probe.length === 0) throw new Error('the snapshot returned no data');
-          usable.push(snap);
-        } catch (error) {
-          logger.warn(`Snapshot ${snap.id} exists but is not readable (${errorMessage(error)}); discarding it`);
-          try {
-            native.deleteSnapshot(snap.id);
-          } catch {
-            /* best effort */
+          if (!probe || probe.length === 0) {
+            logger.warn(`Snapshot ${snap.id} returned no data on probe; continuing anyway`);
           }
-          lastError = error;
+        } catch (error) {
+          logger.warn(
+            `Probe read on snapshot ${snap.id} failed (${errorMessage(error)}); continuing — ` +
+              `the capture itself aborts if the snapshot is genuinely unusable`
+          );
         }
       }
-      if (usable.length === paths.length) {
-        paths.forEach((volumePath, i) => {
-          snapshotCache.set(volumePath, usable[i]);
-          // Self-evidencing: the log must show, per volume, that a snapshot
-          // was actually taken. Its absence is the answer to "was this backup
-          // consistent?" (field report 2026-11-03).
-          const label = volumes.get(volumePath) ?? volumePath;
-          logger.info(`${label}: VSS snapshot ${usable[i].id} -> ${usable[i].devicePath}`);
-        });
-        snapshotsCreated += usable.length;
-        return;
-      }
-      // Partly unusable: a snapshot set is only meaningful whole. Drop the
-      // rest rather than capture some volumes frozen and some live.
-      for (const snap of usable) {
-        try {
-          native.deleteSnapshot(snap.id);
-        } catch {
-          /* best effort */
-        }
-      }
-      lastError = lastError ?? new Error('a snapshot in the set was not readable');
+      snapshots.forEach((snap, i) => {
+        snapshotCache.set(paths[i], snap);
+        // Self-evidencing: the log must show, per volume, that a snapshot
+        // was actually taken. Its absence is the answer to "was this backup
+        // consistent?" (field report 2026-11-03).
+        const label = volumes.get(paths[i]) ?? paths[i];
+        logger.info(`${label}: VSS snapshot ${snap.id} -> ${snap.devicePath}`);
+      });
+      snapshotsCreated += snapshots.length;
+      return;
     }
 
     const detail = errorMessage(lastError);
