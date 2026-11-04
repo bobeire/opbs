@@ -181,18 +181,20 @@ HANDLE DiskReader::GetCachedHandle(const std::string& devicePath, DWORD access) 
     // Open with sequential-scan hint for backup/restore read-ahead optimization.
     // FILE_FLAG_SEQUENTIAL_SCAN tells Windows to aggressively prefetch forward.
     //
-    // NOT for device objects. It is a filesystem hint, and applying it to a
-    // shadow copy device path made ReadFile fail with "the device is not
-    // ready" on a snapshot that had just been created successfully (observed
-    // 2026-11-04). Prefetching is worth nothing if the read fails.
+    // NOT for device paths. It is a filesystem hint, and for shadow copy
+    // device objects (\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyN) the
+    // documented way to open them is with FILE_FLAG_BACKUP_SEMANTICS — that
+    // is what the VSS samples do. Without it ReadFile returned "the device is
+    // not ready" on a snapshot that had just been created successfully.
     const bool isDevicePath = devicePath.rfind("\\\\.\\", 0) == 0 || devicePath.rfind("\\\\?\\GLOBALROOT", 0) == 0;
+    const DWORD flags = isDevicePath ? FILE_FLAG_BACKUP_SEMANTICS : FILE_FLAG_SEQUENTIAL_SCAN;
     HANDLE hDevice = CreateFileW(
         std::wstring(devicePath.begin(), devicePath.end()).c_str(),
         access,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr,
         OPEN_EXISTING,
-        isDevicePath ? 0 : FILE_FLAG_SEQUENTIAL_SCAN,
+        flags,
         nullptr
     );
 

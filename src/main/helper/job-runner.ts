@@ -54,7 +54,7 @@ import {
   type AllocationMap
 } from '../imaging/capture-consistency';
 import { writeRestoreMarker, clearRestoreMarker } from '../utils/restore-marker';
-import { vssBrokenMessage, adviseVssFailure, isTransientVssFailure } from '../utils/vss-health';
+import { vssBrokenMessage, adviseVssFailure, isTransientVssFailure, isVolumeNotSnapshotable, volumeNotSnapshotableMessage } from '../utils/vss-health';
 import { planNtfsShrink, NtfsShrinkPlan } from '../imaging/fs/ntfs-shrink';
 import { planFat32Shrink, Fat32ShrinkPlan } from '../imaging/fs/fat32-shrink';
 import { detectFatType } from '../imaging/fs/fat32';
@@ -281,7 +281,29 @@ export async function runBackupJob(
         }
       } catch (error) {
         lastError = error;
-        if (!isTransientVssFailure(errorMessage(error))) break;
+        // A volume that cannot be snapshotted at all (FAT32, exFAT) makes the
+        // whole set fail. Refusing the entire backup because one small boot
+        // partition exists is the wrong answer — snapshot what can be, and be
+        // explicit about what could not. (Field report 2026-11-04: a
+        // dual-partition USB's FAT32 boot volume killed the whole backup, and
+        // the message told the user their VSS was broken.)
+        if (isVolumeNotSnapshotable(errorMessage(error))) {
+          snapshots = [];
+          for (const volumePath of paths) {
+            try {
+              snapshots.push(native.createSnapshot(volumePath));
+            } catch (volumeError) {
+              const label = volumes.get(volumePath) ?? volumePath;
+              warnings.push(volumeNotSnapshotableMessage(label, errorMessage(volumeError)));
+              snapshots.push({ id: '', devicePath: '' }); // placeholder: keep the order
+            }
+          }
+          if (snapshots.every((s) => !s.devicePath)) {
+            snapshots = null; // nothing could be frozen at all
+          }
+        } else if (!isTransientVssFailure(errorMessage(error))) {
+          break;
+        }
       }
     }
 
@@ -306,15 +328,21 @@ export async function runBackupJob(
           );
         }
       }
+      // Entries with an empty devicePath could not be frozen (a FAT32 or exFAT
+      // volume, typically). Those partitions fall back to a live capture with
+      // the warning above already recorded; everything else is frozen.
+      let frozen = 0;
       snapshots.forEach((snap, i) => {
+        if (!snap.devicePath) return;
         snapshotCache.set(paths[i], snap);
+        frozen++;
         // Self-evidencing: the log must show, per volume, that a snapshot
         // was actually taken. Its absence is the answer to "was this backup
         // consistent?" (field report 2026-11-03).
         const label = volumes.get(paths[i]) ?? paths[i];
         logger.info(`${label}: VSS snapshot ${snap.id} -> ${snap.devicePath}`);
       });
-      snapshotsCreated += snapshots.length;
+      snapshotsCreated += frozen;
       return;
     }
 

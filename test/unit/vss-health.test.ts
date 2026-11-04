@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { probeVss, adviseVssFailure, vssBrokenMessage } from '../../src/main/utils/vss-health';
+import { probeVss, adviseVssFailure, vssBrokenMessage, isVolumeNotSnapshotable, volumeNotSnapshotableMessage } from '../../src/main/utils/vss-health';
 
 /**
  * A raw VSS error code is not an answer. The 2026-11-03 field report spent
@@ -80,5 +80,26 @@ describe('VSS diagnosis', () => {
     // And it does not pretend the work was done.
     expect(message).toContain('no partitions have been captured');
     expect(message).toContain('--allow-inconsistent');
+  });
+});
+
+describe('a volume that cannot be snapshotted is not a broken machine', () => {
+  it('says it is the volume, not VSS', () => {
+    // Field report 2026-11-04: backing up a dual-partition USB, whose boot
+    // partition is FAT32, produced "VSS is not working on this machine" —
+    // which was both wrong and alarming. VSS was fine; FAT32 cannot be
+    // snapshotted and never could be.
+    expect(isVolumeNotSnapshotable('VSS operation failed with HRESULT 0x8004230c')).toBe(true);
+    expect(isVolumeNotSnapshotable('VSS_E_VOLUME_NOT_SUPPORTED')).toBe(true);
+    // Transient and systemic failures are a different matter.
+    expect(isVolumeNotSnapshotable('VSS_E_SNAPSHOT_SET_IN_PROGRESS')).toBe(false);
+    expect(isVolumeNotSnapshotable('VSS_E_UNEXPECTED_PROVIDER_ERROR')).toBe(false);
+
+    const message = volumeNotSnapshotableMessage('OPBS-BOOT', 'VSS_E_VOLUME_NOT_SUPPORTED');
+    expect(message).toContain('OPBS-BOOT');
+    // It must not claim the machine is broken.
+    expect(message).not.toContain('not working on this machine');
+    expect(message).toContain('property of the volume');
+    expect(message).toContain('captured live');
   });
 });

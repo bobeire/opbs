@@ -162,6 +162,35 @@ export function isTransientVssFailure(message: string): boolean {
 }
 
 /**
+ * The message for a volume that cannot be snapshotted at all. Distinct from
+ * "VSS is broken on this machine" — conflating them made a FAT32 boot
+ * partition look like a damaged Windows install (field report 2026-11-04:
+ * "VSS is not working on this machine: a shadow copy of OPBS-BOOT ... could
+ * not be created (0x8004230c)"). VSS was fine; the filesystem cannot be
+ * snapshotted and never could be.
+ */
+export function volumeNotSnapshotableMessage(label: string, error: string): string {
+  return (
+    `${label} cannot be snapshotted (${error}). That is a property of the volume, not a fault: ` +
+    `FAT32 and exFAT volumes are never snapshot-able, and some storage controllers are not ` +
+    `either. This volume was captured live, so it has no single point in time — the rest of the ` +
+    `backup was frozen normally. If that matters here, convert the volume to NTFS or accept the ` +
+    `caveat.`
+  );
+}
+
+/**
+ * Failures that mean "this particular volume cannot be snapshotted", as
+ * opposed to "VSS is broken". These are permanent: retrying will not help,
+ * and refusing the whole backup because one small FAT32 boot partition
+ * exists is the wrong answer.
+ */
+export function isVolumeNotSnapshotable(message: string): boolean {
+  const m = message.toLowerCase();
+  return /0x8004230c|0x80042309|volume_not_supported|unsupported_volume/.test(m);
+}
+
+/**
  * The message for a machine where VSS is broken outright. Distinct from "this
  * volume cannot be snapshotted", which is a property of the volume rather than
  * of the machine — the two need different fixes, and conflating them was part
