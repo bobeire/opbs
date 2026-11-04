@@ -139,7 +139,17 @@ describe('normalizeVolumeRoot', () => {
 
 describe('CORE_VSS_DLLS and enumerateVolumes', () => {
   it('keeps the standard re-registration set', () => {
-    expect(CORE_VSS_DLLS).toEqual(['vssapi.dll', 'vss_ps.dll', 'vsscore.dll', 'vsstrace.dll']);
+    // The registerable flag is the whole point: only one of these is a COM
+    // server, and regsvr32 on the others fails by design. Reporting those
+    // failures as damage told a user their VSS was broken when it was not
+    // (field report 2026-11-04).
+    expect(CORE_VSS_DLLS.map((d) => d.name)).toEqual([
+      'vssapi.dll',
+      'vss_ps.dll',
+      'vsscore.dll',
+      'vsstrace.dll'
+    ]);
+    expect(CORE_VSS_DLLS.filter((d) => d.comRegisterable).map((d) => d.name)).toEqual(['vss_ps.dll']);
   });
 
   it('always includes the system drive on Windows', () => {

@@ -29,7 +29,24 @@ export function resolveSystem32Exe(name: string): string {
 
 export const VSS_SERVICE = 'vss';
 export const VSS_DISPLAY_NAME = 'Volume Shadow Copy';
-export const CORE_VSS_DLLS = ['vssapi.dll', 'vss_ps.dll', 'vsscore.dll', 'vsstrace.dll'] as const;
+/**
+ * The VSS binaries worth checking for, and which of them can actually be
+ * registered with regsvr32.
+ *
+ * This distinction matters: `vssapi.dll` is the requester API library,
+ * `vsscore.dll` is the service's own binary and `vsstrace.dll` is tracing.
+ * None of them are COM servers, so `regsvr32` on any of them fails — and
+ * that failure is EXPECTED, not evidence of a broken installation. The old
+ * list registered all four and reported three failures as "VSS is broken",
+ * which sent a whole investigation down the wrong path (field report
+ * 2026-11-04). Only `vss_ps.dll` is COM-registerable.
+ */
+export const CORE_VSS_DLLS: ReadonlyArray<{ name: string; comRegisterable: boolean }> = [
+  { name: 'vssapi.dll', comRegisterable: false },
+  { name: 'vss_ps.dll', comRegisterable: true },
+  { name: 'vsscore.dll', comRegisterable: false },
+  { name: 'vsstrace.dll', comRegisterable: false }
+];
 
 export type VssJobOperation = 'writers' | 'smoke-test' | 'repair' | 'start' | 'stop';
 

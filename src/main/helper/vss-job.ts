@@ -120,14 +120,21 @@ function runVssSmokeTest(volume: string): VssJobResult {
 function runVssRepair(): VssJobResult {
   const system32 = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
   const results: VssRepairResult[] = [];
-  for (const dll of CORE_VSS_DLLS) {
-    const full = path.join(system32, dll);
+  for (const entry of CORE_VSS_DLLS) {
+    const full = path.join(system32, entry.name);
     if (!fs.existsSync(full)) {
-      results.push({ dll, ok: true, skipped: true });
+      results.push({ dll: entry.name, ok: true, skipped: true });
+      continue;
+    }
+    // Only COM servers can be registered. Running regsvr32 on a library that
+    // is not one always fails, and reporting that as damage told a user their
+    // VSS was broken when nothing was wrong with it (field report 2026-11-04).
+    if (!entry.comRegisterable) {
+      results.push({ dll: entry.name, ok: true, skipped: true });
       continue;
     }
     const result = run(resolveSystem32Exe('regsvr32.exe'), ['/s', full]);
-    results.push({ dll, ok: result.ok, error: result.ok ? undefined : result.stderr.trim() || result.error });
+    results.push({ dll: entry.name, ok: result.ok, error: result.ok ? undefined : result.stderr.trim() || result.error });
   }
 
   let running = serviceState().running;
