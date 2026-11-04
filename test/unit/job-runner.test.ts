@@ -317,7 +317,10 @@ describe('runBackupJob', () => {
     await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
     const refused = readResult();
     expect(refused.ok).toBe(false);
-    expect(refused.error ?? '').toMatch(/shadow copy of/);
+    // VSS_E_VOLUME_NOT_SUPPORTED is a property of the volume, not a broken
+    // machine — the message must say that, not "VSS is not working".
+    expect(refused.error ?? '').toContain('No selected volume can be snapshotted');
+    expect(refused.error ?? '').not.toContain('not working on this machine');
     // It refuses rather than quietly capturing live.
   });
 
@@ -2661,6 +2664,115 @@ describe('multi-volume backups share one point in time', () => {
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
     expect(result.ok).toBe(true);
     expect(result.warnings.some((w) => w.includes('no single point in time'))).toBe(true);
+  });
+
+  it('freezes what it can and warns about one volume that cannot be', async () => {
+    // Field report 2026-11-04: a dual-partition recovery stick — OPBS-BOOT
+    // (FAT32) plus OPBS-DATA (NTFS). The FAT32 volume made AddToSnapshotSet
+    // fail, and the whole backup was refused with "VSS is not working on this
+    // machine". Both halves were wrong: the NTFS volume freezes fine, and
+    // FAT32 is a filesystem property, not damage.
+    fs.writeFileSync(
+      jobPath,
+      JSON.stringify({
+        type: 'backup',
+        imagePath: path.join(dir, 'usb.opbs'),
+        blockSize: BLOCK,
+        compressionLevel: 3,
+        verificationEnabled: false,
+        partitions: [
+          {
+            diskIndex: 1,
+            partitionIndex: 1,
+            size: BLOCK,
+            offset: 1048576,
+            label: 'OPBS-BOOT',
+            readSource: 'volume',
+            volumeDevicePath: '\\\\.\\Volume{boot}\\'
+          },
+          {
+            diskIndex: 1,
+            partitionIndex: 2,
+            size: BLOCK,
+            offset: 1048576 + BLOCK,
+            label: 'OPBS-DATA',
+            readSource: 'volume',
+            volumeDevicePath: '\\\\.\\Volume{data}\\'
+          }
+        ]
+      })
+    );
+
+    const native = createMockNative() as unknown as {
+      createSnapshot: ReturnType<typeof vi.fn>;
+      createSnapshotSet: () => Array<{ id: string; devicePath: string }>;
+    };
+    const notSupported = () =>
+      new Error("VSS operation 'AddToSnapshotSet' failed with HRESULT 0x8004230c");
+    native.createSnapshotSet = () => {
+      throw notSupported();
+    };
+    native.createSnapshot = vi.fn((volumePath: string) => {
+      if (volumePath.includes('boot')) throw notSupported();
+      return { id: 'snap-data', devicePath: '\\\\.\\ShadowCopy2' };
+    });
+
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native as never);
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
+    expect(result.ok).toBe(true);
+    // The volume that could not be frozen is named, and the reason is honest.
+    const warning = result.warnings.find((w) => w.includes('OPBS-BOOT')) ?? '';
+    expect(warning).toContain('property of the volume');
+    expect(warning).toContain('captured live');
+    // And the machine is not accused of being broken.
+    expect(result.warnings.some((w) => w.includes('not working on this machine'))).toBe(false);
+  });
+
+  it('refuses all-FAT32 media without calling VSS broken', async () => {
+    fs.writeFileSync(
+      jobPath,
+      JSON.stringify({
+        type: 'backup',
+        imagePath: path.join(dir, 'all-fat.opbs'),
+        blockSize: BLOCK,
+        compressionLevel: 3,
+        verificationEnabled: false,
+        partitions: [
+          {
+            diskIndex: 1,
+            partitionIndex: 1,
+            size: BLOCK,
+            offset: 1048576,
+            label: 'OPBS-BOOT',
+            readSource: 'volume',
+            volumeDevicePath: '\\\\.\\Volume{boot}\\'
+          }
+        ]
+      })
+    );
+
+    const native = createMockNative() as unknown as {
+      createSnapshot: ReturnType<typeof vi.fn>;
+      createSnapshotSet: () => Array<{ id: string; devicePath: string }>;
+    };
+    const notSupported = () =>
+      new Error("VSS operation 'AddToSnapshotSet' failed with HRESULT 0x8004230c");
+    native.createSnapshotSet = () => {
+      throw notSupported();
+    };
+    native.createSnapshot = vi.fn(() => {
+      throw notSupported();
+    });
+
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native as never);
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
+    expect(result.ok).toBe(false);
+    const error = result.error ?? '';
+    expect(error).not.toContain('not working on this machine');
+    expect(error).toContain('property of those volumes');
+    expect(error).toContain('--allow-inconsistent');
   });
 });
 

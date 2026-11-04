@@ -66,11 +66,20 @@ export function adviseVssFailure(message: string): string {
 
   // VSS_E_SNAPSHOT_SET_IN_PROGRESS (0x80042316): another shadow copy is
   // being created right now. Not damage — just busy. Wait and retry.
+  //
+  // The other operation is often this program's own previous attempt: a set
+  // started by a backup that then failed stays "in progress" until it is
+  // released, so the retry collides with the corpse. That is why the retry
+  // delay matters, and why persistent 0x80042316 after a failed backup means
+  // "clear the abandoned set", not "something else is running".
   if (/0x80042316|snapshot_set_in_progress|snapshot set in progress/.test(m)) {
     return (
       'Another shadow copy is already being created on this machine, so this one was refused. ' +
       'Nothing is broken. Wait for the other operation to finish and try again — a scheduled ' +
-      'backup, a system restore point or another tool may be running.'
+      'backup, a system restore point or another tool may be running, and a previous attempt ' +
+      'of this backup that failed can also leave a set behind. If it keeps happening, an ' +
+      'elevated `vssadmin list shadows` shows what is there and restarting the Volume Shadow ' +
+      'Copy service clears an abandoned set.'
     );
   }
 
@@ -176,6 +185,23 @@ export function volumeNotSnapshotableMessage(label: string, error: string): stri
     `either. This volume was captured live, so it has no single point in time — the rest of the ` +
     `backup was frozen normally. If that matters here, convert the volume to NTFS or accept the ` +
     `caveat.`
+  );
+}
+
+/**
+ * The message for "none of the selected volumes can be snapshotted".
+ *
+ * This must not reuse vssBrokenMessage: when every volume is FAT32 (a recovery
+ * stick, the usual case) nothing is broken and nothing needs repairing. The
+ * earlier code said "VSS is not working on this machine" for exactly this.
+ */
+export function noneSnapshotableMessage(labels: string[], error: string): string {
+  return (
+    `No selected volume can be snapshotted (${error}): ${labels.join(', ')}. That is a property ` +
+    `of those volumes, not a fault: FAT32 and exFAT volumes are never snapshot-able, and some ` +
+    `storage controllers are not either. Nothing was captured, because a backup with no snapshot ` +
+    `has no single point in time. Retry with --allow-inconsistent to capture these volumes live ` +
+    `and accept that, or convert them to NTFS.`
   );
 }
 

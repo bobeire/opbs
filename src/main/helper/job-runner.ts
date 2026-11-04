@@ -54,7 +54,7 @@ import {
   type AllocationMap
 } from '../imaging/capture-consistency';
 import { writeRestoreMarker, clearRestoreMarker } from '../utils/restore-marker';
-import { vssBrokenMessage, adviseVssFailure, isTransientVssFailure, isVolumeNotSnapshotable, volumeNotSnapshotableMessage } from '../utils/vss-health';
+import { vssBrokenMessage, adviseVssFailure, isTransientVssFailure, isVolumeNotSnapshotable, volumeNotSnapshotableMessage, noneSnapshotableMessage } from '../utils/vss-health';
 import { planNtfsShrink, NtfsShrinkPlan } from '../imaging/fs/ntfs-shrink';
 import { planFat32Shrink, Fat32ShrinkPlan } from '../imaging/fs/fat32-shrink';
 import { detectFatType } from '../imaging/fs/fat32';
@@ -252,6 +252,8 @@ export async function runBackupJob(
     const paths = [...volumes.keys()];
     let snapshots: Array<{ id: string; devicePath: string }> | null = null;
     let lastError: unknown = null;
+    let notSnapshotable = false;
+    const notSnapshotableLabels: string[] = [];
 
     // A shadow copy is read-only from the user's side, so a second attempt is
     // free when it works. Retrying the transient codes (snapshot already in
@@ -288,18 +290,25 @@ export async function runBackupJob(
         // dual-partition USB's FAT32 boot volume killed the whole backup, and
         // the message told the user their VSS was broken.)
         if (isVolumeNotSnapshotable(errorMessage(error))) {
+          notSnapshotable = true;
           snapshots = [];
+          let frozen = 0;
           for (const volumePath of paths) {
             try {
-              snapshots.push(native.createSnapshot(volumePath));
+              const snap = native.createSnapshot(volumePath);
+              snapshots.push(snap);
+              if (snap.devicePath) frozen++;
             } catch (volumeError) {
               const label = volumes.get(volumePath) ?? volumePath;
+              notSnapshotableLabels.push(label);
               warnings.push(volumeNotSnapshotableMessage(label, errorMessage(volumeError)));
               snapshots.push({ id: '', devicePath: '' }); // placeholder: keep the order
             }
           }
-          if (snapshots.every((s) => !s.devicePath)) {
+          if (frozen === 0) {
             snapshots = null; // nothing could be frozen at all
+            // Permanent: a filesystem type does not change between retries.
+            break;
           }
         } else if (!isTransientVssFailure(errorMessage(error))) {
           break;
@@ -316,6 +325,7 @@ export async function runBackupJob(
       // genuinely unusable snapshot is caught by the capture itself, which
       // aborts on a read failure instead of writing a truncated image.
       for (const snap of snapshots) {
+        if (!snap.devicePath) continue; // not frozen (FAT32/exFAT) — nothing to probe
         try {
           const probe = native.readBlocks(snap.devicePath, 0n, 512n);
           if (!probe || probe.length === 0) {
@@ -348,6 +358,13 @@ export async function runBackupJob(
 
     const detail = errorMessage(lastError);
     if (!job2.allowInconsistentCapture) {
+      // Never say "VSS is broken" when the truth is "these volumes cannot be
+      // snapshotted": one is a machine fault, the other is a filesystem type.
+      if (notSnapshotable && notSnapshotableLabels.length === paths.length) {
+        throw new Error(noneSnapshotableMessage(notSnapshotableLabels, detail), {
+          cause: lastError,
+        });
+      }
       // The refusal distinguishes "VSS is broken on this machine" from
       // "this volume cannot be snapshotted" — they need different fixes, and
       // conflating them is part of why the 2026-11-03 report took three days

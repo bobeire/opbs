@@ -9,7 +9,9 @@
 #include <sstream>
 #include <iomanip>
 #include <memory>
+#include <mutex>
 #include <vector>
+#include <unordered_map>
 
 #ifdef _MSC_VER
 #pragma comment(lib, "vssapi.lib")
@@ -86,6 +88,134 @@ HRESULT WaitForAsync(IVssAsync* pAsync, DWORD timeoutMs = 120000) {
     return hr;
 }
 
+/**
+ * Joins the COM multithreaded apartment, once per thread.
+ *
+ * COM is per-thread, and uninitializing a thread that still holds a live VSS
+ * object is undefined behaviour. Every failure path used to call
+ * CoUninitialize() *before* releasing the components object — the same class of
+ * ordering mistake that abandoned snapshot sets. The addon lives as long as
+ * the process, so the apartment is left joined rather than torn down under a
+ * snapshot that is still in use.
+ */
+void EnsureComInitialized() {
+    constexpr HRESULT kNotYet = 0x7FFFFFFF; // never returned by CoInitializeEx
+    thread_local HRESULT initHr = kNotYet;
+    if (initHr == kNotYet) {
+        initHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    }
+    // RPC_E_CHANGED_MODE means the host already initialized COM in another
+    // apartment. We did not add a reference, so this is not an error — and it
+    // must never be balanced with CoUninitialize.
+    if (FAILED(initHr) && initHr != RPC_E_CHANGED_MODE) {
+        HRESULT failure = initHr;
+        // Do not cache a transient failure: the next call should retry rather
+        // than proceed with COM uninitialized.
+        initHr = kNotYet;
+        VssErrorWithHr(L"CoInitializeEx", failure);
+    }
+}
+
+/**
+ * A shadow copy only survives while the object that created it survives.
+ *
+ * This is the whole reason snapshots never worked. VSS_CTX_BACKUP creates a
+ * NON-PERSISTENT shadow copy, and the DeleteSnapshots documentation is explicit:
+ * "During a backup, shadow copies are automatically released as soon as the
+ * IVssBackupComponents instance is released."
+ *
+ * The old code created the snapshot, returned its device path, and let the
+ * IVssBackupComponents object die at the end of that call. The device object
+ * lingered in the namespace, so CreateFile succeeded — but the shadow copy
+ * behind it was gone, and ReadFile returned ERROR_NOT_READY (21). Every OPBS
+ * backup then fell back to reading the live disk, which is exactly the silent
+ * inconsistency this project has been chasing.
+ *
+ * Keeping the requester object alive for as long as the snapshot is in use is
+ * what other requesters do (wimlib keeps IVssBackupComponents in its snapshot
+ * handle for the same reason). DeleteSnapshot releases it, which also releases
+ * the shadow copy.
+ */
+struct LiveSnapshot {
+    std::shared_ptr<IVssBackupComponents> components;
+    VSS_ID snapshotId{ GUID_NULL };
+};
+
+std::mutex g_liveSnapshotsMutex;
+std::unordered_map<std::string, LiveSnapshot> g_liveSnapshots;
+
+/**
+ * Guarantees a snapshot set is never left unusable after a failure.
+ *
+ * There is no AbortSnapshotSet in the VSS API. The documented cleanup is
+ * different depending on how far the sequence got (Aborting VSS Operations):
+ *
+ *   - Before PrepareForBackup: releasing the IVssBackupComponents object is
+ *     the abort. The owner does that immediately after this guard runs.
+ *   - Once PrepareForBackup has succeeded: AbortBackup() must tell the writers
+ *     the backup will not complete, or they stay wedged — and wedged writers
+ *     are what makes the *next* snapshot fail for no visible reason.
+ *   - After DoSnapshotSet: snapshots may exist and have to be deleted
+ *     explicitly; aborting is no longer possible.
+ *
+ * This guard exists because the shipped code called CoUninitialize() *inside*
+ * each failure branch, before the components object was released. Tearing down
+ * the COM apartment while a live VSS requester object still holds an in-progress
+ * snapshot set is undefined behaviour, and it left the set behind: the retry
+ * then failed with VSS_E_SNAPSHOT_SET_IN_PROGRESS (0x80042316). One FAT32
+ * volume turned into "VSS is busy" on every subsequent attempt.
+ * (Field report 2026-11-04.)
+ */
+class SnapshotSetGuard {
+public:
+    explicit SnapshotSetGuard(IVssBackupComponents* components)
+        : components_(components) {}
+
+    // PrepareForBackup succeeded: from now on, a failure owes the writers an
+    // AbortBackup.
+    void Prepared() { prepared_ = true; }
+
+    // DoSnapshotSet succeeded: cleanup now means deleting the snapshots.
+    void Committed(const std::vector<VSS_ID>& snapshotIds) {
+        committed_ = true;
+        snapshotIds_ = snapshotIds;
+    }
+
+    void Disarm() { armed_ = false; }
+
+    ~SnapshotSetGuard() {
+        // Never let cleanup throw: this runs during unwinding, where a second
+        // exception terminates the process.
+        if (!armed_ || components_ == nullptr) return;
+
+        if (prepared_ || committed_) {
+            // Any snapshot that was actually committed must go, whether or not
+            // we got as far as collecting its properties.
+            for (const VSS_ID& id : snapshotIds_) {
+                if (id == GUID_NULL) continue;
+                LONG deleted = 0;
+                VSS_ID notDeleted = GUID_NULL;
+                components_->DeleteSnapshots(
+                    id, VSS_OBJECT_SNAPSHOT, TRUE, &deleted, &notDeleted);
+            }
+        }
+
+        if (prepared_ && !committed_) {
+            components_->AbortBackup(); // best effort; writers come first
+        }
+    }
+
+    SnapshotSetGuard(const SnapshotSetGuard&) = delete;
+    SnapshotSetGuard& operator=(const SnapshotSetGuard&) = delete;
+
+private:
+    IVssBackupComponents* components_;
+    std::vector<VSS_ID> snapshotIds_;
+    bool prepared_ = false;
+    bool committed_ = false;
+    bool armed_ = true;
+};
+
 } // namespace
 
 /**
@@ -161,26 +291,23 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
     if (volumePaths.empty()) {
         VssError(L"CreateSnapshotSet (no volumes)");
     }
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
-        VssErrorWithHr(L"CoInitializeEx", hr);
-    }
-    
+    EnsureComInitialized();
+
     IVssBackupComponents* backupComponents = nullptr;
-    hr = CreateVssBackupComponents(&backupComponents);
+    HRESULT hr = CreateVssBackupComponents(&backupComponents);
     if (FAILED(hr)) {
-        CoUninitialize();
         VssErrorWithHr(L"CreateVssBackupComponents", hr);
     }
     
-    std::unique_ptr<IVssBackupComponents, void(*)(IVssBackupComponents*)> 
-        components(backupComponents, [](IVssBackupComponents* bc) {
+    // Shared, because the object must outlive this call: releasing it releases
+    // the shadow copy (see LiveSnapshot).
+    std::shared_ptr<IVssBackupComponents> components(
+        backupComponents, [](IVssBackupComponents* bc) {
             if (bc) bc->Release();
         });
     
     hr = components->InitializeForBackup();
     if (FAILED(hr)) {
-        CoUninitialize();
         VssErrorWithHr(L"InitializeForBackup", hr);
     }
 
@@ -193,13 +320,11 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
     // sequence was incomplete and Macrium succeeded on the same machine.)
     hr = components->SetContext(VSS_CTX_BACKUP);
     if (FAILED(hr)) {
-        CoUninitialize();
         VssErrorWithHr(L"SetContext", hr);
     }
 
     hr = components->SetBackupState(true, true, VSS_BT_FULL, false);
     if (FAILED(hr)) {
-        CoUninitialize();
         VssErrorWithHr(L"SetBackupState", hr);
     }
 
@@ -212,12 +337,10 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
     IVssAsync* pMetaAsync = nullptr;
     hr = components->GatherWriterMetadata(&pMetaAsync);
     if (FAILED(hr)) {
-        CoUninitialize();
         VssErrorWithHr(L"GatherWriterMetadata", hr);
     }
     hr = WaitForAsync(pMetaAsync);
     if (FAILED(hr)) {
-        CoUninitialize();
         VssErrorWithHr(L"GatherWriterMetadata wait", hr);
     }
     // Look at what the writers said before relying on them. A writer that is
@@ -228,9 +351,10 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
     VSS_ID snapshotSetId = GUID_NULL;
     hr = components->StartSnapshotSet(&snapshotSetId);
     if (FAILED(hr)) {
-        CoUninitialize();
         VssErrorWithHr(L"StartSnapshotSet", hr);
     }
+    // From here on, a failure owes cleanup — see SnapshotSetGuard.
+    SnapshotSetGuard setGuard(components.get());
     
     // Every volume goes into the SAME snapshot set, so DoSnapshotSet freezes
     // them at one instant. Separate sets meant a multi-partition backup
@@ -241,7 +365,6 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
         VSS_PWSZ pwszVolume = const_cast<VSS_PWSZ>(volumeRoot.c_str());
         hr = components->AddToSnapshotSet(pwszVolume, GUID_NULL, &snapshotIds[v]);
         if (FAILED(hr)) {
-            CoUninitialize();
             VssErrorWithHr(L"AddToSnapshotSet", hr);
         }
     }
@@ -249,13 +372,15 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
     IVssAsync* pAsync = nullptr;
     hr = components->PrepareForBackup(&pAsync);
     if (FAILED(hr)) {
-        CoUninitialize();
         VssErrorWithHr(L"PrepareForBackup", hr);
     }
+    // Writers have been told to prepare. From here on, any failure — including
+    // the async wait — must tell them to abort, or they sit in a prepared
+    // state and the next snapshot fails for no visible reason.
+    setGuard.Prepared();
     
     hr = WaitForAsync(pAsync);
     if (FAILED(hr)) {
-        CoUninitialize();
         VssErrorWithHr(L"PrepareForBackup wait", hr);
     }
     // Writers run their prepare phase here; a failure now is the last moment
@@ -265,15 +390,17 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
     pAsync = nullptr;
     hr = components->DoSnapshotSet(&pAsync);
     if (FAILED(hr)) {
-        CoUninitialize();
         VssErrorWithHr(L"DoSnapshotSet", hr);
     }
     
     hr = WaitForAsync(pAsync);
     if (FAILED(hr)) {
-        CoUninitialize();
         VssErrorWithHr(L"DoSnapshotSet wait", hr);
     }
+
+    // The set is committed. If anything below fails, cleanup means deleting
+    // the snapshots rather than aborting a set that no longer exists.
+    setGuard.Committed(snapshotIds);
     
     // Collect the device path for every volume in the set.
     std::vector<VssSnapshotInfo> infos;
@@ -282,7 +409,6 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
         VSS_SNAPSHOT_PROP prop = {};
         hr = components->GetSnapshotProperties(snapshotIds[v], &prop);
         if (FAILED(hr)) {
-            CoUninitialize();
             VssErrorWithHr(L"GetSnapshotProperties", hr);
         }
 
@@ -335,7 +461,19 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
         (void)e;
     }
 
-    CoUninitialize();
+    // Keep the requester object alive for as long as the snapshots are in use.
+    // Releasing it releases the shadow copies, so this must happen before the
+    // function returns and the local shared_ptr goes out of scope. DeleteSnapshot
+    // consumes the entry and drops the last reference once the data is read.
+    {
+        std::lock_guard<std::mutex> lock(g_liveSnapshotsMutex);
+        for (size_t v = 0; v < infos.size(); v++) {
+            if (infos[v].id.empty() || snapshotIds[v] == GUID_NULL) continue;
+            g_liveSnapshots[infos[v].id] = LiveSnapshot{ components, snapshotIds[v] };
+        }
+    }
+
+    setGuard.Disarm();
     return infos;
 }
 
@@ -345,22 +483,46 @@ VssSnapshotInfo VssManager::CreateSnapshot(const std::string& volumePath) {
 }
 
 void VssManager::DeleteSnapshot(const std::string& snapshotId) {
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
-        VssErrorWithHr(L"CoInitializeEx", hr);
+    EnsureComInitialized();
+
+    // Normal path: this process created the snapshot, so the requester object
+    // that keeps it alive is still in the registry. Deleting through it both
+    // removes the shadow copy and lets the last reference go, which is what
+    // releases it for good.
+    LiveSnapshot live;
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> lock(g_liveSnapshotsMutex);
+        auto it = g_liveSnapshots.find(snapshotId);
+        if (it != g_liveSnapshots.end()) {
+            live = it->second;
+            g_liveSnapshots.erase(it);
+            found = true;
+        }
     }
-    
+    if (found) {
+        LONG deletedCount = 0;
+        VSS_ID nonDeletedId = GUID_NULL;
+        HRESULT deleteHr = live.components->DeleteSnapshots(
+            live.snapshotId, VSS_OBJECT_SNAPSHOT, TRUE, &deletedCount, &nonDeletedId);
+        if (FAILED(deleteHr)) {
+            VssErrorWithHr(L"DeleteSnapshots", deleteHr);
+        }
+        return; // `live` drops the reference and releases the requester here
+    }
+
+    // Unknown id — a snapshot created by an older native build, or by another
+    // process. There is no live requester to route through, so use a fresh one
+    // in restore mode, which can delete a persistent snapshot by id.
     // Parse the GUID string back
     GUID guid;
     if (UuidFromStringA((RPC_CSTR)snapshotId.c_str(), &guid) != RPC_S_OK) {
-        CoUninitialize();
         VssError(L"UuidFromString");
     }
     
     IVssBackupComponents* backupComponents = nullptr;
-    hr = CreateVssBackupComponents(&backupComponents);
+    HRESULT hr = CreateVssBackupComponents(&backupComponents);
     if (FAILED(hr)) {
-        CoUninitialize();
         VssErrorWithHr(L"CreateVssBackupComponents", hr);
     }
     
@@ -371,7 +533,6 @@ void VssManager::DeleteSnapshot(const std::string& snapshotId) {
     
     hr = components->InitializeForRestore(nullptr);
     if (FAILED(hr)) {
-        CoUninitialize();
         VssErrorWithHr(L"InitializeForRestore", hr);
     }
     
@@ -380,11 +541,8 @@ void VssManager::DeleteSnapshot(const std::string& snapshotId) {
     hr = components->DeleteSnapshots(guid, VSS_OBJECT_SNAPSHOT, TRUE, &deletedCount, &nonDeletedId);
     
     if (FAILED(hr)) {
-        CoUninitialize();
         VssErrorWithHr(L"DeleteSnapshots", hr);
     }
-    
-    CoUninitialize();
 }
 
 bool VssManager::IsSupported() {

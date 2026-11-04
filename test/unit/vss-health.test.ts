@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { probeVss, adviseVssFailure, vssBrokenMessage, isVolumeNotSnapshotable, volumeNotSnapshotableMessage } from '../../src/main/utils/vss-health';
+import { probeVss, adviseVssFailure, vssBrokenMessage, isVolumeNotSnapshotable, volumeNotSnapshotableMessage, noneSnapshotableMessage } from '../../src/main/utils/vss-health';
 
 /**
  * A raw VSS error code is not an answer. The 2026-11-03 field report spent
@@ -101,5 +101,31 @@ describe('a volume that cannot be snapshotted is not a broken machine', () => {
     expect(message).not.toContain('not working on this machine');
     expect(message).toContain('property of the volume');
     expect(message).toContain('captured live');
+  });
+});
+
+describe('when no selected volume can be snapshotted', () => {
+  it('blames the volumes, not VSS, and offers both ways forward', () => {
+    // A recovery stick is often all-FAT32. Nothing here is broken.
+    const message = noneSnapshotableMessage(
+      ['OPBS-BOOT', 'OPBS-DATA'],
+      'VSS_E_VOLUME_NOT_SUPPORTED'
+    );
+    expect(message).toContain('OPBS-BOOT, OPBS-DATA');
+    expect(message).not.toContain('not working on this machine');
+    expect(message).toContain('property of those volumes');
+    expect(message).toContain('--allow-inconsistent');
+    expect(message).toContain('NTFS');
+  });
+});
+
+describe('a snapshot set abandoned by a failed attempt', () => {
+  it('is named as a likely cause of "already in progress"', () => {
+    // The 0.6.113 native helper called CoUninitialize() while the live VSS
+    // requester object still held an in-progress set. The retry then hit
+    // 0x80042316 and the message blamed some other program.
+    const advice = adviseVssFailure('StartSnapshotSet failed with HRESULT 0x80042316');
+    expect(advice).toContain('previous attempt');
+    expect(advice).toContain('vssadmin list shadows');
   });
 });
