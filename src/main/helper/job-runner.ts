@@ -25,6 +25,7 @@ import {
   compressBlock,
   COMPRESSION_NONE,
   FLAG_HAS_BLOCK_INDEX,
+  FLAG_INCONSISTENT_CAPTURE,
   FLAG_VERIFIED,
   FLAG_INCREMENTAL,
   FLAG_RESUMED,
@@ -53,7 +54,7 @@ import {
   type AllocationMap
 } from '../imaging/capture-consistency';
 import { writeRestoreMarker, clearRestoreMarker } from '../utils/restore-marker';
-import { vssBrokenMessage, adviseVssFailure } from '../utils/vss-health';
+import { vssBrokenMessage, adviseVssFailure, isTransientVssFailure } from '../utils/vss-health';
 import { planNtfsShrink, NtfsShrinkPlan } from '../imaging/fs/ntfs-shrink';
 import { planFat32Shrink, Fat32ShrinkPlan } from '../imaging/fs/fat32-shrink';
 import { detectFatType } from '../imaging/fs/fat32';
@@ -231,38 +232,58 @@ export async function runBackupJob(
 
   const snapshotCache = new Map<string, SnapshotHandle>();
 
-  const createSnapshots = (job2: ImagingJob): void => {
+  const createSnapshots = async (job2: ImagingJob): Promise<void> => {
     const seen = new Set<string>();
     for (const p of job2.partitions) {
       if (p.readSource === 'volume' && p.volumeDevicePath && !seen.has(p.volumeDevicePath)) {
         seen.add(p.volumeDevicePath);
         progress.currentPartition = `${p.label}: snapshotting`;
         writeProgress('snapshotting');
-        try {
-          const snap = native.createSnapshot(p.volumeDevicePath);
-          snapshotCache.set(p.volumeDevicePath, snap);
+        // A shadow copy is read-only from the user's side, so a second attempt
+        // is free when it works. Retrying the transient codes (snapshot
+        // already in progress, the two freeze timeouts) turns a lot of "the
+        // backup failed" into "it worked on the second try". Anything else is
+        // a decision rather than a wait and is not retried.
+        let snapshot: { id: string; devicePath: string } | null = null;
+        let lastError: unknown = null;
+        for (let attempt = 0; attempt < 3 && !snapshot; attempt++) {
+          if (attempt > 0) {
+            const delayMs = 2_000 * attempt;
+            logger.info(`${p.label}: retrying VSS snapshot in ${delayMs}ms (attempt ${attempt + 1} of 3)`);
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+          }
+          try {
+            snapshot = native.createSnapshot(p.volumeDevicePath);
+          } catch (error) {
+            lastError = error;
+            if (!isTransientVssFailure(errorMessage(error))) break;
+          }
+        }
+        if (snapshot) {
+          snapshotCache.set(p.volumeDevicePath, snapshot);
           snapshotsCreated++;
           // Self-evidencing: the log must show, per partition, that a snapshot
           // was actually taken. Its absence is the answer to "was this backup
           // consistent?" (field report 2026-11-03).
-          logger.info(`${p.label}: VSS snapshot ${snap.id} -> ${snap.devicePath}`);
-        } catch (error) {
-          const detail = errorMessage(error);
-          if (!job2.allowInconsistentCapture) {
-            // The refusal distinguishes "VSS is broken on this machine" from
-            // "this volume cannot be snapshotted" — they need different fixes,
-            // and conflating them is part of why the 2026-11-03 report took
-            // three days to understand.
-            throw new Error(vssBrokenMessage(p.label, detail), { cause: error });
-          }
-          warnings.push(
-            `${p.label}: no VSS snapshot (${detail}); capturing WITHOUT a consistent point in time. ` +
-              `This image may be internally inconsistent and may restore as a filesystem that looks ` +
-              `corrupt. ${adviseVssFailure(detail)}`
-          );
-          p.readSource = 'physical';
-          p.volumeDevicePath = undefined;
+          logger.info(`${p.label}: VSS snapshot ${snapshot.id} -> ${snapshot.devicePath}`);
+          continue;
         }
+
+        const detail = errorMessage(lastError);
+        if (!job2.allowInconsistentCapture) {
+          // The refusal distinguishes "VSS is broken on this machine" from
+          // "this volume cannot be snapshotted" — they need different fixes,
+          // and conflating them is part of why the 2026-11-03 report took
+          // three days to understand.
+          throw new Error(vssBrokenMessage(p.label, detail), { cause: lastError });
+        }
+        warnings.push(
+          `${p.label}: no VSS snapshot (${detail}); capturing WITHOUT a consistent point in time. ` +
+            `This image may be internally inconsistent and may restore as a filesystem that looks ` +
+            `corrupt. ${adviseVssFailure(detail)}`
+        );
+        p.readSource = 'physical';
+        p.volumeDevicePath = undefined;
       }
     }
   };
@@ -322,7 +343,16 @@ export async function runBackupJob(
       blockSize,
       compressionId,
       partitionCount: job.partitions.length,
-      flags: FLAG_HAS_BLOCK_INDEX | (job.baseImagePath ? FLAG_INCREMENTAL : 0) | (isMultiVolume ? FLAG_MULTI_VOLUME : 0),
+      flags:
+        FLAG_HAS_BLOCK_INDEX |
+        (job.baseImagePath ? FLAG_INCREMENTAL : 0) |
+        (isMultiVolume ? FLAG_MULTI_VOLUME : 0) |
+        // Live capture was permitted, so consistency cannot be proved. This
+        // is deliberately conservative: it also marks an image where every
+        // partition did get a snapshot, because a false "this may be
+        // inconsistent" is much cheaper than a missing one. The person who
+        // restores this image is usually not the person who made it.
+        (job.allowInconsistentCapture ? FLAG_INCONSISTENT_CAPTURE : 0),
       blockIndexOffset: 0,
       cipherId: cipher ? cipher.cipherId : CIPHER_NONE,
       kdfIterations: cipher ? cipher.kdfIterations : 0,
@@ -421,7 +451,7 @@ export async function runBackupJob(
     }
 
     try {
-      createSnapshots(job);
+      await createSnapshots(job);
     } catch (error) {
       deleteSnapshots();
       throw new Error(`Failed to create VSS snapshot: ${errorMessage(error)}`, { cause: error });

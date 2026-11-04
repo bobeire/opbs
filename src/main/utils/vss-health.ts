@@ -140,6 +140,28 @@ export function adviseVssFailure(message: string): string {
 }
 
 /**
+ * Failures that are worth retrying, and failures that are not.
+ *
+ * A shadow copy is a read-only operation from the user's point of view, so
+ * retrying is safe where it can work. The three below are transient by
+ * nature: a snapshot already in progress (0x80042316), and the two freeze
+ * timeouts (0x80042313 / 0x80042314) that mean the volume was too busy to
+ * freeze in time. Retrying those with a short backoff turns a lot of "the
+ * backup failed" into "the backup worked on the second try".
+ *
+ * Everything else is a decision, not a wait: a volume that cannot be
+ * snapshotted, or a writer that has failed, will fail again.
+ */
+export function isTransientVssFailure(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    /0x80042316|snapshot_set_in_progress/.test(m) ||
+    /0x80042313|0x80042314|flush_writes_timeout|hold_writes_timeout/.test(m) ||
+    /0x800423f3|writererror_retryable/.test(m)
+  );
+}
+
+/**
  * The message for a machine where VSS is broken outright. Distinct from "this
  * volume cannot be snapshotted", which is a property of the volume rather than
  * of the machine — the two need different fixes, and conflating them was part

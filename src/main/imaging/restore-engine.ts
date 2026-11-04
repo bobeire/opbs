@@ -6,6 +6,7 @@ import {
   deriveImageKey,
   resolveImageChain,
   FLAG_INCREMENTAL,
+  FLAG_INCONSISTENT_CAPTURE,
   COMPRESSION_NONE,
   CIPHER_NONE
 } from './image-format';
@@ -633,6 +634,25 @@ export class RestoreEngine implements RestoreCoordinator {
       if (dirtyTargets.length > 0) {
         warnings.push(dirtyVolumeWarning(dirtyTargets.join(', ')));
       }
+    }
+
+    // The image says it may not be consistent. Say so before anyone restores
+    // it: the person doing the restore is usually not the person who made the
+    // backup, and the job result that carried the warning is long gone.
+    //
+    // Tolerant by design: a header we cannot read is "no verdict", never a
+    // failure of the plan. A check that can break the thing it is checking is
+    // worse than no check.
+    try {
+      if ((readImageInfo(chain[0]).header.flags & FLAG_INCONSISTENT_CAPTURE) !== 0) {
+        warnings.push(
+          'This image was captured with live reads permitted, so it has no guaranteed single point ' +
+            'in time. It may restore as a filesystem that looks corrupt even though every block ' +
+            'verifies. If you have a newer backup, prefer it.'
+        );
+      }
+    } catch {
+      /* unreadable header: no verdict */
     }
 
     if (warnings.length > 0) {

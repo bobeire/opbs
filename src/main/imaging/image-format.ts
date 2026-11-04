@@ -42,6 +42,16 @@ export const FLAG_VERIFIED = 0x2;
 export const FLAG_INCREMENTAL = 0x4;
 export const FLAG_RESUMED = 0x8;
 export const FLAG_MULTI_VOLUME = 0x10;
+/**
+ * The image was captured WITHOUT a consistent point in time — some partition
+ * was read live because no shadow copy was available. It may restore as a
+ * filesystem that looks corrupt even though every block verifies.
+ *
+ * This has to live in the header, not only in the job result: the result is
+ * gone by the time anyone restores, and the person restoring is usually not
+ * the person who made the backup. (Field report 2026-11-04.)
+ */
+export const FLAG_INCONSISTENT_CAPTURE = 0x20;
 
 /** Byte offset of the flags field inside the 256-byte image header. */
 export const FLAGS_OFFSET = 36;
