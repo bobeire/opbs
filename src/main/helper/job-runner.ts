@@ -1096,6 +1096,55 @@ export async function runBackupJob(
       }
     }
 
+    // Validate the artifact, not just the blocks. Every one of the 2026-11-03
+    // images passed its CRCs and still restored as a corrupt filesystem: the
+    // allocation map and the file records had been captured moments apart.
+    // This asks the image whether it agrees with itself, and a "no" is a
+    // failed backup — not a warning beside a green tick.
+    //
+    // Cost is one read-back pass over the image; on a backup that already
+    // took minutes it is a few percent. The alternative is discovering it at
+    // restore time, which is the worst possible moment.
+    if (job.encryption?.keyHex) {
+      warnings.push(
+        'Filesystem consistency was not checked: the image is encrypted and the passphrase is not ' +
+          'available here. Run `opbs fscheck` on it after the run for the same verdict.'
+      );
+    } else {
+      const { checkImageConsistency, describeConsistency } = await import('../imaging/fs/ntfs-consistency');
+      for (const p of job.partitions) {
+        let report;
+        try {
+          report = checkImageConsistency(job.imagePath, p.partitionIndex);
+        } catch (error) {
+          // Could not check is not the same as checked and fine.
+          warnings.push(`${p.label}: filesystem consistency not checked (${errorMessage(error)}).`);
+          continue;
+        }
+        if (!report) {
+          warnings.push(`${p.label}: filesystem consistency not checked (not NTFS, or unreadable).`);
+          continue;
+        }
+        if (report.truncated) {
+          // A partition with no filesystem (an MSR, a raw volume) is a normal
+          // thing to find, not a missing check — saying so on every backup
+          // would train people to ignore the message.
+          if (!/not an NTFS/i.test(report.truncated)) {
+            warnings.push(`${p.label}: filesystem consistency not checked (${report.truncated}).`);
+          }
+          continue;
+        }
+        if (!report.ok) {
+          throw new Error(
+            `Backup produced an internally inconsistent image on ${p.label}: ` +
+              `${describeConsistency(report)} The image has been left on disk for inspection but ` +
+              `must NOT be used — restoring it would produce a filesystem that looks corrupt even ` +
+              `though every block verifies. Run \`opbs fscheck\` on it for the detail.`
+          );
+        }
+      }
+    }
+
     const result: JobResult = {
       ok: true,
       imagePath: job.imagePath,

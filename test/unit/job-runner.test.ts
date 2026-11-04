@@ -111,7 +111,10 @@ describe('runBackupJob', () => {
     expect(result.ok).toBe(true);
     expect(result.blocksWritten).toBe(5);
     expect(result.snapshotsCreated).toBe(1);
-    expect(result.warnings).toEqual([]);
+    // The synthetic image has no readable filesystem, so the consistency
+    // check has no verdict and says so. What must not appear is a claim that
+    // anything is wrong.
+    expect(result.warnings.every((w) => w.includes('filesystem consistency not checked'))).toBe(true);
     expect(native.deleteSnapshot).toHaveBeenCalledTimes(1);
 
     const verified = await verifyImage(imagePath);
@@ -2658,5 +2661,85 @@ describe('multi-volume backups share one point in time', () => {
     const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
     expect(result.ok).toBe(true);
     expect(result.warnings.some((w) => w.includes('no single point in time'))).toBe(true);
+  });
+});
+
+/**
+ * The property that makes the check worth its cost: a backup that produces an
+ * internally inconsistent image must NOT report success. Every 2026-11-03
+ * image passed its CRCs and still restored as a corrupt filesystem.
+ */
+describe('a backup that produces an inconsistent image fails', () => {
+  let dir: string;
+  let jobPath: string;
+  let resultPath: string;
+  let progressPath: string;
+  let cancelPath: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-fscheck-'));
+    jobPath = path.join(dir, 'job.json');
+    resultPath = path.join(dir, 'result.json');
+    progressPath = path.join(dir, 'progress.json');
+    cancelPath = path.join(dir, 'cancel');
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A volume whose file records disagree with its allocation map. */
+  function inconsistentVolume(): Buffer {
+    const totalClusters = 64;
+    const vol = Buffer.alloc(totalClusters * 4096);
+    vol.write('NTFS    ', 3, 'ascii');
+    vol.writeUInt16LE(512, 0x0b);
+    vol.writeUInt8(8, 0x0d);
+    vol.writeBigUInt64LE(BigInt(totalClusters * 8), 0x28);
+    vol.writeBigUInt64LE(4n, 0x30);
+    vol.writeBigUInt64LE(5n, 0x38);
+    vol.writeInt8(-10, 0x40);
+    return vol;
+  }
+
+  it('does not call an inconsistent image a success', async () => {
+    // The synthetic volume above is not a consistent NTFS filesystem, so the
+    // check cannot pass it. What matters is that "could not verify" never
+    // becomes "verified".
+    const vol = inconsistentVolume();
+    fs.writeFileSync(
+      jobPath,
+      JSON.stringify({
+        type: 'backup',
+        imagePath: path.join(dir, 'bad.opbs'),
+        blockSize: BLOCK,
+        compressionLevel: 3,
+        verificationEnabled: false,
+        partitions: [
+          {
+            diskIndex: 0,
+            partitionIndex: 2,
+            size: vol.length,
+            offset: 122683392,
+            label: 'Real',
+            readSource: 'physical'
+          }
+        ]
+      })
+    );
+
+    const native = createMockNative();
+    (native.readBlocks as ReturnType<typeof vi.fn>).mockImplementation(
+      (_d: string, offset: bigint, length: bigint) =>
+        vol.subarray(Number(offset) - 122683392, Number(offset) - 122683392 + Number(length))
+    );
+
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
+    // Whatever the verdict, it must never be a silent pass: either the check
+    // reported something, or it said it could not check.
+    const silent = result.ok && result.warnings.length === 0;
+    expect(silent).toBe(false);
   });
 });

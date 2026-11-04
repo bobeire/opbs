@@ -325,7 +325,9 @@ describe('runBackupJob with usedBlocksOnly', () => {
     expect(result.ok).toBe(true);
     expect(result.blocksWritten).toBe(16);
     expect(result.skippedBlocks).toBe(TOTAL_CLUSTERS - 16);
-    expect(result.warnings).toEqual([]);
+    // The synthetic volume gives the consistency check no verdict, and it
+    // says so. What must not appear is a claim that anything is wrong.
+    expect(result.warnings.every((w) => w.includes('filesystem consistency not checked'))).toBe(true);
 
     const info = readImageInfo(imagePath);
     expect(info.partitions[0].blockCount).toBe(16);
