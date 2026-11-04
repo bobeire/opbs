@@ -294,9 +294,14 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
         guidStream << std::uppercase << std::hex
                    << std::setfill(L'0') << std::setw(8) << guid.Data1 << L'-'
                    << std::setw(4) << guid.Data2 << L'-' << std::setw(4) << guid.Data3 << L'-';
+        // GUID string form: 8-4-4-4-12, so the second dash comes after TWO
+        // bytes of Data4 (4 hex digits), not four. The old code put it after
+        // four and produced e.g. 6588A26E-59BA-47E6-B98778A8-346652A5, which
+        // UuidFromStringA rejects — so the snapshot could be created but never
+        // deleted. (Field report 2026-11-04.)
         for (int i = 0; i < 8; i++) {
             guidStream << std::setw(2) << static_cast<int>(guid.Data4[i]);
-            if (i == 3) {
+            if (i == 1) {
                 guidStream << L'-';
             }
         }
