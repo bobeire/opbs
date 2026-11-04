@@ -11,7 +11,7 @@ import { verifyImage, readImageInfo, deriveImageKey, scanPartialImage, DEFAULT_B
 import { applyRetention, planRetention, scanBackupDirectory, pickDrillImage, groupIntoChains, writeManifest, selectImagesForVerify, RetentionPlan } from '../backup/retention';
 import { checkDiskHealth } from '../utils/disk-health';
 import { registerScheduledTask, removeScheduledTask, listScheduledTasks } from '../utils/task-scheduler';
-import { decryptSecret } from '../utils/secret-store';
+import { decryptSecret, isSecretEncrypted } from '../utils/secret-store';
 import { dispatchHelperJob } from '../helper/job-runner';
 import { createStyle } from './console-style';
 import type { RecoveryMenuDeps } from './restore-wizard';
@@ -669,8 +669,25 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   // Unattended task configs carry the passphrase as an `enc:v1:` safeStorage
   // blob (written by the GUI); hand-written configs stay plaintext and pass
   // through decryptSecret unchanged.
+  //
+  // A blob that cannot be decrypted (settings from another machine or user,
+  // a reinstalled Windows, a task running as a different account) must NOT be
+  // used as the passphrase. It would encrypt the backup with `enc:v1:...` as
+  // the literal key — a backup nobody can ever open, created without a word
+  // of warning. Refuse instead. (Field report 2026-11-04.)
   if (typeof config.passphrase === 'string') {
     config.passphrase = decryptSecret(config.passphrase);
+    if (isSecretEncrypted(config.passphrase)) {
+      console.error(
+        'Refusing to back up: the stored passphrase could not be decrypted, so it cannot be used.\n' +
+          'This happens when the settings came from another machine or user account, or Windows was\n' +
+          'reinstalled. Using it as-is would encrypt this backup with a key nobody knows and you would\n' +
+          'only find out when trying to restore.\n' +
+          'Re-enter the passphrase in Settings (or set it in the config) and run the backup again. ' +
+          'Nothing has been written.'
+      );
+      return 1;
+    }
   }
 
   // --repo flag wins; config-driven runs (GUI wizard / scheduled) can carry

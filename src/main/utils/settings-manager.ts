@@ -5,6 +5,7 @@ import { SftpProfileSettings } from './sftp';
 import { FtpProfileSettings } from './ftp';
 import { ErrorReportingConfig } from './error-reporter';
 import { encryptSecret, decryptSecret, isSecretEncrypted } from './secret-store';
+import { logger } from './logger';
 
 export interface AppSettings {
   defaultCompression: number;
@@ -376,9 +377,28 @@ export class SettingsManager {
         };
       }
     } catch (error) {
-      console.error('Failed to load settings:', error);
+      // Do NOT fall through to a silent default here. The next save() would
+      // overwrite the damaged file and the settings — schedules, cloud
+      // credentials, every stored passphrase — would be gone with no warning
+      // and no way back. Keep the evidence and say so. (Field report
+      // 2026-11-04: a crash during save can produce exactly this file.)
+      let preserved: string | null;
+      try {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        preserved = `${this.settingsFile}.corrupt-${stamp}`;
+        fs.renameSync(this.settingsFile, preserved);
+      } catch {
+        preserved = null;
+      }
+      const message =
+        `Settings could not be read and were NOT overwritten. Your schedules and stored credentials ` +
+        `are not loaded, but they are not lost either.` +
+        (preserved ? ` The damaged file was kept as ${preserved}.` : '') +
+        ` Fix or delete that file, then restart. (${error instanceof Error ? error.message : error})`;
+      logger.error(message);
+      console.error(message);
     }
-    
+
     return { ...DEFAULT_SETTINGS };
   }
 
@@ -407,12 +427,16 @@ export class SettingsManager {
       // wizard, IPC); only the serialized copy carries `enc:v1:` blobs.
       const forDisk = JSON.parse(JSON.stringify(this.settings)) as AppSettings;
       forEachSecret(forDisk, encryptSecret);
-      fs.writeFileSync(
-        this.settingsFile,
-        JSON.stringify(forDisk, null, 2),
-        'utf-8'
-      );
+      // Write-then-rename, not a plain write: a crash mid-write used to leave
+      // a truncated file, which the next load treated as corrupt and the one
+      // after that overwrote with defaults. Atomic replacement means the file
+      // is either the old settings or the new ones, never half of either.
+      // (Field report 2026-11-04; the pattern is the one fleet/policy.ts uses.)
+      const tmp = `${this.settingsFile}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(forDisk, null, 2), 'utf-8');
+      fs.renameSync(tmp, this.settingsFile);
     } catch (error) {
+      logger.error(`Failed to save settings: ${error instanceof Error ? error.message : error}`);
       console.error('Failed to save settings:', error);
     }
   }

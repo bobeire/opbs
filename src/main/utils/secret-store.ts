@@ -58,11 +58,21 @@ export function encryptSecret(value: string): string {
 
 /**
  * Reverse of `encryptSecret`. A value without the prefix is plaintext and
- * returned as-is. An encrypted value that fails to decrypt (settings copied
- * from another user/machine) is returned unchanged and logged: downstream it
- * then fails loudly as a wrong passphrase instead of silently degrading to an
- * unencrypted run. Before the app is ready the blob is also returned
- * unchanged — callers hydrate lazily and retry.
+ * returned as-is.
+ *
+ * An encrypted value that fails to decrypt (settings copied from another
+ * user or machine, a reinstalled Windows) is returned UNCHANGED. That is
+ * deliberate for callers that must not throw during lazy hydration, but it
+ * is a trap: a caller that uses the result as a passphrase would encrypt
+ * data with `enc:v1:...` as the literal key — a secret nobody knows, created
+ * without warning. So the result is indistinguishable from a real value and
+ * every caller that needs a usable secret must check `isSecretEncrypted()`
+ * afterwards and refuse when it still is. (Field report 2026-11-04: a backup
+ * was encrypted with the blob and the old comment here claimed the caller
+ * would "fail loudly as a wrong passphrase". It did not fail at all.)
+ *
+ * Before the app is ready the blob is also returned unchanged — callers
+ * hydrate lazily and retry.
  */
 export function decryptSecret(value: string): string {
   if (!isSecretEncrypted(value)) return value;
@@ -74,4 +84,14 @@ export function decryptSecret(value: string): string {
     logger.warn('Stored secret could not be decrypted (foreign machine/user?):', error);
     return value;
   }
+}
+
+/**
+ * Decrypt, or report that the value is still an encrypted blob. Use this
+ * wherever the result must be a real secret: it makes "cannot decrypt"
+ * impossible to mistake for success.
+ */
+export function tryDecryptSecret(value: string): { ok: true; value: string } | { ok: false; stillEncrypted: true } {
+  const decrypted = decryptSecret(value);
+  return isSecretEncrypted(decrypted) ? { ok: false, stillEncrypted: true } : { ok: true, value: decrypted };
 }
