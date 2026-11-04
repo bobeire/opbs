@@ -9,6 +9,7 @@
 #include <sstream>
 #include <iomanip>
 #include <memory>
+#include <vector>
 
 #ifdef _MSC_VER
 #pragma comment(lib, "vssapi.lib")
@@ -141,7 +142,10 @@ void CheckWriterState(IVssBackupComponents* components, const wchar_t* phase) {
     }
 }
 
-VssSnapshotInfo VssManager::CreateSnapshot(const std::string& volumePath) {
+std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std::string>& volumePaths) {
+    if (volumePaths.empty()) {
+        VssError(L"CreateSnapshotSet (no volumes)");
+    }
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
         VssErrorWithHr(L"CoInitializeEx", hr);
@@ -213,14 +217,18 @@ VssSnapshotInfo VssManager::CreateSnapshot(const std::string& volumePath) {
         VssErrorWithHr(L"StartSnapshotSet", hr);
     }
     
-    std::wstring volumeRoot = GetVolumeRoot(volumePath);
-    VSS_PWSZ pwszVolume = const_cast<VSS_PWSZ>(volumeRoot.c_str());
-    VSS_ID snapshotId = GUID_NULL;
-    
-    hr = components->AddToSnapshotSet(pwszVolume, GUID_NULL, &snapshotId);
-    if (FAILED(hr)) {
-        CoUninitialize();
-        VssErrorWithHr(L"AddToSnapshotSet", hr);
+    // Every volume goes into the SAME snapshot set, so DoSnapshotSet freezes
+    // them at one instant. Separate sets meant a multi-partition backup
+    // captured each partition at a different moment. (Field report 2026-11-04.)
+    std::vector<VSS_ID> snapshotIds(volumePaths.size(), GUID_NULL);
+    for (size_t v = 0; v < volumePaths.size(); v++) {
+        std::wstring volumeRoot = GetVolumeRoot(volumePaths[v]);
+        VSS_PWSZ pwszVolume = const_cast<VSS_PWSZ>(volumeRoot.c_str());
+        hr = components->AddToSnapshotSet(pwszVolume, GUID_NULL, &snapshotIds[v]);
+        if (FAILED(hr)) {
+            CoUninitialize();
+            VssErrorWithHr(L"AddToSnapshotSet", hr);
+        }
     }
     
     IVssAsync* pAsync = nullptr;
@@ -252,36 +260,41 @@ VssSnapshotInfo VssManager::CreateSnapshot(const std::string& volumePath) {
         VssErrorWithHr(L"DoSnapshotSet wait", hr);
     }
     
-    // Get snapshot properties to obtain the device path
-    VSS_SNAPSHOT_PROP prop = {};
-    hr = components->GetSnapshotProperties(snapshotId, &prop);
-    if (FAILED(hr)) {
-        CoUninitialize();
-        VssErrorWithHr(L"GetSnapshotProperties", hr);
-    }
-    
-    VssSnapshotInfo info;
-    
-    // Convert GUID to string
-    GUID guid = snapshotId;
-    std::wstringstream guidStream;
-    guidStream << std::uppercase << std::hex
-               << std::setfill(L'0') << std::setw(8) << guid.Data1 << L'-'
-               << std::setw(4) << guid.Data2 << L'-' << std::setw(4) << guid.Data3 << L'-';
-    for (int i = 0; i < 8; i++) {
-        guidStream << std::setw(2) << static_cast<int>(guid.Data4[i]);
-        if (i == 3) {
-            guidStream << L'-';
+    // Collect the device path for every volume in the set.
+    std::vector<VssSnapshotInfo> infos;
+    infos.reserve(snapshotIds.size());
+    for (size_t v = 0; v < snapshotIds.size(); v++) {
+        VSS_SNAPSHOT_PROP prop = {};
+        hr = components->GetSnapshotProperties(snapshotIds[v], &prop);
+        if (FAILED(hr)) {
+            CoUninitialize();
+            VssErrorWithHr(L"GetSnapshotProperties", hr);
         }
+
+        VssSnapshotInfo info;
+
+        // Convert GUID to string
+        GUID guid = snapshotIds[v];
+        std::wstringstream guidStream;
+        guidStream << std::uppercase << std::hex
+                   << std::setfill(L'0') << std::setw(8) << guid.Data1 << L'-'
+                   << std::setw(4) << guid.Data2 << L'-' << std::setw(4) << guid.Data3 << L'-';
+        for (int i = 0; i < 8; i++) {
+            guidStream << std::setw(2) << static_cast<int>(guid.Data4[i]);
+            if (i == 3) {
+                guidStream << L'-';
+            }
+        }
+
+        std::wstring guidString = guidStream.str();
+        info.id = std::string(guidString.begin(), guidString.end());
+
+        std::wstring devicePath(prop.m_pwszSnapshotDeviceObject);
+        info.devicePath = std::string(devicePath.begin(), devicePath.end());
+
+        ::VssFreeSnapshotProperties(&prop);
+        infos.push_back(info);
     }
-    
-    std::wstring guidString = guidStream.str();
-    info.id = std::string(guidString.begin(), guidString.end());
-    
-    std::wstring devicePath(prop.m_pwszSnapshotDeviceObject);
-    info.devicePath = std::string(devicePath.begin(), devicePath.end());
-    
-    ::VssFreeSnapshotProperties(&prop);
 
     // Signal the end of the backup to the writers. Skipping this leaves them
     // believing a backup is still in progress, which is how a machine ends up
@@ -303,7 +316,12 @@ VssSnapshotInfo VssManager::CreateSnapshot(const std::string& volumePath) {
     }
 
     CoUninitialize();
-    return info;
+    return infos;
+}
+
+VssSnapshotInfo VssManager::CreateSnapshot(const std::string& volumePath) {
+    std::vector<VssSnapshotInfo> infos = CreateSnapshotSet({ volumePath });
+    return infos.at(0);
 }
 
 void VssManager::DeleteSnapshot(const std::string& snapshotId) {

@@ -185,6 +185,33 @@ Napi::Value CreateSnapshot(const Napi::CallbackInfo& info) {
     }
 }
 
+// Create one snapshot set covering several volumes, so they share a single
+// point in time. Returns an array of { id, devicePath } in the same order.
+Napi::Value CreateSnapshotSet(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    Napi::Array paths = info[0].As<Napi::Array>();
+    std::vector<std::string> volumes;
+    volumes.reserve(paths.Length());
+    for (uint32_t i = 0; i < paths.Length(); i++) {
+        volumes.push_back(paths.Get(i).As<Napi::String>().Utf8Value());
+    }
+
+    try {
+        auto snapshots = VssManager::CreateSnapshotSet(volumes);
+        Napi::Array result = Napi::Array::New(env, snapshots.size());
+        for (size_t i = 0; i < snapshots.size(); i++) {
+            Napi::Object entry = Napi::Object::New(env);
+            entry.Set("id", snapshots[i].id);
+            entry.Set("devicePath", snapshots[i].devicePath);
+            result.Set(static_cast<uint32_t>(i), entry);
+        }
+        return result;
+    } catch (const std::exception& e) {
+        Napi::TypeError::New(env, e.what()).ThrowAsJavaScriptException();
+        return env.Null();
+    }
+}
+
 // Delete a VSS snapshot
 Napi::Value DeleteSnapshot(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
@@ -397,6 +424,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set("getUsnJournalInfo", Napi::Function::New(env, GetUsnJournalInfo));
     exports.Set("crc32", Napi::Function::New(env, Crc32));
     exports.Set("createSnapshot", Napi::Function::New(env, CreateSnapshot));
+    exports.Set("createSnapshotSet", Napi::Function::New(env, CreateSnapshotSet));
     exports.Set("deleteSnapshot", Napi::Function::New(env, DeleteSnapshot));
     exports.Set("readBlocks", Napi::Function::New(env, ReadBlocks));
     exports.Set("writeBlocks", Napi::Function::New(env, WriteBlocks));

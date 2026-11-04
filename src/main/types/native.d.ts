@@ -27,6 +27,11 @@ declare module 'opbs-native' {
   export function releaseLockedVolumes(): void;
   export function updateDiskProperties(devicePath: string): boolean;
   export function createSnapshot(volumePath: string): SnapshotInfo;
+  /**
+   * One snapshot set covering several volumes, so they share a single point
+   * in time. Returns one entry per volume, in order.
+   */
+  export function createSnapshotSet(volumePaths: string[]): SnapshotInfo[];
   export function deleteSnapshot(snapshotId: string): boolean;
   export function readBlocks(devicePath: string, offset: bigint, length: bigint): Buffer;
   export function writeBlocks(devicePath: string, offset: bigint, data: Buffer): number;

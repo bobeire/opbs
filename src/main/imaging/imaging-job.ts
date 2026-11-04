@@ -2,6 +2,12 @@ export type ReadSource = 'volume' | 'physical';
 
 export interface NativeImagingApi {
   createSnapshot(volumePath: string): { id: string; devicePath: string };
+  /**
+   * One snapshot set covering several volumes, so they share a single point
+   * in time. Optional so older native builds and test doubles still work;
+   * the caller falls back to per-volume snapshots and says so.
+   */
+  createSnapshotSet?(volumePaths: string[]): Array<{ id: string; devicePath: string }>;
   deleteSnapshot(id: string): boolean;
   readBlocks(devicePath: string, offset: bigint, length: bigint): Buffer;
   writeBlocks(devicePath: string, offset: bigint, data: Buffer): number;

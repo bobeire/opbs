@@ -233,72 +233,113 @@ export async function runBackupJob(
   const snapshotCache = new Map<string, SnapshotHandle>();
 
   const createSnapshots = async (job2: ImagingJob): Promise<void> => {
-    const seen = new Set<string>();
+    // Collect the volumes first, then snapshot them as ONE set. Per-volume
+    // sets meant a multi-partition backup captured each partition at a
+    // different moment — the image then has no single point in time, which is
+    // a real inconsistency for data spanning volumes and a lie about the
+    // image for everything else. (Field report 2026-11-04.)
+    const volumes = new Map<string, string>();
     for (const p of job2.partitions) {
-      if (p.readSource === 'volume' && p.volumeDevicePath && !seen.has(p.volumeDevicePath)) {
-        seen.add(p.volumeDevicePath);
-        progress.currentPartition = `${p.label}: snapshotting`;
-        writeProgress('snapshotting');
-        // A shadow copy is read-only from the user's side, so a second attempt
-        // is free when it works. Retrying the transient codes (snapshot
-        // already in progress, the two freeze timeouts) turns a lot of "the
-        // backup failed" into "it worked on the second try". Anything else is
-        // a decision rather than a wait and is not retried.
-        let snapshot: { id: string; devicePath: string } | null = null;
-        let lastError: unknown = null;
-        for (let attempt = 0; attempt < 3 && !snapshot; attempt++) {
-          if (attempt > 0) {
-            const delayMs = 2_000 * attempt;
-            logger.info(`${p.label}: retrying VSS snapshot in ${delayMs}ms (attempt ${attempt + 1} of 3)`);
-            await new Promise((resolve) => setTimeout(resolve, delayMs));
-          }
-          try {
-            snapshot = native.createSnapshot(p.volumeDevicePath);
-          } catch (error) {
-            lastError = error;
-            if (!isTransientVssFailure(errorMessage(error))) break;
-          }
-        }
-        if (snapshot) {
-          // Probe it before trusting it: a shadow copy that exists but cannot
-          // be read is useless, and finding that out at the first data block
-          // is the worst moment. One 512-byte read is enough to know.
-          try {
-            const probe = native.readBlocks(snapshot.devicePath, 0n, 512n);
-            if (!probe || probe.length === 0) {
-              throw new Error('the snapshot returned no data');
-            }
-          } catch (error) {
-            logger.warn(
-              `${p.label}: snapshot ${snapshot.id} exists but is not readable (${errorMessage(error)}); discarding it`
+      if (p.readSource === 'volume' && p.volumeDevicePath && !volumes.has(p.volumeDevicePath)) {
+        volumes.set(p.volumeDevicePath, p.label);
+      }
+    }
+    if (volumes.size === 0) return;
+
+    progress.currentPartition = 'snapshotting';
+    writeProgress('snapshotting');
+
+    const paths = [...volumes.keys()];
+    let snapshots: Array<{ id: string; devicePath: string }> | null = null;
+    let lastError: unknown = null;
+
+    // A shadow copy is read-only from the user's side, so a second attempt is
+    // free when it works. Retrying the transient codes (snapshot already in
+    // progress, the two freeze timeouts) turns a lot of "the backup failed"
+    // into "it worked on the second try". Anything else is a decision rather
+    // than a wait and is not retried.
+    for (let attempt = 0; attempt < 3 && !snapshots; attempt++) {
+      if (attempt > 0) {
+        const delayMs = 2_000 * attempt;
+        logger.info(`Retrying the VSS snapshot set in ${delayMs}ms (attempt ${attempt + 1} of 3)`);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+      try {
+        if (typeof native.createSnapshotSet === 'function') {
+          snapshots = native.createSnapshotSet(paths);
+        } else {
+          // Older native build, or a test double. Per-volume snapshots do NOT
+          // share one point in time, so say so rather than implying they do.
+          snapshots = paths.map((p) => native.createSnapshot(p));
+          if (paths.length > 1) {
+            warnings.push(
+              `${paths.length} volumes were snapshotted separately rather than as one set, so this ` +
+                `backup has no single point in time across them. Rebuilding the native helper ` +
+                `restores consistent multi-volume captures.`
             );
-            try {
-              native.deleteSnapshot(snapshot.id);
-            } catch {
-              /* best effort */
-            }
-            lastError = error;
-            snapshot = null;
           }
         }
-        if (snapshot) {
-          snapshotCache.set(p.volumeDevicePath, snapshot);
-          snapshotsCreated++;
-          // Self-evidencing: the log must show, per partition, that a snapshot
+      } catch (error) {
+        lastError = error;
+        if (!isTransientVssFailure(errorMessage(error))) break;
+      }
+    }
+
+    if (snapshots) {
+      // Probe each one before trusting it: a shadow copy that exists but
+      // cannot be read is useless, and finding that out at the first data
+      // block is the worst moment.
+      const usable: Array<{ id: string; devicePath: string }> = [];
+      for (const snap of snapshots) {
+        try {
+          const probe = native.readBlocks(snap.devicePath, 0n, 512n);
+          if (!probe || probe.length === 0) throw new Error('the snapshot returned no data');
+          usable.push(snap);
+        } catch (error) {
+          logger.warn(`Snapshot ${snap.id} exists but is not readable (${errorMessage(error)}); discarding it`);
+          try {
+            native.deleteSnapshot(snap.id);
+          } catch {
+            /* best effort */
+          }
+          lastError = error;
+        }
+      }
+      if (usable.length === paths.length) {
+        paths.forEach((volumePath, i) => {
+          snapshotCache.set(volumePath, usable[i]);
+          // Self-evidencing: the log must show, per volume, that a snapshot
           // was actually taken. Its absence is the answer to "was this backup
           // consistent?" (field report 2026-11-03).
-          logger.info(`${p.label}: VSS snapshot ${snapshot.id} -> ${snapshot.devicePath}`);
-          continue;
+          const label = volumes.get(volumePath) ?? volumePath;
+          logger.info(`${label}: VSS snapshot ${usable[i].id} -> ${usable[i].devicePath}`);
+        });
+        snapshotsCreated += usable.length;
+        return;
+      }
+      // Partly unusable: a snapshot set is only meaningful whole. Drop the
+      // rest rather than capture some volumes frozen and some live.
+      for (const snap of usable) {
+        try {
+          native.deleteSnapshot(snap.id);
+        } catch {
+          /* best effort */
         }
+      }
+      lastError = lastError ?? new Error('a snapshot in the set was not readable');
+    }
 
-        const detail = errorMessage(lastError);
-        if (!job2.allowInconsistentCapture) {
-          // The refusal distinguishes "VSS is broken on this machine" from
-          // "this volume cannot be snapshotted" — they need different fixes,
-          // and conflating them is part of why the 2026-11-03 report took
-          // three days to understand.
-          throw new Error(vssBrokenMessage(p.label, detail), { cause: lastError });
-        }
+    const detail = errorMessage(lastError);
+    if (!job2.allowInconsistentCapture) {
+      // The refusal distinguishes "VSS is broken on this machine" from
+      // "this volume cannot be snapshotted" — they need different fixes, and
+      // conflating them is part of why the 2026-11-03 report took three days
+      // to understand.
+      const label = [...volumes.values()].join(', ');
+      throw new Error(vssBrokenMessage(label, detail), { cause: lastError });
+    }
+    for (const p of job2.partitions) {
+      if (volumes.has(p.volumeDevicePath ?? '')) {
         warnings.push(
           `${p.label}: no VSS snapshot (${detail}); capturing WITHOUT a consistent point in time. ` +
             `This image may be internally inconsistent and may restore as a filesystem that looks ` +

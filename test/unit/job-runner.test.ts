@@ -2552,3 +2552,111 @@ describe('a backup without a consistent snapshot', () => {
     expect(result.warnings.some((w) => w.includes('no VSS snapshot'))).toBe(false);
   });
 });
+
+/**
+ * Per-volume snapshot sets meant a multi-partition backup captured each
+ * partition at a different moment — the image had no single point in time
+ * across volumes. (Field report 2026-11-04.)
+ */
+describe('multi-volume backups share one point in time', () => {
+  let dir: string;
+  let jobPath: string;
+  let resultPath: string;
+  let progressPath: string;
+  let cancelPath: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-snapset-'));
+    jobPath = path.join(dir, 'job.json');
+    resultPath = path.join(dir, 'result.json');
+    progressPath = path.join(dir, 'progress.json');
+    cancelPath = path.join(dir, 'cancel');
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('snapshots every volume in one set, not one set each', async () => {
+    const twoVolumes = [
+      { label: 'One', volumeDevicePath: '\\\\.\\Volume{one}\\' },
+      { label: 'Two', volumeDevicePath: '\\\\.\\Volume{two}\\' }
+    ];
+    fs.writeFileSync(
+      jobPath,
+      JSON.stringify({
+        type: 'backup',
+        imagePath: path.join(dir, 'a.opbs'),
+        blockSize: BLOCK,
+        compressionLevel: 3,
+        verificationEnabled: false,
+        partitions: twoVolumes.map((v, i) => ({
+          diskIndex: 0,
+          partitionIndex: i + 1,
+          size: BLOCK,
+          offset: 122683392 + i * BLOCK,
+          label: v.label,
+          readSource: 'volume',
+          volumeDevicePath: v.volumeDevicePath
+        }))
+      })
+    );
+
+    const setCalls: string[][] = [];
+    const native = createMockNative() as unknown as {
+      createSnapshot: ReturnType<typeof vi.fn>;
+      createSnapshotSet: (paths: string[]) => Array<{ id: string; devicePath: string }>;
+    };
+    native.createSnapshotSet = (paths: string[]) => {
+      setCalls.push(paths);
+      return paths.map((p, i) => ({ id: `snap-${i}`, devicePath: p }));
+    };
+
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native as never);
+
+    // One call, both volumes: a single DoSnapshotSet freezes them together.
+    expect(setCalls).toHaveLength(1);
+    expect(setCalls[0]).toEqual(['\\\\.\\Volume{one}\\', '\\\\.\\Volume{two}\\']);
+  });
+
+  it('says so when it has to fall back to per-volume snapshots', async () => {
+    fs.writeFileSync(
+      jobPath,
+      JSON.stringify({
+        type: 'backup',
+        imagePath: path.join(dir, 'b.opbs'),
+        blockSize: BLOCK,
+        compressionLevel: 3,
+        verificationEnabled: false,
+        partitions: [
+          {
+            diskIndex: 0,
+            partitionIndex: 1,
+            size: BLOCK,
+            offset: 122683392,
+            label: 'One',
+            readSource: 'volume',
+            volumeDevicePath: '\\\\.\\Volume{one}\\'
+          },
+          {
+            diskIndex: 0,
+            partitionIndex: 2,
+            size: BLOCK,
+            offset: 122683392 + BLOCK,
+            label: 'Two',
+            readSource: 'volume',
+            volumeDevicePath: '\\\\.\\Volume{two}\\'
+          }
+        ]
+      })
+    );
+
+    // No createSnapshotSet: the old per-volume path. It must not pretend the
+    // result is a single point in time.
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, createMockNative());
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
+    expect(result.ok).toBe(true);
+    expect(result.warnings.some((w) => w.includes('no single point in time'))).toBe(true);
+  });
+});
