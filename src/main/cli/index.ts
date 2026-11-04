@@ -1680,14 +1680,36 @@ async function cmdVerify(ctx: CommandContext): Promise<number> {
     key = deriveImageKey(passphrase, info.header.salt, info.header.kdfIterations);
   }
   const result = await verifyImage(imagePath, key);
+  // Block verification answers "did every frame survive?". It cannot see an
+  // image whose filesystem is internally inconsistent — the 2026-11-03
+  // images passed every CRC and still restored as a corrupt filesystem. Ask
+  // the filesystem too, and say so when we could not.
+  const { checkImageConsistency, describeConsistency } = await import('../imaging/fs/ntfs-consistency');
+  const fsReports: Array<{ partitionIndex: number; summary: string; ok: boolean }> = [];
+  for (const p of readImageInfo(imagePath).partitions) {
+    const report = checkImageConsistency(imagePath, p.partitionIndex, passphrase);
+    fsReports.push(
+      report
+        ? { partitionIndex: p.partitionIndex, summary: describeConsistency(report), ok: report.ok }
+        : {
+            partitionIndex: p.partitionIndex,
+            summary: 'not checked (not NTFS, or unreadable without a passphrase)',
+            ok: true
+          }
+    );
+  }
+  const fsOk = fsReports.every((r) => r.ok);
+  const ok = result.ok && fsOk;
   if (ctx.opts.json) {
-    console.log(JSON.stringify(result, null, 2));
-  } else if (result.ok) {
+    console.log(JSON.stringify({ ...result, ok, filesystem: fsReports }, null, 2));
+  } else if (ok) {
     console.log(`OK: ${result.blocksVerified} block(s) verified`);
+    for (const r of fsReports) console.log(`  partition ${r.partitionIndex}: ${r.summary}`);
   } else {
     console.error(`FAILED: ${result.error ?? `${result.blocksVerified} block(s) verified; no frame data in image`}`);
+    for (const r of fsReports) console.error(`  partition ${r.partitionIndex}: ${r.summary}`);
   }
-  return result.ok ? 0 : 1;
+  return ok ? 0 : 1;
 }
 
 interface VerifySummary {

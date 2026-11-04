@@ -182,6 +182,34 @@ export function checkNtfsConsistency(reader: PartitionReader): ConsistencyReport
 }
 
 /**
+ * Check one partition of an image file. Builds the reader from the image
+ * chain, so verification can answer "is this filesystem consistent?" without
+ * restoring anything first.
+ *
+ * Returns null when the partition is not NTFS or cannot be read — callers
+ * report that as "not checked", never as "fine".
+ */
+export function checkImageConsistency(
+  imagePath: string,
+  partitionIndex: number,
+  passphrase?: string
+): ConsistencyReport | null {
+  try {
+    // Lazy imports: this module is also used from the helper, where the image
+    // readers must not be pulled in eagerly.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { baseVolumePath, resolveImageChain } = require('../image-format') as typeof import('../image-format');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { partitionReaderForChain } = require('../image-browse') as typeof import('../image-browse');
+    const chain = resolveImageChain(baseVolumePath(imagePath));
+    const { reader } = partitionReaderForChain(chain, partitionIndex, passphrase);
+    return checkNtfsConsistency(reader);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The summary line. `claimedButFree` is the chkdsk error a tester saw, so the
  * wording matches it rather than inventing new vocabulary.
  */
