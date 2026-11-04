@@ -415,13 +415,78 @@ export function manifestFilePath(dir: string): string {
 }
 
 /** Newest valid image in a directory, useful as an incremental base. */
-export function findNewestImage(dir: string): string | undefined {
+/**
+ * Newest image in a folder, optionally restricted to one source disk.
+ *
+ * An incremental builds on a base image, so picking the wrong one matters:
+ * if the folder holds images from two disks (two machines sharing a
+ * destination, two jobs pointed at one folder) the newest image can belong to
+ * the wrong one. Partition counts match happily across disks, so nothing else
+ * catches it — the result is a chain that mixes sources, which restores as a
+ * corrupt volume even though every block of both images verifies.
+ *
+ * So: images recorded as belonging to another disk are skipped, and a folder
+ * holding more than one known source disk is treated as ambiguous and yields
+ * no base at all. Falling back to no base is always safe — the caller takes a
+ * full backup instead. (Field report 2026-11-04.)
+ */
+export function findNewestImage(
+  dir: string,
+  expected?: { serial?: string; model?: string }
+): string | undefined {
   const entries = scanBackupDirectory(dir);
   if (entries.length === 0) {
     return undefined;
   }
   entries.sort((a, b) => b.timestamp - a.timestamp);
-  return entries[0].path;
+
+  // Record the source identity of each candidate. Images written before this
+  // field existed have neither; they are "unknown", never a mismatch, or the
+  // first incremental after an upgrade would fall back to a full every time.
+  const identityOf = new Map<string, { serial?: string; model?: string }>();
+  const identities = new Set<string>();
+  for (const entry of entries) {
+    try {
+      const header = readImageInfo(entry.path).header;
+      const serial = header.sourceDiskSerial || undefined;
+      const model = header.sourceDiskModel || undefined;
+      identityOf.set(entry.path, { serial, model });
+      identities.add(`${serial ?? ''}|${model ?? ''}`);
+    } catch {
+      identityOf.set(entry.path, {});
+      identities.add('|');
+    }
+  }
+
+  const knownIdentities = [...identities].filter((id) => id !== '|');
+  if (!expected && knownIdentities.length > 1) {
+    logger.warn(
+      `${dir} holds images from ${knownIdentities.length} different source disks, so there is no safe ` +
+        `incremental base to pick. The next backup will be a full one. Use one folder per source disk ` +
+        `to keep chains intact.`
+    );
+    return undefined;
+  }
+
+  for (const entry of entries) {
+    const have = identityOf.get(entry.path) ?? {};
+    const serialMismatch = !!have.serial && !!expected?.serial && have.serial !== expected.serial;
+    const modelMismatch = !!have.model && !!expected?.model && have.model !== expected.model;
+    if (serialMismatch || modelMismatch) {
+      logger.warn(
+        `Skipping ${entry.path} as an incremental base: it was made from a different disk ` +
+          `(image ${have.model ?? '?'}/${have.serial ?? '?'}, this run ${expected?.model ?? '?'}/${expected?.serial ?? '?'}).`
+      );
+      continue;
+    }
+    return entry.path;
+  }
+
+  logger.warn(
+    `No image in ${dir} matches this source disk; the next backup will be a full one rather than ` +
+      `build a chain on another disk's image.`
+  );
+  return undefined;
 }
 
 /**

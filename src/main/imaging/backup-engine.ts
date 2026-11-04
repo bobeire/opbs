@@ -187,6 +187,26 @@ export class ImagingEngine implements BackupCoordinator {
           `Base image partition count (${baseInfo.header.partitionCount}) does not match selection (${items.length})`
         );
       }
+      // Partition counts match happily across different disks, so they are not
+      // enough. An incremental built on another disk's image produces a chain
+      // that mixes sources, and that restores as a corrupt volume — silently,
+      // because every block of both images is intact. Refuse instead.
+      // (Field report 2026-11-04.)
+      const baseSerial = baseInfo.header.sourceDiskSerial || '';
+      const baseModel = baseInfo.header.sourceDiskModel || '';
+      if (sourceDisk && (baseSerial || baseModel)) {
+        const serialMismatch = !!baseSerial && !!sourceDisk.serial && baseSerial !== sourceDisk.serial;
+        const modelMismatch = !!baseModel && !!sourceDisk.model && baseModel !== sourceDisk.model;
+        if (serialMismatch || modelMismatch) {
+          throw new Error(
+            `Refusing to build an incremental on ${config.baseImagePath}: that image was made from a ` +
+              `different disk (image: ${baseModel || '?'}/${baseSerial || '?'}; this run: ` +
+              `${sourceDisk.model || '?'}/${sourceDisk.serial || '?'}). A chain that mixes two source ` +
+              `disks restores as a corrupt volume even though every block verifies. Point the backup at ` +
+              `a folder per source disk, or run a full backup instead. Nothing has been written.`
+          );
+        }
+      }
     }
 
     const destinationDir = normalizeBackupLocation(config.destinationPath);
