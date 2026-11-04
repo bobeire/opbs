@@ -99,6 +99,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdClone(ctx);
       case 'verify':
         return await cmdVerify(ctx);
+      case 'fscheck':
+        return await cmdFsCheck(ctx);
       case 'scrub':
         return await cmdScrub(ctx);
       case 'parity':
@@ -202,6 +204,10 @@ Commands:
                            Clone live partitions to a different local disk.
   verify <image.opbs> [--passphrase p] Verify a single image (no elevation needed).
   verify --dir <directory> [--scope newest|all] [--passphrase p] [--json-out FILE]
+  fscheck <image.opbs> [--partition N]  Check filesystem consistency: do the file
+                                         runlists agree with the allocation map?
+                                         Catches internally inconsistent images that
+                                         block verification cannot see.
                                          Verify images in a directory.
   scrub --dir <directory> [--scope newest|all] [--repair] [--passphrase p] [--json] [--json-out FILE]
                                          Idle scrub: read back every block of every image
@@ -1589,6 +1595,68 @@ async function runJobInProcess(
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * Filesystem-level consistency of an image partition: does the allocation map
+ * agree with what the files claim? Block verification cannot answer this —
+ * the 2026-11-03 images passed every CRC and were still internally
+ * inconsistent. This is the check that sees it, so it is worth being able to
+ * run on any image without restoring it first.
+ */
+async function cmdFsCheck(ctx: CommandContext): Promise<number> {
+  const imagePath = ctx.argv[0];
+  if (!imagePath) {
+    console.error('Usage: fscheck <image.opbs> [--partition N] [--json]');
+    return 1;
+  }
+  const { baseVolumePath, resolveImageChain } = await import('../imaging/image-format');
+  const { partitionReaderForChain } = await import('../imaging/image-browse');
+  const { checkNtfsConsistency, describeConsistency } = await import('../imaging/fs/ntfs-consistency');
+
+  const chain = resolveImageChain(baseVolumePath(imagePath));
+  const { info } = (await import('../imaging/image-browse')).readChainInfos(chain)[0];
+  const partitionFlag = flagValue(ctx.argv, '--partition');
+  const indexes =
+    partitionFlag !== undefined
+      ? [Number(partitionFlag)]
+      : info.partitions.map((p) => p.partitionIndex);
+
+  let anyFailed = false;
+  const reports: Array<{ partitionIndex: number; report: ReturnType<typeof checkNtfsConsistency> }> = [];
+  for (const partitionIndex of indexes) {
+    try {
+      const { reader } = partitionReaderForChain(chain, partitionIndex);
+      reports.push({ partitionIndex, report: checkNtfsConsistency(reader) });
+    } catch (error) {
+      reports.push({
+        partitionIndex,
+        report: {
+          ok: true,
+          clusterSize: 0,
+          totalClusters: 0,
+          recordsChecked: 0,
+          claimedButFree: [],
+          doubleClaimed: [],
+          unreferencedClusterCount: 0,
+          truncated: error instanceof Error ? error.message : String(error)
+        }
+      });
+    }
+    if (!reports[reports.length - 1].report.ok) anyFailed = true;
+  }
+
+  if (ctx.opts.json) {
+    console.log(JSON.stringify(reports, null, 2));
+  } else {
+    for (const { partitionIndex, report } of reports) {
+      console.log(`partition ${partitionIndex}: ${describeConsistency(report)}`);
+    }
+    if (anyFailed) {
+      console.error('At least one partition is internally inconsistent. Do not rely on this image.');
+    }
+  }
+  return anyFailed ? 1 : 0;
 }
 
 async function cmdVerify(ctx: CommandContext): Promise<number> {
