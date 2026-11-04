@@ -37,17 +37,31 @@ describe('VSS diagnosis', () => {
     const result = probeVss(native, '\\\\.\\Volume{x}\\');
     expect(result.ok).toBe(false);
     expect(result.error).toContain('VSS_E_UNEXPECTED_PROVIDER_ERROR');
-    expect(result.advice).toContain('VSS diagnostics');
+    expect(result.advice).toContain('vssadmin');
     expect(deleted).toBe('');
   });
 
-  it('distinguishes a broken provider from an unsupported volume', () => {
-    // Different causes, different fixes — conflating them is what made this
-    // hard to diagnose.
-    expect(adviseVssFailure('VSS_E_UNEXPECTED_PROVIDER_ERROR')).toContain('writer is broken');
+  it('distinguishes the causes, and does not call a busy machine broken', () => {
+    // Corrected against vsserror.h on 2026-11-04. The first version told
+    // someone to re-register VSS DLLs because a snapshot was already in
+    // progress — authoritative, confident, and wrong.
+    expect(adviseVssFailure('VSS_E_SNAPSHOT_SET_IN_PROGRESS')).toContain('already being created');
+    expect(adviseVssFailure('VSS_E_SNAPSHOT_SET_IN_PROGRESS')).toContain('Nothing is broken');
+    // Both of these are timeouts from heavy activity: retry, do not reinstall.
+    expect(adviseVssFailure('VSS_E_FLUSH_WRITES_TIMEOUT')).toContain('too busy');
+    expect(adviseVssFailure('0x80042314')).toContain('retry');
+    expect(adviseVssFailure('VSS_E_UNEXPECTED_PROVIDER_ERROR')).toContain('third-party provider');
     expect(adviseVssFailure('VSS_E_VOLUME_NOT_SUPPORTED')).toContain('FAT32 and exFAT');
     expect(adviseVssFailure('VSS_E_INSUFFICIENT_STORAGE')).toContain('vssadmin');
     expect(adviseVssFailure('The service is not running')).toContain('services.msc');
+  });
+
+  it('tells a retryable writer error from a non-retryable one', () => {
+    // 0x800423F3 is retryable, 0x800423F4 explicitly is not.
+    expect(adviseVssFailure('0x800423F3')).toContain('Retrying is reasonable');
+    expect(adviseVssFailure('0x800423F4')).toContain('non-retryable');
+    // And both point at the tool that names the writer.
+    expect(adviseVssFailure('0x800423F0')).toContain('vssadmin list writers');
   });
 
   it('always offers a way forward for an unrecognised failure', () => {
@@ -55,7 +69,7 @@ describe('VSS diagnosis', () => {
     // tell the user what to do next.
     const advice = adviseVssFailure('something entirely new went wrong');
     expect(advice.length).toBeGreaterThan(20);
-    expect(advice).toContain('diagnostics');
+    expect(advice).toContain('vssadmin');
   });
 
   it('says plainly that the backup was stopped and why it matters', () => {

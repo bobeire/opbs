@@ -46,26 +46,41 @@ std::wstring GetVolumeRoot(const std::string& volumePath) {
     return result;
 }
 
-// Wait for an async VSS operation to complete
-HRESULT WaitForAsync(IVssAsync* pAsync) {
+// Wait for an async VSS operation to complete.
+//
+// Two things the previous version got wrong:
+//   - `Wait()` defaults to INFINITE, so a hung VSS service stalled the helper
+//     at "snapshotting" with no watchdog at all.
+//   - `QueryStatus(NULL, NULL)` threw the operation's status away. Wait can
+//     return S_OK while the underlying operation failed, so the result has to
+//     be captured — the comment said "to ensure the operation didn't fail" and
+//     the code could not have told.
+HRESULT WaitForAsync(IVssAsync* pAsync, DWORD timeoutMs = 120000) {
     if (!pAsync) {
         return E_POINTER;
     }
-    
-    HRESULT hr = S_OK;
-    hr = pAsync->Wait();
-    
+
+    HRESULT hr = pAsync->Wait(timeoutMs);
     if (hr == E_ABORT) {
-        // The operation was aborted
         pAsync->Release();
         return hr;
     }
-    
-    if (SUCCEEDED(hr)) {
-        // Query the status to ensure the operation didn't fail
-        hr = pAsync->QueryStatus(NULL, NULL);
+    if (hr == HRESULT_FROM_WIN32(ERROR_TIMEOUT) || hr == WAIT_TIMEOUT) {
+        // Leave the operation to finish or abort on its own, but never hang.
+        pAsync->Release();
+        return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
     }
-    
+
+    if (SUCCEEDED(hr)) {
+        // Capture the operation's own status: Wait succeeding is not the same
+        // as the operation succeeding.
+        HRESULT operationHr = S_OK;
+        hr = pAsync->QueryStatus(&operationHr, NULL);
+        if (SUCCEEDED(hr)) {
+            hr = operationHr;
+        }
+    }
+
     pAsync->Release();
     return hr;
 }
