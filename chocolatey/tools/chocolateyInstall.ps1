@@ -3,8 +3,8 @@ $ErrorActionPreference = 'Stop'
 $packageArgs = @{
   packageName    = $env:ChocolateyPackageName
   fileType       = 'exe'
-  url            = 'https://github.com/bobeire/opbs/releases/download/0.6.113/OPBS-Setup-0.6.113.exe'
-  checksum       = '3088bdb76769b7b0e5ab482624c83ace6634559ba51b34e9e7a54de8f16e5b1a'
+  url            = 'https://github.com/bobeire/opbs/releases/download/0.6.114/OPBS-Setup-0.6.114.exe'
+  checksum       = '734b744dbfd90af1cc955e881e619deb9e960a07846527b5e8d426efafd27fee'
   checksumType   = 'sha256'
   softwareName   = 'OPBS*'
   # NSIS assisted installer: /S = silent, /currentuser = per-user scope
