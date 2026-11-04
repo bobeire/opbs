@@ -260,6 +260,28 @@ export async function runBackupJob(
           }
         }
         if (snapshot) {
+          // Probe it before trusting it: a shadow copy that exists but cannot
+          // be read is useless, and finding that out at the first data block
+          // is the worst moment. One 512-byte read is enough to know.
+          try {
+            const probe = native.readBlocks(snapshot.devicePath, 0n, 512n);
+            if (!probe || probe.length === 0) {
+              throw new Error('the snapshot returned no data');
+            }
+          } catch (error) {
+            logger.warn(
+              `${p.label}: snapshot ${snapshot.id} exists but is not readable (${errorMessage(error)}); discarding it`
+            );
+            try {
+              native.deleteSnapshot(snapshot.id);
+            } catch {
+              /* best effort */
+            }
+            lastError = error;
+            snapshot = null;
+          }
+        }
+        if (snapshot) {
           snapshotCache.set(p.volumeDevicePath, snapshot);
           snapshotsCreated++;
           // Self-evidencing: the log must show, per partition, that a snapshot
@@ -812,10 +834,22 @@ export async function runBackupJob(
             ? await native.readBlocksAsync(device, readOffset, readLength)
             : Buffer.from(native.readBlocks(device, readOffset, readLength));
         } catch (error) {
-          warnings.push(
-            `Read failed for ${part.label} at offset ${baseOffset + BigInt(partitionBytes)}: ${errorMessage(error)}`
+          // A read failure must ABORT, not warn and stop reading. The old
+          // behaviour pushed a warning and `break`-ed out of the loop, so the
+          // backup completed "successfully" with a silently truncated
+          // partition — the same silent-success shape as every other defect
+          // in this area. Windows deletes a shadow copy when its storage
+          // fills, so this is the ordinary way a mid-backup read fails, and
+          // an image missing a tail is worse than no image at all.
+          throw new Error(
+            `Backup aborted: could not read ${part.label} at offset ` +
+              `${baseOffset + BigInt(partitionBytes)} (${errorMessage(error)}). The image is ` +
+              `incomplete and has been left on disk for inspection, but it must NOT be used — ` +
+              `restoring it would write a truncated partition. If this was a shadow copy, the ` +
+              `likely cause is Windows discarding it mid-run (shadow storage full): free some ` +
+              `space or grow it with 'vssadmin resize shadowstorage', then run the backup again.`,
+            { cause: error }
           );
-          break;
         }
 
         // Incremental: skip blocks whose content matches the base image.

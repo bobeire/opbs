@@ -233,7 +233,13 @@ describe('runBackupJob', () => {
     expect(fs.existsSync(jobPath)).toBe(false);
   });
 
-  it('reports read failures as warnings but finishes other partitions', async () => {
+  it('aborts on a read failure instead of finishing with a truncated image', async () => {
+    // This test used to assert the opposite: that a read failure becomes a
+    // warning and the other partitions still get written. That produced an
+    // image that completed "successfully" with a silently truncated partition
+    // — the same silent-success shape as every other defect in this area.
+    // Windows discards a shadow copy when its storage fills, which makes this
+    // the ordinary way a mid-backup read fails. (Field report 2026-11-04.)
     writeJob({
       type: 'backup',
       imagePath,
@@ -268,9 +274,11 @@ describe('runBackupJob', () => {
     await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
 
     const result = readResult();
-    expect(result.ok).toBe(true);
-    expect(result.blocksWritten).toBe(0);
-    expect(result.warnings).toHaveLength(2);
+    expect(result.ok).toBe(false);
+    // And it says the image is not usable, rather than leaving the caller to
+    // discover that at restore time.
+    expect(result.error ?? '').toContain('must NOT be used');
+    expect(result.error ?? '').toContain('truncated');
   });
 
   it('refuses when a snapshot cannot be created', async () => {
@@ -1657,7 +1665,9 @@ describe('incremental and encrypted jobs', () => {
     });
     await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
     expect(readResult().blocksWritten).toBe(totalBlocks);
-    expect(native.readBlocks.mock.calls.length).toBe(totalBlocks);
+    // +1: each snapshot is probed with a 512-byte read before it is trusted.
+    // The data blocks are still exactly totalBlocks.
+    expect(native.readBlocks.mock.calls.length).toBe(totalBlocks + 1);
   });
 
   it('records the pre-snapshot USN cursor in the sidecar', async () => {
@@ -1776,7 +1786,8 @@ describe('incremental and encrypted jobs', () => {
     });
     await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
     // Foreign cursor → treated as "no cursor" → full read, correct frames.
-    expect(native.readBlocks.mock.calls.length).toBe(totalBlocks);
+    // +1: the snapshot probe read, before any data block.
+    expect(native.readBlocks.mock.calls.length).toBe(totalBlocks + 1);
     expect(readResult().blocksWritten).toBe(2);
   });
 
