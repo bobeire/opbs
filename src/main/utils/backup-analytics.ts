@@ -1,3 +1,4 @@
+import { writeFileAtomic } from './atomic-write';
 import * as fs from 'fs';
 import * as path from 'path';
 import { scanBackupDirectory, groupIntoChains } from '../backup/retention';
@@ -65,7 +66,7 @@ export function recordAnalytics(dir: string, entry: BackupAnalyticsEntry): void 
   filtered.push(entry);
   filtered.sort((a, b) => b.timestamp - a.timestamp);
   try {
-    fs.writeFileSync(analyticsPath(dir), JSON.stringify(filtered, null, 2), 'utf-8');
+    writeFileAtomic(analyticsPath(dir), JSON.stringify(filtered, null, 2), 'utf-8');
   } catch {
     /* best-effort: destination may be offline */
   }

@@ -1,3 +1,4 @@
+import { writeFileAtomic } from '../utils/atomic-write';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
@@ -97,7 +98,7 @@ export function recordScrubResult(dir: string, record: ScrubImageRecord): void {
   entries.push(record);
   entries.sort((a, b) => b.at - a.at);
   try {
-    fs.writeFileSync(scrubHistoryPath(dir), JSON.stringify(entries, null, 2), 'utf-8');
+    writeFileAtomic(scrubHistoryPath(dir), JSON.stringify(entries, null, 2), 'utf-8');
   } catch (error) {
     logger.warn(`Could not write scrub history: ${error instanceof Error ? error.message : error}`);
   }

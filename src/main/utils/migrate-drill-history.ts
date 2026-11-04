@@ -1,3 +1,4 @@
+import { writeFileAtomic } from './atomic-write';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -45,7 +46,7 @@ export function recordMigrateDrillResult(
     const dir = path.dirname(imagePath);
     const history = readMigrateDrillHistory(dir);
     history[path.resolve(imagePath)] = { imagePath, at: record.at ?? Date.now(), ...record };
-    fs.writeFileSync(migrateDrillHistoryPath(dir), JSON.stringify(history, null, 2), 'utf-8');
+    writeFileAtomic(migrateDrillHistoryPath(dir), JSON.stringify(history, null, 2), 'utf-8');
   } catch {
     /* best-effort */
   }

@@ -14,7 +14,7 @@ export type CmdRun = (cmd: string, args: string[]) => { status: number | null; s
 export type RegArgRun = (args: string[]) => { status: number | null; stdout?: string; error?: string };
 
 const execCmd: CmdRun = (cmd, args) => {
-  const res = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true });
+  const res = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, timeout: 60_000 });
   return { status: res.status, stdout: res.stdout ?? '', ...(res.error ? { error: res.error.message } : {}) };
 };
 
@@ -127,7 +127,7 @@ export const realIdentity: IdentityOps = {
 export type IcaclsRun = (args: string[]) => { status: number | null; stdout?: string; error?: string };
 
 const execIcacls: IcaclsRun = (args) => {
-  const res = spawnSync(path.join(process.env.windir ?? 'C:\\Windows', 'System32', 'icacls.exe'), args, { encoding: 'utf8', windowsHide: true });
+  const res = spawnSync(path.join(process.env.windir ?? 'C:\\Windows', 'System32', 'icacls.exe'), args, { encoding: 'utf8', windowsHide: true, timeout: 60_000 });
   return { status: res.status, stdout: res.stdout ?? '', ...(res.error ? { error: res.error.message } : {}) };
 };
 

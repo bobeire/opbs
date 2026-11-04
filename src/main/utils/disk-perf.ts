@@ -1,3 +1,4 @@
+import { writeFileAtomic } from './atomic-write';
 import * as fs from 'fs';
 import * as path from 'path';
 import { performance } from 'perf_hooks';
@@ -95,7 +96,7 @@ export function recordPerfResult(dir: string, result: DiskPerfResult): void {
   try {
     const history = readPerfHistory(dir).filter((r) => r.at !== result.at);
     history.unshift(result);
-    fs.writeFileSync(perfPath(dir), JSON.stringify(history.slice(0, MAX_HISTORY), null, 2), 'utf-8');
+    writeFileAtomic(perfPath(dir), JSON.stringify(history.slice(0, MAX_HISTORY), null, 2), 'utf-8');
   } catch {
     /* best-effort: destination may be offline or read-only */
   }

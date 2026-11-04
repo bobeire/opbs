@@ -558,13 +558,17 @@ function main(): void {
     } catch (error) {
       logger.warn(`Stale job dir sweep failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+    createWindow();
+    // File associations register AFTER the window exists. They shell out to
+    // `reg.exe` per entry, and even with a timeout that is work which has
+    // nothing to do with getting the UI on screen — a stall here used to mean
+    // the app looked dead. (Field report 2026-11-04.)
     if (app.isPackaged && settingsManager.getSettings().fileAssociations) {
       const result = registerFileAssociations();
       if (!result.ok) {
         logger.warn(`File association registration failed: ${result.failures.join('; ')}`);
       }
     }
-    createWindow();
     buildAppMenu();
     setupIpcHandlers();
     setupBackupEvents();

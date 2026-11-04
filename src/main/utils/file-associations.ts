@@ -91,7 +91,11 @@ export interface AssociatorResult {
 }
 
 function execReg(args: string[]): { status: number | null; error?: string } {
-  const res = spawnSync(regExe(), args, { encoding: 'utf8', windowsHide: true });
+  // A timeout, deliberately. `reg.exe` is a separate process and can stall —
+  // a locked registry hive, a policy, a bad filter driver — and without a
+  // limit this blocks whatever called it. At launch that means the window
+  // never opens and the app looks dead. (Field report 2026-11-04.)
+  const res = spawnSync(regExe(), args, { encoding: 'utf8', windowsHide: true, timeout: 15_000 });
   return { status: res.status, error: res.error?.message };
 }
 

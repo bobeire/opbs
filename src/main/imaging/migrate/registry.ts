@@ -25,7 +25,7 @@ import type { MigrateRegistryOutcome, MigrateSource } from './types';
  */
 
 const execReg: RegArgRun = (args) => {
-  const res = spawnSync(path.join(process.env.windir ?? process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'reg.exe'), args, { encoding: 'utf8', windowsHide: true });
+  const res = spawnSync(path.join(process.env.windir ?? process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'reg.exe'), args, { encoding: 'utf8', windowsHide: true, timeout: 60_000 });
   return { status: res.status, stdout: res.stdout ?? '', ...(res.error ? { error: res.error.message } : {}) };
 };
 

@@ -89,7 +89,10 @@ function extractZip(zip: string, destDir: string): void {
   const script = `Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory(${psQuote(zip)}, ${psQuote(destDir)})`;
   execFileSync(resolvePowershell(), ['-NoProfile', '-NonInteractive', '-Command', script], {
     windowsHide: true,
-    stdio: 'ignore'
+    stdio: 'ignore',
+    // A real install can legitimately take minutes; an unbounded wait cannot
+    // be distinguished from a hang. (Field report 2026-11-04.)
+    timeout: 600_000
   });
 }
 
@@ -166,6 +169,7 @@ export async function installNodeRuntime(options: NodeInstallOptions = {}): Prom
       const out = execFileSync(nodeExe, ['-v'], {
         encoding: 'utf8',
         windowsHide: true,
+        timeout: 30_000,
         env: { ...process.env, OPENSSL_CONF: '' }
       }).trim();
       if (!/^v\d+\./.test(out)) {
