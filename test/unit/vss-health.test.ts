@@ -101,6 +101,11 @@ describe('a volume that cannot be snapshotted is not a broken machine', () => {
     expect(message).not.toContain('not working on this machine');
     expect(message).toContain('property of the volume');
     expect(message).toContain('captured live');
+    // Field-verified on 2026-11-04: an NTFS volume on a USB flash device also
+    // returned 0x8004230c. Advising "convert to NTFS" unconditionally would
+    // send that user in a circle, so the message must name the device.
+    expect(message).toContain('USB flash devices');
+    expect(message).toContain('already NTFS');
   });
 });
 

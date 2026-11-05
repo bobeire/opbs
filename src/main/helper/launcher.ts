@@ -14,9 +14,14 @@ import { PipeServer, generatePipeName, type PipeMessage } from '../utils/pipe-ip
  * would crash there. `launchElevatedJob` is only ever called from the Electron
  * main process, where the require resolves.
  */
-function electronApp(): typeof import('electron').app {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require('electron').app;
+function electronApp(): typeof import('electron').app | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const electron = require('electron') as { app?: typeof import('electron').app };
+    return electron?.app ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export const HELPER_FLAG = '--opbs-helper';
@@ -51,6 +56,19 @@ function newTempDir(): string {
  *   { type: "cancelled" }                       — cancel acknowledged
  */
 export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { promise: Promise<R>; cancel(): void } {
+  // Under plain node.exe `require('electron').app` is undefined, and the old
+  // code dereferenced it: a CLI backup died with "Cannot read properties of
+  // undefined (reading 'isPackaged')" before VSS was ever reached. That is a
+  // misleading failure — the real answer is "use --elevated from an admin
+  // terminal". Fail with that instead of a TypeError.
+  const app = electronApp();
+  if (!app) {
+    throw new Error(
+      'Elevated jobs are normally launched by the OPBS app. When running the CLI ' +
+        'under plain Node.js, start it from an administrator terminal with --elevated.'
+    );
+  }
+
   const dir = newTempDir();
   const jobPath = path.join(dir, 'job.json');
   const resultPath = path.join(dir, 'result.json');
@@ -227,7 +245,6 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
 
   // --- Spawn helper ---
   const exe = process.execPath;
-  const app = electronApp();
   const appPath = app.isPackaged ? undefined : app.getAppPath();
 
   (async (): Promise<void> => {

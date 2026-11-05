@@ -180,11 +180,12 @@ export function isTransientVssFailure(message: string): boolean {
  */
 export function volumeNotSnapshotableMessage(label: string, error: string): string {
   return (
-    `${label} cannot be snapshotted (${error}). That is a property of the volume, not a fault: ` +
-    `FAT32 and exFAT volumes are never snapshot-able, and some storage controllers are not ` +
-    `either. This volume was captured live, so it has no single point in time — the rest of the ` +
-    `backup was frozen normally. If that matters here, convert the volume to NTFS or accept the ` +
-    `caveat.`
+    `${label} cannot be snapshotted (${error}). That is a property of the volume or the device ` +
+    `behind it, not a fault: FAT32 and exFAT volumes are never snapshot-able, and some USB flash ` +
+    `devices and storage controllers do not support VSS snapshots even on NTFS. This volume was ` +
+    `captured live, so it has no single point in time — the rest of the backup was frozen ` +
+    `normally. If it is FAT32 or exFAT, converting it to NTFS may help; if it is already NTFS, ` +
+    `the device does not support snapshots and --allow-inconsistent is the only way to include it.`
   );
 }
 
@@ -198,10 +199,12 @@ export function volumeNotSnapshotableMessage(label: string, error: string): stri
 export function noneSnapshotableMessage(labels: string[], error: string): string {
   return (
     `No selected volume can be snapshotted (${error}): ${labels.join(', ')}. That is a property ` +
-    `of those volumes, not a fault: FAT32 and exFAT volumes are never snapshot-able, and some ` +
-    `storage controllers are not either. Nothing was captured, because a backup with no snapshot ` +
-    `has no single point in time. Retry with --allow-inconsistent to capture these volumes live ` +
-    `and accept that, or convert them to NTFS.`
+    `of those volumes or the device behind them, not a fault: FAT32 and exFAT volumes are never ` +
+    `snapshot-able, and some USB flash devices and storage controllers do not support VSS ` +
+    `snapshots even on NTFS. Nothing was captured, because a backup with no snapshot has no ` +
+    `single point in time. Retry with --allow-inconsistent to capture these volumes live and ` +
+    `accept that. If a volume is FAT32 or exFAT, converting it to NTFS may help; if it is ` +
+    `already NTFS, the device does not support snapshots.`
   );
 }
 
