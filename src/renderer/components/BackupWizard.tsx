@@ -47,6 +47,8 @@ interface BackupConfig {
   compressionThreads?: number;
   verificationEnabled: boolean;
   usedBlocksOnly?: boolean;
+  /** Capture live when Windows cannot freeze a volume (no point in time). */
+  allowInconsistentCapture?: boolean;
   useUsnJournal?: boolean;
   usnFullScanThreshold?: number;
   baseImagePath?: string;
@@ -75,6 +77,8 @@ interface BackupProfile {
   passphrase?: string;
   /** Only capture allocated clusters (NTFS/FAT32/exFAT); skip free space. */
   usedBlocksOnly?: boolean;
+  /** Capture live when Windows cannot freeze a volume (no point in time). */
+  allowInconsistentCapture?: boolean;
   /** Read only NTFS-journal-changed blocks for incrementals (USN tracking). */
   useUsnJournal?: boolean;
   /** Fraction (0..1) of a partition that USN may report as changed before the
@@ -179,6 +183,8 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   );
   const [verificationEnabled, setVerificationEnabled] = useState(true);
   const [usedBlocksOnly, setUsedBlocksOnly] = useState(true);
+  const [allowInconsistentCapture, setAllowInconsistentCapture] = useState(false);
+  const [snapshotFailure, setSnapshotFailure] = useState<'busy' | 'unsupported' | null>(null);
   const [useUsnJournal, setUseUsnJournal] = useState(true);
   const [usnThresholdPct, setUsnThresholdPct] = useState('');
   const [incrementalEnabled, setIncrementalEnabled] = useState(false);
@@ -443,6 +449,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     );
     setVerificationEnabled(profile.verificationEnabled ?? true);
     setUsedBlocksOnly(profile.usedBlocksOnly ?? true);
+    setAllowInconsistentCapture(profile.allowInconsistentCapture ?? false);
     setUseUsnJournal(profile.useUsnJournal ?? true);
     setUsnThresholdPct(
       profile.usnFullScanThreshold !== undefined
@@ -514,6 +521,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       compressionThreads,
       verificationEnabled,
       usedBlocksOnly,
+      allowInconsistentCapture,
       useUsnJournal,
       incremental: incrementalEnabled,
       ...(useUsnJournal && parseUsnPct(usnThresholdPct) !== undefined
@@ -534,16 +542,23 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     }
   };
 
-  const handleStartBackup = async () => {
+  const handleStartBackup = async (overrides?: { allowInconsistentCapture?: boolean }) => {
     if (!confirmReady(passphrase, passphraseConfirm)) {
       setErrorMsg('Passphrases do not match — re-enter to confirm.');
       return;
     }
     setCurrentStep('progress');
     setErrorMsg(null);
+    setSnapshotFailure(null);
     setProgress(null);
     setRepoNote(null);
     setRepoWarn(null);
+
+    // The retry button passes this explicitly because React state updates are
+    // asynchronous: reading allowInconsistentCapture right after setState
+    // would still see the old value.
+    const captureLive = overrides?.allowInconsistentCapture ?? allowInconsistentCapture;
+    if (captureLive) setAllowInconsistentCapture(true);
 
     const common: Omit<BackupConfig, 'sourceDiskIndex' | 'sourcePartitions'> = {
       destinationPath,
@@ -553,6 +568,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       compressionThreads,
       verificationEnabled,
       usedBlocksOnly,
+      ...(captureLive ? { allowInconsistentCapture: true } : {}),
       useUsnJournal,
       ...(useUsnJournal && parseUsnPct(usnThresholdPct) !== undefined
         ? { usnFullScanThreshold: parseUsnPct(usnThresholdPct) }
@@ -622,6 +638,14 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     } catch (error) {
       console.error('Backup failed:', error);
       const msg = error instanceof Error ? error.message : String(error ?? 'Backup failed');
+      // Offer a way forward only for the failure that has one. A shadow copy
+      // that cannot be taken is permanent per volume (a USB stick that does
+      // not support VSS), and OPBS can still image it live if the user says
+      // so. A busy machine is a wait, and retrying is the safer first move.
+      const busy = /still in progress|0x80042316|0x80042313|0x80042314|too busy/i.test(msg);
+      const snapshot =
+        /shadow copy|snapshot|VSS operation|snapshotted|volume path could not be resolved/i.test(msg);
+      setSnapshotFailure(snapshot ? (busy ? 'busy' : 'unsupported') : null);
       setErrorMsg(msg);
     }
   };
@@ -1088,6 +1112,25 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                 <label className="checkbox-label">
                   <input
                     type="checkbox"
+                    checked={allowInconsistentCapture}
+                    onChange={(e) => setAllowInconsistentCapture(e.target.checked)}
+                  />
+                  Back up without a snapshot when Windows cannot freeze a volume
+                </label>
+                <p className="field-hint">
+                  OPBS normally stops when Windows cannot take a shadow copy, because the image
+                  would have no single point in time and could restore as a filesystem that looks
+                  corrupt even though every block verifies. Turn this on only for a USB stick or
+                  volume that a healthy VSS refuses to snapshot (for example a flash device that
+                  returns 0x8004230c). The affected volumes are captured live, with a warning
+                  naming them; everything else is still frozen normally.
+                </p>
+              </div>
+
+              <div className="option-group">
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
                     checked={useUsnJournal}
                     onChange={(e) => setUseUsnJournal(e.target.checked)}
                   />
@@ -1224,6 +1267,12 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                 <li>Verification: {verificationEnabled ? 'Enabled' : 'Disabled'}</li>
                 <li>Used data only: {usedBlocksOnly ? 'Enabled (skips free space)' : 'Disabled (whole partition)'}</li>
                 <li>
+                  Live capture fallback:{' '}
+                  {allowInconsistentCapture
+                    ? 'Enabled (volumes VSS refuses are captured without a point in time)'
+                    : 'Disabled (stop if a volume cannot be frozen)'}
+                </li>
+                <li>
                   USN journal:{' '}
                   {useUsnJournal
                     ? parseUsnPct(usnThresholdPct) !== undefined
@@ -1255,7 +1304,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
               <button className="btn-secondary" onClick={() => setCurrentStep('select_destination')}>
                 Back
               </button>
-              <button className="btn-primary" onClick={handleStartBackup}>
+              <button className="btn-primary" onClick={() => handleStartBackup()}>
                 Start Backup
               </button>
             </div>
@@ -1271,14 +1320,39 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                 <p>{errorMsg}</p>
               </div>
               <p className="field-hint">
-                The backup did not start. See the Logs page for details, then check that
-                the destination folder exists and is writable.
+                {snapshotFailure === 'unsupported'
+                  ? 'Windows cannot take a shadow copy of this volume, so OPBS stopped before writing anything. Nothing is broken: FAT32 and exFAT volumes never support snapshots, and some USB flash devices refuse them even on NTFS. You can back it up live instead, accepting that the image has no single point in time.'
+                  : snapshotFailure === 'busy'
+                    ? 'Another shadow copy is using VSS right now, so OPBS waited and then stopped before writing anything. Let the other operation finish and try again — a scheduled backup, a restore point, or another imaging tool may be running.'
+                    : 'The backup did not start. See the Logs page for details, then check that the destination folder exists and is writable.'}
               </p>
               <div className="wizard-actions">
+                {snapshotFailure === 'busy' && (
+                  <button className="btn-primary" onClick={() => handleStartBackup()}>
+                    Try again
+                  </button>
+                )}
+                {snapshotFailure === 'unsupported' && (
+                  <button
+                    className="btn-primary"
+                    onClick={() => handleStartBackup({ allowInconsistentCapture: true })}
+                  >
+                    Back up without a snapshot
+                  </button>
+                )}
+                {snapshotFailure === 'busy' && (
+                  <button
+                    className="btn-secondary"
+                    onClick={() => handleStartBackup({ allowInconsistentCapture: true })}
+                  >
+                    Back up without a snapshot
+                  </button>
+                )}
                 <button
                   className="btn-secondary"
                   onClick={() => {
                     setErrorMsg(null);
+                    setSnapshotFailure(null);
                     setCurrentStep('select_source');
                   }}
                 >

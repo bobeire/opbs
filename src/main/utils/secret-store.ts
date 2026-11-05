@@ -95,3 +95,33 @@ export function tryDecryptSecret(value: string): { ok: true; value: string } | {
   const decrypted = decryptSecret(value);
   return isSecretEncrypted(decrypted) ? { ok: false, stillEncrypted: true } : { ok: true, value: decrypted };
 }
+
+/**
+ * A stored secret could not be turned back into plaintext on this computer or
+ * account. Permanent for the run that hit it: retrying cannot help, so callers
+ * that retry (the scheduler) check for this type and stop.
+ */
+export class UndecryptableSecretError extends Error {
+  constructor(what: string) {
+    super(
+      `The saved ${what} could not be decrypted on this computer or account. Saved secrets are ` +
+        'protected for the Windows user who stored them, so settings copied from another machine, ' +
+        'a reinstalled Windows or a different account cannot be read. Using it anyway would encrypt ' +
+        'the backup with a key nobody knows, so nothing was written. Re-enter the passphrase and try again.'
+    );
+    this.name = 'UndecryptableSecretError';
+  }
+}
+
+/**
+ * Return `value` if it is a usable secret, or throw `UndecryptableSecretError`
+ * if it is still an encrypted blob. Call this at the point a secret is about
+ * to be *used*, where failing loudly is the only safe outcome: a blob used as
+ * a passphrase silently produces an image nobody can open.
+ */
+export function requireDecryptedSecret(value: string, what: string): string {
+  if (isSecretEncrypted(value)) {
+    throw new UndecryptableSecretError(what);
+  }
+  return value;
+}

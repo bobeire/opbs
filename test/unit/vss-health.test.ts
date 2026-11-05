@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { probeVss, adviseVssFailure, vssBrokenMessage, isVolumeNotSnapshotable, volumeNotSnapshotableMessage, noneSnapshotableMessage } from '../../src/main/utils/vss-health';
+import { probeVss, adviseVssFailure, vssBrokenMessage, isVolumeNotSnapshotable, volumeNotSnapshotableMessage, noneSnapshotableMessage, snapshotFailureMessage, vssBusyMessage } from '../../src/main/utils/vss-health';
 
 /**
  * A raw VSS error code is not an answer. The 2026-11-03 field report spent
@@ -64,6 +64,50 @@ describe('VSS diagnosis', () => {
     expect(adviseVssFailure('0x800423F0')).toContain('vssadmin list writers');
   });
 
+  it('maps the codes the first two versions got wrong', () => {
+    // 0x80042309 is not an error at all: VSS_S_ASYNC_PENDING is 0x00042309, a
+    // success status. It used to be treated as "volume cannot be snapshot".
+    expect(adviseVssFailure('0x80042309')).not.toContain('cannot be snapshot');
+    // 0x80042310 is VSS_E_CORRUPT_XML_DOCUMENT, not a storage problem.
+    expect(adviseVssFailure('0x80042310')).not.toContain('no room left');
+    // The codes those two stood in for.
+    expect(adviseVssFailure('0x8004230E')).toContain('cannot be snapshot');
+    expect(adviseVssFailure('VSS_E_VOLUME_NOT_SUPPORTED_BY_PROVIDER')).toContain('cannot be snapshot');
+    expect(adviseVssFailure('0x80042317')).toContain('too many');
+    expect(adviseVssFailure('0x8004231E')).toContain('no room left');
+  });
+
+  it('does not send a refused snapshot to --allow-inconsistent', () => {
+    // VSS_E_PROVIDER_VETO is a fixable refusal (another product's provider, too
+    // little shadow storage), not a volume that cannot be snapshot. Pointing it
+    // at a live capture would recreate the 2026-11-03 failure.
+    const advice = adviseVssFailure('VSS operation failed with HRESULT 0x80042306');
+    expect(advice).toContain('refused');
+    expect(advice).toContain('vssadmin list providers');
+    expect(advice).toContain('vssadmin list shadowstorage');
+    expect(advice).toContain('Do not work around this');
+    expect(advice).not.toContain('cannot be snapshot');
+  });
+
+  it('treats the three writer-side codes as writer problems', () => {
+    // Asserted on the writer-specific wording, because the generic fallback also
+    // mentions `vssadmin list writers` and would let a missing branch pass.
+    for (const code of ['0x80042315', '0x80042318', '0x80042319']) {
+      expect(adviseVssFailure(code)).toContain('A VSS writer reported a failure');
+    }
+    expect(adviseVssFailure('VSS_E_WRITER_NOT_RESPONDING')).toContain('A VSS writer reported a failure');
+  });
+
+  it('reserves "repair Windows" for the one code that means damage', () => {
+    // Re-registering or repairing VSS because of a busy machine is the advice
+    // that was wrong before. A missing provider is the case it belongs to.
+    const advice = adviseVssFailure('0x80042304');
+    expect(advice).toContain('not registered');
+    expect(advice).toContain('sfc /scannow');
+    expect(adviseVssFailure('0x80042316')).not.toContain('sfc');
+    expect(adviseVssFailure('0x80042313')).not.toContain('sfc');
+  });
+
   it('always offers a way forward for an unrecognised failure', () => {
     // Never a dead end: some failure we have not seen before still has to
     // tell the user what to do next.
@@ -121,6 +165,46 @@ describe('when no selected volume can be snapshotted', () => {
     expect(message).toContain('property of those volumes');
     expect(message).toContain('--allow-inconsistent');
     expect(message).toContain('NTFS');
+  });
+});
+
+describe('a snapshot refused because another one is in progress', () => {
+  it('never opens with "VSS is not working on this machine"', () => {
+    // Field report 2026-11-05: the retry collided with the previous attempt's
+    // own abandoned set. The final message began "VSS is not working on this
+    // machine" and then said "Nothing is broken" in the same paragraph. The
+    // machine was healthy; the message was not.
+    const message = snapshotFailureMessage(
+      'OPBS-BOOT',
+      "VSS operation 'StartSnapshotSet' failed with HRESULT 0x80042316",
+      5,
+      29_000
+    );
+    expect(message).not.toContain('not working on this machine');
+    expect(message).toContain('Another shadow copy was still in progress');
+    expect(message).toContain('Nothing is broken');
+    expect(message).toContain('no partitions have been captured');
+    // The wait is visible, so "it failed instantly" is not the impression.
+    expect(message).toContain('29 second(s)');
+    expect(message).toContain('5 time(s)');
+    // And it points at the self-inflicted cause rather than blaming a ghost.
+    expect(message).toContain('earlier failed attempt');
+  });
+
+  it('keeps the broken-machine diagnosis for non-transient failures', () => {
+    const message = snapshotFailureMessage(
+      'Real',
+      'VSS_E_UNEXPECTED_PROVIDER_ERROR',
+      1,
+      0
+    );
+    expect(message).toContain('VSS is not working on this machine');
+  });
+
+  it('names the live-capture escape hatch without pretending it is safe', () => {
+    const message = vssBusyMessage('OPBS-BOOT', '0x80042316', 5, 29_000);
+    expect(message).toContain('Back up without a snapshot');
+    expect(message).toContain('no single point in time');
   });
 });
 

@@ -19,6 +19,7 @@ interface ScheduledBackup {
   compressionType?: 'deflate' | 'zstd';
   compressionThreads?: number;
   verificationEnabled: boolean;
+  allowInconsistentCapture?: boolean;
   incremental: boolean;
   passphrase?: string;
   enabled: boolean;
@@ -49,6 +50,8 @@ interface ScheduleForm {
   compressionType: 'deflate' | 'zstd';
   compressionThreads: number;
   verificationEnabled: boolean;
+  /** Capture live when Windows cannot freeze a volume (no point in time). */
+  allowInconsistentCapture: boolean;
   incremental: boolean;
   passphrase: string;
   passphraseConfirm: string;
@@ -99,6 +102,7 @@ interface RunBackupConfig {
   compressionType: 'deflate' | 'zstd';
   compressionThreads: number;
   verificationEnabled: boolean;
+  allowInconsistentCapture?: boolean;
   passphrase?: string;
   /** Newest image in the destination directory; set for incremental runs. */
   baseImagePath?: string;
@@ -194,6 +198,7 @@ function Schedules() {
     compressionType: 'zstd',
     compressionThreads: Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1)),
     verificationEnabled: defaults.defaultVerification,
+    allowInconsistentCapture: false,
     incremental: false,
     passphrase: '',
     passphraseConfirm: '',
@@ -235,6 +240,7 @@ function Schedules() {
       compressionType: job.compressionType || 'zstd',
       compressionThreads: job.compressionThreads || base.compressionThreads,
       verificationEnabled: job.verificationEnabled,
+      allowInconsistentCapture: job.allowInconsistentCapture ?? false,
       incremental: job.incremental,
       passphrase: job.passphrase || '',
       passphraseConfirm: job.passphrase || '',
@@ -396,6 +402,7 @@ function Schedules() {
       compressionType: scheduleForm.compressionType,
       compressionThreads: scheduleForm.compressionThreads,
       verificationEnabled: scheduleForm.verificationEnabled,
+      ...(scheduleForm.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
       incremental: scheduleForm.incremental,
       maxRetries: scheduleForm.maxRetries,
       retryDelayMinutes: scheduleForm.retryDelayMinutes,
@@ -463,6 +470,7 @@ function Schedules() {
       compressionType: job.compressionType || 'zstd',
       compressionThreads: job.compressionThreads || 0,
       verificationEnabled: job.verificationEnabled,
+      ...(job.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
       ...(job.passphrase ? { passphrase: job.passphrase } : {})
     };
     if (job.incremental) {
@@ -791,6 +799,24 @@ function Schedules() {
               />
               Incremental backup (only changed blocks; falls back to full if no image exists)
             </label>
+          </div>
+
+          <div className="setting-item">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={scheduleForm.allowInconsistentCapture}
+                onChange={(e) =>
+                  setScheduleForm({ ...scheduleForm, allowInconsistentCapture: e.target.checked })
+                }
+              />
+              Back up without a snapshot when Windows cannot freeze a volume
+            </label>
+            <p className="field-hint" style={{ marginTop: 4 }}>
+              Only for drives that cannot take a shadow copy, such as some USB flash drives.
+              The image is read live and has no single point in time, so files can change while
+              it is being captured. Leave this off unless the snapshot reliably fails on this drive.
+            </p>
           </div>
 
           <div className="setting-item">

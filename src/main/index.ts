@@ -631,6 +631,7 @@ interface UnattendedBackupSchedule {
   compressionType?: string;
   compressionThreads?: number;
   verificationEnabled: boolean;
+  allowInconsistentCapture?: boolean;
   incremental: boolean;
   passphrase?: string;
 }

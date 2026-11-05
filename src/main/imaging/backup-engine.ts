@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { DiskEnumerator } from '../utils/disk-enumerator';
+import { requireDecryptedSecret } from '../utils/secret-store';
 import {
   defaultImagePath,
   DEFAULT_BLOCK_SIZE,
@@ -122,6 +123,16 @@ export class ImagingEngine implements BackupCoordinator {
   constructor(private diskEnumerator: DiskEnumerator) {}
 
   async buildJob(config: BackupJobConfig): Promise<ImagingJob> {
+    // A stored passphrase that could not be decrypted comes back as its
+    // `enc:v1:` blob. Using that as the passphrase encrypts the image with a
+    // key nobody knows: the backup succeeds and can never be opened. Every
+    // caller (in-app scheduler, saved profiles, CLI) passes through here
+    // before a passphrase becomes an image key, so refuse here, first, before
+    // anything is enumerated or written.
+    if (config.passphrase) {
+      requireDecryptedSecret(config.passphrase, 'backup passphrase');
+    }
+
     const diskIndex = config.sourceDiskIndex;
 
     const partitions = await this.diskEnumerator.getPartitions(diskIndex);

@@ -60,6 +60,12 @@ export function probeVss(
  * lumped 0x80042313/0x80042314 in with provider failure. All three are
  * transient. Telling someone to reinstall VSS because a snapshot was already
  * in progress is the worst kind of advice: authoritative, confident, wrong.
+ *
+ * Corrected a second time against the same header: 0x80042309 is not an
+ * error at all (VSS_S_ASYNC_PENDING is 0x00042309, a success status), and
+ * 0x80042310 is VSS_E_CORRUPT_XML_DOCUMENT, not a storage code. The codes
+ * those two were standing in for are 0x8004230E (volume not supported by the
+ * provider) and 0x80042317 (too many shadow copies).
  */
 export function adviseVssFailure(message: string): string {
   const m = message.toLowerCase();
@@ -93,9 +99,11 @@ export function adviseVssFailure(message: string): string {
     );
   }
 
-  // Writer errors 0x800423F0..0x800423F4. These come from a specific writer;
-  // only 0x800423F3 is worth retrying.
-  if (/0x800423f[0-4]|writererror/.test(m)) {
+  // Writer errors 0x800423F0..0x800423F4, plus the three writer-side codes
+  // 0x80042315 (unexpected writer error), 0x80042318 (writer infrastructure)
+  // and 0x80042319 (writer not responding). These come from a specific
+  // writer; only 0x800423F3 is worth retrying.
+  if (/0x800423f[0-4]|0x8004231[589]|writererror|unexpected_writer_error|writer_infrastructure|writer_not_responding/.test(m)) {
     const nonRetryable = /0x800423f4|writererror_nonretryable/.test(m);
     return (
       'A VSS writer reported a failure while preparing the snapshot. Run `vssadmin list writers` ' +
@@ -104,6 +112,34 @@ export function adviseVssFailure(message: string): string {
       (nonRetryable
         ? ' This particular code is marked non-retryable by VSS, so the writer itself needs attention.'
         : ' Retrying is reasonable; some of these clear on their own.')
+    );
+  }
+
+  // VSS_E_PROVIDER_VETO (0x80042306): a provider refused to create the shadow
+  // copy. Common causes are another backup or security product's provider,
+  // too little shadow-copy storage, or a volume that was changing too fast.
+  // This is not "the volume cannot be snapshotted", so it must not point
+  // at --allow-inconsistent: that turns a fixable refusal into a live read.
+  if (/0x80042306|provider_veto/.test(m)) {
+    return (
+      'A shadow copy provider refused to create the snapshot. Common causes are another backup or ' +
+      'security product\'s VSS provider, too little shadow-copy storage, or a volume that was busy. ' +
+      'Check `vssadmin list providers` (only the Microsoft Software Shadow Copy provider and ' +
+      'products you know should be listed) and `vssadmin list shadowstorage`, look for VSS or ' +
+      'VolSnap errors in the Application event log, and retry once. Do not work around this with ' +
+      '--allow-inconsistent: fix the cause instead.'
+    );
+  }
+
+  // VSS_E_PROVIDER_NOT_REGISTERED (0x80042304): damage to the VSS installation
+  // itself, not a busy machine - the one case where repairing Windows is the
+  // right advice.
+  if (/0x80042304|provider_not_registered/.test(m)) {
+    return (
+      'The shadow copy provider is not registered with Windows, which points at damage to the VSS ' +
+      'installation rather than a busy machine. `vssadmin list providers` should list \'Microsoft ' +
+      'Software Shadow Copy provider\'. If it does not, repairing system files usually restores ' +
+      'it: run `sfc /scannow`, then `DISM /Online /Cleanup-Image /RestoreHealth`, restart, and retry.'
     );
   }
 
@@ -118,7 +154,7 @@ export function adviseVssFailure(message: string): string {
   }
 
   // VSS_E_VOLUME_NOT_SUPPORTED (0x8004230C) and friends.
-  if (/0x8004230c|0x80042309|volume_not_supported|unsupported_volume/.test(m)) {
+  if (/0x8004230c|0x8004230e|volume_not_supported|unsupported_volume/.test(m)) {
     return (
       'This volume cannot be snapshot. FAT32 and exFAT volumes never can, and some storage ' +
       'controllers do not support it. For those volumes, only a live capture is possible: use ' +
@@ -127,7 +163,7 @@ export function adviseVssFailure(message: string): string {
   }
 
   // VSS_E_INSUFFICIENT_STORAGE and snapshot-count exhaustion.
-  if (/0x8004231f|0x80042310|insufficient_storage|maximum_number_of_snapshots/.test(m)) {
+  if (/0x8004231f|0x80042317|0x8004231e|insufficient_storage|maximum_number_of_snapshots|maximum_diffarea/.test(m)) {
     return (
       'There is no room left for shadow copies on this volume, or too many already exist. Free ' +
       'some space or delete old shadow copies with `vssadmin delete shadows`, then retry.'
@@ -217,6 +253,56 @@ export function noneSnapshotableMessage(labels: string[], error: string): string
 export function isVolumeNotSnapshotable(message: string): boolean {
   const m = message.toLowerCase();
   return /0x8004230c|0x80042309|volume_not_supported|unsupported_volume/.test(m);
+}
+
+/**
+ * The message for a snapshot refused because another set is already in
+ * progress (0x80042316), or another failure that is transient by nature.
+ *
+ * This must not reuse vssBrokenMessage: its first sentence is "VSS is not
+ * working on this machine", which is exactly what the 2026-11-05 field report
+ * showed to be false while the very same message went on to say "Nothing is
+ * broken". A lock is a wait, not a diagnosis. (Field report 2026-11-05: a
+ * failed attempt left its own set behind, the retry hit 0x80042316, and the
+ * error accused a healthy machine of broken VSS.)
+ */
+export function vssBusyMessage(
+  volumeLabel: string,
+  error: string,
+  attempts: number,
+  waitedMs: number
+): string {
+  const waited = waitedMs > 0 ? `${Math.round(waitedMs / 1000)} second(s)` : 'no time';
+  return (
+    `Another shadow copy was still in progress, so a shadow copy of ${volumeLabel} could not be ` +
+    `created (${error}). Nothing is broken and no partitions have been captured. OPBS waited ` +
+    `${waited} and tried ${attempts} time(s). This is a wait, not a repair: a scheduled backup, ` +
+    `a restore point, another imaging tool, or a snapshot set left by an earlier failed attempt ` +
+    `can hold the lock. Let the other operation finish and try again. If it keeps happening, an ` +
+    `elevated \`vssadmin list shadows\` shows what is there; a set left by OPBS 0.6.115 or older ` +
+    `can also be cleared by restarting the Volume Shadow Copy service. OPBS 0.6.116 and later ` +
+    `delete their own set when a snapshot attempt fails. If you accept an image with no single ` +
+    `point in time, enable "Back up without a snapshot" in the backup options (or use ` +
+    `--allow-inconsistent).`
+  );
+}
+
+/**
+ * Pick the honest message for a snapshot that never succeeded.
+ *
+ * Transient failures get the "wait, nothing is broken" text; everything else
+ * gets the machine/volume diagnosis. Keeping the choice in one function makes
+ * it testable without running VSS, and stops the two messages drifting apart.
+ */
+export function snapshotFailureMessage(
+  volumeLabel: string,
+  error: string,
+  attempts: number,
+  waitedMs: number
+): string {
+  return isTransientVssFailure(error)
+    ? vssBusyMessage(volumeLabel, error, attempts, waitedMs)
+    : vssBrokenMessage(volumeLabel, error);
 }
 
 /**

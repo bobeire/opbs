@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { BackupManager, BackupConfig } from '../backup/manager';
 import { ScheduledBackup, ScheduledVerification, ScheduledRestoreDrill, ScheduledMigrateDrill, ScheduledScrub, SettingsManager } from '../utils/settings-manager';
+import { UndecryptableSecretError } from '../utils/secret-store';
 import { applyRetention, findNewestImage, pickDrillImage, resolveScheduledRetention, scanBackupDirectory, type BackupImageEntry } from './retention';
 import { cloudImageEntries } from './retention-s3';
 import { isCloudImageLocation, materializeImageFromCloud, type StagedCloudImage } from '../imaging/cloud-restore';
@@ -63,6 +64,15 @@ function broadcastActivity(event: ActivityEvent): void {
   for (const win of electron.BrowserWindow.getAllWindows()) {
     win.webContents.send('activity', event);
   }
+}
+
+/**
+ * Failures that retrying cannot fix. A saved passphrase that cannot be
+ * decrypted on this machine will fail the same way on every attempt, so the
+ * retries would only delay telling the user.
+ */
+export function isPermanentBackupFailure(error: unknown): boolean {
+  return error instanceof UndecryptableSecretError;
 }
 
 export class BackupScheduler {
@@ -869,6 +879,7 @@ export class BackupScheduler {
       compressionThreads: config.compressionThreads,
       verificationEnabled: config.verificationEnabled,
       ...(config.usedBlocksOnly ? { usedBlocksOnly: true } : {}),
+      ...(config.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
       ...(config.useUsnJournal ? { useUsnJournal: true } : {}),
       ...(config.usnFullScanThreshold !== undefined
         ? { usnFullScanThreshold: config.usnFullScanThreshold }
@@ -933,7 +944,7 @@ export class BackupScheduler {
       const maxRetries = Math.max(0, Math.floor(config.maxRetries ?? 2));
       const baseDelayMs = Math.max(1, config.retryDelayMinutes ?? 5) * 60_000;
       const state = this.retries.get(config.id) ?? { attempt: 0 };
-      if (state.attempt < maxRetries) {
+      if (!isPermanentBackupFailure(error) && state.attempt < maxRetries) {
         state.attempt += 1;
         const delayMs = baseDelayMs * 2 ** (state.attempt - 1);
         logger.warn(

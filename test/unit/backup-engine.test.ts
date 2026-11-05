@@ -133,6 +133,27 @@ describe('ImagingEngine', () => {
   });
 
   describe('buildJob', () => {
+    it('refuses an undecryptable saved passphrase before touching anything', async () => {
+      // A stored passphrase that could not be decrypted arrives as its enc:v1:
+      // blob. Used as a passphrase it would encrypt the image with a key nobody
+      // knows, and the backup would still report success.
+      const enumerator = createFakeEnumerator();
+      const refusing = new ImagingEngine(enumerator);
+      await expect(
+        refusing.buildJob({
+          sourceDiskIndex: 0,
+          sourcePartitions: [0, 2],
+          destinationPath: dir,
+          compressionLevel: 5,
+          verificationEnabled: false,
+          passphrase: 'enc:v1:AQAAANCMnd8BFdERjHoAwE'
+        })
+      ).rejects.toThrow(/could not be decrypted/);
+      // Refused first: no disks were enumerated and no image was started.
+      expect(enumerator.getPartitions).not.toHaveBeenCalled();
+      expect(fs.readdirSync(dir)).toHaveLength(0);
+    });
+
     it('builds a job from the selected partitions', async () => {
       const job = await engine.buildJob({
         sourceDiskIndex: 0,

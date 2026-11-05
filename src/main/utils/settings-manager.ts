@@ -178,6 +178,8 @@ export interface ScheduledBackup {
   usnFullScanThreshold?: number;
   /** Only capture allocated clusters; skip free space (NTFS/FAT32/exFAT). */
   usedBlocksOnly?: boolean;
+  /** Capture live when Windows cannot freeze a volume (no point in time). */
+  allowInconsistentCapture?: boolean;
   passphrase?: string;
   enabled: boolean;
   lastRun?: string;
@@ -213,6 +215,8 @@ export interface BackupProfile {
   passphrase?: string;
   /** Only capture allocated clusters (NTFS/FAT32/exFAT); skip free space. */
   usedBlocksOnly?: boolean;
+  /** Capture live when Windows cannot freeze a volume (no point in time). */
+  allowInconsistentCapture?: boolean;
   /** Read only NTFS-journal-changed blocks for incrementals (USN tracking). */
   useUsnJournal?: boolean;
   /** Fraction (0..1) of a partition that USN may report as changed before the

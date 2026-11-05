@@ -54,7 +54,7 @@ import {
   type AllocationMap
 } from '../imaging/capture-consistency';
 import { writeRestoreMarker, clearRestoreMarker } from '../utils/restore-marker';
-import { vssBrokenMessage, adviseVssFailure, isTransientVssFailure, isVolumeNotSnapshotable, volumeNotSnapshotableMessage, noneSnapshotableMessage } from '../utils/vss-health';
+import { snapshotFailureMessage, adviseVssFailure, isTransientVssFailure, isVolumeNotSnapshotable, volumeNotSnapshotableMessage, noneSnapshotableMessage } from '../utils/vss-health';
 import { planNtfsShrink, NtfsShrinkPlan } from '../imaging/fs/ntfs-shrink';
 import { planFat32Shrink, Fat32ShrinkPlan } from '../imaging/fs/fat32-shrink';
 import { detectFatType } from '../imaging/fs/fat32';
@@ -95,6 +95,15 @@ interface SnapshotHandle {
 }
 
 const SECTOR_SIZE = 512;
+
+/**
+ * How long to wait for another shadow copy to finish before giving up.
+ * Total wait is 29 s across five attempts; a snapshot set normally releases
+ * in well under a second, so this covers a transient collision without
+ * making a genuinely stuck machine look like a hang.
+ */
+const SNAPSHOT_ATTEMPTS = 5;
+const SNAPSHOT_RETRY_DELAYS_MS = [2_000, 4_000, 8_000, 15_000];
 
 /**
  * Write a job result to both the result.json file (crash recovery) and the
@@ -260,12 +269,29 @@ export async function runBackupJob(
     // progress, the two freeze timeouts) turns a lot of "the backup failed"
     // into "it worked on the second try". Anything else is a decision rather
     // than a wait and is not retried.
-    for (let attempt = 0; attempt < 3 && !snapshots; attempt++) {
+    //
+    // The 2026-11-05 field report showed two seconds is not enough to call a
+    // machine broken: a set left by the *previous* attempt was still in
+    // progress 66 seconds later. Wait about half a minute in total, and make
+    // the wait visible instead of sitting silently on "snapshotting".
+    let attemptsMade = 0;
+    let waitedMs = 0;
+    for (let attempt = 0; attempt < SNAPSHOT_ATTEMPTS && !snapshots; attempt++) {
       if (attempt > 0) {
-        const delayMs = 2_000 * attempt;
-        logger.info(`Retrying the VSS snapshot set in ${delayMs}ms (attempt ${attempt + 1} of 3)`);
+        const delayMs =
+          SNAPSHOT_RETRY_DELAYS_MS[attempt - 1] ??
+          SNAPSHOT_RETRY_DELAYS_MS[SNAPSHOT_RETRY_DELAYS_MS.length - 1];
+        waitedMs += delayMs;
+        progress.currentPartition = 'Waiting for another snapshot to finish…';
+        writeProgress('snapshotting');
+        logger.info(
+          `Another shadow copy is in progress; waiting ${delayMs}ms before attempt ` +
+            `${attempt + 1} of ${SNAPSHOT_ATTEMPTS}`
+        );
         await new Promise((resolve) => setTimeout(resolve, delayMs));
+        progress.currentPartition = 'snapshotting';
       }
+      attemptsMade = attempt + 1;
       try {
         if (typeof native.createSnapshotSet === 'function') {
           snapshots = native.createSnapshotSet(paths);
@@ -366,11 +392,13 @@ export async function runBackupJob(
         });
       }
       // The refusal distinguishes "VSS is broken on this machine" from
-      // "this volume cannot be snapshotted" — they need different fixes, and
-      // conflating them is part of why the 2026-11-03 report took three days
-      // to understand.
+      // "this volume cannot be snapshotted" and from "another snapshot is
+      // running" — they need different fixes, and conflating them is part of
+      // why the 2026-11-03 report took three days to understand.
       const label = [...volumes.values()].join(', ');
-      throw new Error(vssBrokenMessage(label, detail), { cause: lastError });
+      throw new Error(snapshotFailureMessage(label, detail, attemptsMade, waitedMs), {
+        cause: lastError,
+      });
     }
     for (const p of job2.partitions) {
       if (volumes.has(p.volumeDevicePath ?? '')) {

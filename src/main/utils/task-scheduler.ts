@@ -388,6 +388,7 @@ export function buildUnattendedBackupConfig(schedule: {
   compressionType?: string;
   compressionThreads?: number;
   verificationEnabled: boolean;
+  allowInconsistentCapture?: boolean;
   incremental: boolean;
   passphrase?: string;
 }): Record<string, unknown> {
@@ -399,6 +400,7 @@ export function buildUnattendedBackupConfig(schedule: {
     compressionType: schedule.compressionType ?? 'zstd',
     compressionThreads: schedule.compressionThreads ?? 1,
     verificationEnabled: schedule.verificationEnabled,
+    ...(schedule.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
     incremental: schedule.incremental,
     // For incremental: omit baseImagePath — the CLI resolves it dynamically
     // via findNewestImage() so each run picks up the latest chain.
@@ -426,6 +428,7 @@ export async function registerUnattendedBackupTask(
     compressionType?: string;
     compressionThreads?: number;
     verificationEnabled: boolean;
+    allowInconsistentCapture?: boolean;
     incremental: boolean;
     passphrase?: string;
   }

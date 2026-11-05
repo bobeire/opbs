@@ -27,7 +27,13 @@ vi.mock('../../src/main/utils/electron-access', () => ({
   })
 }));
 
-import { encryptSecret, decryptSecret, isSecretEncrypted } from '../../src/main/utils/secret-store';
+import {
+  encryptSecret,
+  decryptSecret,
+  isSecretEncrypted,
+  requireDecryptedSecret,
+  UndecryptableSecretError
+} from '../../src/main/utils/secret-store';
 
 describe('secret-store', () => {
   beforeEach(() => {
@@ -89,5 +95,21 @@ describe('secret-store', () => {
   it('falls back to plaintext when encryptString throws', () => {
     mocks.encryptThrows = true;
     expect(encryptSecret('pw')).toBe('pw');
+  });
+
+  it('refuses a secret that is still an encrypted blob', () => {
+    // The dangerous case: decryption fails, decryptSecret hands the blob back,
+    // and anything that uses it as a passphrase encrypts with a key nobody has.
+    mocks.decryptThrows = true;
+    const hydrated = decryptSecret('enc:v1:AAAA');
+    expect(() => requireDecryptedSecret(hydrated, 'backup passphrase')).toThrow(UndecryptableSecretError);
+    expect(() => requireDecryptedSecret(hydrated, 'backup passphrase')).toThrow(/could not be decrypted/);
+    expect(() => requireDecryptedSecret(hydrated, 'backup passphrase')).toThrow(/nothing was written/);
+  });
+
+  it('lets a real secret through, whether or not it ever was encrypted', () => {
+    expect(requireDecryptedSecret('plain passphrase', 'backup passphrase')).toBe('plain passphrase');
+    const stored = encryptSecret('correct horse');
+    expect(requireDecryptedSecret(decryptSecret(stored), 'backup passphrase')).toBe('correct horse');
   });
 });

@@ -147,16 +147,25 @@ std::unordered_map<std::string, LiveSnapshot> g_liveSnapshots;
 /**
  * Guarantees a snapshot set is never left unusable after a failure.
  *
- * There is no AbortSnapshotSet in the VSS API. The documented cleanup is
- * different depending on how far the sequence got (Aborting VSS Operations):
+ * There is no AbortSnapshotSet in the VSS API, and the two documents that
+ * describe the cleanup only look contradictory until you separate "notify the
+ * writers" from "destroy the shadow copies":
  *
- *   - Before PrepareForBackup: releasing the IVssBackupComponents object is
- *     the abort. The owner does that immediately after this guard runs.
- *   - Once PrepareForBackup has succeeded: AbortBackup() must tell the writers
- *     the backup will not complete, or they stay wedged — and wedged writers
- *     are what makes the *next* snapshot fail for no visible reason.
- *   - After DoSnapshotSet: snapshots may exist and have to be deleted
- *     explicitly; aborting is no longer possible.
+ *   - AbortBackup's reference page says it "must be called if a backup
+ *     operation terminates after the creation of a shadow copy set with
+ *     StartSnapshotSet and before DoSnapshotSet returns", and that it is
+ *     ignored when nothing is underway.
+ *   - "Aborting VSS Operations" says a requester only needs to generate the
+ *     Abort event after PrepareForBackup, and may simply release the object
+ *     if PrepareForBackup was never reached or failed.
+ *
+ * So: call AbortBackup whenever a started set will not be committed (cheap,
+ * safe, and it is the only way to unwedge writers after PrepareForBackup), and
+ * *also* delete the set explicitly. Releasing the requester is not immediate
+ * enough to be a cleanup strategy on its own — the 2026-11-05 field report had
+ * AddToSnapshotSet fail with 0x8004230c, the set survive, and the next attempt
+ * 66 seconds later fail at StartSnapshotSet with 0x80042316, while Macrium had
+ * not started yet (its log begins at 09:06:31).
  *
  * This guard exists because the shipped code called CoUninitialize() *inside*
  * each failure branch, before the components object was released. Tearing down
@@ -168,11 +177,11 @@ std::unordered_map<std::string, LiveSnapshot> g_liveSnapshots;
  */
 class SnapshotSetGuard {
 public:
-    explicit SnapshotSetGuard(IVssBackupComponents* components)
-        : components_(components) {}
+    SnapshotSetGuard(IVssBackupComponents* components, VSS_ID snapshotSetId)
+        : components_(components), snapshotSetId_(snapshotSetId) {}
 
-    // PrepareForBackup succeeded: from now on, a failure owes the writers an
-    // AbortBackup.
+    // PrepareForBackup succeeded: from now on, a failure definitely owes the
+    // writers an AbortBackup.
     void Prepared() { prepared_ = true; }
 
     // DoSnapshotSet succeeded: cleanup now means deleting the snapshots.
@@ -188,6 +197,25 @@ public:
         // exception terminates the process.
         if (!armed_ || components_ == nullptr) return;
 
+        if (!committed_) {
+            // Tell VSS and the writers this backup is over. Ignored if nothing
+            // is underway; required once PrepareForBackup has run, and the
+            // documented requirement after StartSnapshotSet.
+            components_->AbortBackup(); // best effort; writers come first
+        }
+
+        if (!prepared_ && !committed_) {
+            // The set was started but never prepared. Delete it explicitly as
+            // well: AbortBackup does not guarantee the set is gone before the
+            // requester object is released, and a set that lingers blocks the
+            // next attempt with VSS_E_SNAPSHOT_SET_IN_PROGRESS.
+            LONG deleted = 0;
+            VSS_ID notDeleted = GUID_NULL;
+            components_->DeleteSnapshots(
+                snapshotSetId_, VSS_OBJECT_SNAPSHOT_SET, TRUE, &deleted, &notDeleted);
+            return;
+        }
+
         if (prepared_ || committed_) {
             // Any snapshot that was actually committed must go, whether or not
             // we got as far as collecting its properties.
@@ -199,10 +227,6 @@ public:
                     id, VSS_OBJECT_SNAPSHOT, TRUE, &deleted, &notDeleted);
             }
         }
-
-        if (prepared_ && !committed_) {
-            components_->AbortBackup(); // best effort; writers come first
-        }
     }
 
     SnapshotSetGuard(const SnapshotSetGuard&) = delete;
@@ -210,6 +234,7 @@ public:
 
 private:
     IVssBackupComponents* components_;
+    VSS_ID snapshotSetId_ = GUID_NULL;
     std::vector<VSS_ID> snapshotIds_;
     bool prepared_ = false;
     bool committed_ = false;
@@ -354,7 +379,7 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
         VssErrorWithHr(L"StartSnapshotSet", hr);
     }
     // From here on, a failure owes cleanup — see SnapshotSetGuard.
-    SnapshotSetGuard setGuard(components.get());
+    SnapshotSetGuard setGuard(components.get(), snapshotSetId);
     
     // Every volume goes into the SAME snapshot set, so DoSnapshotSet freezes
     // them at one instant. Separate sets meant a multi-partition backup
