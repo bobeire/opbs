@@ -12,6 +12,8 @@
 #include <mutex>
 #include <vector>
 #include <unordered_map>
+#include <fstream>
+#include <cstdlib>
 
 #ifdef _MSC_VER
 #pragma comment(lib, "vssapi.lib")
@@ -19,9 +21,53 @@
 
 namespace {
 
+/**
+ * Convert wide text to UTF-8. The old code used
+ * `std::string(msg.begin(), msg.end())`, which narrows each wchar_t to one
+ * byte. That is fine for ASCII and silently corrupts anything else; Node then
+ * reports a replacement character and the real failure disappears.
+ */
+std::string Narrow(const std::wstring& text) {
+    if (text.empty()) return {};
+    const int size = WideCharToMultiByte(
+        CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return {};
+    std::string out(static_cast<size_t>(size), '\0');
+    WideCharToMultiByte(
+        CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), size, nullptr, nullptr);
+    return out;
+}
+
+/**
+ * Opt-in trace for field debugging: set OPBS_VSS_TRACE to a file path and every
+ * VSS step, HRESULT and cleanup call is appended there. Never throws, never
+ * changes behaviour when unset.
+ */
+void VssTrace(const std::string& text) {
+    const char* path = std::getenv("OPBS_VSS_TRACE");
+    if (path == nullptr || *path == '\0') return;
+    std::ofstream out(path, std::ios::app);
+    if (!out) return;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    out << '[' << std::setfill('0')
+        << std::setw(2) << st.wHour << ':' << std::setw(2) << st.wMinute << ':'
+        << std::setw(2) << st.wSecond << '.' << std::setw(3) << st.wMilliseconds << "] "
+        << text << '\n';
+}
+
+void VssTrace(const std::wstring& text) { VssTrace(Narrow(text)); }
+
+std::string HexHr(HRESULT hr) {
+    std::ostringstream ss;
+    ss << "0x" << std::hex << static_cast<unsigned long>(hr);
+    return ss.str();
+}
+
 void VssError(const wchar_t* operation) {
-    throw std::runtime_error("VSS operation failed during: " + 
-        std::string(operation, operation + wcslen(operation)));
+    std::wstring msg = L"VSS operation failed during: " + std::wstring(operation);
+    VssTrace(msg);
+    throw std::runtime_error(Narrow(msg));
 }
 
 void VssErrorWithHr(const wchar_t* operation, HRESULT hr) {
@@ -29,7 +75,8 @@ void VssErrorWithHr(const wchar_t* operation, HRESULT hr) {
     ss << L"VSS operation '" << operation << L"' failed with HRESULT 0x" 
        << std::hex << static_cast<unsigned long>(hr);
     std::wstring msg = ss.str();
-    throw std::runtime_error(std::string(msg.begin(), msg.end()));
+    VssTrace(msg);
+    throw std::runtime_error(Narrow(msg));
 }
 
 std::wstring GetVolumeRoot(const std::string& volumePath) {
@@ -197,11 +244,15 @@ public:
         // exception terminates the process.
         if (!armed_ || components_ == nullptr) return;
 
+        VssTrace(std::string("guard cleanup: prepared=") + (prepared_ ? "1" : "0") +
+                 " committed=" + (committed_ ? "1" : "0"));
+
         if (!committed_) {
             // Tell VSS and the writers this backup is over. Ignored if nothing
             // is underway; required once PrepareForBackup has run, and the
             // documented requirement after StartSnapshotSet.
-            components_->AbortBackup(); // best effort; writers come first
+            HRESULT abortHr = components_->AbortBackup(); // best effort; writers come first
+            VssTrace("guard AbortBackup hr=" + HexHr(abortHr));
         }
 
         if (!prepared_ && !committed_) {
@@ -211,8 +262,10 @@ public:
             // next attempt with VSS_E_SNAPSHOT_SET_IN_PROGRESS.
             LONG deleted = 0;
             VSS_ID notDeleted = GUID_NULL;
-            components_->DeleteSnapshots(
+            HRESULT deleteHr = components_->DeleteSnapshots(
                 snapshotSetId_, VSS_OBJECT_SNAPSHOT_SET, TRUE, &deleted, &notDeleted);
+            VssTrace("guard DeleteSnapshots(set) hr=" + HexHr(deleteHr) +
+                     " deleted=" + std::to_string(deleted));
             return;
         }
 
@@ -223,8 +276,10 @@ public:
                 if (id == GUID_NULL) continue;
                 LONG deleted = 0;
                 VSS_ID notDeleted = GUID_NULL;
-                components_->DeleteSnapshots(
+                HRESULT deleteHr = components_->DeleteSnapshots(
                     id, VSS_OBJECT_SNAPSHOT, TRUE, &deleted, &notDeleted);
+                VssTrace("guard DeleteSnapshots(committed) hr=" + HexHr(deleteHr) +
+                         " deleted=" + std::to_string(deleted));
             }
         }
     }
@@ -307,7 +362,8 @@ void CheckWriterState(IVssBackupComponents* components, const wchar_t* phase) {
                << L"that writer is failing. Run 'vssadmin list writers' to see which one, then fix "
                << L"or restart that writer.";
             std::wstring msg = ss.str();
-            throw std::runtime_error(std::string(msg.begin(), msg.end()));
+            VssTrace(msg);
+            throw std::runtime_error(Narrow(msg));
         }
     }
 }
@@ -375,6 +431,7 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
 
     VSS_ID snapshotSetId = GUID_NULL;
     hr = components->StartSnapshotSet(&snapshotSetId);
+    VssTrace("StartSnapshotSet hr=" + HexHr(hr));
     if (FAILED(hr)) {
         VssErrorWithHr(L"StartSnapshotSet", hr);
     }
@@ -389,6 +446,7 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
         std::wstring volumeRoot = GetVolumeRoot(volumePaths[v]);
         VSS_PWSZ pwszVolume = const_cast<VSS_PWSZ>(volumeRoot.c_str());
         hr = components->AddToSnapshotSet(pwszVolume, GUID_NULL, &snapshotIds[v]);
+        VssTrace("AddToSnapshotSet " + Narrow(volumeRoot) + " hr=" + HexHr(hr));
         if (FAILED(hr)) {
             VssErrorWithHr(L"AddToSnapshotSet", hr);
         }
@@ -396,6 +454,7 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
     
     IVssAsync* pAsync = nullptr;
     hr = components->PrepareForBackup(&pAsync);
+    VssTrace("PrepareForBackup hr=" + HexHr(hr));
     if (FAILED(hr)) {
         VssErrorWithHr(L"PrepareForBackup", hr);
     }
@@ -405,6 +464,7 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
     setGuard.Prepared();
     
     hr = WaitForAsync(pAsync);
+    VssTrace("PrepareForBackup wait hr=" + HexHr(hr));
     if (FAILED(hr)) {
         VssErrorWithHr(L"PrepareForBackup wait", hr);
     }
@@ -414,11 +474,13 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
 
     pAsync = nullptr;
     hr = components->DoSnapshotSet(&pAsync);
+    VssTrace("DoSnapshotSet hr=" + HexHr(hr));
     if (FAILED(hr)) {
         VssErrorWithHr(L"DoSnapshotSet", hr);
     }
     
     hr = WaitForAsync(pAsync);
+    VssTrace("DoSnapshotSet wait hr=" + HexHr(hr));
     if (FAILED(hr)) {
         VssErrorWithHr(L"DoSnapshotSet wait", hr);
     }
