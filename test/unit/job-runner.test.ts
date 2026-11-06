@@ -2729,6 +2729,69 @@ describe('multi-volume backups share one point in time', () => {
     expect(result.warnings.some((w) => w.includes('not working on this machine'))).toBe(false);
   });
 
+  const usbJob = (): string =>
+    JSON.stringify({
+      type: 'backup',
+      imagePath: path.join(dir, 'usb.opbs'),
+      blockSize: BLOCK,
+      compressionLevel: 3,
+      verificationEnabled: false,
+      partitions: [
+        { diskIndex: 1, partitionIndex: 1, size: BLOCK, offset: 1048576, label: 'OPBS-BOOT', readSource: 'volume', volumeDevicePath: '\\\\.\\Volume{boot}\\' },
+        { diskIndex: 1, partitionIndex: 2, size: BLOCK, offset: 1048576 + BLOCK, label: 'OPBS-DATA', readSource: 'volume', volumeDevicePath: '\\\\.\\Volume{data}\\' }
+      ]
+    });
+
+  it('treats VSS_E_VOLUME_NOT_SUPPORTED_BY_PROVIDER (0x8004230e) as a per-volume limit too', async () => {
+    // The classifier carried a mistyped code (0x80042309, a success status)
+    // where 0x8004230e belongs, so a provider that rejected one volume refused
+    // the whole backup instead of freezing the rest.
+    fs.writeFileSync(jobPath, usbJob());
+    const native = createMockNative() as unknown as {
+      createSnapshot: ReturnType<typeof vi.fn>;
+      createSnapshotSet: () => Array<{ id: string; devicePath: string }>;
+    };
+    const rejected = () => new Error("VSS operation 'AddToSnapshotSet' failed with HRESULT 0x8004230e");
+    native.createSnapshotSet = () => {
+      throw rejected();
+    };
+    native.createSnapshot = vi.fn((volumePath: string) => {
+      if (volumePath.includes('boot')) throw rejected();
+      return { id: 'snap-data', devicePath: '\\\\.\\ShadowCopy2' };
+    });
+
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native as never);
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
+    expect(result.ok).toBe(true);
+    const warning = result.warnings.find((w) => w.includes('OPBS-BOOT')) ?? '';
+    expect(warning).toContain('captured live');
+  });
+
+  it('does not fall back to a live capture when a provider vetoes the snapshot', async () => {
+    // 0x80042306 (VSS_E_PROVIDER_VETO) is a fixable refusal, not a property of
+    // the volume. Degrading it to a live read would recreate the failure this
+    // project was hurt by: an image that verifies block by block and restores
+    // as a corrupt filesystem.
+    fs.writeFileSync(jobPath, usbJob());
+    const native = createMockNative() as unknown as {
+      createSnapshot: ReturnType<typeof vi.fn>;
+      createSnapshotSet: () => Array<{ id: string; devicePath: string }>;
+    };
+    native.createSnapshotSet = () => {
+      throw new Error("VSS operation 'DoSnapshotSet' failed with HRESULT 0x80042306");
+    };
+    native.createSnapshot = vi.fn(() => ({ id: 'should-not-happen', devicePath: '\\\\.\\ShadowCopy9' }));
+
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native as never);
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
+    expect(result.ok).toBe(false);
+    // No per-volume retry was attempted, so nothing was quietly captured live.
+    expect(native.createSnapshot).not.toHaveBeenCalled();
+    expect(result.warnings.some((w) => w.includes('captured live'))).toBe(false);
+  });
+
   it('refuses all-FAT32 media without calling VSS broken', async () => {
     fs.writeFileSync(
       jobPath,

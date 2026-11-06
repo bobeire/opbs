@@ -108,6 +108,20 @@ describe('VSS diagnosis', () => {
     expect(adviseVssFailure('0x80042313')).not.toContain('sfc');
   });
 
+  it('only treats the two unsupported-volume codes as a per-volume limit', () => {
+    // This classifier decides whether a volume is captured live instead of
+    // the backup being refused, so it must stay narrow.
+    for (const supported of ['0x8004230c', '0x8004230E', 'VSS_E_VOLUME_NOT_SUPPORTED', 'VSS_E_VOLUME_NOT_SUPPORTED_BY_PROVIDER']) {
+      expect(isVolumeNotSnapshotable(`VSS operation 'AddToSnapshotSet' failed with HRESULT ${supported}`)).toBe(true);
+    }
+    // 0x80042309 is not an error (VSS_S_ASYNC_PENDING is 0x00042309).
+    expect(isVolumeNotSnapshotable('0x80042309')).toBe(false);
+    // Fixable refusals must never degrade to a live capture.
+    for (const fixable of ['0x80042306', '0x80042316', '0x8004231f', '0x80042304', '0x80042313', '0x800423f4']) {
+      expect(isVolumeNotSnapshotable(`HRESULT ${fixable}`)).toBe(false);
+    }
+  });
+
   it('always offers a way forward for an unrecognised failure', () => {
     // Never a dead end: some failure we have not seen before still has to
     // tell the user what to do next.

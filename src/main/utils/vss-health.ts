@@ -252,7 +252,14 @@ export function noneSnapshotableMessage(labels: string[], error: string): string
  */
 export function isVolumeNotSnapshotable(message: string): boolean {
   const m = message.toLowerCase();
-  return /0x8004230c|0x80042309|volume_not_supported|unsupported_volume/.test(m);
+  // 0x8004230C is VSS_E_VOLUME_NOT_SUPPORTED and 0x8004230E is
+  // VSS_E_VOLUME_NOT_SUPPORTED_BY_PROVIDER: both mean "this volume, not the
+  // machine". 0x80042309 used to stand in for the second and is not an error
+  // at all (VSS_S_ASYNC_PENDING is 0x00042309). Because this decides whether a
+  // volume is captured live instead of refusing the backup, it must stay
+  // narrow: a provider veto (0x80042306), a set already in progress
+  // (0x80042316) or a full shadow-storage area are fixable and must not match.
+  return /0x8004230c|0x8004230e|volume_not_supported|unsupported_volume/.test(m);
 }
 
 /**
