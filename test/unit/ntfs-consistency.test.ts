@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { checkNtfsConsistency, describeConsistency } from '../../src/main/imaging/fs/ntfs-consistency';
-import { buildFileRecord, FILE_RECORD, standardInfo, fileNameAttr, volumeInfoAttr } from '../helpers/ntfs-fixture';
+import {
+  buildFileRecord,
+  FILE_RECORD,
+  standardInfo,
+  fileNameAttr,
+  volumeInfoAttr,
+  attributeListValue
+} from '../helpers/ntfs-fixture';
 import type { DataRun } from '../../src/main/imaging/fs/ntfs';
 
 const SECTOR = 512;
@@ -17,10 +24,23 @@ const MFT_LCN = 4;
  */
 function syntheticVolume(spec: {
   /** Records to write, beyond $MFT and $Bitmap. */
-  records: Array<{ record: number; runs: DataRun[]; inUse?: boolean; name?: string }>;
+  records: Array<{
+    record: number;
+    runs: DataRun[];
+    inUse?: boolean;
+    name?: string;
+    /** Starting VCN of this record's $DATA segment (default 0). */
+    vcn?: number;
+    /** $ATTRIBUTE_LIST entries, when this record is the base of a split file. */
+    attributeList?: Array<{ type: number; lowestVcn: number; fileReference: number }>;
+    /** An $ATTRIBUTE_LIST extension record carries no $FILE_NAME of its own. */
+    extension?: boolean;
+  }>;
   /** Clusters the $Bitmap marks allocated. */
   allocated: number[];
   totalClusters?: number;
+  /** $Volume VOLUME_INFORMATION flags (bit 0 = dirty), default 0. */
+  volumeFlags?: number;
 }): Buffer {
   const totalClusters = spec.totalClusters ?? 64;
   const buf = Buffer.alloc(totalClusters * CLUSTER);
@@ -60,7 +80,7 @@ function syntheticVolume(spec: {
     attrs: [
       { type: 0x10, nonResident: false, resident: standardInfo(2000) },
       { type: 0x30, nonResident: false, resident: fileNameAttr(5, '$Volume', 1) },
-      { type: 0x70, nonResident: false, resident: volumeInfoAttr(0) }
+      { type: 0x70, nonResident: false, resident: volumeInfoAttr(spec.volumeFlags ?? 0) }
     ]
   });
   rec3.copy(buf, mftBase + 3 * FILE_RECORD);
@@ -81,16 +101,23 @@ function syntheticVolume(spec: {
   rec6.copy(buf, mftBase + 6 * FILE_RECORD);
 
   for (const r of spec.records) {
-    const attrs: Array<{ type: number; nonResident: boolean; resident?: Buffer; runs?: DataRun[]; realSize?: number }> = [
-      { type: 0x10, nonResident: false, resident: standardInfo(4000) },
-      { type: 0x30, nonResident: false, resident: fileNameAttr(5, r.name ?? `file${r.record}`, 1) }
-    ];
+    const attrs: Array<{ type: number; nonResident: boolean; resident?: Buffer; runs?: DataRun[]; realSize?: number; vcn?: number }> = [];
+    if (!r.extension) {
+      attrs.push(
+        { type: 0x10, nonResident: false, resident: standardInfo(4000) },
+        { type: 0x30, nonResident: false, resident: fileNameAttr(5, r.name ?? `file${r.record}`, 1) }
+      );
+    }
+    if (r.attributeList) {
+      attrs.push({ type: 0x20, nonResident: false, resident: attributeListValue(r.attributeList) });
+    }
     if (r.runs.length > 0) {
       attrs.push({
         type: 0x80,
         nonResident: true,
         runs: r.runs,
-        realSize: r.runs.reduce((sum, run) => sum + run.runLength, 0) * CLUSTER
+        realSize: r.runs.reduce((sum, run) => sum + run.runLength, 0) * CLUSTER,
+        vcn: r.vcn ?? 0
       });
     }
     buildFileRecord(r.record, { inUse: r.inUse !== false, attrs }).copy(buf, mftBase + r.record * FILE_RECORD);
@@ -127,6 +154,19 @@ describe('bitmap-vs-runlist consistency', () => {
     expect(report.doubleClaimed).toEqual([]);
     expect(report.ok).toBe(true);
     expect(report.recordsChecked).toBeGreaterThan(0);
+    expect(report.volumeDirty).toBe(false);
+  });
+
+  it('reports the captured volume dirty flag, since a dirty map can hold journal-only allocations', () => {
+    const vol = syntheticVolume({
+      records: [{ record: 20, runs: [{ startLcn: 20, runLength: 2 }], name: 'good.dat' }],
+      allocated: [4, 5, 6, 7, 8, 9, 10, 11, 20, 21],
+      volumeFlags: 0x0001 // VOLUME_IS_DIRTY, set on every live-capture image
+    });
+
+    const report = checkNtfsConsistency(readerOver(vol));
+    expect(report.volumeDirty).toBe(true);
+    expect(report.ok).toBe(true);
   });
 
   it("finds chkdsk's error: a file's clusters marked free in the map", () => {
@@ -164,6 +204,36 @@ describe('bitmap-vs-runlist consistency', () => {
     expect(report.doubleClaimed[0].cluster).toBe(31);
   });
 
+  it('does not count $ATTRIBUTE_LIST extension records as a second file', () => {
+    // A file large enough to need an attribute list stores part of its $DATA
+    // runlist in a second MFT record. That record is part of the same file:
+    // its clusters are in the bitmap once and are already merged into the base
+    // by resolveAttributeLists(). Counting it separately reported every one of
+    // its clusters as "claimed by more than one file" — the 2026-11-06 field
+    // report that made a healthy 0.6.117 image look corrupt.
+    const vol = syntheticVolume({
+      records: [
+        {
+          record: 10,
+          runs: [{ startLcn: 20, runLength: 2 }],
+          vcn: 0,
+          name: 'huge.bin',
+          attributeList: [
+            { type: 0x80, lowestVcn: 0, fileReference: 10 },
+            { type: 0x80, lowestVcn: 2, fileReference: 11 }
+          ]
+        },
+        { record: 11, runs: [{ startLcn: 22, runLength: 2 }], vcn: 2, extension: true }
+      ],
+      allocated: [4, 5, 6, 7, 8, 9, 10, 11, 20, 21, 22, 23]
+    });
+
+    const report = checkNtfsConsistency(readerOver(vol));
+    expect(report.doubleClaimed).toEqual([]);
+    expect(report.claimedButFree).toEqual([]);
+    expect(report.ok).toBe(true);
+  });
+
   it('ignores sparse runs — they claim nothing', () => {
     const vol = syntheticVolume({
       // $BadClus-style sparse run covering the whole volume must not be read
@@ -189,6 +259,22 @@ describe('bitmap-vs-runlist consistency', () => {
     expect(report.ok).toBe(true);
     expect(report.unreferencedClusterCount).toBeGreaterThan(0);
     expect(describeConsistency(report)).toContain('claimed by no file we could parse');
+  });
+
+  it('marks a capped report as a lower bound instead of saying "exactly 50"', () => {
+    const vol = syntheticVolume({
+      totalClusters: 128,
+      // 64 clusters claimed by a file but free in the map: more findings than
+      // the report cap, so the arrays stop at 50 and must not read as exact.
+      records: [{ record: 20, runs: [{ startLcn: 12, runLength: 64 }], name: 'holey.dat' }],
+      allocated: [4, 5, 6, 7, 8, 9, 10, 11]
+    });
+
+    const report = checkNtfsConsistency(readerOver(vol));
+    expect(report.ok).toBe(false);
+    expect(report.claimedButFree).toHaveLength(50);
+    expect(report.claimedButFreeCapped).toBe(true);
+    expect(describeConsistency(report)).toContain('at least 50 cluster(s)');
   });
 
   it('ignores records that are not in use', () => {

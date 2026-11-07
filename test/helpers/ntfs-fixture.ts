@@ -12,6 +12,8 @@ interface AttrDef {
   nonResident: boolean;
   resident?: Buffer;
   runs?: DataRun[];
+  /** Pre-encoded runlist, used to exercise field widths `buildRunlist` would not pick. */
+  rawRunlist?: Buffer;
   realSize?: number;
   /** allocated_size (defaults to realSize). */
   allocatedSize?: number;
@@ -24,15 +26,17 @@ interface AttrDef {
   namespace?: number;
 }
 
+/**
+ * Bytes needed for a runlist field. Run lengths are unsigned and offsets are
+ * signed (a negative delta is a jump backwards on a fragmented volume), so
+ * pick the narrowest width that represents `v` in two's complement.
+ */
 function countBytes(v: number): number {
-  if (v === 0) return 1;
-  let n = 0;
-  let x = v;
-  while (x !== 0 && n < 8) {
-    n++;
-    x = Math.floor(x / 256);
+  for (let n = 1; n < 8; n++) {
+    const half = 2 ** (8 * n - 1);
+    if (v >= -half && v <= half - 1) return n;
   }
-  return n;
+  return 8;
 }
 
 function leBytes(v: number, n: number): Buffer {
@@ -118,7 +122,7 @@ export function buildFileRecord(recordNumber: number, opts: { inUse?: boolean; d
     const nameBuf = a.fileName ? Buffer.from(a.fileName, 'utf16le') : Buffer.alloc(0);
     const nameLenChars = nameBuf.length / 2;
     if (a.nonResident) {
-      const runlist = buildRunlist(a.runs ?? []);
+      const runlist = a.rawRunlist ?? buildRunlist(a.runs ?? []);
       const headerLen = 0x40;
       const nameOff = nameLenChars > 0 ? headerLen : 0;
       const total = headerLen + nameBuf.length + runlist.length;

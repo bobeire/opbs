@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { NtfsFile, DataRun, parseBootSector, parseFileRecord, buildTree, readFileData, readFileRecords, readStreamData, readDirectoryIndex, resolveAttributeLists } from '../../src/main/imaging/fs/ntfs';
+import { NtfsFile, parseBootSector, parseFileRecord, buildTree, readFileData, readFileRecords, readStreamData, readDirectoryIndex, resolveAttributeLists } from '../../src/main/imaging/fs/ntfs';
 import { PartitionReader } from '../../src/main/imaging/image-browse';
 import { buildNtfsVolume, buildNtfsVolumeData, buildFileRecord, attributeListValue, indexRootValue, SECTOR, CLUSTER, FILE_RECORD, MFT_CLUSTER, standardInfo, fileNameAttr } from '../helpers/ntfs-fixture';
 
@@ -117,9 +117,100 @@ describe('ntfs parser', () => {
       attrs: [{ type: 0x80, nonResident: true, runs: [{ startLcn: 56, runLength: 2 }], realSize: 2 * CLUSTER, vcn: 0 }]
     });
 
-    const [mergedBase] = resolveAttributeLists([parseFileRecord(base, 10), parseFileRecord(dataHolder, 11)]);
+    const [mergedBase, extension] = resolveAttributeLists([
+      parseFileRecord(base, 10),
+      parseFileRecord(dataHolder, 11)
+    ]);
     expect(mergedBase.dataRuns).toEqual([{ startLcn: 56, runLength: 2 }]);
     expect(mergedBase.size).toBe(2 * CLUSTER);
+    // The record named by the list is an extension of record 10, and callers
+    // that walk every record must be able to tell.
+    expect(extension.attributeListExtension).toBe(true);
+  });
+
+  it('does not duplicate the base runlist when $ATTRIBUTE_LIST names the base record', () => {
+    // A real $ATTRIBUTE_LIST lists every attribute, including the ones stored
+    // in the base record itself. Appending the base runlist first and then
+    // again for the self-reference shifted every later segment's file offset,
+    // so reads from the second segment on returned the wrong clusters.
+    const attrList = attributeListValue([
+      { type: 0x80, lowestVcn: 0, fileReference: 10 },
+      { type: 0x80, lowestVcn: 2, fileReference: 11 }
+    ]);
+    const base = buildFileRecord(10, {
+      inUse: true,
+      attrs: [
+        { type: 0x30, nonResident: false, resident: fileNameAttr(5, 'huge.bin', 1) },
+        { type: 0x20, nonResident: false, resident: attrList },
+        {
+          type: 0x80,
+          nonResident: true,
+          runs: [{ startLcn: 56, runLength: 2 }],
+          realSize: 4 * CLUSTER,
+          vcn: 0
+        }
+      ]
+    });
+    const extension = buildFileRecord(11, {
+      inUse: true,
+      attrs: [
+        {
+          type: 0x80,
+          nonResident: true,
+          runs: [{ startLcn: 60, runLength: 2 }],
+          realSize: 2 * CLUSTER,
+          vcn: 2
+        }
+      ]
+    });
+
+    const records = resolveAttributeLists([parseFileRecord(base, 10), parseFileRecord(extension, 11)]);
+    expect(records[0].dataRuns).toEqual([
+      { startLcn: 56, runLength: 2 },
+      { startLcn: 60, runLength: 2 }
+    ]);
+    expect(records[0].size).toBe(4 * CLUSTER);
+    expect(records[1].attributeListExtension).toBe(true);
+    expect(records[0].attributeListExtension).toBeUndefined();
+  });
+
+  it('sign-extends a 4-byte negative runlist offset instead of wrapping', () => {
+    // Run 1 at LCN 100, then a backwards jump of -52 encoded in the 4-byte
+    // field a fragmented file would use. JavaScript's `1 << 32` is 1, so the
+    // old code subtracted 1 instead of 2^32 and put the run at LCN ~4 billion.
+    const rawRunlist = Buffer.from([
+      0x11, 0x02, 100, // header(off=1,len=1), length 2, offset +100
+      0x41, 0x02, 0xcc, 0xff, 0xff, 0xff, // header(off=4,len=1), length 2, offset -52
+      0x00
+    ]);
+    const rec = buildFileRecord(12, {
+      inUse: true,
+      attrs: [
+        { type: 0x80, nonResident: true, rawRunlist, realSize: 4 * CLUSTER }
+      ]
+    });
+
+    expect(parseFileRecord(rec, 12).dataRuns).toEqual([
+      { startLcn: 100, runLength: 2 },
+      { startLcn: 48, runLength: 2 }
+    ]);
+  });
+
+  it('sign-extends a 5-byte negative runlist offset', () => {
+    const rawRunlist = Buffer.from([
+      0x11, 0x02, 100,
+      0x51, 0x02, 0xff, 0xff, 0xff, 0xff, 0xff, // 5-byte offset: -1
+      0x00
+    ]);
+    const rec = buildFileRecord(13, {
+      inUse: true,
+      attrs: [{ type: 0x80, nonResident: true, rawRunlist, realSize: 4 * CLUSTER }]
+    });
+
+    expect(parseFileRecord(rec, 13).dataRuns).toEqual([
+      { startLcn: 100, runLength: 2 },
+      { startLcn: 99, runLength: 2 }
+    ]);
   });
 
   it('reads sparse runs as zeros and skips the missing clusters', () => {    // File data: clusters 40-41 (allocated), then 2 sparse clusters (zeros),

@@ -1,4 +1,12 @@
-import { NtfsLayout, parseBootSector, readNtfsBitmap, readFileRecords, type DataRun, type NtfsFile } from './ntfs';
+import {
+  NtfsLayout,
+  parseBootSector,
+  readNtfsBitmap,
+  readFileRecords,
+  readVolumeFlags,
+  type DataRun,
+  type NtfsFile
+} from './ntfs';
 import type { PartitionReader } from '../image-browse';
 
 /**
@@ -48,8 +56,23 @@ export interface ConsistencyReport {
   /** The serious signals. `ok` is false when either is non-empty. */
   claimedButFree: ConsistencyIssue[];
   doubleClaimed: ConsistencyIssue[];
+  /**
+   * Set when the corresponding list was capped at `MAX_ISSUES`. The arrays
+   * then hold only the first N findings, so their length is a lower bound —
+   * without this, a capped report reads as "exactly 50 problems".
+   */
+  claimedButFreeCapped?: boolean;
+  doubleClaimedCapped?: boolean;
   /** Informational. Never makes `ok` false. */
   unreferencedClusterCount: number;
+  /**
+   * The volume's dirty flag as captured, when the boot sector parsed.
+   * Every image taken from a running Windows carries it set, and a dirty
+   * volume can legitimately hold allocations that exist only in $LogFile —
+   * chkdsk replays those before it judges the map. `unknown` when $Volume
+   * could not be read.
+   */
+  volumeDirty?: boolean | 'unknown';
   /** Set when the check could not run to completion. */
   truncated?: string;
 }
@@ -63,7 +86,12 @@ const MAX_ISSUES = 50;
  * not a crash and not a pass.
  */
 export function checkNtfsConsistency(reader: PartitionReader): ConsistencyReport {
-  const empty = (clusterSize: number, totalClusters: number, truncated?: string): ConsistencyReport => ({
+  const empty = (
+    clusterSize: number,
+    totalClusters: number,
+    truncated?: string,
+    volumeDirty?: boolean | 'unknown'
+  ): ConsistencyReport => ({
     ok: true,
     clusterSize,
     totalClusters,
@@ -71,7 +99,8 @@ export function checkNtfsConsistency(reader: PartitionReader): ConsistencyReport
     claimedButFree: [],
     doubleClaimed: [],
     unreferencedClusterCount: 0,
-    ...(truncated ? { truncated } : {})
+    ...(truncated ? { truncated } : {}),
+    ...(volumeDirty !== undefined ? { volumeDirty } : {})
   });
 
   let layout: NtfsLayout;
@@ -85,6 +114,11 @@ export function checkNtfsConsistency(reader: PartitionReader): ConsistencyReport
     return empty(0, 0, `boot sector unreadable: ${error instanceof Error ? error.message : error}`);
   }
 
+  // Reported with the verdict: on a dirty volume, a map/runlist disagreement
+  // may be a pending $LogFile transaction rather than corruption, and the
+  // reader should know which situation they are looking at.
+  const volumeDirty: boolean | 'unknown' = readVolumeFlags(reader, layout)?.dirty ?? 'unknown';
+
   let bitmapBytes: Buffer;
   let totalClusters: number;
   try {
@@ -92,10 +126,15 @@ export function checkNtfsConsistency(reader: PartitionReader): ConsistencyReport
     bitmapBytes = bitmap.bitmapBytes;
     totalClusters = bitmap.totalClusters;
   } catch (error) {
-    return empty(layout.clusterSize, 0, `$Bitmap unreadable: ${error instanceof Error ? error.message : error}`);
+    return empty(
+      layout.clusterSize,
+      0,
+      `$Bitmap unreadable: ${error instanceof Error ? error.message : error}`,
+      volumeDirty
+    );
   }
   if (totalClusters <= 0) {
-    return empty(layout.clusterSize, 0, 'allocation map is empty');
+    return empty(layout.clusterSize, 0, 'allocation map is empty', volumeDirty);
   }
 
   const isFree = (cluster: number): boolean => {
@@ -116,10 +155,19 @@ export function checkNtfsConsistency(reader: PartitionReader): ConsistencyReport
   try {
     records = readFileRecords(reader, layout);
   } catch (error) {
-    return empty(layout.clusterSize, totalClusters, `$MFT unreadable: ${error instanceof Error ? error.message : error}`);
+    return empty(
+      layout.clusterSize,
+      totalClusters,
+      `$MFT unreadable: ${error instanceof Error ? error.message : error}`,
+      volumeDirty
+    );
   }
 
+  let claimedButFreeTotal = 0;
+  let doubleClaimedTotal = 0;
   const addIssue = (list: ConsistencyIssue[], issue: ConsistencyIssue): void => {
+    if (list === claimedButFree) claimedButFreeTotal++;
+    else doubleClaimedTotal++;
     if (list.length < MAX_ISSUES) list.push(issue);
   };
 
@@ -127,6 +175,12 @@ export function checkNtfsConsistency(reader: PartitionReader): ConsistencyReport
   for (const file of records) {
     // Skip anything we should not reason about.
     if (!file.inUse) continue;
+    // An $ATTRIBUTE_LIST extension record is part of its base file, not a file
+    // of its own. `resolveAttributeLists` has already merged its runlist into
+    // the base record, so walking it here would report every one of its
+    // clusters as "claimed by more than one file" — a false alarm that made a
+    // healthy 0.6.117 image look corrupt on 2026-11-06.
+    if (file.attributeListExtension) continue;
     const runs: DataRun[] = file.dataRuns ?? [];
     if (runs.length === 0) continue; // resident data claims no clusters
     recordsChecked++;
@@ -171,13 +225,16 @@ export function checkNtfsConsistency(reader: PartitionReader): ConsistencyReport
   }
 
   return {
-    ok: claimedButFree.length === 0 && doubleClaimed.length === 0,
+    ok: claimedButFreeTotal === 0 && doubleClaimedTotal === 0,
     clusterSize: layout.clusterSize,
     totalClusters,
     recordsChecked,
     claimedButFree,
     doubleClaimed,
-    unreferencedClusterCount
+    ...(claimedButFreeTotal > claimedButFree.length ? { claimedButFreeCapped: true } : {}),
+    ...(doubleClaimedTotal > doubleClaimed.length ? { doubleClaimedCapped: true } : {}),
+    unreferencedClusterCount,
+    volumeDirty
   };
 }
 
@@ -223,15 +280,22 @@ export function describeConsistency(report: ConsistencyReport): string {
       `allocation map${report.unreferencedClusterCount > 0 ? ` (${report.unreferencedClusterCount} allocated cluster(s) claimed by no file we could parse, which is usually metadata we do not walk)` : ''}.`
     );
   }
+  // A capped list is a lower bound, and saying "50" when there are 50,000
+  // sends people looking for a small problem.
+  const count = (n: number, capped?: boolean): string => (capped ? `at least ${n}` : `${n}`);
   const parts: string[] = [];
   if (report.claimedButFree.length > 0) {
     parts.push(
-      `${report.claimedButFree.length} cluster(s) are allocated to a file but marked free in the ` +
-        `allocation map — the same error chkdsk reports as "clusters allocated to file ... marked as free"`
+      `${count(report.claimedButFree.length, report.claimedButFreeCapped)} cluster(s) are allocated ` +
+        `to a file but marked free in the allocation map — the same error chkdsk reports as ` +
+        `"clusters allocated to file ... marked as free"`
     );
   }
   if (report.doubleClaimed.length > 0) {
-    parts.push(`${report.doubleClaimed.length} cluster(s) are claimed by more than one file`);
+    parts.push(
+      `${count(report.doubleClaimed.length, report.doubleClaimedCapped)} cluster(s) are claimed by ` +
+        `more than one file`
+    );
   }
   return `Filesystem consistency FAILED: ${parts.join('; ')}. The image is internally inconsistent and should not be relied on.`;
 }

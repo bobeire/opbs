@@ -70,6 +70,15 @@ export interface NtfsFile {
   compressionUnit?: number;
   /** $ATTRIBUTE_LIST entries when a file's attributes span multiple records. */
   attributeList?: Array<{ type: number; lowestVcn: number; fileReference: number }>;
+  /**
+   * True when another record's $ATTRIBUTE_LIST named this record as the home
+   * of one of its attributes. Such a record is part of its base file, not a
+   * file of its own: it has no `$FILE_NAME` and its runlist is already merged
+   * into the base record by `resolveAttributeLists`. Callers that walk every
+   * record (notably the allocation-map consistency check) must not count it a
+   * second time.
+   */
+  attributeListExtension?: boolean;
   /** Named (alternate) data streams, keyed by stream name. */
   streams: Map<string, NtfsStream>;
   /** Resident $INDEX_ROOT value for the "$I30" directory index. */
@@ -210,20 +219,32 @@ function parseRunlist(buf: Buffer, offset: number): DataRun[] {
     const lenField = header & 0x0f;
     const offField = (header >> 4) & 0x0f;
     if (lenField === 0) break;
+    // Accumulate with multiplication, not `<<`: JavaScript's bitwise operators
+    // are 32-bit, so a 4-byte offset field with the high bit set (a backwards
+    // jump, which fragmented files make all the time) was sign-extended by
+    // subtracting 1 instead of 2^32, and fields of 5+ bytes wrapped entirely.
+    // That put the run at a nonsense LCN, so its clusters were never counted.
     let runLength = 0;
-    for (let i = 0; i < lenField; i++) runLength |= buf[pos++] << (8 * i);
+    let scale = 1;
+    for (let i = 0; i < lenField; i++) {
+      runLength += buf[pos++] * scale;
+      scale *= 256;
+    }
     // A zero-length offset field means the run is sparse (not allocated): the
     // clusters are logically zero-filled.
     if (offField === 0) {
-      relative += 0;
       runs.push({ startLcn: relative, runLength, sparse: true });
       continue;
     }
     let runOffset = 0;
-    for (let i = 0; i < offField; i++) runOffset |= buf[pos++] << (8 * i);
-    if (offField > 0 && runOffset & (1 << (8 * offField - 1))) {
-      runOffset -= 1 << (8 * offField);
+    scale = 1;
+    for (let i = 0; i < offField; i++) {
+      runOffset += buf[pos++] * scale;
+      scale *= 256;
     }
+    // `scale` is now 2^(8*offField); an offset at or above half of it is a
+    // two's-complement negative value relative to the previous run's LCN.
+    if (runOffset >= scale / 2) runOffset -= scale;
     relative += runOffset;
     runs.push({ startLcn: relative, runLength });
   }
@@ -251,55 +272,87 @@ function parseAttributeList(buf: Buffer): Array<{ type: number; lowestVcn: numbe
  * When a file's attributes span multiple MFT records (an $ATTRIBUTE_LIST), merge
  * the unnamed $DATA runlists from every referenced record (plus the base record
  * itself), sorted by starting VCN, so `readFileData` can read the whole file.
+ *
+ * Two pitfalls, both seen on real volumes:
+ *
+ *  - A real $ATTRIBUTE_LIST lists *every* attribute, including the ones stored
+ *    in the base record itself. Appending the base runlist first and then again
+ *    for each self-reference duplicated the first segment, which shifted every
+ *    later segment's file offset — reads returned the wrong clusters.
+ *  - The records named by the list are extension records, not files. They stay
+ *    in the array (the browser resolves by record number), but are marked so
+ *    the allocation-map check does not count their clusters a second time.
  */
 export function resolveAttributeLists(records: NtfsFile[]): NtfsFile[] {
   const byRec = new Map<number, NtfsFile>();
   for (const rec of records) byRec.set(rec.recordNumber, rec);
 
+  interface Segment {
+    vcn: number;
+    runs: DataRun[];
+    size: number;
+  }
+  /** Keyed by starting VCN so a self-referencing entry cannot duplicate one. */
+  const addSegment = (
+    segments: Map<number, Segment>,
+    vcn: number,
+    runs: DataRun[],
+    size: number
+  ): void => {
+    if (runs.length === 0 || segments.has(vcn)) return;
+    segments.set(vcn, { vcn, runs, size });
+  };
+
   for (const rec of records) {
     if (!rec.attributeList || rec.attributeList.length === 0) continue;
-    const segments: Array<{ vcn: number; runs: DataRun[]; size: number }> = [];
+    const segments = new Map<number, Segment>();
     let mergedSegmentsEncrypted = false;
     if (rec.dataRuns.length > 0) {
-      segments.push({ vcn: rec.dataVcn, runs: rec.dataRuns, size: rec.size });
+      addSegment(segments, rec.dataVcn, rec.dataRuns, rec.size);
       mergedSegmentsEncrypted ||= rec.isEncrypted ?? false;
     }
-    const indexSegs: Array<{ vcn: number; runs: DataRun[]; size: number }> = [];
+    const indexSegs = new Map<number, Segment>();
     if (rec.indexAllocation && rec.indexAllocation.dataRuns.length > 0) {
-      indexSegs.push({ vcn: 0, runs: rec.indexAllocation.dataRuns, size: rec.indexAllocation.size });
+      addSegment(indexSegs, 0, rec.indexAllocation.dataRuns, rec.indexAllocation.size);
     }
     for (const entry of rec.attributeList) {
       const ref = byRec.get(entry.fileReference);
-      if (entry.type === ATTR_DATA && ref && ref.dataRuns.length > 0) {
-        segments.push({ vcn: ref.dataVcn, runs: ref.dataRuns, size: ref.size });
-        mergedSegmentsEncrypted ||= ref.isEncrypted ?? false;
-      } else if (entry.type === ATTR_INDEX_ALLOCATION && ref?.indexAllocation?.dataRuns.length) {
-        indexSegs.push({
-          vcn: entry.lowestVcn,
-          runs: ref.indexAllocation.dataRuns,
-          size: ref.indexAllocation.size
-        });
-      } else if (entry.type === ATTR_INDEX_ROOT && ref?.indexRoot && !rec.indexRoot) {
+      if (!ref) continue;
+      // The list also names the attributes stored in the base record itself.
+      // Those are already parsed above; handling the self-reference again is
+      // what duplicated the first segment.
+      if (entry.fileReference === rec.recordNumber) continue;
+      // Any other record this list points at is an extension of this file.
+      ref.attributeListExtension = true;
+      if (entry.type === ATTR_DATA) {
+        addSegment(segments, entry.lowestVcn, ref.dataRuns, ref.size);
+        if (ref.dataRuns.length > 0) mergedSegmentsEncrypted ||= ref.isEncrypted ?? false;
+      } else if (entry.type === ATTR_INDEX_ALLOCATION && ref.indexAllocation?.dataRuns.length) {
+        addSegment(
+          indexSegs,
+          entry.lowestVcn,
+          ref.indexAllocation.dataRuns,
+          ref.indexAllocation.size
+        );
+      } else if (entry.type === ATTR_INDEX_ROOT && ref.indexRoot && !rec.indexRoot) {
         rec.indexRoot = ref.indexRoot;
-      } else if (entry.type === ATTR_BITMAP && ref?.indexBitmap && !rec.indexBitmap) {
+      } else if (entry.type === ATTR_BITMAP && ref.indexBitmap && !rec.indexBitmap) {
         rec.indexBitmap = ref.indexBitmap;
       }
     }
-    if (indexSegs.length > 0) {
-      indexSegs.sort((a, b) => a.vcn - b.vcn);
+    if (indexSegs.size > 0) {
       const merged: DataRun[] = [];
       let size = 0;
-      for (const seg of indexSegs) {
+      for (const seg of [...indexSegs.values()].sort((a, b) => a.vcn - b.vcn)) {
         merged.push(...seg.runs);
         if (seg.size > size) size = seg.size;
       }
       rec.indexAllocation = { dataRuns: merged, size };
     }
-    if (segments.length > 0) {
-      segments.sort((a, b) => a.vcn - b.vcn);
+    if (segments.size > 0) {
       const merged: DataRun[] = [];
       let size = 0;
-      for (const seg of segments) {
+      for (const seg of [...segments.values()].sort((a, b) => a.vcn - b.vcn)) {
         merged.push(...seg.runs);
         if (seg.size > size) size = seg.size;
       }
