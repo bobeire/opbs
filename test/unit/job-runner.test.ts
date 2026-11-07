@@ -7,7 +7,7 @@ import { createHash } from 'crypto';
 import { runBackupJob, runRestoreJob } from '../../src/main/helper/job-runner';
 import { readMacriumImage, openMacriumPartitionReader, macriumPartitionSize } from '../../src/main/imaging/mrimg';
 import { buildMrimgxImage } from '../helpers/mrimg-image';
-import { verifyImage, readImageInfo, encodeHeader, encodeBlockFrame, encodePartitionEntry, encodeBlockIndexEntry, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, FLAG_VERIFIED, FLAGS_OFFSET, FLAG_INCREMENTAL, FLAG_RESUMED, COMPRESSION_DEFLATE, COMPRESSION_ZSTD, crc32, newImageCipher, metadataFromCipher, scanPartialImage, compressBlock, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
+import { verifyImage, readImageInfo, resolveImageChain, clearImageInfoCache, encodeHeader, encodeBlockFrame, encodePartitionEntry, encodeBlockIndexEntry, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, FLAG_VERIFIED, FLAGS_OFFSET, FLAG_INCREMENTAL, FLAG_RESUMED, COMPRESSION_DEFLATE, COMPRESSION_ZSTD, crc32, newImageCipher, metadataFromCipher, scanPartialImage, compressBlock, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
 import { ImagingJob, RestoreJob, NativeImagingApi, JobResult, RestoreJobResult } from '../../src/main/imaging/imaging-job';
 import { buildNtfsVolumeData, CLUSTER as NTFS_CLUSTER } from '../helpers/ntfs-fixture';
 import { buildCanonicalNtfsVolumeData, GR_CLUSTER, GR_SPC } from '../helpers/ntfs-resize-fixture';
@@ -1281,6 +1281,61 @@ describe('incremental and encrypted jobs', () => {
     const verified = await verifyImage(deltaPath);
     expect(verified.ok).toBe(true);
     expect(verified.blocksVerified).toBe(1);
+  });
+
+  it('records only the base file name when the folder path is too long for the header', async () => {
+    // The header's base-path field holds 127 bytes. A deep or network folder
+    // used to be cut off mid-name (and an accented one mangled), so the chain
+    // could never be restored - while the backup reported success.
+    const longDir = path.join(dir, 'Sauvegardes José Müller', 'x'.repeat(60), 'y'.repeat(60));
+    fs.mkdirSync(longDir, { recursive: true });
+    const longFull = path.join(longDir, 'full.opbs');
+    const longDelta = path.join(longDir, 'delta.opbs');
+    expect(Buffer.byteLength(longFull)).toBeGreaterThan(127);
+
+    const native = createIncrementalMock();
+    writeJob(singlePartitionJob(longFull));
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+    expect(readResult().ok).toBe(true);
+
+    native.changeBlock1();
+    writeJob({ ...singlePartitionJob(longDelta), baseImagePath: longFull });
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+    expect(readResult().ok).toBe(true);
+
+    expect(readImageInfo(longDelta).header.baseImagePath).toBe('full.opbs');
+    expect(resolveImageChain(longDelta)).toEqual([longFull, longDelta]);
+
+    // And the chain still resolves after the folder is moved.
+    const moved = path.join(dir, 'moved');
+    fs.renameSync(path.join(dir, 'Sauvegardes José Müller'), moved);
+    clearImageInfoCache();
+    const movedDir = path.join(moved, 'x'.repeat(60), 'y'.repeat(60));
+    expect(resolveImageChain(path.join(movedDir, 'delta.opbs'))).toEqual([
+      path.join(movedDir, 'full.opbs'),
+      path.join(movedDir, 'delta.opbs')
+    ]);
+  });
+
+  it('stops an incremental whose base path cannot be recorded instead of writing a broken chain', async () => {
+    const longDir = path.join(dir, 'x'.repeat(70), 'y'.repeat(70));
+    fs.mkdirSync(longDir, { recursive: true });
+    const longFull = path.join(longDir, 'full.opbs');
+
+    const native = createIncrementalMock();
+    writeJob(singlePartitionJob(longFull));
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+    expect(readResult().ok).toBe(true);
+
+    // The delta goes to a different folder, so the file name alone cannot be
+    // used and the full path does not fit: refuse before writing anything.
+    native.changeBlock1();
+    writeJob({ ...singlePartitionJob(deltaPath), baseImagePath: longFull });
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+    const result = readResult();
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/too long to record/);
+    expect(fs.existsSync(deltaPath)).toBe(false);
   });
 
   it('restores a chain of full + delta so changed blocks land at their original offsets', async () => {

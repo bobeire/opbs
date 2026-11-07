@@ -1,5 +1,4 @@
-import * as path from 'path';
-import { parseHeader, HEADER_SIZE, FLAG_INCREMENTAL, FLAG_VERIFIED } from '../imaging/image-format';
+import { parseHeader, HEADER_SIZE, FLAG_INCREMENTAL, FLAG_VERIFIED, baseImageFileName } from '../imaging/image-format';
 import { planRetention, BackupImageEntry, RetentionOptions, RetentionPlan } from './retention';
 
 /** Object-store surface shared by the S3 and SFTP backends. */
@@ -26,7 +25,7 @@ export async function cloudImageEntries(store: CloudStore): Promise<BackupImageE
   for (const obj of objects) {
     if (!obj.key.endsWith('.opbs')) continue;
     const header = parseHeader(await store.getRange(obj.key, 0, HEADER_SIZE));
-    const baseName = header.baseImagePath ? path.basename(header.baseImagePath) : '';
+    const baseName = header.baseImagePath ? baseImageFileName(header.baseImagePath) : '';
     entries.push({
       path: obj.key,
       name: obj.key.split('/').pop() ?? obj.key,

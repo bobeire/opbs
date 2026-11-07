@@ -181,19 +181,100 @@ export function newImageCipher(passphrase: string): ImageCipher {
   };
 }
 
-/** Encode a base image path into the fixed-size header field (asscii, truncated). */
+/** Usable bytes in the header's base-path field (the last byte stays NUL). */
+export const BASE_IMAGE_PATH_MAX_BYTES = BASE_IMAGE_PATH_LENGTH - 1;
+
+/**
+ * Encode a base image path into the fixed-size header field as UTF-8,
+ * truncated to the field on a character boundary so a multi-byte character is
+ * never cut in half. Callers that need the value to survive should build it
+ * with `baseImageHeaderValue`, which never lets truncation happen.
+ *
+ * Older versions wrote this field with 'ascii', which Node treats as latin1
+ * when encoding: a character below U+0100 became one byte and anything higher
+ * became its low byte. `decodeBaseImagePath` reads both forms.
+ */
 export function encodeBaseImagePath(value: string | undefined): Buffer {
   const buf = Buffer.alloc(BASE_IMAGE_PATH_LENGTH);
   if (value) {
-    buf.write(value.slice(0, BASE_IMAGE_PATH_LENGTH - 1), 0, 'ascii');
+    const bytes = Buffer.from(value, 'utf8');
+    let end = Math.min(bytes.length, BASE_IMAGE_PATH_MAX_BYTES);
+    // Back up while the first dropped byte is a UTF-8 continuation byte.
+    while (end > 0 && end < bytes.length && (bytes[end] & 0xc0) === 0x80) {
+      end--;
+    }
+    bytes.copy(buf, 0, 0, end);
   }
   return buf;
 }
 
+/**
+ * Decode the header's base-path field. Valid UTF-8 is read as such; anything
+ * else is a legacy latin1-style value, so accented names written by an older
+ * version come back correctly instead of being mangled to 7 bits. Characters
+ * above U+00FF were already lost when an old version wrote them.
+ */
 export function decodeBaseImagePath(buf: Buffer): string {
   const end = buf.indexOf(0);
-  const len = end === -1 ? buf.length : end;
-  return buf.toString('ascii', 0, len);
+  const raw = buf.subarray(0, end === -1 ? buf.length : end);
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(raw);
+  } catch {
+    return raw.toString('latin1');
+  }
+}
+
+/**
+ * The file name at the end of a stored base path. Splits on both separators,
+ * because a header written on Windows has to yield its file name when it is
+ * read somewhere that uses `/`, which `path.basename` would not do.
+ */
+export function baseImageFileName(storedBasePath: string): string {
+  return storedBasePath.split(/[\\/]/).pop() ?? '';
+}
+
+/**
+ * The value to record in a new incremental image's header for its base.
+ *
+ * The field holds 127 bytes, which a deep folder or a network path easily
+ * exceeds. A longer value used to be cut off silently (and a non-ASCII name
+ * mangled), leaving a chain that could never be restored. In order of
+ * preference:
+ *
+ *  1. the full path, when it is plain ASCII and fits - unchanged from before,
+ *     so older OPBS versions keep reading these images;
+ *  2. just the base's file name, when it sits in the same folder as the new
+ *     image, which is where chains live. Every reader looks beside the
+ *     referencing image first, so this survives moves, copies, other drive
+ *     letters and recovery media;
+ *  3. the full path, when it fits as UTF-8;
+ *  4. otherwise it throws, so the backup stops before writing anything rather
+ *     than producing a chain that cannot be restored.
+ */
+export function baseImageHeaderValue(newImagePath: string, basePath: string): string {
+  if (!basePath) return '';
+  const bytesOf = (value: string): number => Buffer.byteLength(value, 'utf8');
+  // eslint-disable-next-line no-control-regex
+  const isAscii = (value: string): boolean => /^[\x00-\x7f]*$/.test(value);
+
+  if (isAscii(basePath) && bytesOf(basePath) <= BASE_IMAGE_PATH_MAX_BYTES) {
+    return basePath;
+  }
+
+  const fold = (p: string): string => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
+  const name = path.basename(basePath);
+  if (name && fold(path.dirname(basePath)) === fold(path.dirname(newImagePath)) && bytesOf(name) <= BASE_IMAGE_PATH_MAX_BYTES) {
+    return name;
+  }
+
+  if (bytesOf(basePath) <= BASE_IMAGE_PATH_MAX_BYTES) {
+    return basePath;
+  }
+
+  throw new Error(
+    `The base image path is too long to record in the image header (${bytesOf(basePath)} bytes; the limit is ${BASE_IMAGE_PATH_MAX_BYTES}). ` +
+      'Keep the incremental chain in a single folder, or shorten the folder path.'
+  );
 }
 
 /** Encode a string into a fixed-size ASCII field (truncated, NUL-padded). */
@@ -489,11 +570,15 @@ export function readFrameCompressed(
  * lives elsewhere. Duplicates (unmoved chains) are collapsed.
  */
 export function baseImageCandidates(referencingImagePath: string, storedBasePath: string): string[] {
-  const name = path.basename(storedBasePath);
+  const name = baseImageFileName(storedBasePath);
   const sibling = name ? path.join(path.dirname(referencingImagePath), name) : '';
   const candidates: string[] = [];
   for (const c of [sibling, storedBasePath]) {
-    if (c && !candidates.includes(c)) candidates.push(c);
+    if (!c || candidates.includes(c)) continue;
+    // A bare file name only means something beside the referencing image.
+    // Resolving it against the process's working directory would be a guess.
+    if (c !== sibling && !path.isAbsolute(c) && !path.win32.isAbsolute(c)) continue;
+    candidates.push(c);
   }
   return candidates;
 }
@@ -533,7 +618,24 @@ export function resolveImageChain(imagePath: string): string[] {
     if (!(info.header.flags & FLAG_INCREMENTAL) || !info.header.baseImagePath) {
       break;
     }
-    current = locateBaseImage(current, info.header.baseImagePath);
+    const stored = info.header.baseImagePath;
+    const located = locateBaseImage(current, stored);
+    if (
+      located === stored &&
+      !fs.existsSync(located) &&
+      !fs.existsSync(`${located}.001`) &&
+      Buffer.byteLength(stored, 'utf8') >= BASE_IMAGE_PATH_MAX_BYTES
+    ) {
+      // The field is full to the last byte, so this value was almost certainly
+      // cut off by the old 127-character limit rather than being a real path.
+      throw new Error(
+        `Cannot locate the base image for ${path.basename(current)}. The path recorded in its header fills the whole ` +
+          `${BASE_IMAGE_PATH_MAX_BYTES}-byte field and was cut off by the limit of earlier versions: "${stored}". ` +
+          'Images made by this version record only the base\'s file name, so this only affects older chains. ' +
+          'Keep every image of the chain in one folder; a header cut off this way cannot be repaired automatically.'
+      );
+    }
+    current = located;
   }
   return chain;
 }

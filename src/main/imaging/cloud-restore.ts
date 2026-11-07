@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { parseHeader, HEADER_SIZE, FLAG_INCREMENTAL } from './image-format';
+import { parseHeader, HEADER_SIZE, FLAG_INCREMENTAL, baseImageFileName } from './image-format';
 import { isNonFilesystemLocation } from '../utils/location';
 import { cloudStoreFromLocation, type CloudStoreOptions } from '../utils/cloud-store';
 
@@ -153,7 +153,7 @@ export async function planCloudImageDownload(uri: string, store: RestoreCloudSto
     if (!(header.flags & FLAG_INCREMENTAL) || !header.baseImagePath) {
       break;
     }
-    const baseName = path.basename(header.baseImagePath);
+    const baseName = baseImageFileName(header.baseImagePath);
     const baseKey = keyByBasename.get(baseName);
     if (!baseKey) {
       throw new Error(`Base image ${baseName} of ${current} is not present at ${dirUri}`);

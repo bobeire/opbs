@@ -40,7 +40,8 @@ import {
   CIPHER_NONE,
   cipherFromMetadata,
   resolveVolumePath,
-  resolveImageChain
+  resolveImageChain,
+  baseImageHeaderValue
 } from '../imaging/image-format';
 import { CompressionPool } from '../imaging/compression-pool';
 import { validateRestoredFilesystem, FsValidation } from '../imaging/drill-validation';
@@ -482,7 +483,7 @@ export async function runBackupJob(
       cipherId: cipher ? cipher.cipherId : CIPHER_NONE,
       kdfIterations: cipher ? cipher.kdfIterations : 0,
       salt: cipher ? cipher.salt : Buffer.alloc(0),
-      baseImagePath: job.baseImagePath ?? '',
+      baseImagePath: baseImageHeaderValue(job.imagePath, job.baseImagePath ?? ''),
       sourceDiskModel: job.sourceDisk?.model ?? '',
       sourceDiskSerial: job.sourceDisk?.serial ?? '',
       maxVolumeSize: isMultiVolume ? maxVolumeSize : undefined
