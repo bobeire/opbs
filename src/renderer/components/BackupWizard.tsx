@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { PassphraseInput } from './PassphraseInput';
 import { confirmReady } from '../lib/passphrase';
+import { backupFailureHint } from './backup-failure-hint';
 
 interface DiskInfo {
   index: number;
@@ -195,6 +196,9 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   const [baseImageName, setBaseImageName] = useState<string | undefined>(undefined);
   const [progress, setProgress] = useState<BackupProgress | null>(activeProgress ?? null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  /** True once the job emitted progress, i.e. it really began writing. */
+  const [backupRan, setBackupRan] = useState(false);
+  const backupStartedRef = useRef(false);
   const [diskLabel, setDiskLabel] = useState<string | null>(null);
   const [networkOpen, setNetworkOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -222,6 +226,9 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       .then((s: { backupProfiles?: BackupProfile[] }) => setProfiles(s?.backupProfiles ?? []))
       .catch(() => setProfiles([]));
     const cleanup = window.electronAPI.onBackupProgress((p) => {
+      // The first progress event proves the job started. The error screen uses
+      // this so a failure after capture is not described as "did not start".
+      backupStartedRef.current = true;
       setProgress(p);
     });
     return cleanup;
@@ -550,6 +557,8 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     setCurrentStep('progress');
     setErrorMsg(null);
     setSnapshotFailure(null);
+    setBackupRan(false);
+    backupStartedRef.current = false;
     setProgress(null);
     setRepoNote(null);
     setRepoWarn(null);
@@ -646,6 +655,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       const snapshot =
         /shadow copy|snapshot|VSS operation|snapshotted|volume path could not be resolved/i.test(msg);
       setSnapshotFailure(snapshot ? (busy ? 'busy' : 'unsupported') : null);
+      setBackupRan(backupStartedRef.current);
       setErrorMsg(msg);
     }
   };
@@ -1320,11 +1330,15 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                 <p>{errorMsg}</p>
               </div>
               <p className="field-hint">
-                {snapshotFailure === 'unsupported'
-                  ? 'Windows cannot take a shadow copy of this volume, so OPBS stopped before writing anything. Nothing is broken: FAT32 and exFAT volumes never support snapshots, and some USB flash devices refuse them even on NTFS. You can back it up live instead, accepting that the image has no single point in time.'
-                  : snapshotFailure === 'busy'
-                    ? 'Another shadow copy is using VSS right now, so OPBS waited and then stopped before writing anything. Let the other operation finish and try again — a scheduled backup, a restore point, or another imaging tool may be running.'
-                    : 'The backup did not start. See the Logs page for details, then check that the destination folder exists and is writable.'}
+                {backupFailureHint(
+                  snapshotFailure === 'unsupported'
+                    ? 'snapshot-unsupported'
+                    : snapshotFailure === 'busy'
+                      ? 'snapshot-busy'
+                      : backupRan
+                        ? 'ran'
+                        : 'not-started'
+                )}
               </p>
               <div className="wizard-actions">
                 {snapshotFailure === 'busy' && (
