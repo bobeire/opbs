@@ -356,6 +356,13 @@ export function buildNtfsVolume(opts?: {
   efsFile?: NtfsEfsFileFixture;
   /** Stamp a security descriptor with a foreign owner SID on hello.txt. */
   alienOwner?: boolean;
+  /**
+   * Clusters to mark FREE in $Bitmap even though the fixture's files claim
+   * them. Empty by default: the volume the fixture describes is internally
+   * consistent, so a backup of it is expected to pass the post-run check.
+   * Pass e.g. `[32, 33]` to model the 2026-11-03 failure on purpose.
+   */
+  freeClusters?: number[];
 }): PartitionReader {
   const totalClusters = 64;
   const data = Buffer.alloc(totalClusters * CLUSTER);
@@ -399,7 +406,28 @@ export function buildNtfsVolume(opts?: {
   });
   rec5.copy(data, mftBase + 5 * FILE_RECORD);
 
+  // $Bitmap is record 6 by definition, so its bits must agree with what the
+  // fixture's files claim. Every cluster starts allocated (0xff) and the
+  // caller can free specific ones to model an inconsistent capture. Its
+  // parent is 11 ($Extend) so it does not appear as a root directory entry.
+  const bitmap = Buffer.alloc(Math.ceil(totalClusters / 8), 0xff);
+  for (const cluster of opts?.freeClusters ?? []) {
+    if (cluster >= 0 && cluster < totalClusters) {
+      bitmap[cluster >> 3] &= ~(1 << (cluster & 7));
+    }
+  }
   const rec6 = buildFileRecord(6, {
+    inUse: true,
+    attrs: [
+      { type: 0x10, nonResident: false, resident: standardInfo(3000) },
+      { type: 0x30, nonResident: false, resident: fileNameAttr(11, '$Bitmap', 1) },
+      { type: 0x80, nonResident: false, resident: bitmap }
+    ]
+  });
+  rec6.copy(data, mftBase + 6 * FILE_RECORD);
+
+  // hello.txt: resident data, a child of the root.
+  const rec12 = buildFileRecord(12, {
     inUse: true,
     attrs: [
       { type: 0x10, nonResident: false, resident: standardInfo(3000) },
@@ -408,7 +436,7 @@ export function buildNtfsVolume(opts?: {
       { type: 0x80, nonResident: false, resident: Buffer.from('Hello, OPBS world!', 'utf8') }
     ]
   });
-  rec6.copy(data, mftBase + 6 * FILE_RECORD);
+  rec12.copy(data, mftBase + 12 * FILE_RECORD);
 
   const rec7 = buildFileRecord(7, {
     inUse: true,
@@ -486,8 +514,8 @@ export function buildNtfsVolume(opts?: {
 }
 
 /** Build the raw NTFS volume bytes (exposed for corrupt/fallback tests). */
-export function buildNtfsVolumeData(): Buffer {
-  const reader = buildNtfsVolume();
+export function buildNtfsVolumeData(opts?: Parameters<typeof buildNtfsVolume>[0]): Buffer {
+  const reader = buildNtfsVolume(opts);
   const out = Buffer.alloc(reader.size);
   for (let i = 0; i < reader.size; i += CLUSTER) {
     reader.read(i, Math.min(CLUSTER, reader.size - i)).copy(out, i);

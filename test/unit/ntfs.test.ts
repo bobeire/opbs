@@ -74,7 +74,7 @@ describe('ntfs parser', () => {
     const records = readFileRecords(reader, layout);
     const byRec = new Map(records.map((r) => [r.recordNumber, r]));
 
-    expect(readFileData(reader, layout, byRec.get(6)!).toString()).toBe('Hello, OPBS world!');
+    expect(readFileData(reader, layout, byRec.get(12)!).toString()).toBe('Hello, OPBS world!');
 
     const big = readFileData(reader, layout, byRec.get(8)!);
     expect(big.length).toBe(2 * CLUSTER);
@@ -437,7 +437,7 @@ describe('ntfs parser', () => {
 
     const records = readFileRecords(reader, layout);
     // The hole must not truncate everything after it.
-    const hello = records.find((r) => r.recordNumber === 6);
+    const hello = records.find((r) => r.recordNumber === 12);
     expect(hello).toBeDefined();
     expect(hello!.name?.name).toBe('hello.txt');
   });
@@ -463,7 +463,7 @@ describe('ntfs parser', () => {
     };
     const layout = parseBootSector(reader);
     const records = readFileRecords(reader, layout);
-    const hello = records.find((r) => r.recordNumber === 6);
+    const hello = records.find((r) => r.recordNumber === 12);
     expect(hello).toBeDefined();
     expect(hello!.name?.name).toBe('hello.txt');
   });

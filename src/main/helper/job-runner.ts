@@ -174,6 +174,10 @@ export async function runBackupJob(
   let snapshotsCreated = 0;
   let verifiedBlocks = 0;
   let skippedBlocks = 0;
+  // Set when the image is internally inconsistent: the evidence (the image and
+  // its report) has to survive the failure, because the error tells the user
+  // to inspect it and deleting it would leave that advice pointing at nothing.
+  let keepForInspection = false;
 
   // For incrementals: map (partitionIndex, blockIndex) -> raw CRC so unchanged
   // blocks can be skipped. Delta-on-delta: union the CRCs of the *whole*
@@ -1198,11 +1202,38 @@ export async function runBackupJob(
           continue;
         }
         if (!report.ok) {
+          keepForInspection = true;
+          // Leave the machine-readable report beside the image. The people who
+          // have to decide what to do with a failed image — and the people
+          // debugging why it failed — should not have to run a multi-minute
+          // check again to see the detail. Best effort: the verdict stands
+          // whether or not the file could be written.
+          const sidecarPath = `${job.imagePath}.fscheck.json`;
+          let detail = 'Run `opbs fscheck` on it for the detail.';
+          try {
+            fs.writeFileSync(
+              sidecarPath,
+              JSON.stringify(
+                {
+                  generatedAt: new Date().toISOString(),
+                  label: p.label,
+                  partitionIndex: p.partitionIndex,
+                  report
+                },
+                null,
+                2
+              ),
+              'utf-8'
+            );
+            detail = `The full report is in ${sidecarPath}; run \`opbs fscheck\` on the image for the same verdict.`;
+          } catch {
+            // Keep the original advice if the report could not be written.
+          }
           throw new Error(
             `Backup produced an internally inconsistent image on ${p.label}: ` +
               `${describeConsistency(report)} The image has been left on disk for inspection but ` +
               `must NOT be used — restoring it would produce a filesystem that looks corrupt even ` +
-              `though every block verifies. Run \`opbs fscheck\` on it for the detail.`
+              `though every block verifies. ${detail}`
           );
         }
       }
@@ -1254,7 +1285,9 @@ export async function runBackupJob(
     // Keep the partial image when resume is enabled so a later run can continue
     // from where this one stopped; otherwise remove it so it is never mistaken
     // for a good backup. scanPartialImage / buildJob determine resumability.
-    if (!job.resume) {
+    // An inconsistent image is the exception: it is kept as evidence for the
+    // inspection the error message asks for, and its .fscheck.json beside it.
+    if (!job.resume && !keepForInspection) {
       // Remove every volume file (base + .001, .002, ...) and the manifest.
       for (const p of volumePaths) {
         try { fs.unlinkSync(p); } catch { /* best-effort */ }

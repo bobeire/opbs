@@ -115,7 +115,7 @@ describe('EFS-encrypted files across the browse path', () => {
 
   it('leaves plaintext reads of normal files untouched', () => {
     const session = efsSession();
-    const hello = session.records.get(6)!;
+    const hello = session.records.get(12)!;
     expect(hello.isEncrypted).toBeUndefined();
     expect(readFileData(session.reader, session.layout, hello).toString()).toBe('Hello, OPBS world!');
     const big = session.records.get(8)!;

@@ -2972,4 +2972,60 @@ describe('a backup that produces an inconsistent image fails', () => {
     const silent = result.ok && result.warnings.length === 0;
     expect(silent).toBe(false);
   });
+
+  it('leaves the full report beside the image and names it in the error', async () => {
+    // A volume whose file records and bitmap were captured moments apart: the
+    // 2026-11-03 shape. The user cannot act on "inconsistent" alone, and
+    // asking them to re-run a multi-minute check to see the detail is not an
+    // answer — so the report must be on disk next to the image.
+    const imagePath = path.join(dir, 'bad.opbs');
+    const vol = buildNtfsVolumeData({ freeClusters: [32, 33] });
+    fs.writeFileSync(
+      jobPath,
+      JSON.stringify({
+        type: 'backup',
+        imagePath,
+        blockSize: NTFS_CLUSTER,
+        compressionLevel: 3,
+        verificationEnabled: false,
+        partitions: [
+          {
+            diskIndex: 0,
+            partitionIndex: 2,
+            size: vol.length,
+            offset: 0,
+            label: 'Real',
+            readSource: 'physical'
+          }
+        ]
+      })
+    );
+
+    const native = createMockNative();
+    (native.readBlocks as ReturnType<typeof vi.fn>).mockImplementation(
+      (_d: string, offset: bigint, length: bigint) =>
+        vol.subarray(Number(offset), Number(offset) + Number(length))
+    );
+
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8')) as JobResult;
+    expect(result.ok).toBe(false);
+    const sidecarPath = `${imagePath}.fscheck.json`;
+    expect(result.error ?? '').toContain(sidecarPath);
+    // The evidence the message points at has to survive the failure.
+    expect(fs.existsSync(imagePath)).toBe(true);
+    const sidecar = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8')) as {
+      generatedAt: string;
+      label: string;
+      partitionIndex: number;
+      report: { ok: boolean; claimedButFree: Array<{ cluster: number; label?: string }> };
+    };
+    expect(sidecar.label).toBe('Real');
+    expect(sidecar.partitionIndex).toBe(2);
+    expect(sidecar.report.ok).toBe(false);
+    expect(sidecar.report.claimedButFree.map((i) => i.cluster)).toEqual([32, 33]);
+    expect(sidecar.report.claimedButFree[0].label).toBe('big.bin');
+    expect(new Date(sidecar.generatedAt).getTime()).toBeGreaterThan(0);
+  });
 });

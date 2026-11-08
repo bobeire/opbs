@@ -8,6 +8,8 @@ import {
   type NtfsFile
 } from './ntfs';
 import type { PartitionReader } from '../image-browse';
+import { partitionReaderForChain } from '../image-browse';
+import { baseVolumePath, resolveImageChain } from '../image-format';
 
 /**
  * Filesystem-level consistency: does the allocation map agree with what the
@@ -252,12 +254,6 @@ export function checkImageConsistency(
   passphrase?: string
 ): ConsistencyReport | null {
   try {
-    // Lazy imports: this module is also used from the helper, where the image
-    // readers must not be pulled in eagerly.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { baseVolumePath, resolveImageChain } = require('../image-format') as typeof import('../image-format');
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { partitionReaderForChain } = require('../image-browse') as typeof import('../image-browse');
     const chain = resolveImageChain(baseVolumePath(imagePath));
     const { reader } = partitionReaderForChain(chain, partitionIndex, passphrase);
     return checkNtfsConsistency(reader);
