@@ -4,9 +4,9 @@ import { PartitionReader, partitionReaderForChain } from '../image-browse';
 import { baseVolumePath, resolveImageChain } from '../image-format';
 import { GPT_EFI_SYSTEM_GUID } from '../partition-table';
 import { logger } from '../../utils/logger';
-import { parseBootSector, readFileRecords, buildTree, readFileData, readStreamData, readDirectoryIndex, EfsEncryptedError, NtfsFile, NtfsLayout, NtfsNode } from './ntfs';
-import { parseFat32BootSector, listFat32Directory, readFileData as readFat32FileData, Fat32Layout, Fat32Entry, detectFatType } from './fat32';
-import { parseExfatBootSector, listExfatDirectory, readExfatFileData, detectExfat, ExfatLayout, ExfatEntry } from './exfat';
+import { parseBootSector, readFileRecords, buildTree, readFileData, readStreamData, readDirectoryIndex, forEachNtfsFileChunk, EfsEncryptedError, NtfsFile, NtfsLayout, NtfsNode } from './ntfs';
+import { parseFat32BootSector, listFat32Directory, readFileData as readFat32FileData, forEachFat32FileChunk, Fat32Layout, Fat32Entry, detectFatType } from './fat32';
+import { parseExfatBootSector, listExfatDirectory, readExfatFileData, forEachExfatFileChunk, detectExfat, ExfatLayout, ExfatEntry } from './exfat';
 import { detectMacriumFormat, readMacriumImage, openMacriumPartitionReader, MacriumUnsupportedError, MacriumPasswordError, MacriumUnlock } from '../mrimg';
 
 /**
@@ -638,7 +638,10 @@ export function readPath(session: BrowseSession, relPath: string): Buffer {
     const entry = resolveExfatPath(session, relPath);
     if (!entry) throw new Error(`File not found: ${relPath}`);
     if (entry.isDirectory) throw new Error(`Is a directory: ${relPath}`);
-    return readExfatFileData(session.reader, session.layout, entry.startCluster, entry.size);
+    return readExfatFileData(session.reader, session.layout, entry.startCluster, entry.size, {
+      noFatChain: entry.noFatChain,
+      validDataLength: entry.validDataLength
+    });
   }
   const rec = resolveNtfsPath(session, relPath);
   if (!rec) throw new Error(`File not found: ${relPath}`);
@@ -662,135 +665,339 @@ function writeAlternateStreams(session: NtfsBrowseSession, rec: NtfsFile, dest: 
   }
 }
 
-/** Extract a file (or a directory recursively) to `outPath` on the host. */
-export function extractPath(session: BrowseSession, relPath: string, outPath: string): number {
-  if (session.filesystem === 'fat32') {
-    return extractFat32(session, relPath, outPath);
-  }
-  if (session.filesystem === 'exfat') {
-    return extractExfat(session, relPath, outPath);
-  }
-  return extractNtfs(session, relPath, outPath);
+/** One item an extraction could not recover as it was, or had to rename. */
+export interface ExtractProblem {
+  /** Path inside the image. */
+  path: string;
+  kind: 'skipped' | 'renamed';
+  reason: string;
 }
 
-function extractNtfs(session: NtfsBrowseSession, relPath: string, outPath: string): number {
+const RESERVED_DEVICE_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+
+/**
+ * A name that is safe to create on the host, whatever the image says it is. Names come
+ * from the image, which may be untrusted (someone else's backup, a damaged disk, a crafted
+ * file), so a separator or `..` must not be able to leave the destination folder, and a
+ * character or device name Windows rejects must not be able to abort the whole extraction.
+ */
+export function safeFileName(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  let safe = name.replace(/[\u0000-\u001f<>:"/\\|?*]/g, '_');
+  safe = safe.replace(/[. ]+$/, ''); // Windows silently drops trailing dots and spaces
+  if (safe === '') safe = '_'; // also covers '.' and '..'
+  if (RESERVED_DEVICE_NAMES.test(safe)) safe = `_${safe}`;
+  return safe.length > 255 ? safe.slice(0, 255) : safe;
+}
+
+/** Hands out names that cannot collide in one folder, ignoring case as Windows does. */
+class DirectoryNames {
+  private readonly taken = new Set<string>();
+
+  claim(wanted: string): string {
+    let name = wanted;
+    const ext = path.extname(wanted);
+    const stem = ext ? wanted.slice(0, -ext.length) : wanted;
+    for (let n = 2; this.taken.has(name.toLowerCase()); n++) {
+      name = `${stem} (${n})${ext}`;
+    }
+    this.taken.add(name.toLowerCase());
+    return name;
+  }
+}
+
+const describeError = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/** State of one extraction: the count, and (optionally) a list to collect problems in. */
+class Extraction {
+  count = 0;
+
+  /**
+   * With a list, a file that cannot be extracted is recorded there and the run carries on.
+   * Without one, the first failure propagates, as it always did.
+   */
+  constructor(readonly problems?: ExtractProblem[]) {}
+
+  note(problem: ExtractProblem): void {
+    this.problems?.push(problem);
+  }
+
+  /** Pick the on-disk name for a child, recording a rename, and refuse anything outside `outDir`. */
+  place(outDir: string, names: DirectoryNames, rawName: string, shown: string): string {
+    const name = names.claim(safeFileName(rawName));
+    if (name !== rawName) {
+      this.note({
+        path: shown,
+        kind: 'renamed',
+        reason: `Saved as "${name}": the name is not valid on Windows or is already used in this folder.`
+      });
+    }
+    const dest = path.join(outDir, name);
+    const rel = path.relative(outDir, dest);
+    // `..` is only a parent reference as a whole path segment: `..hidden` and `.._x` are ordinary names.
+    if (rel === '' || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+      throw new Error(`Refusing to write outside the destination folder: ${rawName}`);
+    }
+    return dest;
+  }
+
+  /** Run one item. `work` returns false when it did not produce a file, so it is not counted. */
+  attempt(shown: string, work: () => boolean | void): void {
+    if (!this.problems) {
+      if (work() !== false) this.count++;
+      return;
+    }
+    try {
+      if (work() !== false) this.count++;
+    } catch (err) {
+      this.problems.push({ path: shown, kind: 'skipped', reason: describeError(err) });
+    }
+  }
+}
+
+/**
+ * Write a file a piece at a time, so its size is not limited by what one Buffer can hold
+ * (4 GiB under the Node that Electron 28 ships) and it is not held in memory whole. A partly
+ * written file is removed on failure: it would otherwise look like a complete, shorter one.
+ */
+function writeStreamed(dest: string, produce: (emit: (chunk: Buffer) => void) => void): void {
+  const fd = fs.openSync(dest, 'w');
+  let finished = false;
+  try {
+    produce((chunk) => {
+      let written = 0;
+      while (written < chunk.length) {
+        written += fs.writeSync(fd, chunk, written, chunk.length - written);
+      }
+    });
+    finished = true;
+  } finally {
+    fs.closeSync(fd);
+    if (!finished) {
+      try {
+        fs.unlinkSync(dest);
+      } catch {
+        // already gone
+      }
+    }
+  }
+}
+
+/** Give an extracted file or folder its original modified time, as the image records it. */
+function applyTimes(dest: string, unixSeconds: number | undefined): void {
+  if (unixSeconds === undefined || !Number.isFinite(unixSeconds) || unixSeconds <= 0) return;
+  try {
+    fs.utimesSync(dest, unixSeconds, unixSeconds);
+  } catch {
+    // best effort: a destination that cannot hold the time still holds the data
+  }
+}
+
+const ntfsToUnixSeconds = (t100ns: number | undefined): number | undefined =>
+  t100ns ? t100ns / 1e7 - 11644473600 : undefined;
+
+/**
+ * Extract a file (or a directory recursively) to `outPath` on the host.
+ *
+ * Pass `problems` to extract a folder without one bad file ending the run: files that cannot
+ * be recovered are listed there (with the reason) and the rest are still written, and names
+ * that had to change to be valid on Windows are noted too. Extracting a single file always
+ * throws on failure, so its exact reason reaches the caller.
+ */
+export function extractPath(session: BrowseSession, relPath: string, outPath: string, problems?: ExtractProblem[]): number {
+  const ex = new Extraction(problems);
+  if (session.filesystem === 'fat32') {
+    extractFat32(session, relPath, outPath, ex);
+  } else if (session.filesystem === 'exfat') {
+    extractExfat(session, relPath, outPath, ex);
+  } else {
+    extractNtfs(session, relPath, outPath, ex);
+  }
+  return ex.count;
+}
+
+const joinShown = (dir: string, name: string): string => (dir === '' || dir === '/' ? `/${name}` : `${dir}/${name}`);
+
+function copyNtfsFile(session: NtfsBrowseSession, rec: NtfsFile, dest: string): void {
+  writeStreamed(dest, (emit) => forEachNtfsFileChunk(session.reader, session.layout, rec, emit));
+  writeAlternateStreams(session, rec, dest);
+  applyTimes(dest, ntfsToUnixSeconds(rec.modified));
+}
+
+function extractNtfs(session: NtfsBrowseSession, relPath: string, outPath: string, ex: Extraction): void {
   const rec = resolveNtfsPath(session, relPath);
   if (!rec) throw new Error(`Path not found: ${relPath}`);
-  let extracted = 0;
   if (rec.isDirectory) {
-    const dir = path.join(outPath, rec.name?.name ?? '');
+    const isRoot = rec.recordNumber === session.rootId;
+    const dir = isRoot ? outPath : path.join(outPath, safeFileName(rec.name?.name ?? ''));
     fs.mkdirSync(dir, { recursive: true });
-    extracted += extractNtfsDir(session, rec.recordNumber, dir);
+    extractNtfsDir(session, rec.recordNumber, dir, relPath, ex, new Set());
+    applyTimes(dir, ntfsToUnixSeconds(rec.modified));
   } else {
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    fs.writeFileSync(outPath, readFileData(session.reader, session.layout, rec));
-    writeAlternateStreams(session, rec, outPath);
-    extracted = 1;
+    copyNtfsFile(session, rec, outPath);
+    ex.count = 1;
   }
-  return extracted;
 }
 
-function extractNtfsDir(session: NtfsBrowseSession, recordNumber: number, outDir: string): number {
-  let count = 0;
+function extractNtfsDir(
+  session: NtfsBrowseSession,
+  recordNumber: number,
+  outDir: string,
+  shownDir: string,
+  ex: Extraction,
+  ancestors: Set<number>
+): void {
+  const here = new Set(ancestors).add(recordNumber);
+  const names = new DirectoryNames();
   for (const node of session.children.get(recordNumber) ?? []) {
     // The root record lists itself as a child (its $FILE_NAME parent is 5);
     // extracting it would recurse into the same directory forever.
     if (node.recordNumber === recordNumber) continue;
-    const rec = session.records.get(node.recordNumber)!;
-    const dest = path.join(outDir, node.name);
-    if (rec.isDirectory) {
-      fs.mkdirSync(dest, { recursive: true });
-      count += extractNtfsDir(session, rec.recordNumber, dest);
-    } else {
-      let data: Buffer;
+    const shown = joinShown(shownDir, node.name);
+    ex.attempt(shown, () => {
+      // A damaged directory index can point back at a folder already being extracted.
+      if (here.has(node.recordNumber)) throw new Error('This folder loops back to one of its parent folders.');
+      const rec = session.records.get(node.recordNumber);
+      if (!rec) throw new Error('Its file record could not be read.');
+      const dest = ex.place(outDir, names, node.name, shown);
+      if (rec.isDirectory) {
+        fs.mkdirSync(dest, { recursive: true });
+        extractNtfsDir(session, rec.recordNumber, dest, shown, ex, here);
+        applyTimes(dest, ntfsToUnixSeconds(rec.modified));
+        return false;
+      }
       try {
-        data = readFileData(session.reader, session.layout, rec);
+        copyNtfsFile(session, rec, dest);
       } catch (err) {
         // An EFS file whose key cannot be unwrapped locally is skipped rather
         // than aborting the extraction of everything around it.
-        if (err instanceof EfsEncryptedError) continue;
+        if (err instanceof EfsEncryptedError) {
+          ex.note({ path: shown, kind: 'skipped', reason: 'Encrypted with EFS, and its key is not available on this computer.' });
+          return false;
+        }
         throw err;
       }
-      fs.writeFileSync(dest, data);
-      writeAlternateStreams(session, rec, dest);
-      count++;
-    }
+      return true;
+    });
   }
-  return count;
 }
 
-function extractFat32(session: Fat32BrowseSession, relPath: string, outPath: string): number {
+function copyFat32File(session: Fat32BrowseSession, entry: Fat32Entry, dest: string): void {
+  writeStreamed(dest, (emit) =>
+    forEachFat32FileChunk(session.reader, session.layout, entry.startCluster, entry.size, emit)
+  );
+  applyTimes(dest, entry.modified);
+}
+
+function extractFat32(session: Fat32BrowseSession, relPath: string, outPath: string, ex: Extraction): void {
   const entry = resolveFat32Path(session, relPath);
   if (!entry) throw new Error(`Path not found: ${relPath}`);
-  let extracted = 0;
   if (entry.isDirectory) {
-    const dir = path.join(outPath, entry.name);
+    const dir = entry.name === '' ? outPath : path.join(outPath, safeFileName(entry.name));
     fs.mkdirSync(dir, { recursive: true });
-    extracted += extractFat32Dir(session, entry.startCluster, dir);
+    extractFat32Dir(session, entry.startCluster, dir, relPath, ex, new Set());
+    applyTimes(dir, entry.modified);
   } else {
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    fs.writeFileSync(outPath, readFat32FileData(session.reader, session.layout, entry.startCluster, entry.size));
-    extracted = 1;
+    copyFat32File(session, entry, outPath);
+    ex.count = 1;
   }
-  return extracted;
 }
 
-function extractFat32Dir(session: Fat32BrowseSession, cluster: number, outDir: string): number {
+function extractFat32Dir(
+  session: Fat32BrowseSession,
+  cluster: number,
+  outDir: string,
+  shownDir: string,
+  ex: Extraction,
+  ancestors: Set<number>
+): void {
   let entries = session.directories.get(cluster);
   if (!entries) {
     entries = listFat32Directory(session.reader, session.layout, cluster);
     session.directories.set(cluster, entries);
   }
-  let count = 0;
+  const here = new Set(ancestors).add(cluster);
+  const names = new DirectoryNames();
   for (const entry of entries) {
     if (entry.name === '.' || entry.name === '..') continue;
-    const dest = path.join(outDir, entry.name);
-    if (entry.isDirectory) {
-      fs.mkdirSync(dest, { recursive: true });
-      count += extractFat32Dir(session, entry.startCluster, dest);
-    } else {
-      fs.writeFileSync(dest, readFat32FileData(session.reader, session.layout, entry.startCluster, entry.size));
-      count++;
-    }
+    const shown = joinShown(shownDir, entry.name);
+    ex.attempt(shown, () => {
+      if (entry.isDirectory && here.has(entry.startCluster)) {
+        throw new Error('This folder loops back to one of its parent folders.');
+      }
+      const dest = ex.place(outDir, names, entry.name, shown);
+      if (entry.isDirectory) {
+        fs.mkdirSync(dest, { recursive: true });
+        extractFat32Dir(session, entry.startCluster, dest, shown, ex, here);
+        applyTimes(dest, entry.modified);
+        return false;
+      }
+      copyFat32File(session, entry, dest);
+      return true;
+    });
   }
-  return count;
 }
 
-function extractExfat(session: ExfatBrowseSession, relPath: string, outPath: string): number {
+function copyExfatFile(session: ExfatBrowseSession, entry: ExfatEntry, dest: string): void {
+  writeStreamed(dest, (emit) =>
+    forEachExfatFileChunk(session.reader, session.layout, entry.startCluster, entry.size, emit, {
+      noFatChain: entry.noFatChain,
+      validDataLength: entry.validDataLength
+    })
+  );
+  applyTimes(dest, entry.modified);
+}
+
+function extractExfat(session: ExfatBrowseSession, relPath: string, outPath: string, ex: Extraction): void {
   const entry = resolveExfatPath(session, relPath);
   if (!entry) throw new Error(`Path not found: ${relPath}`);
-  let extracted = 0;
   if (entry.isDirectory) {
-    const dir = path.join(outPath, entry.name);
+    const dir = entry.name === '' ? outPath : path.join(outPath, safeFileName(entry.name));
     fs.mkdirSync(dir, { recursive: true });
-    extracted += extractExfatDir(session, entry.startCluster, dir);
+    extractExfatDir(session, entry.startCluster, dir, relPath, ex, new Set());
+    applyTimes(dir, entry.modified);
   } else {
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    fs.writeFileSync(outPath, readExfatFileData(session.reader, session.layout, entry.startCluster, entry.size));
-    extracted = 1;
+    copyExfatFile(session, entry, outPath);
+    ex.count = 1;
   }
-  return extracted;
 }
 
-function extractExfatDir(session: ExfatBrowseSession, cluster: number, outDir: string): number {
+function extractExfatDir(
+  session: ExfatBrowseSession,
+  cluster: number,
+  outDir: string,
+  shownDir: string,
+  ex: Extraction,
+  ancestors: Set<number>
+): void {
   let entries = session.directories.get(cluster);
   if (!entries) {
     entries = listExfatDirectory(session.reader, session.layout, cluster);
     session.directories.set(cluster, entries);
   }
-  let count = 0;
+  const here = new Set(ancestors).add(cluster);
+  const names = new DirectoryNames();
   for (const entry of entries) {
     if (entry.name === '.' || entry.name === '..') continue;
-    const dest = path.join(outDir, entry.name);
-    if (entry.isDirectory) {
-      fs.mkdirSync(dest, { recursive: true });
-      count += extractExfatDir(session, entry.startCluster, dest);
-    } else {
-      fs.writeFileSync(dest, readExfatFileData(session.reader, session.layout, entry.startCluster, entry.size));
-      count++;
-    }
+    const shown = joinShown(shownDir, entry.name);
+    ex.attempt(shown, () => {
+      if (entry.isDirectory && here.has(entry.startCluster)) {
+        throw new Error('This folder loops back to one of its parent folders.');
+      }
+      const dest = ex.place(outDir, names, entry.name, shown);
+      if (entry.isDirectory) {
+        fs.mkdirSync(dest, { recursive: true });
+        extractExfatDir(session, entry.startCluster, dest, shown, ex, here);
+        applyTimes(dest, entry.modified);
+        return false;
+      }
+      copyExfatFile(session, entry, dest);
+      return true;
+    });
   }
-  return count;
 }
 
 /** Format an NTFS 100ns timestamp (since 1601) as an ISO string. */

@@ -17,7 +17,7 @@ interface AttrDef {
   realSize?: number;
   /** allocated_size (defaults to realSize). */
   allocatedSize?: number;
-  /** initialized_size (defaults to 0). */
+  /** initialized_size (defaults to realSize, as on a real volume for an ordinary file). */
   initializedSize?: number;
   vcn?: number;
   compressionUnit?: number;
@@ -139,7 +139,7 @@ export function buildFileRecord(recordNumber: number, opts: { inUse?: boolean; d
       buf.writeUInt16LE(a.compressionUnit ?? 0, pos + 0x22);
       buf.writeBigUInt64LE(BigInt(a.allocatedSize ?? a.realSize ?? 0), pos + 0x28);
       buf.writeBigUInt64LE(BigInt(a.realSize ?? 0), pos + 0x30);
-      buf.writeBigUInt64LE(BigInt(a.initializedSize ?? 0), pos + 0x38);
+      buf.writeBigUInt64LE(BigInt(a.initializedSize ?? a.realSize ?? 0), pos + 0x38);
       if (nameBuf.length > 0) nameBuf.copy(buf, pos + headerLen);
       runlist.copy(buf, pos + headerLen + nameBuf.length);
       pos += total;

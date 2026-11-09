@@ -280,6 +280,56 @@ function fatDateTimeToTimestamp(date: number, time: number): number {
   return Math.floor(new Date(year, month, day, hours, minutes, seconds).getTime() / 1000);
 }
 
+/** Default size of the pieces a file is streamed in. */
+export const FAT32_STREAM_CHUNK_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Hand a file's bytes to `onChunk` in order, a piece at a time, following its FAT
+ * chain lazily. `readFileData` loads the whole chain first and refuses anything over
+ * 1 GiB, which rules out any large video or archive on a FAT32 card; this has no
+ * such limit and holds one piece in memory. Throws if the chain ends before `size`
+ * bytes have been read, rather than returning a silently short file.
+ */
+export function forEachFat32FileChunk(
+  reader: PartitionReader,
+  layout: Fat32Layout,
+  startCluster: number,
+  size: number,
+  onChunk: (chunk: Buffer) => void,
+  chunkBytes = FAT32_STREAM_CHUNK_BYTES
+): void {
+  if (startCluster < 2 || size <= 0) return;
+  const clustersPerChunk = Math.max(1, Math.floor(Math.max(layout.clusterSize, chunkBytes) / layout.clusterSize));
+  let current = startCluster;
+  let followed = 0;
+  let emitted = 0;
+  let parts: Buffer[] = [];
+  let queued = 0;
+  while (emitted + queued < size) {
+    if (current < 2 || current >= FAT32_EOF_MIN) {
+      throw new Error(
+        `FAT chain ends ${size - emitted - queued} bytes before the end of the file; the file is cut short or the volume is corrupt`
+      );
+    }
+    // A chain can never be longer than the volume, so this catches a cycle without
+    // a per-cluster Set (which would be millions of entries for a large file).
+    if (++followed > layout.totalClusters) {
+      throw new Error('FAT chain is longer than the volume (cycle or corruption)');
+    }
+    parts.push(reader.read(clusterToOffset(layout, current), layout.clusterSize));
+    queued += layout.clusterSize;
+    current = readFatEntry(reader, layout, current);
+    if (parts.length >= clustersPerChunk || emitted + queued >= size) {
+      let piece = Buffer.concat(parts);
+      if (piece.length > size - emitted) piece = piece.subarray(0, size - emitted);
+      emitted += piece.length;
+      onChunk(piece);
+      parts = [];
+      queued = 0;
+    }
+  }
+}
+
 /**
  * Read a file's data by following its FAT cluster chain.
  */

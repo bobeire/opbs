@@ -399,7 +399,12 @@ declare global {
       >;
       browsePartitions: (imagePath: string, passphrase?: string) => Promise<{ encrypted: boolean; imageFormat?: string; partitions: Array<{ partitionIndex: number; size: number; offsetOnDisk: number; blockCount: number; fsType?: string; browsable?: boolean; reason?: string }> }>;
       browseList: (imagePath: string, partitionIndex: number, relPath: string, passphrase?: string) => Promise<ApiBrowseNode[]>;
-      browseExtract: (imagePath: string, partitionIndex: number, relPath: string, outPath: string, passphrase?: string) => Promise<{ ok?: boolean; files: number; outPath: string }>;
+      browseExtract: (imagePath: string, partitionIndex: number, relPath: string, outPath: string, passphrase?: string) => Promise<{
+        ok?: boolean;
+        files: number;
+        outPath: string;
+        problems?: Array<{ path: string; kind: 'skipped' | 'renamed'; reason: string }>;
+      }>;
       browseClose: () => Promise<void>;
       mediaCheck: () => Promise<ApiMediaCheckReport>;
       mediaCreate: (options: ApiMediaCreateOptions) => Promise<ApiMediaCreateResult>;

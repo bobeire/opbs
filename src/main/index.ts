@@ -31,7 +31,7 @@ import { listProfileNames } from './imaging/migrate/inventory';
 import { isElevatedSync } from './imaging/migrate/identity';
 import { readMigrateDrillHistory } from './utils/migrate-drill-history';
 import { readImageInfo, verifyImage, CIPHER_NONE, clearImageInfoCache } from './imaging/image-format';
-import { openAnyBrowse as fsOpenBrowseAny, listDirectory, extractPath, detectPartitionFilesystem, BrowseSession } from './imaging/fs/file-browse';
+import { openAnyBrowse as fsOpenBrowseAny, listDirectory, extractPath, detectPartitionFilesystem, BrowseSession, ExtractProblem } from './imaging/fs/file-browse';
 import { detectMacriumFormat, readMacriumImage, macriumJobKey, closeImageFds, clearMacriumInfoCache } from './imaging/mrimg';
 import { locateAdk, peArchForProcess } from './utils/adk';
 import { createRecoveryMedia, resolveNodeExe, MediaCreateOptions } from './utils/winpe-media';
@@ -1812,8 +1812,14 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
   ipcMain.handle('browse-extract', async (_, imagePath: string, partitionIndex: number, relPath: string, outPath: string, passphrase?: string) => {
     try {
       const session = openBrowseSession(imagePath, partitionIndex, passphrase);
-      const files = extractPath(session, relPath, outPath);
-      return { ok: true, files, outPath };
+      // Collect what could not be recovered, so one unreadable file does not end the extraction of
+      // the rest and the user is told exactly which files were skipped or renamed.
+      const problems: ExtractProblem[] = [];
+      const files = extractPath(session, relPath, outPath, problems);
+      for (const problem of problems) {
+        logger.warn(`browse-extract ${problem.kind}: ${problem.path}: ${problem.reason}`);
+      }
+      return { ok: true, files, outPath, problems };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       logger.error(

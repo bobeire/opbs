@@ -87,6 +87,12 @@ export interface NtfsFile {
   indexAllocation?: { dataRuns: DataRun[]; size: number };
   /** Resident $BITMAP for the "$I30" index. */
   indexBitmap?: Buffer;
+  /**
+   * Reparse tag from $REPARSE_POINT. Tags that redirect a file's data elsewhere
+   * (Compact OS / WOF, Data Deduplication, cloud placeholders) leave the main
+   * stream empty or sparse, which reads as zeros unless it is recognised.
+   */
+  reparseTag?: number;
   /** Set when the file carries an $EFS attribute (Encrypting File System). */
   isEncrypted?: boolean;
   /** Parseable ownership metadata from the $EFS attribute, when present. */
@@ -120,6 +126,7 @@ const ATTR_DATA = 0x80;
 const ATTR_INDEX_ROOT = 0x90;
 const ATTR_INDEX_ALLOCATION = 0xa0;
 const ATTR_BITMAP = 0xb0;
+const ATTR_REPARSE_POINT = 0xc0;
 const ATTR_EFS = 0x100;
 
 export function parseBootSector(reader: PartitionReader): NtfsLayout {
@@ -505,6 +512,14 @@ export function parseFileRecord(raw: Buffer, recordNumber: number): NtfsFile {
           file.indexBitmap = Buffer.from(buf.subarray(pos + valOffset, pos + valOffset + valLen));
         }
       }
+    } else if (attrType === ATTR_REPARSE_POINT) {
+      if (!nonResident) {
+        const valOffset = buf.readUInt16LE(pos + 0x14);
+        const valLen = buf.readUInt32LE(pos + 0x10);
+        if (valLen >= 4 && pos + valOffset + 4 <= buf.length) {
+          file.reparseTag = buf.readUInt32LE(pos + valOffset);
+        }
+      }
     } else if (attrType === ATTR_EFS) {
       // Encrypting File System: the presence of the attribute marks the file,
       // and its value records which principals' keys wrap the file's FEK.
@@ -809,6 +824,65 @@ function readEfsFileData(reader: PartitionReader, layout: NtfsLayout, file: Ntfs
   return out;
 }
 
+/**
+ * The file's data is not in its main stream, so reading that stream would hand
+ * back zeros (or nothing) that look like real content. Raised instead of
+ * returning them, so an extraction can say which files it could not recover.
+ */
+export class NtfsDataUnavailableError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = 'NtfsDataUnavailableError';
+  }
+}
+
+const REPARSE_TAG_DEDUP = 0x80000013;
+const REPARSE_TAG_WOF = 0x80000017;
+/** IO_REPARSE_TAG_CLOUD and CLOUD_1..CLOUD_F (0x9000_X01A). */
+const isCloudReparseTag = (tag: number): boolean => ((tag & 0xffff0fff) >>> 0) === 0x9000001a;
+
+/**
+ * Why a file's data cannot be read from its main stream, or undefined when it can.
+ *
+ * A file whose main stream has no allocated clusters but a non-zero size is either
+ * redirected elsewhere by a reparse point (Compact OS keeps the bytes in a separate
+ * compressed stream; a cloud placeholder keeps them off the disk; Data Deduplication
+ * keeps them in a chunk store) or has a record that is incomplete. Reading the stream
+ * as if it were sparse returns zeros that look real, and the old code returned an empty
+ * file when there were no runs at all. A file that is genuinely sparse (no reparse
+ * point, runs present) really is zeros, and stays readable.
+ */
+export function dataUnavailableReason(file: NtfsFile): string | undefined {
+  if (file.isEncrypted || file.residentData.length > 0 || file.size === 0) return undefined;
+  if (file.dataRuns.some((run) => !run.sparse)) return undefined;
+  const tag = file.reparseTag;
+  if (tag === REPARSE_TAG_WOF) {
+    return 'The file is stored with Windows Compact OS (WOF) compression, which OPBS cannot decompress yet.';
+  }
+  if (tag === REPARSE_TAG_DEDUP) {
+    return 'The file is stored by Windows Data Deduplication, which OPBS cannot reassemble.';
+  }
+  if (tag !== undefined && isCloudReparseTag(tag)) {
+    return 'The file is an online-only cloud file (for example OneDrive): its data was never on this disk.';
+  }
+  if (file.dataRuns.length === 0) {
+    return "The file's data runs could not be located (the record is incomplete or damaged).";
+  }
+  return undefined;
+}
+
+function assertDataAvailable(file: NtfsFile): void {
+  const reason = dataUnavailableReason(file);
+  if (reason) throw new NtfsDataUnavailableError(reason);
+}
+
+/** Zero the bytes of `buf` (which starts at file offset `from`) that lie past the valid data length. */
+function zeroPastValidData(buf: Buffer, from: number, file: NtfsFile): void {
+  const valid = file.initializedSize;
+  if (valid === undefined || valid >= file.size) return;
+  if (from + buf.length > valid) buf.fill(0, Math.max(0, valid - from));
+}
+
 /** Read the unnamed $DATA stream of a file record (cluster-based). */
 export function readFileData(reader: PartitionReader, layout: NtfsLayout, file: NtfsFile): Buffer {
   if (file.isEncrypted) {
@@ -817,13 +891,18 @@ export function readFileData(reader: PartitionReader, layout: NtfsLayout, file: 
   if (file.residentData.length > 0) {
     return Buffer.from(file.residentData);
   }
-  if (file.dataRuns.length === 0) {
+  if (file.size === 0) {
     return Buffer.alloc(0);
   }
-  if (file.compressionUnit && file.compressionUnit > 0) {
-    return readCompressedFileData(reader, layout, file);
-  }
-  return readRuns(reader, layout.clusterSize, file.dataRuns, 0, file.size);
+  assertDataAvailable(file);
+  // Bytes past the valid data length read as zero (clusters can hold stale data from
+  // a preallocated or extended file); both readers below return a fresh buffer.
+  const out =
+    file.compressionUnit && file.compressionUnit > 0
+      ? readCompressedFileData(reader, layout, file)
+      : readRuns(reader, layout.clusterSize, file.dataRuns, 0, file.size);
+  zeroPastValidData(out, 0, file);
+  return out;
 }
 
 /**
@@ -847,72 +926,103 @@ export function readFileRange(
   if (length <= 0 || offset >= file.size) return Buffer.alloc(0);
   const start = offset < 0 ? 0 : offset;
   const end = Math.min(start + length, file.size);
-  if (file.compressionUnit && file.compressionUnit > 0) {
-    return readCompressedFileData(reader, layout, file).subarray(start, end);
-  }
   if (file.residentData.length > 0) {
     return Buffer.from(file.residentData.subarray(start, end));
   }
-  if (file.dataRuns.length === 0) {
-    return Buffer.alloc(Math.max(0, end - start));
+  assertDataAvailable(file);
+  const out =
+    file.compressionUnit && file.compressionUnit > 0
+      ? readCompressedFileData(reader, layout, file).subarray(start, end)
+      : readRuns(reader, layout.clusterSize, file.dataRuns, start, end - start);
+  zeroPastValidData(out, start, file);
+  return out;
+}
+
+/** Default size of the pieces a file is streamed in. */
+export const NTFS_STREAM_CHUNK_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Hand a file's bytes to `onChunk` in order, a piece at a time. Plain files are read
+ * range by range, so a file of any size (a Node 18 Buffer tops out at 4 GiB) can be
+ * copied without holding it in memory. Resident, compressed and EFS files are decoded
+ * whole, as their formats require.
+ */
+export function forEachNtfsFileChunk(
+  reader: PartitionReader,
+  layout: NtfsLayout,
+  file: NtfsFile,
+  onChunk: (chunk: Buffer) => void,
+  chunkBytes = NTFS_STREAM_CHUNK_BYTES
+): void {
+  const decodedWhole =
+    file.isEncrypted || file.residentData.length > 0 || (file.compressionUnit ?? 0) > 0 || file.size <= chunkBytes;
+  if (decodedWhole) {
+    const whole = readFileData(reader, layout, file);
+    if (whole.length > 0) onChunk(whole);
+    return;
   }
-  return readRuns(reader, layout.clusterSize, file.dataRuns, start, end - start);
+  assertDataAvailable(file);
+  for (let offset = 0; offset < file.size; offset += chunkBytes) {
+    onChunk(readFileRange(reader, layout, file, offset, Math.min(chunkBytes, file.size - offset)));
+  }
 }
 
 /**
  * Read an NTFS-compressed (LZNT1) file. The data is stored as independent
- * compression units of `1 << compressionUnit` clusters; each unit is either a
- * full raw data run (uncompressed), a short data run followed by a sparse fill
- * (compressed, decoded via LZNT1), or sparse (zeros).
+ * compression units of `1 << compressionUnit` clusters. Each unit is one of:
+ *  - entirely sparse: zeros;
+ *  - allocated in full: stored raw;
+ *  - partly allocated, the rest sparse: compressed, decoded via LZNT1.
+ *
+ * Works unit by unit from each run's absolute position in the file. The old
+ * version asked `readRuns` for a file-level offset inside a list holding only
+ * the current run, which only worked for the very first unit, so any compressed
+ * file larger than one unit failed with "Data run list does not cover offset".
+ * It also shortened runs in place, corrupting the cached record.
  */
 function readCompressedFileData(reader: PartitionReader, layout: NtfsLayout, file: NtfsFile): Buffer {
+  const clusterSize = layout.clusterSize;
   const cuClusters = 1 << (file.compressionUnit ?? 4);
-  const cuSize = cuClusters * layout.clusterSize;
+  const cuSize = cuClusters * clusterSize;
   const out = Buffer.alloc(file.size);
-  let outPos = 0;
-  let vcn = 0;
-  const runs = file.dataRuns;
+  const fileClusters = Math.ceil(file.size / clusterSize);
+
+  // Where each run starts in the file, in clusters. Not mutated afterwards.
+  const runs: Array<{ vcn: number; length: number; startLcn: number; sparse: boolean }> = [];
+  let next = 0;
+  for (const run of file.dataRuns) {
+    runs.push({ vcn: next, length: run.runLength, startLcn: run.startLcn, sparse: !!run.sparse });
+    next += run.runLength;
+  }
+
   let ri = 0;
+  for (let cuStart = 0; cuStart < fileClusters; cuStart += cuClusters) {
+    const cuEnd = cuStart + cuClusters;
+    while (ri < runs.length && runs[ri].vcn + runs[ri].length <= cuStart) ri++;
 
-  while (outPos < file.size && ri < runs.length) {
-    const run = runs[ri];
-    const cuRemaining = cuClusters - (vcn % cuClusters);
-    if (run.sparse) {
-      const take = Math.min(run.runLength, cuRemaining);
-      out.fill(0, outPos, Math.min(outPos + take * layout.clusterSize, file.size));
-      outPos += Math.min(take * layout.clusterSize, file.size - outPos);
-      vcn += take;
-      if (take === run.runLength) ri++;
-      continue;
+    // The allocated pieces of this unit, in order, and how much of it is sparse.
+    const pieces: Buffer[] = [];
+    let allocated = 0;
+    let sparse = 0;
+    for (let k = ri; k < runs.length && runs[k].vcn < cuEnd; k++) {
+      const run = runs[k];
+      const from = Math.max(run.vcn, cuStart);
+      const to = Math.min(run.vcn + run.length, cuEnd);
+      if (run.sparse) {
+        sparse += to - from;
+      } else {
+        pieces.push(reader.read((run.startLcn + (from - run.vcn)) * clusterSize, (to - from) * clusterSize));
+        allocated += to - from;
+      }
     }
+    if (allocated === 0) continue; // all sparse, or past the run list: zeros
 
-    const take = Math.min(run.runLength, cuRemaining);
-    const data = readRuns(reader, layout.clusterSize, [run], vcn * layout.clusterSize, take * layout.clusterSize);
-    if (take === cuClusters) {
-      // Full CU: uncompressed raw data.
-      data.copy(out, outPos, 0, Math.min(data.length, file.size - outPos));
-      outPos += Math.min(take * layout.clusterSize, file.size - outPos);
-      vcn += take;
-      if (take === run.runLength) ri++;
-      continue;
-    }
-
-    // Partial CU: compressed. Decompress the `take` clusters to a full CU.
-    const decompressed = decompressLznt1(data, cuSize);
-    const copyLen = Math.min(decompressed.length, file.size - outPos);
-    decompressed.copy(out, outPos, 0, copyLen);
-    outPos += copyLen;
-    vcn += take;
-    if (take === run.runLength) ri++;
-
-    // The remainder of this CU is a sparse fill; consume it.
-    const cuEndVcn = (Math.floor(vcn / cuClusters) + 1) * cuClusters;
-    while (vcn < cuEndVcn && ri < runs.length && runs[ri].sparse) {
-      const takeFill = Math.min(runs[ri].runLength, cuEndVcn - vcn);
-      vcn += takeFill;
-      if (takeFill === runs[ri].runLength) ri++;
-      else runs[ri].runLength -= takeFill;
-    }
+    const raw = pieces.length === 1 ? pieces[0] : Buffer.concat(pieces);
+    // Compressed only when part of the unit is explicitly sparse. A unit allocated in full is raw,
+    // and so is a short last unit whose run list simply ends (no sparse fill follows it).
+    const data = sparse > 0 ? decompressLznt1(raw, cuSize) : raw;
+    const at = cuStart * clusterSize;
+    data.copy(out, at, 0, Math.min(data.length, file.size - at));
   }
   return out;
 }

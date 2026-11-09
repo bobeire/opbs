@@ -281,7 +281,19 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         outPath,
         passphrase || undefined
       );
-      setNotice(`Extracted ${result.files} item(s) to ${result.outPath}`);
+      const problems = result.problems ?? [];
+      const skipped = problems.filter((p) => p.kind === 'skipped');
+      const renamed = problems.filter((p) => p.kind === 'renamed');
+      setNotice(
+        `Extracted ${result.files} item(s) to ${result.outPath}` +
+          (renamed.length > 0 ? ` (${renamed.length} renamed to names Windows accepts)` : '')
+      );
+      if (skipped.length > 0) {
+        // Say which files were not recovered and why, rather than leaving a short folder to be noticed later.
+        const shown = skipped.slice(0, 3).map((p) => `${p.path}: ${p.reason}`).join(' ');
+        const more = skipped.length > 3 ? ` (and ${skipped.length - 3} more; see the log)` : '';
+        setError(`${skipped.length} item(s) could not be recovered. ${shown}${more}`);
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Extraction failed');
     } finally {

@@ -22,6 +22,12 @@ export interface ExfatLayout {
   clusterCount: number;
   rootDirCluster: number;
   volumeLabel: string;
+  /**
+   * How each subdirectory is stored, learned while its parent is listed. A
+   * directory flagged NoFatChain is one contiguous run whose FAT entries are not
+   * valid, so opening it needs this and not the FAT.
+   */
+  dirExtents?: Map<number, { noFatChain: boolean; dataLength: number }>;
 }
 
 /** A directory entry returned by the parser. */
@@ -31,6 +37,17 @@ export interface ExfatEntry {
   size: number;
   startCluster: number;
   modified?: number;
+  /**
+   * Stream extension flag NoFatChain: the data is one contiguous run of
+   * clusters from `startCluster` and the FAT entries for it are not maintained,
+   * so following the FAT reads the first cluster and stops. Windows sets it on
+   * contiguous files, which is most large files on a freshly written card.
+   */
+  noFatChain?: boolean;
+  /** ValidDataLength: bytes at or past this offset read as zero. Undefined means all of `size`. */
+  validDataLength?: number;
+  /** The stream's DataLength. `size` is 0 for directories, so their length lives here. */
+  dataLength?: number;
 }
 
 const EXFAT_EOF_MIN = 0xFFFFFFF8;
@@ -143,7 +160,13 @@ function readExfatChainData(
 export function parseExfatDirectory(data: Buffer): ExfatEntry[] {
   const entries: ExfatEntry[] = [];
   let pendingFile: { attrs: number; modified?: number } | null = null;
-  let pendingStream: { nameLength: number; startCluster: number; dataLength: number } | null = null;
+  let pendingStream: {
+    nameLength: number;
+    startCluster: number;
+    dataLength: number;
+    noFatChain: boolean;
+    validDataLength: number;
+  } | null = null;
   let nameParts: string[] = [];
 
   for (let off = 0; off + 32 <= data.length; off += 32) {
@@ -163,10 +186,13 @@ export function parseExfatDirectory(data: Buffer): ExfatEntry[] {
 
     if (type === 0xC0 && pendingFile) {
       // Stream extension.
+      // GeneralSecondaryFlags (byte 1): bit 0 AllocationPossible, bit 1 NoFatChain.
+      const noFatChain = (data[off + 1] & 0x02) !== 0;
       const nameLength = data[off + 3];
+      const validDataLength = Number(data.readBigUInt64LE(off + 0x08));
       const firstCluster = data.readUInt32LE(off + 0x14);
       const dataLength = Number(data.readBigUInt64LE(off + 0x18));
-      pendingStream = { nameLength, startCluster: firstCluster, dataLength };
+      pendingStream = { nameLength, startCluster: firstCluster, dataLength, noFatChain, validDataLength };
       continue;
     }
 
@@ -186,7 +212,12 @@ export function parseExfatDirectory(data: Buffer): ExfatEntry[] {
           isDirectory: (file.attrs & ATTR_DIRECTORY) !== 0,
           size: (file.attrs & ATTR_DIRECTORY) !== 0 ? 0 : stream.dataLength,
           startCluster: stream.startCluster,
-          modified: file.modified
+          modified: file.modified,
+          noFatChain: stream.noFatChain,
+          // A ValidDataLength of 0 with data present is how some writers leave it for
+          // untouched preallocation; only a value below DataLength means "zero past here".
+          validDataLength: stream.validDataLength < stream.dataLength ? stream.validDataLength : undefined,
+          dataLength: stream.dataLength
         });
         pendingFile = null;
         pendingStream = null;
@@ -214,40 +245,102 @@ function exfatDateTimeToTimestamp(date: number, time: number): number {
   return Math.floor(new Date(year, month, day, hours, minutes, seconds).getTime() / 1000);
 }
 
-/** Read a file's data by following its FAT chain, capped at `size` bytes. */
+/** Default size of the pieces a file is streamed in. */
+export const EXFAT_STREAM_CHUNK_BYTES = 8 * 1024 * 1024;
+
+export interface ExfatFileOptions {
+  /** The stream is one contiguous run and its FAT entries are not valid (NoFatChain). */
+  noFatChain?: boolean;
+  /** Bytes at or past this offset read as zero (ValidDataLength). */
+  validDataLength?: number;
+  /** Piece size for streaming; a multiple of the cluster size is used. */
+  chunkBytes?: number;
+}
+
+/**
+ * Hand a file's bytes to `onChunk` in order, a piece at a time, so a file of any
+ * size can be copied without holding it in memory. Follows the FAT chain, or
+ * reads one contiguous run when the stream is flagged NoFatChain. Zeroes bytes
+ * past ValidDataLength, as Windows does. Throws if the chain ends before `size`
+ * bytes have been read, instead of returning a silently short file.
+ */
+export function forEachExfatFileChunk(
+  reader: PartitionReader,
+  layout: ExfatLayout,
+  startCluster: number,
+  size: number,
+  onChunk: (chunk: Buffer) => void,
+  opts: ExfatFileOptions = {}
+): void {
+  if (startCluster < 2 || size <= 0) return;
+  const chunkBytes = Math.max(layout.clusterSize, opts.chunkBytes ?? EXFAT_STREAM_CHUNK_BYTES);
+  const clustersPerChunk = Math.max(1, Math.floor(chunkBytes / layout.clusterSize));
+  const validLength = opts.validDataLength;
+  let emitted = 0;
+
+  const emit = (chunk: Buffer): void => {
+    let piece = chunk;
+    if (piece.length > size - emitted) piece = piece.subarray(0, size - emitted);
+    if (validLength !== undefined && emitted + piece.length > validLength) {
+      // Copy before zeroing: a reader may hand back a view into its backing store.
+      piece = Buffer.from(piece);
+      piece.fill(0, Math.max(0, validLength - emitted));
+    }
+    emitted += piece.length;
+    onChunk(piece);
+  };
+
+  if (opts.noFatChain) {
+    const totalClusters = Math.ceil(size / layout.clusterSize);
+    if (startCluster + totalClusters - 1 > layout.clusterCount + 1) {
+      throw new Error(
+        `exFAT file runs past the end of the volume (cluster ${startCluster}, ${totalClusters} clusters); the volume may be corrupt`
+      );
+    }
+    for (let done = 0; done < totalClusters; done += clustersPerChunk) {
+      const count = Math.min(clustersPerChunk, totalClusters - done);
+      emit(reader.read(exfatClusterToOffset(layout, startCluster + done), count * layout.clusterSize));
+    }
+    return;
+  }
+
+  let current = startCluster;
+  let followed = 0;
+  let parts: Buffer[] = [];
+  let queued = 0;
+  while (emitted + queued < size) {
+    if (current < 2 || current >= EXFAT_EOF_MIN || current > layout.clusterCount + 1) {
+      throw new Error(
+        `exFAT chain ends ${size - emitted - queued} bytes before the end of the file; the file is cut short or the volume is corrupt`
+      );
+    }
+    if (++followed > layout.clusterCount) {
+      throw new Error('exFAT chain is longer than the volume (cycle or corruption)');
+    }
+    parts.push(reader.read(exfatClusterToOffset(layout, current), layout.clusterSize));
+    queued += layout.clusterSize;
+    current = readExfatFatEntry(reader, layout, current);
+    if (parts.length >= clustersPerChunk || emitted + queued >= size) {
+      emit(Buffer.concat(parts));
+      parts = [];
+      queued = 0;
+    }
+  }
+}
+
+/** Read a whole file into memory, capped at `size` bytes. Prefer the chunked reader for large files. */
 export function readExfatFileData(
   reader: PartitionReader,
   layout: ExfatLayout,
   startCluster: number,
-  size: number
+  size: number,
+  opts: ExfatFileOptions = {}
 ): Buffer {
-  if (startCluster < 2 || size === 0) return Buffer.alloc(0);
-  // Only walk far enough to cover `size` — a corrupt chain that continues
-  // past the real file must not fail the read.
-  const maxClusters = Math.max(1, Math.ceil(size / layout.clusterSize));
-  const buffers: Buffer[] = [];
-  let bytes = 0;
-  let current = startCluster;
-  const seen = new Set<number>();
-  while (
-    bytes < size &&
-    current >= 2 &&
-    current < EXFAT_EOF_MIN &&
-    current <= layout.clusterCount + 1
-  ) {
-    if (seen.has(current)) {
-      throw new Error(`exFAT chain cycle detected at cluster ${current}`);
-    }
-    if (buffers.length >= maxClusters) break;
-    seen.add(current);
-    const chunk = reader.read(exfatClusterToOffset(layout, current), layout.clusterSize);
-    buffers.push(chunk);
-    bytes += chunk.length;
-    current = readExfatFatEntry(reader, layout, current);
-  }
-  const raw = Buffer.concat(buffers);
-  return size < raw.length ? raw.subarray(0, size) : raw;
+  const pieces: Buffer[] = [];
+  forEachExfatFileChunk(reader, layout, startCluster, size, (chunk) => pieces.push(chunk), opts);
+  return pieces.length === 1 ? pieces[0] : Buffer.concat(pieces);
 }
+
 
 /**
  * List a directory's entries (given its start cluster).
@@ -257,12 +350,40 @@ export function readExfatFileData(
  * so a long or corrupt chain that continues after the real directory data
  * does not fail the listing. Cluster sizes are always multiples of 32, so
  * checking each chunk in place covers every new entry boundary.
+ *
+ * A subdirectory flagged NoFatChain is read as one contiguous run instead,
+ * using the extent recorded when its parent was listed: its FAT entries are
+ * not valid, so following them would stop after the first cluster and the
+ * rest of the directory would silently go missing.
  */
 export function listExfatDirectory(
   reader: PartitionReader,
   layout: ExfatLayout,
   startCluster: number
 ): ExfatEntry[] {
+  const entries = readExfatDirectoryEntries(reader, layout, startCluster);
+  // Remember how each subdirectory is stored so opening it later reads it correctly.
+  const extents = (layout.dirExtents ??= new Map());
+  for (const e of entries) {
+    if (e.isDirectory) extents.set(e.startCluster, { noFatChain: !!e.noFatChain, dataLength: e.dataLength ?? 0 });
+  }
+  return entries;
+}
+
+function readExfatDirectoryEntries(reader: PartitionReader, layout: ExfatLayout, startCluster: number): ExfatEntry[] {
+  const extent = layout.dirExtents?.get(startCluster);
+  if (extent?.noFatChain && extent.dataLength > 0) {
+    const maxBytes = 256 << 20;
+    if (extent.dataLength > maxBytes) {
+      throw new Error(`exFAT directory is ${Math.round(extent.dataLength / (1024 * 1024))} MB (limit 256 MB); the volume may be corrupt`);
+    }
+    const clusters = Math.ceil(extent.dataLength / layout.clusterSize);
+    if (startCluster < 2 || startCluster + clusters - 1 > layout.clusterCount + 1) {
+      throw new Error(`exFAT directory runs past the end of the volume (cluster ${startCluster}); the volume may be corrupt`);
+    }
+    const data = reader.read(exfatClusterToOffset(layout, startCluster), clusters * layout.clusterSize);
+    return parseExfatDirectory(data).filter((e) => e.name !== '.' && e.name !== '..');
+  }
   const maxBytes = 256 << 20;
   // Align the chain cap with the byte cap: for 512-byte clusters the old
   // 65_536-cluster limit was only 32 MB, rejecting valid large directories

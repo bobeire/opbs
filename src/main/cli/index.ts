@@ -22,7 +22,7 @@ import { JobResult } from '../imaging/imaging-job';
 import type { RestoreJobProgress, RestoreJob, RestoreTarget } from '../imaging/imaging-job';
 import { locateAdk, peArchForProcess } from '../utils/adk';
 import { createRecoveryMedia, resolveNodeExe, smokeMediaPayload } from '../utils/winpe-media';
-import { openAnyBrowse, listDirectory, extractPath, formatTimestamp, resolvePath } from '../imaging/fs/file-browse';
+import { openAnyBrowse, listDirectory, extractPath, formatTimestamp, resolvePath, ExtractProblem } from '../imaging/fs/file-browse';
 import { detectMacriumFormat, readMacriumImage, macriumJobKey, macriumUnsupportedReason } from '../imaging/mrimg';
 import { SftpStore } from '../utils/sftp';
 import { FtpStore } from '../utils/ftp';
@@ -3028,13 +3028,21 @@ async function cmdExtract(ctx: CommandContext): Promise<number> {
       console.error(`Path not found: ${relPath}`);
       return 1;
     }
-    const count = extractPath(session, relPath, outPath);
+    const problems: ExtractProblem[] = [];
+    const count = extractPath(session, relPath, outPath, problems);
+    const skipped = problems.filter((p) => p.kind === 'skipped');
     if (!ctx.opts.json) {
       console.log(`Extracted ${count} file(s) from ${relPath} to ${outPath}`);
+      for (const p of problems) console.error(`${p.kind === 'skipped' ? 'Skipped' : 'Renamed'} ${p.path}: ${p.reason}`);
+      if (skipped.length > 0) console.error(`${skipped.length} item(s) could not be recovered.`);
     } else {
-      console.log(JSON.stringify({ imagePath, partitionIndex, path: relPath, outPath, extracted: count, ok: true }, null, 2));
+      console.log(
+        JSON.stringify({ imagePath, partitionIndex, path: relPath, outPath, extracted: count, ok: skipped.length === 0, problems }, null, 2)
+      );
     }
-    return 0;
+    // A partial extraction is not a success: a script that checks the exit code must not take a
+    // folder with missing files for a complete one.
+    return skipped.length === 0 ? 0 : 1;
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     return 1;
