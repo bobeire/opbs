@@ -21,8 +21,11 @@ module.exports = async function afterAllArtifactBuild(buildResult) {
   const version = require('../package.json').version;
   const zipPath = path.resolve(outDir, `OPBS-Portable-${version}.zip`);
   if (fs.existsSync(zipPath)) fs.rmSync(zipPath, { force: true });
-  // Compress-Archive puts the CONTENTS of win-unpacked at the ZIP root, so
-  // OPBS.exe sits right next to the extracted folder - extract and run.
+  // Compress-Archive pulls in the Microsoft.PowerShell.Archive module, which
+  // is not always loadable (it failed with "module could not be loaded" on the
+  // 0.6.118 and 0.6.119 builds). ZipFile is part of the .NET framework and
+  // needs no module. CreateFromDirectory puts the CONTENTS of win-unpacked at
+  // the ZIP root, so OPBS.exe sits right next to the extracted folder.
   const powershell = path.join(
     process.env.SystemRoot || 'C:\\Windows',
     'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
@@ -32,7 +35,9 @@ module.exports = async function afterAllArtifactBuild(buildResult) {
     [
       '-NoProfile',
       '-Command',
-      `Compress-Archive -Path '${unpacked.replace(/'/g, "''")}\\*' -DestinationPath '${zipPath.replace(/'/g, "''")}' -Force`
+      `Add-Type -AssemblyName System.IO.Compression.FileSystem; ` +
+        `[System.IO.Compression.ZipFile]::CreateFromDirectory(` +
+        `'${unpacked.replace(/'/g, "''")}', '${zipPath.replace(/'/g, "''")}')`
     ],
     { stdio: 'inherit' }
   );
