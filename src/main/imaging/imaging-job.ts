@@ -302,8 +302,10 @@ export interface RestoreJobResult {
     partitionIndex: number;
     label: string;
     ok: boolean;
+    skipped?: boolean;
     checks: Record<string, boolean | string | number>;
     error?: string;
+    note?: string;
   }>;
   /** Aggregate restore-drill outcome. */
   drill?: { ok: boolean; failures: string[] };

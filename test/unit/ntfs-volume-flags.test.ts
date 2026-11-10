@@ -93,7 +93,7 @@ describe('validateRestoredFilesystem — dirty flag reporting', () => {
 
   it('reports a dirty volume so the caller can warn before first boot', () => {
     const vol = buildCanonicalNtfsVolumeData({ totalClusters: 64, volumeFlags: VOLUME_FLAG_DIRTY });
-    vol.writeUInt16LE(0x55aa, 510);
+    vol.writeUInt16LE(0xaa55, 510);
 
     const check = validateRestoredFilesystem(fakeNative(vol), '\\\\.\\PhysicalDrive5', {
       partitionIndex: 0,
@@ -108,7 +108,7 @@ describe('validateRestoredFilesystem — dirty flag reporting', () => {
 
   it('reports a clean volume as clean', () => {
     const vol = buildCanonicalNtfsVolumeData({ totalClusters: 64 });
-    vol.writeUInt16LE(0x55aa, 510);
+    vol.writeUInt16LE(0xaa55, 510);
 
     const check = validateRestoredFilesystem(fakeNative(vol), '\\\\.\\PhysicalDrive5', {
       partitionIndex: 0,
@@ -125,7 +125,7 @@ describe('validateRestoredFilesystem — dirty flag reporting', () => {
     fat.write('FAT16', 3, 'ascii');
     fat.writeUInt16LE(512, 0x0b);
     fat.writeUInt8(8, 0x0d);
-    fat.writeUInt16LE(0x55aa, 510);
+    fat.writeUInt16LE(0xaa55, 510);
 
     const check = validateRestoredFilesystem(fakeNative(fat), '\\\\.\\PhysicalDrive5', {
       partitionIndex: 2,

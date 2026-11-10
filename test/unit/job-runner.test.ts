@@ -1855,7 +1855,7 @@ describe('incremental and encrypted jobs', () => {
   it('restore drill validates the written NTFS filesystem when validateAfterWrite is set', async () => {
     const imagePath = path.join(dir, 'drill.opbs');
     const vol = buildCanonicalNtfsVolumeData({ totalClusters: 64 });
-    vol.writeUInt16LE(0x55aa, 510);
+    vol.writeUInt16LE(0xaa55, 510);
     const volumeJob: ImagingJob = {
       type: 'backup',
       imagePath,
@@ -1924,7 +1924,7 @@ describe('incremental and encrypted jobs', () => {
   it('restore drill keeps the restore result ok but reports validation failures', async () => {
     const imagePath = path.join(dir, 'drill.opbs');
     const vol = buildCanonicalNtfsVolumeData({ totalClusters: 64 });
-    vol.writeUInt16LE(0x55aa, 510);
+    vol.writeUInt16LE(0xaa55, 510);
     const volumeJob: ImagingJob = {
       type: 'backup',
       imagePath,
@@ -1990,7 +1990,7 @@ describe('incremental and encrypted jobs', () => {
   it('post-restore CRC verify reads back blocks and reports mismatches', async () => {
     const imagePath = path.join(dir, 'verify-crc.opbs');
     const vol = buildCanonicalNtfsVolumeData({ totalClusters: 64 });
-    vol.writeUInt16LE(0x55aa, 510);
+    vol.writeUInt16LE(0xaa55, 510);
     const volumeJob: ImagingJob = {
       type: 'backup',
       imagePath,

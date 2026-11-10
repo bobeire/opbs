@@ -417,7 +417,14 @@ export class BackupScheduler {
             validated: boolean;
             failures: string[];
             imagePath: string;
-            fsValidation?: Array<{ partitionIndex: number; label: string; ok: boolean; error?: string }>;
+            fsValidation?: Array<{
+              partitionIndex: number;
+              label: string;
+              ok: boolean;
+              skipped?: boolean;
+              error?: string;
+              note?: string;
+            }>;
             durationMs: number;
           };
 
@@ -435,11 +442,16 @@ export class BackupScheduler {
               this.drillFailures.reset();
             }
           } else {
-            logger.info(`Restore drill PASSED for ${drillSource} (${result.fsValidation?.length ?? 0} partition(s) validated)`);
+            const validatedCount = (result.fsValidation ?? []).filter((p) => p.ok && !p.skipped).length;
+            const skippedCount = (result.fsValidation ?? []).filter((p) => p.skipped).length;
+            const skippedNote = skippedCount > 0 ? `, skipped ${skippedCount} with no filesystem` : '';
+            logger.info(
+              `Restore drill PASSED for ${drillSource} (${validatedCount} partition(s) validated${skippedNote})`
+            );
             recordDrillResult(drillSource, {
               ok: true,
               targetDiskIndex: config.targetDiskIndex,
-              partitionsValidated: result.fsValidation?.length ?? 0,
+              partitionsValidated: validatedCount,
               durationMs: result.durationMs
             });
             this.drillFailures.record(true);

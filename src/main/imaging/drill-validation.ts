@@ -7,8 +7,13 @@ export interface FsValidation {
   partitionIndex: number;
   label: string;
   ok: boolean;
+  /** True when the partition holds no filesystem we can validate (MSR, vendor
+   *  reserved regions, Linux volumes). Skipped partitions never fail a drill. */
+  skipped?: boolean;
   checks: Record<string, boolean | string | number>;
   error?: string;
+  /** Human-readable reason attached to a skipped (not failed) partition. */
+  note?: string;
 }
 
 /** Round up to the nearest power-of-two; returns `fallback` when `n` is not a
@@ -52,8 +57,10 @@ export function validateRestoredFilesystem(
       return { partitionIndex, label, ok: false, checks, error: 'boot sector unreadable' };
     }
 
-    // BIOS Parameter Block (BPB) signature at 0x1FE–0x1FF.
-    checks.bootSignature = boot.readUInt16LE(0x1fe) === 0x55aa;
+    // BIOS Parameter Block (BPB) signature at 0x1FE–0x1FF: little-endian
+    // 0x55AA, i.e. the bytes 0x55 then 0xAA. Comparing the u16 as 0x55AA read
+    // little-endian never matched and reported `false` on every volume.
+    checks.bootSignature = boot[0x1fe] === 0x55 && boot[0x1ff] === 0xaa;
 
     const oem = boot.toString('ascii', 3, 11).trimEnd();
     checks.oemId = oem;
@@ -127,7 +134,21 @@ export function validateRestoredFilesystem(
       return { partitionIndex, label, ok: true, checks };
     }
 
-    return { partitionIndex, label, ok: false, checks, error: `unrecognised filesystem OEM "${oem}"` };
+    // A Microsoft Reserved (MSR) partition, a vendor reserved region or a
+    // non-Windows volume has no BPB, so bytes 3..10 are just whatever the
+    // partition left there. Failing a drill on that turned an otherwise clean
+    // restore into "FAILED" (field report 2026-11-09: OEM bytes
+    // "\0\0\x01\x14PcFP" on a 16 MB MSR partition). Only fail when we
+    // positively identify a filesystem and find it damaged; otherwise record
+    // that there was nothing here to validate.
+    return {
+      partitionIndex,
+      label,
+      ok: true,
+      skipped: true,
+      checks,
+      note: `no recognised filesystem (OEM ${JSON.stringify(oem)}); not validated`
+    };
   } catch (error) {
     return {
       partitionIndex,

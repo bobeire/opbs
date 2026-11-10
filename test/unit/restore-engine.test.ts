@@ -1326,7 +1326,7 @@ describe('RestoreEngine dirty-flag warning', () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opbs-restore-dirty-'));
     imagePath = path.join(dir, 'image.opbs');
     const vol = buildCanonicalNtfsVolumeData({ totalClusters: 64, volumeFlags: flags });
-    vol.writeUInt16LE(0x55aa, 510);
+    vol.writeUInt16LE(0xaa55, 510);
     writeImage(imagePath, undefined, { partitionPayload: vol });
   }
 

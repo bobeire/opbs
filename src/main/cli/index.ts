@@ -1293,7 +1293,16 @@ interface DrillOutput {
   validated: boolean;
   failures: string[];
   imagePath: string;
-  fsValidation?: Array<{ partitionIndex: number; label: string; ok: boolean; error?: string }>;
+  fsValidation?: Array<{
+    partitionIndex: number;
+    label: string;
+    ok: boolean;
+    skipped?: boolean;
+    error?: string;
+    note?: string;
+  }>;
+  /** Partitions with no filesystem to check (MSR, vendor reserved, non-Windows). */
+  skipped?: number;
   durationMs: number;
 }
 
@@ -1378,12 +1387,21 @@ async function cmdDrill(ctx: CommandContext): Promise<number> {
   const finish = (result: {
     ok: boolean;
     error?: string;
-    fsValidation?: Array<{ partitionIndex: number; label: string; ok: boolean; error?: string }>;
+    fsValidation?: Array<{
+      partitionIndex: number;
+      label: string;
+      ok: boolean;
+      skipped?: boolean;
+      error?: string;
+      note?: string;
+    }>;
     drill?: { ok: boolean; failures?: string[] };
   }): number => {
     const restored = result.ok;
     const validated = restored && result.drill?.ok === true;
     const failures = result.drill?.failures ?? (result.ok ? [] : [result.error ?? 'restore failed']);
+    const validatedCount = (result.fsValidation ?? []).filter((p) => p.ok && !p.skipped).length;
+    const skippedCount = (result.fsValidation ?? []).filter((p) => p.skipped).length;
     const output: DrillOutput = {
       ok: restored && validated,
       restored,
@@ -1391,6 +1409,7 @@ async function cmdDrill(ctx: CommandContext): Promise<number> {
       failures,
       imagePath: reportedImagePath,
       fsValidation: result.fsValidation,
+      skipped: skippedCount > 0 ? skippedCount : undefined,
       durationMs: Date.now() - started
     };
     if (jsonOutPath) {
@@ -1399,8 +1418,9 @@ async function cmdDrill(ctx: CommandContext): Promise<number> {
     if (ctx.opts.json) {
       console.log(JSON.stringify(output, null, 2));
     } else if (restored && validated) {
+      const skippedNote = skippedCount > 0 ? `, skipped ${skippedCount} with no filesystem` : '';
       console.log(
-        `Drill PASSED: ${path.basename(reportedImagePath)} restored to disk ${config.targetDiskIndex} and validated ${result.fsValidation?.length ?? 0} partition(s)`
+        `Drill PASSED: ${path.basename(reportedImagePath)} restored to disk ${config.targetDiskIndex} and validated ${validatedCount} partition(s)${skippedNote}`
       );
     } else if (restored) {
       console.error(`Drill FAILED: filesystem validation error(s): ${failures.join('; ')}`);
