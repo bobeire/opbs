@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="OPBS code signing policy — who builds and approves releases, what is signed, and how to verify a download." />
+  <link rel="canonical" href="https://opbs.rhitcs.com/code-signing.html" />
+  <title>Code signing policy — OPBS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont,
+                   "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0c1220; color: #d0d7e3; line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: #61d0ff; text-decoration: none; }
+    a:hover { color: #9be2ff; }
+    .wrapper { max-width: 860px; margin: 0 auto; padding: 0 24px; }
+
+    header {
+      position: sticky; top: 0; z-index: 20;
+      background: rgba(12, 18, 32, 0.88); backdrop-filter: blur(10px);
+      border-bottom: 1px solid #1e2d44;
+    }
+    nav { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+    .logo { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 1.15rem; color: #fff; }
+    .logo img { height: 34px; border-radius: 6px; }
+    nav ul { list-style: none; display: flex; gap: 28px; }
+    nav ul li a { color: #a3b1c6; font-size: 0.92rem; font-weight: 500; }
+    nav ul li a:hover { color: #fff; }
+
+    main { padding: 56px 0 72px; }
+    h1 { color: #fff; font-size: 1.9rem; margin-bottom: 8px; }
+    .sub { color: #8fa5c0; margin-bottom: 36px; }
+    h2 { color: #fff; font-size: 1.15rem; margin: 36px 0 10px; }
+    p, li { color: #b6c3d6; }
+    p + p { margin-top: 12px; }
+    ul, ol { margin: 10px 0 0 22px; }
+    li { margin-bottom: 6px; }
+    code {
+      background: #111b2c; border: 1px solid #1e2d44; border-radius: 5px;
+      padding: 1px 5px; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.86em; color: #a3b1c6;
+    }
+    .note {
+      background: #0f1929; border: 1px solid #2a4467; border-radius: 12px;
+      padding: 18px 20px; margin-bottom: 8px; color: #c9d5e6;
+    }
+    .note strong { color: #fff; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid #1e2d44; font-size: 0.92rem; }
+    th { color: #fff; font-weight: 600; }
+    td { color: #b6c3d6; }
+
+    footer { text-align: center; padding: 48px 0; font-size: 0.82rem; color: #586a82; border-top: 1px solid #1e2d44; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="wrapper">
+    <nav>
+      <a href="index.html" class="logo">
+        <img src="https://raw.githubusercontent.com/bobeire/opbs/master/resources/icon.png" alt="OPBS icon" />
+        OPBS
+      </a>
+      <ul>
+        <li><a href="guide.html">Guide</a></li>
+        <li><a href="index.html#features">Features</a></li>
+        <li><a href="macrium.html">Macrium</a></li>
+        <li><a href="migrate.html">Migrate</a></li>
+        <li><a href="benchmark.html">Benchmarks</a></li>
+        <li><a href="prove-your-restore.html">Prove It</a></li>
+        <li><a href="index.html#download">Download</a></li>
+        <li><a href="releases.html">Releases</a></li>
+        <li><a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main class="wrapper">
+  <h1>Code signing policy</h1>
+  <p class="sub">
+    Applies to every OPBS release published on
+    <a href="https://github.com/bobeire/opbs/releases" target="_blank">GitHub Releases</a>,
+    this site and the package managers that mirror them.
+  </p>
+
+  <div class="note">
+    <strong>Status, 2026-11-11:</strong> no published build is signed yet:
+    <code>Get-AuthenticodeSignature</code> on 0.6.119 returns
+    <code>NotSigned</code>. OPBS's application to the
+    <a href="https://signpath.org" target="_blank">SignPath Foundation</a>
+    programme is in preparation. This page describes the arrangement that
+    applies once it is accepted; it is not a claim that a signed build exists
+    today.
+  </div>
+
+  <h2>Signing arrangement</h2>
+  <p>
+    Free code signing provided by
+    <a href="https://about.signpath.io" target="_blank">SignPath.io</a>,
+    certificate by <a href="https://signpath.org" target="_blank">SignPath Foundation</a>.
+    The certificate is issued to SignPath Foundation, so that is the publisher
+    name shown on signed OPBS binaries.
+  </p>
+
+  <h2>What is signed</h2>
+  <ul>
+    <li><code>OPBS-Setup-&lt;version&gt;.exe</code> — the NSIS installer.</li>
+    <li><code>OPBS-Portable-&lt;version&gt;.exe</code> — the self-extracting portable build.</li>
+    <li><code>OPBS.exe</code> and the native addon inside the installer and the portable ZIP.</li>
+  </ul>
+  <p>
+    The portable ZIP is a plain archive of the same signed files. Third-party
+    binaries inside the package (Electron, Node, and the libraries in
+    <code>node_modules</code>) are upstream open-source builds and are not
+    re-signed by this project.
+  </p>
+
+  <h2>How a release is signed</h2>
+  <ol>
+    <li>The release is built on GitHub-hosted runners from the tagged commit in
+      <a href="https://github.com/bobeire/opbs" target="_blank">bobeire/opbs</a>.
+      A binary built anywhere else is not signed.</li>
+    <li>The unsigned artifact is uploaded to the workflow run and submitted to
+      SignPath with origin verification, so the signature is tied to that
+      repository, branch and commit.</li>
+    <li>The signing request is approved manually before the certificate is used.</li>
+    <li>SHA256 hashes of the signed files are published in the release notes.
+      Hashes taken before signing do not apply to the published file.</li>
+  </ol>
+
+  <h2>Roles and members</h2>
+  <table>
+    <tr><th>Role</th><th>Member</th><th>Responsibility</th></tr>
+    <tr>
+      <td>Committer</td>
+      <td><a href="https://github.com/bobeire" target="_blank">@bobeire</a></td>
+      <td>Owns the repository and may commit to it directly.</td>
+    </tr>
+    <tr>
+      <td>Reviewer</td>
+      <td><a href="https://github.com/bobeire" target="_blank">@bobeire</a></td>
+      <td>Reviews every pull request from anyone who is not a committer before merge, including build scripts and CI configuration.</td>
+    </tr>
+    <tr>
+      <td>Approver</td>
+      <td><a href="https://github.com/bobeire" target="_blank">@bobeire</a></td>
+      <td>Approves each signing request manually. The project has a single maintainer, so this role is not separated from the others.</td>
+    </tr>
+  </table>
+
+  <h2>Verifying a download</h2>
+  <p>
+    On a signed release, PowerShell reports <code>Valid</code> and names
+    SignPath Foundation as the signer:
+  </p>
+  <p><code>Get-AuthenticodeSignature .\OPBS-Setup-&lt;version&gt;.exe | Format-List Status,SignerCertificate</code></p>
+  <p>
+    Compare the SHA256 in the release notes with
+    <code>Get-FileHash &lt;file&gt; -Algorithm SHA256</code>. An unsigned build
+    reports <code>NotSigned</code> — that is accurate for every release up to and
+    including 0.6.119, and it is not an error.
+  </p>
+
+  <h2>Privacy</h2>
+  <p>
+    See the <a href="privacy.html">privacy policy</a>. OPBS collects no
+    telemetry and sends nothing to RHITCS.
+  </p>
+
+  <h2>Third-party components</h2>
+  <p>
+    OPBS is GPL-3.0-only. The native addon vendors zstandard 1.5.6
+    (BSD-3-Clause) and the WinFsp SDK headers (GPLv3 with the WinFsp FLOSS
+    exception). WinFsp - Windows File System Proxy, Copyright (C) Bill
+    Zissimopoulos — <a href="https://github.com/winfsp/winfsp" target="_blank">github.com/winfsp/winfsp</a>.
+    Licence texts ship in the repository under
+    <code>src/native/vendor/</code>.
+  </p>
+</main>
+
+<footer class="wrapper">
+  &copy; 2026 RHITCS &middot;
+  <a href="https://github.com/bobeire/opbs/blob/master/COPYING" target="_blank">GPL-3.0-only</a> &middot;
+  <a href="code-signing.html">Code signing policy</a> &middot;
+  <a href="privacy.html">Privacy</a> &middot;
+  <a href="releases.html">Releases</a> &middot;
+  <a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a>
+</footer>
+
+</body>
+</html>

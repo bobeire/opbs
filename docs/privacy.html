@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="OPBS privacy policy — no telemetry, and every network connection the app can make, listed." />
+  <link rel="canonical" href="https://opbs.rhitcs.com/privacy.html" />
+  <title>Privacy policy — OPBS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont,
+                   "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0c1220; color: #d0d7e3; line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: #61d0ff; text-decoration: none; }
+    a:hover { color: #9be2ff; }
+    .wrapper { max-width: 860px; margin: 0 auto; padding: 0 24px; }
+
+    header {
+      position: sticky; top: 0; z-index: 20;
+      background: rgba(12, 18, 32, 0.88); backdrop-filter: blur(10px);
+      border-bottom: 1px solid #1e2d44;
+    }
+    nav { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+    .logo { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 1.15rem; color: #fff; }
+    .logo img { height: 34px; border-radius: 6px; }
+    nav ul { list-style: none; display: flex; gap: 28px; }
+    nav ul li a { color: #a3b1c6; font-size: 0.92rem; font-weight: 500; }
+    nav ul li a:hover { color: #fff; }
+
+    main { padding: 56px 0 72px; }
+    h1 { color: #fff; font-size: 1.9rem; margin-bottom: 8px; }
+    .sub { color: #8fa5c0; margin-bottom: 36px; }
+    h2 { color: #fff; font-size: 1.15rem; margin: 36px 0 10px; }
+    p, li { color: #b6c3d6; }
+    p + p { margin-top: 12px; }
+    ul { margin: 10px 0 0 22px; }
+    li { margin-bottom: 10px; }
+    li strong { color: #fff; }
+    code {
+      background: #111b2c; border: 1px solid #1e2d44; border-radius: 5px;
+      padding: 1px 5px; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.86em; color: #a3b1c6;
+    }
+
+    footer { text-align: center; padding: 48px 0; font-size: 0.82rem; color: #586a82; border-top: 1px solid #1e2d44; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="wrapper">
+    <nav>
+      <a href="index.html" class="logo">
+        <img src="https://raw.githubusercontent.com/bobeire/opbs/master/resources/icon.png" alt="OPBS icon" />
+        OPBS
+      </a>
+      <ul>
+        <li><a href="guide.html">Guide</a></li>
+        <li><a href="index.html#features">Features</a></li>
+        <li><a href="macrium.html">Macrium</a></li>
+        <li><a href="migrate.html">Migrate</a></li>
+        <li><a href="benchmark.html">Benchmarks</a></li>
+        <li><a href="prove-your-restore.html">Prove It</a></li>
+        <li><a href="index.html#download">Download</a></li>
+        <li><a href="releases.html">Releases</a></li>
+        <li><a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main class="wrapper">
+  <h1>Privacy policy</h1>
+  <p class="sub">Effective 2026-11-11, for OPBS 0.6.119 and later.</p>
+
+  <h2>No telemetry</h2>
+  <p>
+    OPBS has no analytics, no usage reporting, no accounts and no crash
+    reporting. RHITCS does not receive information about you, your machine or
+    your backups. Nothing in the app sends backup contents, file names,
+    partition layouts or settings anywhere.
+  </p>
+
+  <h2>Network connections the app can make</h2>
+  <p>
+    OPBS is an offline-first program. The following requests are the complete
+    list of connections it can initiate on its own:
+  </p>
+  <ul>
+    <li>
+      <strong>Update check.</strong> If <em>Check for updates on startup</em> is
+      enabled (the default), the app asks the GitHub releases API for the latest
+      release of <code>bobeire/opbs</code>. As with any HTTPS request, GitHub
+      sees the requesting IP address and user agent. The check can be turned off
+      in Settings; the manual <em>Check for updates</em> button still works.
+    </li>
+    <li>
+      <strong>Downloading an update.</strong> Only after you accept an update
+      prompt. The installer is downloaded from GitHub Releases.
+    </li>
+    <li>
+      <strong>WinFsp runtime install.</strong> When you choose
+      <em>Install WinFsp</em>, the app downloads the MSI published by the WinFsp
+      project on GitHub and runs it after a UAC prompt. Nothing about you is
+      sent beyond the request itself.
+    </li>
+    <li>
+      <strong>Windows ADK and Node.js runtime install.</strong> When you choose
+      those options, the installer is downloaded from Microsoft or from
+      nodejs.org respectively.
+    </li>
+    <li>
+      <strong>Destinations you configure.</strong> S3, SFTP, network shares and
+      webhook notifications are contacted only when you configure them. Their
+      credentials are stored locally in your settings file and are sent only to
+      the service you named.
+    </li>
+  </ul>
+
+  <h2>Data kept on your machine</h2>
+  <p>
+    Settings, logs and backup job metadata live in your user profile; images
+    live wherever you choose to write them. Removing the app and its data
+    directory removes them. Backups you created are yours and are not touched by
+    an uninstall.
+  </p>
+
+  <h2>Third-party services</h2>
+  <p>
+    GitHub hosts the source, releases and update checks; Microsoft supplies the
+    Windows ADK; the OpenJS Foundation hosts Node.js. Those services have their
+    own privacy policies. No other third party is involved.
+  </p>
+
+  <h2>Contact</h2>
+  <p>
+    Questions or corrections: open an issue at
+    <a href="https://github.com/bobeire/opbs/issues" target="_blank">github.com/bobeire/opbs/issues</a>.
+  </p>
+</main>
+
+<footer class="wrapper">
+  &copy; 2026 RHITCS &middot;
+  <a href="https://github.com/bobeire/opbs/blob/master/COPYING" target="_blank">GPL-3.0-only</a> &middot;
+  <a href="code-signing.html">Code signing policy</a> &middot;
+  <a href="privacy.html">Privacy</a> &middot;
+  <a href="releases.html">Releases</a> &middot;
+  <a href="https://github.com/bobeire/opbs" target="_blank">GitHub</a>
+</footer>
+
+</body>
+</html>

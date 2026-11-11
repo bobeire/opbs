@@ -60,6 +60,38 @@ If a backup was terminated by a quarantine, treat the image as unverified. The
 `verify` and `drill` commands read the image without writing to a disk, so they
 can be run before relying on it.
 
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io),
+certificate by [SignPath Foundation](https://signpath.org).
+
+**Status, 2026-11-11:** no published build is signed yet —
+`Get-AuthenticodeSignature` on the 0.6.119 releases returns `NotSigned`. OPBS's
+application to the SignPath Foundation programme is in preparation; the
+arrangement below applies once it is accepted and a signed build is published.
+Nothing here claims otherwise in the meantime.
+
+Once signing is active:
+
+- **What is signed:** `OPBS-Setup-<version>.exe`, the portable executable, and
+  `OPBS.exe` plus the native addon inside them.
+- **How it is built:** on GitHub-hosted runners from the tagged commit in this
+  repository. Builds made on a local machine are not signed.
+- **Approval:** every signing request is approved manually before the
+  certificate is used, and the resulting SHA256 hashes are published in the
+  release notes.
+
+Roles and members:
+
+- **Committers and reviewers:** [@bobeire](https://github.com/bobeire), the
+  repository owner. Changes from anyone else arrive as pull requests and are
+  reviewed before merge.
+- **Approvers:** [@bobeire](https://github.com/bobeire). The project has a
+  single maintainer, so that role cannot be separated yet.
+
+Privacy policy: [docs/privacy.html](docs/privacy.html).
+Scope of this policy: [opbs.rhitcs.com/code-signing.html](https://opbs.rhitcs.com/code-signing.html).
+
 ## Features
 
 - **Disk & partition imaging** with per-block CRC-32 integrity checking
@@ -1332,6 +1364,17 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
 
 ## License
 
-GPL-3.0
-User runs at own risk
-Backup is not guaranteed - always test restores
+GPL-3.0-only. The full text is in [COPYING](COPYING).
+
+Vendored third-party code keeps its own licence:
+
+- **zstandard 1.5.6** (`src/native/vendor/zstd`, BSD-3-Clause used here; the
+  upstream BSD and GPL-2.0 texts are both included).
+- **WinFsp SDK headers** (`src/native/vendor/winfsp`, GPLv3 with the WinFsp
+  FLOSS exception). WinFsp - Windows File System Proxy, Copyright (C) Bill
+  Zissimopoulos — https://github.com/winfsp/winfsp. The WinFsp runtime is
+  installed separately and is not bundled with OPBS.
+
+Electron, React and the npm dependencies are MIT / Apache-2.0 / ISC.
+
+User runs at own risk. Backup is not guaranteed - always test restores.
