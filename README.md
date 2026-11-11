@@ -36,6 +36,30 @@ scoop bucket add opbs https://github.com/bobeire/opbs
 scoop install opbs
 ```
 
+### Antivirus false positives
+
+The released binaries are **not code-signed** — `Get-AuthenticodeSignature` on
+an OPBS build reports `NotSigned`. There is no publisher certificate and no
+reputation history for a security product to consult, so the decision is made
+on behaviour alone. OPBS opens raw physical disk handles, parses NTFS metadata,
+launches an elevated copy of itself and drives VSS. That is what a disk imager
+has to do, and it is also what ransomware does.
+
+If a security product quarantines OPBS:
+
+- Exclude the install folder (`C:\Program Files\OPBS`) or, for the portable
+  build, the folder you extracted the ZIP to, then reinstall.
+- Prefer `OPBS-Portable-<version>.zip` over the self-extracting exe when a
+  reputation engine objects: the self-extracting exe unpacks to a new `%TEMP%`
+  folder on every launch, so it looks like a brand new unknown file each time.
+- Send the detection name and the file path from the product's quarantine log
+  to the issue tracker. A report with the engine and detection name is what
+  gets a false positive fixed; a report without it cannot be acted on.
+
+If a backup was terminated by a quarantine, treat the image as unverified. The
+`verify` and `drill` commands read the image without writing to a disk, so they
+can be run before relying on it.
+
 ## Features
 
 - **Disk & partition imaging** with per-block CRC-32 integrity checking
