@@ -673,6 +673,36 @@ export interface ExtractProblem {
   reason: string;
 }
 
+/** Live figures from an extraction, for a progress display. */
+export interface ExtractProgress {
+  /** Files written so far, including the one whose data is being written. */
+  files: number;
+  /** Bytes written so far. */
+  bytes: number;
+  /** The item being worked on, as a path inside the image. */
+  current: string;
+}
+
+/** Optional callbacks for a long-running extraction. */
+export interface ExtractHooks {
+  /** Polled between files and between the pieces of a file; return true to stop. */
+  isCancelled?: () => boolean;
+  /** Called as pieces are written and files finish. The caller decides how often to act on it. */
+  onProgress?: (progress: ExtractProgress) => void;
+  /** Called as a file is skipped or renamed. */
+  onProblem?: (problem: ExtractProblem) => void;
+}
+
+/** Thrown out of an extraction that was cancelled. `files` is how many were written before it stopped. */
+export class ExtractCancelledError extends Error {
+  files = 0;
+
+  constructor() {
+    super('Extraction cancelled.');
+    this.name = 'ExtractCancelledError';
+  }
+}
+
 const RESERVED_DEVICE_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 
 /**
@@ -711,15 +741,51 @@ const describeError = (err: unknown): string => (err instanceof Error ? err.mess
 /** State of one extraction: the count, and (optionally) a list to collect problems in. */
 class Extraction {
   count = 0;
+  bytes = 0;
+  current = '';
+  /** True while a file's data is being written, so progress can count it before it is finished. */
+  private inFlight = false;
 
   /**
    * With a list, a file that cannot be extracted is recorded there and the run carries on.
    * Without one, the first failure propagates, as it always did.
    */
-  constructor(readonly problems?: ExtractProblem[]) {}
+  constructor(
+    readonly problems?: ExtractProblem[],
+    readonly hooks?: ExtractHooks
+  ) {}
+
+  /** Stop at the next safe point if the caller asked to. Never swallowed by per-file error handling. */
+  throwIfCancelled(): void {
+    if (this.hooks?.isCancelled?.()) throw new ExtractCancelledError();
+  }
+
+  /** Account for bytes just written, and tell the caller. */
+  wrote(bytes: number): void {
+    this.bytes += bytes;
+    this.report();
+  }
+
+  report(): void {
+    this.hooks?.onProgress?.({
+      files: this.count + (this.inFlight ? 1 : 0),
+      bytes: this.bytes,
+      current: this.current
+    });
+  }
+
+  /** Mark the file whose data is about to be written, so progress shows it while it is written. */
+  beginItem(): void {
+    this.inFlight = true;
+  }
+
+  endItem(): void {
+    this.inFlight = false;
+  }
 
   note(problem: ExtractProblem): void {
     this.problems?.push(problem);
+    this.hooks?.onProblem?.(problem);
   }
 
   /** Pick the on-disk name for a child, recording a rename, and refuse anything outside `outDir`. */
@@ -743,15 +809,21 @@ class Extraction {
 
   /** Run one item. `work` returns false when it did not produce a file, so it is not counted. */
   attempt(shown: string, work: () => boolean | void): void {
+    this.throwIfCancelled();
+    this.current = shown;
     if (!this.problems) {
       if (work() !== false) this.count++;
+      this.report();
       return;
     }
     try {
       if (work() !== false) this.count++;
     } catch (err) {
+      // Stopping on request is not a file that failed: let it out of the loop.
+      if (err instanceof ExtractCancelledError) throw err;
       this.problems.push({ path: shown, kind: 'skipped', reason: describeError(err) });
     }
+    this.report();
   }
 }
 
@@ -760,18 +832,24 @@ class Extraction {
  * (4 GiB under the Node that Electron 28 ships) and it is not held in memory whole. A partly
  * written file is removed on failure: it would otherwise look like a complete, shorter one.
  */
-function writeStreamed(dest: string, produce: (emit: (chunk: Buffer) => void) => void): void {
+function writeStreamed(dest: string, produce: (emit: (chunk: Buffer) => void) => void, ex?: Extraction): void {
   const fd = fs.openSync(dest, 'w');
   let finished = false;
+  ex?.beginItem();
   try {
     produce((chunk) => {
+      // Checked before each piece, so cancelling a multi-gigabyte file stops within one piece and the
+      // partly written file is removed below rather than left looking complete.
+      ex?.throwIfCancelled();
       let written = 0;
       while (written < chunk.length) {
         written += fs.writeSync(fd, chunk, written, chunk.length - written);
       }
+      ex?.wrote(chunk.length);
     });
     finished = true;
   } finally {
+    ex?.endItem();
     fs.closeSync(fd);
     if (!finished) {
       try {
@@ -803,23 +881,39 @@ const ntfsToUnixSeconds = (t100ns: number | undefined): number | undefined =>
  * be recovered are listed there (with the reason) and the rest are still written, and names
  * that had to change to be valid on Windows are noted too. Extracting a single file always
  * throws on failure, so its exact reason reaches the caller.
+ *
+ * `hooks` lets a caller watch a long extraction and stop it. `isCancelled` is polled between files
+ * and between the pieces of a file; when it returns true the extraction throws `ExtractCancelledError`
+ * (with the number of files already written) and removes the file it was part-way through.
  */
-export function extractPath(session: BrowseSession, relPath: string, outPath: string, problems?: ExtractProblem[]): number {
-  const ex = new Extraction(problems);
-  if (session.filesystem === 'fat32') {
-    extractFat32(session, relPath, outPath, ex);
-  } else if (session.filesystem === 'exfat') {
-    extractExfat(session, relPath, outPath, ex);
-  } else {
-    extractNtfs(session, relPath, outPath, ex);
+export function extractPath(
+  session: BrowseSession,
+  relPath: string,
+  outPath: string,
+  problems?: ExtractProblem[],
+  hooks?: ExtractHooks
+): number {
+  const ex = new Extraction(problems, hooks);
+  ex.current = relPath;
+  try {
+    if (session.filesystem === 'fat32') {
+      extractFat32(session, relPath, outPath, ex);
+    } else if (session.filesystem === 'exfat') {
+      extractExfat(session, relPath, outPath, ex);
+    } else {
+      extractNtfs(session, relPath, outPath, ex);
+    }
+  } catch (err) {
+    if (err instanceof ExtractCancelledError) err.files = ex.count;
+    throw err;
   }
   return ex.count;
 }
 
 const joinShown = (dir: string, name: string): string => (dir === '' || dir === '/' ? `/${name}` : `${dir}/${name}`);
 
-function copyNtfsFile(session: NtfsBrowseSession, rec: NtfsFile, dest: string): void {
-  writeStreamed(dest, (emit) => forEachNtfsFileChunk(session.reader, session.layout, rec, emit));
+function copyNtfsFile(session: NtfsBrowseSession, rec: NtfsFile, dest: string, ex: Extraction): void {
+  writeStreamed(dest, (emit) => forEachNtfsFileChunk(session.reader, session.layout, rec, emit), ex);
   writeAlternateStreams(session, rec, dest);
   applyTimes(dest, ntfsToUnixSeconds(rec.modified));
 }
@@ -835,7 +929,7 @@ function extractNtfs(session: NtfsBrowseSession, relPath: string, outPath: strin
     applyTimes(dir, ntfsToUnixSeconds(rec.modified));
   } else {
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    copyNtfsFile(session, rec, outPath);
+    copyNtfsFile(session, rec, outPath, ex);
     ex.count = 1;
   }
 }
@@ -868,7 +962,7 @@ function extractNtfsDir(
         return false;
       }
       try {
-        copyNtfsFile(session, rec, dest);
+        copyNtfsFile(session, rec, dest, ex);
       } catch (err) {
         // An EFS file whose key cannot be unwrapped locally is skipped rather
         // than aborting the extraction of everything around it.
@@ -883,9 +977,11 @@ function extractNtfsDir(
   }
 }
 
-function copyFat32File(session: Fat32BrowseSession, entry: Fat32Entry, dest: string): void {
-  writeStreamed(dest, (emit) =>
-    forEachFat32FileChunk(session.reader, session.layout, entry.startCluster, entry.size, emit)
+function copyFat32File(session: Fat32BrowseSession, entry: Fat32Entry, dest: string, ex: Extraction): void {
+  writeStreamed(
+    dest,
+    (emit) => forEachFat32FileChunk(session.reader, session.layout, entry.startCluster, entry.size, emit),
+    ex
   );
   applyTimes(dest, entry.modified);
 }
@@ -900,7 +996,7 @@ function extractFat32(session: Fat32BrowseSession, relPath: string, outPath: str
     applyTimes(dir, entry.modified);
   } else {
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    copyFat32File(session, entry, outPath);
+    copyFat32File(session, entry, outPath, ex);
     ex.count = 1;
   }
 }
@@ -934,18 +1030,21 @@ function extractFat32Dir(
         applyTimes(dest, entry.modified);
         return false;
       }
-      copyFat32File(session, entry, dest);
+      copyFat32File(session, entry, dest, ex);
       return true;
     });
   }
 }
 
-function copyExfatFile(session: ExfatBrowseSession, entry: ExfatEntry, dest: string): void {
-  writeStreamed(dest, (emit) =>
-    forEachExfatFileChunk(session.reader, session.layout, entry.startCluster, entry.size, emit, {
-      noFatChain: entry.noFatChain,
-      validDataLength: entry.validDataLength
-    })
+function copyExfatFile(session: ExfatBrowseSession, entry: ExfatEntry, dest: string, ex: Extraction): void {
+  writeStreamed(
+    dest,
+    (emit) =>
+      forEachExfatFileChunk(session.reader, session.layout, entry.startCluster, entry.size, emit, {
+        noFatChain: entry.noFatChain,
+        validDataLength: entry.validDataLength
+      }),
+    ex
   );
   applyTimes(dest, entry.modified);
 }
@@ -960,7 +1059,7 @@ function extractExfat(session: ExfatBrowseSession, relPath: string, outPath: str
     applyTimes(dir, entry.modified);
   } else {
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    copyExfatFile(session, entry, outPath);
+    copyExfatFile(session, entry, outPath, ex);
     ex.count = 1;
   }
 }
@@ -994,7 +1093,7 @@ function extractExfatDir(
         applyTimes(dest, entry.modified);
         return false;
       }
-      copyExfatFile(session, entry, dest);
+      copyExfatFile(session, entry, dest, ex);
       return true;
     });
   }

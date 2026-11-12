@@ -31,7 +31,8 @@ import { listProfileNames } from './imaging/migrate/inventory';
 import { isElevatedSync } from './imaging/migrate/identity';
 import { readMigrateDrillHistory } from './utils/migrate-drill-history';
 import { readImageInfo, verifyImage, CIPHER_NONE, clearImageInfoCache } from './imaging/image-format';
-import { openAnyBrowse as fsOpenBrowseAny, listDirectory, extractPath, detectPartitionFilesystem, BrowseSession, ExtractProblem } from './imaging/fs/file-browse';
+import { openAnyBrowse as fsOpenBrowseAny, listDirectory, detectPartitionFilesystem, BrowseSession, ExtractProblem } from './imaging/fs/file-browse';
+import { runExtractionInWorker, RunningExtraction } from './imaging/fs/extract-runner';
 import { detectMacriumFormat, readMacriumImage, macriumJobKey, closeImageFds, clearMacriumInfoCache } from './imaging/mrimg';
 import { locateAdk, peArchForProcess } from './utils/adk';
 import { createRecoveryMedia, resolveNodeExe, MediaCreateOptions } from './utils/winpe-media';
@@ -155,7 +156,8 @@ interface BrowseCacheEntry {
 
 const browseSessions = new Map<string, BrowseCacheEntry>();
 
-function openBrowseSession(imagePath: string, partitionIndex: number, passphrase?: string): BrowseSession {
+/** Refuse a partition that has nothing in it, with a message the user can act on. */
+function assertPartitionBrowsable(imagePath: string, partitionIndex: number): void {
   if (!detectMacriumFormat(imagePath)) {
     const info = readImageInfo(imagePath);
     const partition = info.partitions.find((p) => p.partitionIndex === partitionIndex);
@@ -163,6 +165,10 @@ function openBrowseSession(imagePath: string, partitionIndex: number, passphrase
       throw new Error(`Partition ${partitionIndex} is empty (0 bytes) and cannot be browsed.`);
     }
   }
+}
+
+function openBrowseSession(imagePath: string, partitionIndex: number, passphrase?: string): BrowseSession {
+  assertPartitionBrowsable(imagePath, partitionIndex);
   const cacheKey = browseCacheKey(imagePath, partitionIndex, passphrase);
   const signature = imageFileSignature(imagePath);
   const cached = browseSessions.get(cacheKey);
@@ -1809,17 +1815,39 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     }
   });
 
+  // One extraction at a time: it is a long, disk-heavy job and the window shows a single progress strip.
+  let activeExtraction: RunningExtraction | null = null;
+  const sendExtractProgress = (progress: { files: number; bytes: number; current: string }): void => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('browse-extract-progress', progress);
+    }
+  };
+
   ipcMain.handle('browse-extract', async (_, imagePath: string, partitionIndex: number, relPath: string, outPath: string, passphrase?: string) => {
+    if (activeExtraction) {
+      throw new Error('Another extraction is already running. Wait for it to finish, or cancel it first.');
+    }
     try {
-      const session = openBrowseSession(imagePath, partitionIndex, passphrase);
-      // Collect what could not be recovered, so one unreadable file does not end the extraction of
-      // the rest and the user is told exactly which files were skipped or renamed.
-      const problems: ExtractProblem[] = [];
-      const files = extractPath(session, relPath, outPath, problems);
+      assertPartitionBrowsable(imagePath, partitionIndex);
+      // Extraction reads and writes synchronously, so on this thread a large folder or file froze the
+      // whole window until it finished. It runs on a worker, which opens its own session; this thread
+      // only relays progress. Problems are collected there, so one unreadable file does not end the
+      // extraction of the rest and the user is told exactly which files were skipped or renamed.
+      const running = runExtractionInWorker(
+        { imagePath, partitionIndex, passphrase, relPath, outPath },
+        sendExtractProgress,
+        () => sendExtractProgress({ files: 0, bytes: 0, current: relPath })
+      );
+      activeExtraction = running;
+      const outcome = await running.promise;
+      const problems: ExtractProblem[] = outcome.problems;
       for (const problem of problems) {
         logger.warn(`browse-extract ${problem.kind}: ${problem.path}: ${problem.reason}`);
       }
-      return { ok: true, files, outPath, problems };
+      if (outcome.cancelled) {
+        logger.info(`browse-extract cancelled after ${outcome.files} file(s): ${imagePath}#${partitionIndex} "${relPath}"`);
+      }
+      return { ok: !outcome.cancelled, cancelled: outcome.cancelled, partial: outcome.partial, files: outcome.files, bytes: outcome.bytes, outPath, problems };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       logger.error(
@@ -1827,7 +1855,14 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
         error
       );
       throw error;
+    } finally {
+      activeExtraction = null;
     }
+  });
+
+  ipcMain.handle('browse-extract-cancel', async () => {
+    activeExtraction?.cancel();
+    return { ok: true, running: activeExtraction !== null };
   });
 
   ipcMain.handle('browse-close', async () => {

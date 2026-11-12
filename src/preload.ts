@@ -115,6 +115,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   winfspInstall: () => ipcRenderer.invoke('winfsp-install'),
   mountImage: (config: unknown) => ipcRenderer.invoke('mount-image', config),
   unmountImage: (id: string) => ipcRenderer.invoke('unmount-image', id),
+  browseExtractCancel: () => ipcRenderer.invoke('browse-extract-cancel'),
+  onBrowseExtractProgress: (callback: (progress: { files: number; bytes: number; current: string }) => void) => {
+    const handler = (_event: unknown, progress: { files: number; bytes: number; current: string }) => callback(progress);
+    ipcRenderer.on('browse-extract-progress', handler);
+    return () => {
+      ipcRenderer.removeListener('browse-extract-progress', handler);
+    };
+  },
   onMountStatus: (callback: (status: unknown) => void) => {
     const handler = (_event: unknown, status: unknown) => callback(status);
     ipcRenderer.on('mount-status', handler);

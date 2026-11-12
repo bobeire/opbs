@@ -39,6 +39,23 @@ interface BrowseViewProps {
   autoMount?: boolean;
 }
 
+/**
+ * What to tell the user after a cancelled extraction. A cancelled single file is removed, so naming
+ * it as if it were written would point at something that is not there; only a forced stop can leave
+ * a partly written file behind.
+ */
+function cancelledNotice(outPath: string, files: number, isDir: boolean, partial: boolean): string {
+  if (isDir) {
+    return (
+      `Extraction cancelled after ${files} item(s). What was written is in ${outPath}.` +
+      (partial ? ' One file that was part-way through may have been left incomplete there.' : '')
+    );
+  }
+  return partial
+    ? `Extraction cancelled. A file that was part-way through may have been left incomplete at ${outPath}.`
+    : 'Extraction cancelled. Nothing was left on disk.';
+}
+
 function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps) {
   const [imagePath, setImagePath] = useState('');
   const [info, setInfo] = useState<{
@@ -254,6 +271,21 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
     void loadDirectory(stripLastSegment(cwd));
   };
 
+  // Extraction runs on a worker thread in the main process; this is its latest report.
+  const [extractProgress, setExtractProgress] = useState<{ files: number; bytes: number; current: string } | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+
+  useEffect(() => window.electronAPI.onBrowseExtractProgress(setExtractProgress), []);
+
+  const cancelExtraction = async () => {
+    setCancelling(true);
+    try {
+      await window.electronAPI.browseExtractCancel();
+    } catch {
+      // the extraction ends on its own either way
+    }
+  };
+
   const extractTarget = async (relPath: string, displayName: string, isDir: boolean) => {
     if (partitionIndex === null) return;
     let outPath: string | undefined;
@@ -272,6 +304,8 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
     }
     if (!outPath) return;
     setExtracting(relPath);
+    setExtractProgress(null);
+    setCancelling(false);
     setNotice('');
     try {
       const result = await window.electronAPI.browseExtract(
@@ -285,8 +319,10 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
       const skipped = problems.filter((p) => p.kind === 'skipped');
       const renamed = problems.filter((p) => p.kind === 'renamed');
       setNotice(
-        `Extracted ${result.files} item(s) to ${result.outPath}` +
-          (renamed.length > 0 ? ` (${renamed.length} renamed to names Windows accepts)` : '')
+        result.cancelled
+          ? cancelledNotice(result.outPath, result.files, isDir, result.partial === true)
+          : `Extracted ${result.files} item(s) to ${result.outPath}` +
+              (renamed.length > 0 ? ` (${renamed.length} renamed to names Windows accepts)` : '')
       );
       if (skipped.length > 0) {
         // Say which files were not recovered and why, rather than leaving a short folder to be noticed later.
@@ -298,6 +334,8 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
       setError(e instanceof Error ? e.message : 'Extraction failed');
     } finally {
       setExtracting(null);
+      setExtractProgress(null);
+      setCancelling(false);
     }
   };
 
@@ -492,6 +530,25 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
       {notice && (
         <div className="success-message">
           <p>{notice}</p>
+        </div>
+      )}
+
+      {extracting !== null && (
+        // Deliberately not a live region: the figures change several times a second and would be
+        // announced continuously. The outcome is announced where the notice/error is shown.
+        <div className="field-hint" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {cancelling
+              ? 'Cancelling…'
+              : extractProgress
+                ? `Extracting… ${extractProgress.files} file(s), ${formatSize(extractProgress.bytes)}${
+                    extractProgress.current ? ` — ${extractProgress.current}` : ''
+                  }`
+                : 'Preparing…'}
+          </span>
+          <button className="btn btn-secondary" onClick={() => void cancelExtraction()} disabled={cancelling}>
+            Cancel
+          </button>
         </div>
       )}
 

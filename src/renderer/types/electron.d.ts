@@ -401,10 +401,17 @@ declare global {
       browseList: (imagePath: string, partitionIndex: number, relPath: string, passphrase?: string) => Promise<ApiBrowseNode[]>;
       browseExtract: (imagePath: string, partitionIndex: number, relPath: string, outPath: string, passphrase?: string) => Promise<{
         ok?: boolean;
+        /** True when the user cancelled; `files` is how many were written first. */
+        cancelled?: boolean;
+        /** True when the worker had to be stopped outright, so a partly written file may remain. */
+        partial?: boolean;
         files: number;
+        bytes?: number;
         outPath: string;
         problems?: Array<{ path: string; kind: 'skipped' | 'renamed'; reason: string }>;
       }>;
+      browseExtractCancel: () => Promise<{ ok: boolean; running: boolean }>;
+      onBrowseExtractProgress: (callback: (progress: { files: number; bytes: number; current: string }) => void) => () => void;
       browseClose: () => Promise<void>;
       mediaCheck: () => Promise<ApiMediaCheckReport>;
       mediaCreate: (options: ApiMediaCreateOptions) => Promise<ApiMediaCreateResult>;
