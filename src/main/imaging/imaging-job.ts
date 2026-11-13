@@ -240,7 +240,12 @@ export type RestoreJobPhase = 'reading-image' | 'verifying' | 'writing' | 'compl
 export interface JobProgress {
   phase: JobPhase;
   percent: number;
+  /** Planned capture work completed: blocks read from the source. Skipped
+   *  free space and unchanged blocks that were never read do not count, so
+   *  `percent` and `speed` describe actual work rather than partition size. */
   bytesDone: number;
+  /** Planned capture bytes for the run (allocated/changed blocks only when
+   *  those filters are active), not the sum of partition sizes. */
   totalBytes: number;
   speed: number;
   currentPartition: string;

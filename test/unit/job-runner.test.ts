@@ -469,6 +469,18 @@ describe('runBackupJob', () => {
       // Completed partition 0's 3 blocks are kept; partition 1 adds 2.
       expect(result.blocksWritten).toBe(5);
 
+      // Progress totals span the whole job: the kept bytes start as done and
+      // the new partition completes the ratio, so a resumed run does not
+      // restart its bar at 0%.
+      const progress = JSON.parse(fs.readFileSync(progressPath, 'utf-8')) as {
+        totalBytes: number;
+        bytesDone: number;
+        percent: number;
+      };
+      expect(progress.totalBytes).toBe(blockSize * 5);
+      expect(progress.bytesDone).toBe(blockSize * 5);
+      expect(progress.percent).toBe(100);
+
       // The finished image verifies and contains both partitions.
       const verified = await verifyImage(imagePath);
       expect(verified.ok).toBe(true);
@@ -1281,6 +1293,29 @@ describe('incremental and encrypted jobs', () => {
     const verified = await verifyImage(deltaPath);
     expect(verified.ok).toBe(true);
     expect(verified.blocksVerified).toBe(1);
+  });
+
+  it('counts blocks read then skipped against the base image as capture work', async () => {
+    const native = createIncrementalMock();
+    writeJob(singlePartitionJob(fullPath));
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+    expect(readResult().ok).toBe(true);
+
+    native.changeBlock1();
+    writeJob({ ...singlePartitionJob(deltaPath), baseImagePath: fullPath });
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const progress = JSON.parse(fs.readFileSync(progressPath, 'utf-8')) as {
+      totalBytes: number;
+      bytesDone: number;
+      percent: number;
+    };
+    // Without USN all three blocks are read; only the changed one is stored.
+    // The two that matched the base were still fetched and checked, so they
+    // are work: excluding them would stop the bar at 33%.
+    expect(progress.totalBytes).toBe(BLOCK * 3);
+    expect(progress.bytesDone).toBe(BLOCK * 3);
+    expect(progress.percent).toBe(100);
   });
 
   it('records only the base file name when the folder path is too long for the header', async () => {

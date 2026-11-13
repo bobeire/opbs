@@ -1420,7 +1420,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                     <p>ETA: {formatDuration(progress.estimatedTimeRemaining)}</p>
                   )}
                 {progress?.speed !== undefined && progress.speed > 0 && (
-                  <p>Speed: {formatSpeed(progress.speed)}</p>
+                  <p>Read speed: {formatSpeed(progress.speed)}</p>
                 )}
               </div>
             </div>

@@ -117,6 +117,44 @@ function emitResult(resultPath: string, result: Record<string, unknown> | JobRes
 }
 
 /**
+ * Pack a set of block indexes into a bit-per-block map. A `Set<number>` for a
+ * nearly-full 1 TiB archive holds ~1M boxed entries; the bitset holds 128 KiB.
+ * That matters here because every partition's plan stays alive for the whole
+ * capture loop instead of being rebuilt just before its partition.
+ */
+function blockBitset(indexes: Set<number>, totalBlocks: number): Uint8Array {
+  const bits = new Uint8Array(Math.ceil(totalBlocks / 8));
+  for (const index of indexes) {
+    if (index >= 0 && index < totalBlocks) {
+      bits[index >>> 3] |= 1 << (index & 7);
+    }
+  }
+  return bits;
+}
+
+function hasBlock(bits: Uint8Array, index: number): boolean {
+  return (bits[index >>> 3] & (1 << (index & 7))) !== 0;
+}
+
+/**
+ * What the capture loop will read from one partition. Resolved up front so
+ * `progress.totalBytes` can be a real figure before the first byte is written:
+ * with used-blocks capture the job reads 110 GB from an 822 GB volume, and a
+ * bar measured in partition geometry reaches 25% while three quarters of the
+ * actual work is still ahead.
+ */
+interface PartitionPlan {
+  device: string;
+  baseOffset: bigint;
+  /** Blocks whose clusters are allocated; null = capture every block. */
+  usedBits: Uint8Array | null;
+  /** Blocks the USN journal says changed; null = no narrowing. */
+  changedBits: Uint8Array | null;
+  /** Source bytes this partition will read, including a partial final block. */
+  plannedBytes: number;
+}
+
+/**
  * Backs up a disk to a .opbs image. Runs in the elevated helper process.
  *
  * `nativeApi` is optional and injectable for testing.
@@ -642,46 +680,39 @@ export async function runBackupJob(
       );
     }
 
-    for (let pi = 0; pi < job.partitions.length; pi++) {
+    // Capture planning pre-pass. Progress is measured in the bytes this run
+    // will actually read, not partition geometry: a used-blocks backup of
+    // 110 GB inside an 822 GB volume must report 110 GB as its total, or the
+    // bar reaches 25% before a quarter of the reading is done and the MB/s
+    // figure counts skipped free space as throughput. Resolving the plan up
+    // front also means `progress.totalBytes` is correct before the first byte,
+    // and the loop below makes one bitset test per block instead of rebuilding
+    // allocation-map/USN state mid-run.
+    const completedPartitions =
+      isResume && resumeCheckpoint
+        ? Math.min(resumeCheckpoint.completedPartitions, job.partitions.length)
+        : 0;
+    const plans: Array<PartitionPlan | null> = new Array(job.partitions.length).fill(null);
+    // Partitions kept from an interrupted run were already read and will not be
+    // read again, so their checkpointed bytes are both done and part of the
+    // total: resuming continues the bar instead of restarting it.
+    const resumedBytes =
+      completedPartitions > 0 && resumeCheckpoint ? resumeCheckpoint.bytesWritten : 0;
+    let plannedTotalBytes = resumedBytes;
+
+    for (let pi = completedPartitions; pi < job.partitions.length; pi++) {
       const part = job.partitions[pi];
-      // Resume: partitions whose frames are already on disk are skipped.
-      if (isResume && resumeCheckpoint && pi < resumeCheckpoint.completedPartitions) {
-        continue;
-      }
-      if (isCancelled()) {
-        throw new CancelledError();
-      }
 
-      progress.currentPartition = part.label;
-      writeProgress('reading');
-
-      // Determine read source device and base offset.
       let device: string;
       let baseOffset: bigint;
-
       if (part.readSource === 'volume' && part.volumeDevicePath) {
         const snap = snapshotCache.get(part.volumeDevicePath);
-        if (snap) {
-          device = snap.devicePath;
-          baseOffset = 0n;
-        } else {
-          device = part.volumeDevicePath;
-          baseOffset = 0n;
-        }
+        device = snap ? snap.devicePath : part.volumeDevicePath;
+        baseOffset = 0n;
       } else {
         device = native.getPhysicalDrivePath(part.diskIndex);
         baseOffset = BigInt(part.offset);
       }
-
-      const firstBlockFileOffset = cursor;
-      const entry: PartitionEntryMeta = {
-        partitionIndex: part.partitionIndex,
-        size: part.size,
-        offsetOnDisk: part.offset,
-        firstBlockFileOffset,
-        blockCount: 0
-      };
-      partitionEntries.push(entry);
 
       // USN-based changed-block tracking: when enabled and we have a volume + a
       // prior journal USN, only read the blocks touched by changed files. If the
@@ -763,6 +794,68 @@ export async function runBackupJob(
           logger.info(`${part.label}: used-blocks scan found ${usedBlocks.size} of ${totalBlocks} blocks allocated`);
         }
       }
+
+      const totalBlocks = Math.ceil(part.size / blockSize);
+      const usedBits = usedBlocks ? blockBitset(usedBlocks, totalBlocks) : null;
+      const changedBits = changedBlocks ? blockBitset(changedBlocks, totalBlocks) : null;
+
+      // Bytes this partition will read: candidate blocks (allocated and, for a
+      // delta, changed) with the final block counted at its real length. Bytes
+      // read only to discover they match the base image still count as work.
+      let plannedBytes = 0;
+      for (let b = 0; b < totalBlocks; b++) {
+        if (usedBits && !hasBlock(usedBits, b)) continue;
+        if (changedBits && !hasBlock(changedBits, b)) continue;
+        plannedBytes += Math.min(blockSize, part.size - b * blockSize);
+      }
+
+      plans[pi] = { device, baseOffset, usedBits, changedBits, plannedBytes };
+      plannedTotalBytes += plannedBytes;
+      logger.info(
+        `${part.label}: capture plan reads ${plannedBytes} of ${part.size} bytes ` +
+          `(${totalBlocks} blocks, used=${usedBits ? 'bitmap' : 'all'}, changed=${changedBits ? 'usn' : 'all'})`
+      );
+    }
+
+    // Capture-byte accounting from here on. The resumed bytes stay in the
+    // numerator so an interrupted run continues from where it stopped.
+    progress.totalBytes = plannedTotalBytes;
+    progress.bytesDone = resumedBytes;
+    progress.speed = 0;
+    // The rate shown in the UI is this session's read rate. Dividing the
+    // resumed numerator by an elapsed time that starts now would report a
+    // fictional burst on the first block after a resume.
+    const captureStartedAt = Date.now();
+    let bytesCaptured = 0;
+
+    for (let pi = 0; pi < job.partitions.length; pi++) {
+      const part = job.partitions[pi];
+      // Resume: partitions whose frames are already on disk are skipped.
+      if (isResume && resumeCheckpoint && pi < resumeCheckpoint.completedPartitions) {
+        continue;
+      }
+      if (isCancelled()) {
+        throw new CancelledError();
+      }
+
+      const plan = plans[pi];
+      if (!plan) {
+        throw new Error(`Backup planning did not produce a plan for ${part.label}`);
+      }
+      const { device, baseOffset, usedBits, changedBits } = plan;
+
+      progress.currentPartition = part.label;
+      writeProgress('reading');
+
+      const firstBlockFileOffset = cursor;
+      const entry: PartitionEntryMeta = {
+        partitionIndex: part.partitionIndex,
+        size: part.size,
+        offsetOnDisk: part.offset,
+        firstBlockFileOffset,
+        blockCount: 0
+      };
+      partitionEntries.push(entry);
 
       let partitionBytes = 0;
       // Source block index within the partition; advances for every block read,
@@ -918,16 +1011,17 @@ export async function runBackupJob(
         const readLength = BigInt(Math.min(blockSize, remaining));
         const blockIndex = sourceBlockIndex;
 
-        // USN tracking / used-blocks filtering: skip blocks that did not change
-        // or hold no allocated data, without reading them. Accounting still
-        // advances so source offsets stay stable.
+        // Used-blocks / USN filtering: skip blocks that hold no allocated data
+        // or did not change without reading them. Source offsets still advance,
+        // but the progress numerator does not: skipped free space is not work,
+        // and counting it made the bar and the MB/s figure lie on sparse
+        // volumes (field report 2026-11-13: 25% shown after a quarter of the
+        // *volume* while most of the data was still unread).
         if (
-          (changedBlocks && !changedBlocks.has(blockIndex)) ||
-          (usedBlocks && !usedBlocks.has(blockIndex))
+          (usedBits && !hasBlock(usedBits, blockIndex)) ||
+          (changedBits && !hasBlock(changedBits, blockIndex))
         ) {
-          const skipLen = Number(readLength);
-          partitionBytes += skipLen;
-          progress.bytesDone += skipLen;
+          partitionBytes += Number(readLength);
           sourceBlockIndex++;
           skippedBlocks++;
           continue;
@@ -960,21 +1054,27 @@ export async function runBackupJob(
           );
         }
 
-        // Incremental: skip blocks whose content matches the base image.
+        // Reading is the work the plan accounts for. Advance source-side
+        // accounting now (reads and subsequent writes are contiguous in source
+        // space regardless of frame compression ratio), and count the bytes as
+        // captured even if the content check below decides not to store them.
+        partitionBytes += raw.length;
+        sourceBlockIndex++;
+        progress.bytesDone += raw.length;
+        bytesCaptured += raw.length;
+
+        const elapsedSec = (Date.now() - captureStartedAt) / 1000;
+        progress.speed = elapsedSec > 0 ? bytesCaptured / elapsedSec : 0;
+
+        // Incremental: skip storing blocks whose content matches the base image.
         const baseCrc = baseCrcs.get(`${part.partitionIndex}:${blockIndex}`);
         if (job.baseImagePath && baseCrc !== undefined && crc32(raw) === baseCrc) {
           skippedBlocks++;
-          partitionBytes += raw.length;
-          progress.bytesDone += raw.length;
-          sourceBlockIndex++;
+          if (Date.now() - lastProgressWrite > 100) {
+            writeProgress('reading');
+          }
           continue;
         }
-
-        // Advance source-side accounting now (reads and subsequent writes are
-        // contiguous in source space regardless of frame compression ratio).
-        partitionBytes += raw.length;
-        progress.bytesDone += raw.length;
-        sourceBlockIndex++;
 
         // With the pool, defer compression/write until the window fills; the
         // pool resolves in submission order, so draining stays sequential.
@@ -992,9 +1092,6 @@ export async function runBackupJob(
           const compressed = compressBlock(raw, compressionId, job.compressionLevel);
           finalizeSync({ raw, blockIndex, rawSize: raw.length, rawCrc: crc32(raw) }, compressed);
         }
-
-        const elapsedSec = (Date.now() - start) / 1000;
-        progress.speed = elapsedSec > 0 ? progress.bytesDone / elapsedSec : 0;
 
         if (Date.now() - lastProgressWrite > 100) {
           writeProgress('reading');

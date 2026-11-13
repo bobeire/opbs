@@ -334,4 +334,36 @@ describe('runBackupJob with usedBlocksOnly', () => {
     const indices = info.blocks.map((b) => b.blockIndex).sort((a, b) => a - b);
     expect(indices).toEqual(Array.from({ length: 16 }, (_, i) => i));
   });
+
+  it('measures progress in captured bytes, not partition geometry', async () => {
+    fs.writeFileSync(
+      jobPath,
+      JSON.stringify({
+        type: 'backup',
+        imagePath,
+        blockSize: GR_CLUSTER,
+        compressionLevel: 0,
+        verificationEnabled: false,
+        usedBlocksOnly: true,
+        partitions: [
+          { diskIndex: 0, partitionIndex: 0, size: VOLUME_SIZE, offset: 0, label: 'P0', readSource: 'physical' }
+        ]
+      })
+    );
+
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, bufferNative(buildCanonicalNtfsVolumeData()));
+
+    const progress = JSON.parse(fs.readFileSync(progressPath, 'utf-8')) as {
+      totalBytes: number;
+      bytesDone: number;
+      percent: number;
+    };
+    // The fixture allocates clusters 0..15 of 64. Free blocks are skipped
+    // without being read, so they must appear on neither side of the ratio:
+    // a bar measured in partition geometry would show 25% before a single
+    // data block had been read.
+    expect(progress.totalBytes).toBe(16 * GR_CLUSTER);
+    expect(progress.bytesDone).toBe(16 * GR_CLUSTER);
+    expect(progress.percent).toBe(100);
+  });
 });
