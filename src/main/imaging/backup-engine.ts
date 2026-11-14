@@ -53,6 +53,9 @@ export interface BackupJobConfig {
   allowInconsistentCapture?: boolean;
   /** Worker threads for multithreaded compression (0/unset = synchronous). */
   compressionThreads?: number;
+  /** Overlapping source-read lanes (1/unset = the original single read).
+   *  Experimental opt-in: frames stay in source order, only read depth changes. */
+  readLanes?: number;
   /** Use the USN journal to read only changed blocks for an incremental. */
   useUsnJournal?: boolean;
   /** Fraction (0..1) of a partition's blocks that USN may report as changed
@@ -371,6 +374,7 @@ export class ImagingEngine implements BackupCoordinator {
       compressionLevel,
       compressionType: config.compressionType,
       compressionThreads,
+      ...(config.readLanes && config.readLanes > 1 ? { readLanes: config.readLanes } : {}),
       verificationEnabled: config.verificationEnabled,
       partitions: items,
       baseImagePath: config.baseImagePath,

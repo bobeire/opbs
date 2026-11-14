@@ -9,9 +9,10 @@ export interface NativeImagingApi {
    */
   createSnapshotSet?(volumePaths: string[]): Array<{ id: string; devicePath: string }>;
   deleteSnapshot(id: string): boolean;
-  readBlocks(devicePath: string, offset: bigint, length: bigint): Buffer;
+  /** `lane` selects a distinct device handle for overlapping reads. */
+  readBlocks(devicePath: string, offset: bigint, length: bigint, lane?: number): Buffer;
   writeBlocks(devicePath: string, offset: bigint, data: Buffer): number;
-  readBlocksAsync?(devicePath: string, offset: bigint, length: bigint): Promise<Buffer>;
+  readBlocksAsync?(devicePath: string, offset: bigint, length: bigint, lane?: number): Promise<Buffer>;
   writeBlocksAsync?(devicePath: string, offset: bigint, data: Buffer): Promise<number>;
   getPhysicalDrivePath(diskIndex: number): string;
   getVolumePath?(diskIndex: number, partitionOffset: number): string;
@@ -117,6 +118,13 @@ export interface ImagingJob {
   compressionType?: 'deflate' | 'zstd';
   /** Worker threads for multithreaded compression (0/unset = synchronous). */
   compressionThreads?: number;
+  /**
+   * Overlapping source-read lanes (1/unset = the original single read).
+   * Reads are issued ahead of the writer but frames are still written in source
+   * order, so this changes throughput only. Experimental until measured by
+   * someone other than the author, hence opt-in.
+   */
+  readLanes?: number;
   /** Use the USN journal to read only changed blocks for an incremental. */
   useUsnJournal?: boolean;
   /** Volume path whose USN journal to query (single-volume legacy). */

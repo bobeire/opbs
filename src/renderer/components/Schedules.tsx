@@ -18,6 +18,8 @@ interface ScheduledBackup {
   compressionLevel: number;
   compressionType?: 'deflate' | 'zstd';
   compressionThreads?: number;
+  /** Overlapping source-read lanes (1/unset = one read at a time). */
+  readLanes?: number;
   verificationEnabled: boolean;
   allowInconsistentCapture?: boolean;
   incremental: boolean;
@@ -49,6 +51,8 @@ interface ScheduleForm {
   compressionLevel: number;
   compressionType: 'deflate' | 'zstd';
   compressionThreads: number;
+  /** Overlapping source-read lanes (1 = one read at a time, the default). */
+  readLanes: number;
   verificationEnabled: boolean;
   /** Capture live when Windows cannot freeze a volume (no point in time). */
   allowInconsistentCapture: boolean;
@@ -101,6 +105,8 @@ interface RunBackupConfig {
   compressionLevel: number;
   compressionType: 'deflate' | 'zstd';
   compressionThreads: number;
+  /** Overlapping source-read lanes (unset/1 = one read at a time). */
+  readLanes?: number;
   verificationEnabled: boolean;
   allowInconsistentCapture?: boolean;
   passphrase?: string;
@@ -197,6 +203,7 @@ function Schedules() {
     compressionLevel: defaults.defaultCompression,
     compressionType: 'zstd',
     compressionThreads: Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1)),
+    readLanes: 1,
     verificationEnabled: defaults.defaultVerification,
     allowInconsistentCapture: false,
     incremental: false,
@@ -239,6 +246,7 @@ function Schedules() {
       compressionLevel: job.compressionLevel,
       compressionType: job.compressionType || 'zstd',
       compressionThreads: job.compressionThreads || base.compressionThreads,
+      readLanes: job.readLanes ?? 1,
       verificationEnabled: job.verificationEnabled,
       allowInconsistentCapture: job.allowInconsistentCapture ?? false,
       incremental: job.incremental,
@@ -401,6 +409,7 @@ function Schedules() {
       compressionLevel: scheduleForm.compressionLevel,
       compressionType: scheduleForm.compressionType,
       compressionThreads: scheduleForm.compressionThreads,
+      ...(scheduleForm.readLanes > 1 ? { readLanes: scheduleForm.readLanes } : {}),
       verificationEnabled: scheduleForm.verificationEnabled,
       ...(scheduleForm.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
       incremental: scheduleForm.incremental,
@@ -469,6 +478,7 @@ function Schedules() {
       compressionLevel: job.compressionLevel,
       compressionType: job.compressionType || 'zstd',
       compressionThreads: job.compressionThreads || 0,
+      ...(job.readLanes && job.readLanes > 1 ? { readLanes: job.readLanes } : {}),
       verificationEnabled: job.verificationEnabled,
       ...(job.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
       ...(job.passphrase ? { passphrase: job.passphrase } : {})
@@ -788,6 +798,23 @@ function Schedules() {
               }
             />
             <p className="field-hint">1+ parallelizes compression across worker threads (0 disables).</p>
+          </div>
+
+          <div className="setting-item">
+            <label>Overlapping read lanes (experimental):</label>
+            <select
+              value={scheduleForm.readLanes}
+              onChange={(e) => setScheduleForm({ ...scheduleForm, readLanes: parseInt(e.target.value) })}
+            >
+              <option value={1}>1 — one read at a time (default)</option>
+              <option value={2}>2 — two reads in flight</option>
+              <option value={4}>4 — four reads in flight</option>
+              <option value={8}>8 — eight reads in flight</option>
+            </select>
+            <p className="field-hint">
+              Keeps several source reads in flight while frames are still written in order. Opt-in
+              until someone outside this project has measured it; values above 4 mostly queue.
+            </p>
           </div>
 
           <div className="setting-item">

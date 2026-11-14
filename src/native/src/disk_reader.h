@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 #include <unordered_map>
+#include <mutex>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -42,7 +43,10 @@ public:
     static std::vector<DiskInfo> EnumerateDisks();
     static std::vector<PartitionInfo> EnumeratePartitions(int diskIndex);
     static std::string GetPhysicalDrivePath(int diskIndex);
-    static std::vector<char> ReadBlocks(const std::string& devicePath, uint64_t offset, uint64_t length);
+    // `lane` selects a distinct cached handle so several reads can be in flight
+    // at once without racing a shared file pointer. Lane 0 is the original
+    // single-handle path; callers that do not pass a lane keep that behaviour.
+    static std::vector<char> ReadBlocks(const std::string& devicePath, uint64_t offset, uint64_t length, int lane = 0);
     static uint64_t WriteBlocks(const std::string& devicePath, uint64_t offset, const char* data, size_t length);
     static std::string GetVolumePathForOffset(int diskIndex, uint64_t partitionOffset);
     static std::vector<UsnRecord> QueryUsnJournal(const std::string& volumePath, uint64_t startUsn);
@@ -70,8 +74,11 @@ private:
 #ifdef _WIN32
     // Cached device handles keyed by device path. Avoids repeated
     // CreateFileW/CloseHandle per 1MB block during backup/restore.
-    static HANDLE GetCachedHandle(const std::string& devicePath, DWORD access);
+    static HANDLE GetCachedHandle(const std::string& devicePath, DWORD access, int lane = 0);
+    static void InvalidateCachedHandle(const std::string& devicePath, int lane);
     static std::unordered_map<std::string, HANDLE> s_handleCache;
+    // Read lanes run on separate libuv threads; the cache itself is shared.
+    static std::mutex s_handleCacheMutex;
     static std::vector<HANDLE> s_lockedVolumes;
     static std::string s_lastLockNote;
 #endif

@@ -387,6 +387,7 @@ export function buildUnattendedBackupConfig(schedule: {
   compressionLevel: number;
   compressionType?: string;
   compressionThreads?: number;
+  readLanes?: number;
   verificationEnabled: boolean;
   allowInconsistentCapture?: boolean;
   incremental: boolean;
@@ -399,6 +400,7 @@ export function buildUnattendedBackupConfig(schedule: {
     compressionLevel: schedule.compressionLevel,
     compressionType: schedule.compressionType ?? 'zstd',
     compressionThreads: schedule.compressionThreads ?? 1,
+    ...(schedule.readLanes && schedule.readLanes > 1 ? { readLanes: schedule.readLanes } : {}),
     verificationEnabled: schedule.verificationEnabled,
     ...(schedule.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
     incremental: schedule.incremental,
@@ -427,6 +429,7 @@ export async function registerUnattendedBackupTask(
     compressionLevel: number;
     compressionType?: string;
     compressionThreads?: number;
+    readLanes?: number;
     verificationEnabled: boolean;
     allowInconsistentCapture?: boolean;
     incremental: boolean;

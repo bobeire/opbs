@@ -28,6 +28,8 @@ static std::string FormatWinError(DWORD code) {
 
 // Static handle cache — avoids repeated CreateFileW/CloseHandle per 1MB block.
 std::unordered_map<std::string, HANDLE> DiskReader::s_handleCache;
+// Lane reads run concurrently on the libuv thread pool; the map is shared.
+std::mutex DiskReader::s_handleCacheMutex;
 // Volumes locked for restore; held open until ReleaseLockedVolumes.
 std::vector<HANDLE> DiskReader::s_lockedVolumes;
 // Diagnostic for the last LockAndDismountVolume failure (see LastLockNote).
@@ -171,11 +173,25 @@ bool DiskReader::UpdateDiskProperties(const std::string& devicePath) {
     return ok == TRUE;
 }
 
-HANDLE DiskReader::GetCachedHandle(const std::string& devicePath, DWORD access) {
-    // Return cached handle if it exists and has compatible access.
-    auto it = s_handleCache.find(devicePath);
-    if (it != s_handleCache.end() && it->second != INVALID_HANDLE_VALUE) {
-        return it->second;
+namespace {
+// Lane 0 keeps the historical key so existing callers (writes, synchronous
+// reads) share the same handle they always did; extra lanes get their own.
+std::string HandleCacheKey(const std::string& devicePath, int lane) {
+    return lane > 0 ? devicePath + "#lane" + std::to_string(lane) : devicePath;
+}
+}  // namespace
+
+HANDLE DiskReader::GetCachedHandle(const std::string& devicePath, DWORD access, int lane) {
+    const std::string key = HandleCacheKey(devicePath, lane);
+
+    // Return cached handle if it exists. Hold the lock for the whole lookup so
+    // two lanes cannot race a read of the map while another inserts.
+    {
+        std::lock_guard<std::mutex> lock(s_handleCacheMutex);
+        auto it = s_handleCache.find(key);
+        if (it != s_handleCache.end() && it->second != INVALID_HANDLE_VALUE) {
+            return it->second;
+        }
     }
 
     // Open with sequential-scan hint for backup/restore read-ahead optimization.
@@ -202,12 +218,41 @@ HANDLE DiskReader::GetCachedHandle(const std::string& devicePath, DWORD access) 
         throw std::runtime_error("Failed to open device " + devicePath + ": " + FormatWinError(GetLastError()));
     }
 
-    s_handleCache[devicePath] = hDevice;
+    // Another thread may have opened the same lane while we were opening ours.
+    // Keep the first handle and close the duplicate so the cache stays owned by
+    // exactly one entry.
+    {
+        std::lock_guard<std::mutex> lock(s_handleCacheMutex);
+        auto it = s_handleCache.find(key);
+        if (it != s_handleCache.end() && it->second != INVALID_HANDLE_VALUE) {
+            HANDLE existing = it->second;
+            CloseHandle(hDevice);
+            return existing;
+        }
+        s_handleCache[key] = hDevice;
+    }
     return hDevice;
+}
+
+void DiskReader::InvalidateCachedHandle(const std::string& devicePath, int lane) {
+    const std::string key = HandleCacheKey(devicePath, lane);
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    {
+        std::lock_guard<std::mutex> lock(s_handleCacheMutex);
+        auto it = s_handleCache.find(key);
+        if (it != s_handleCache.end()) {
+            handle = it->second;
+            s_handleCache.erase(it);
+        }
+    }
+    if (handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(handle);
+    }
 }
 
 void DiskReader::CloseAllHandles() {
     ReleaseLockedVolumes();
+    std::lock_guard<std::mutex> lock(s_handleCacheMutex);
     for (auto& [path, handle] : s_handleCache) {
         if (handle != INVALID_HANDLE_VALUE) {
             CloseHandle(handle);
@@ -541,8 +586,8 @@ std::string DiskReader::GetPhysicalDrivePath(int diskIndex) {
     return ss.str();
 }
 
-std::vector<char> DiskReader::ReadBlocks(const std::string& devicePath, uint64_t offset, uint64_t length) {
-    HANDLE hDevice = GetCachedHandle(devicePath, GENERIC_READ);
+std::vector<char> DiskReader::ReadBlocks(const std::string& devicePath, uint64_t offset, uint64_t length, int lane) {
+    HANDLE hDevice = GetCachedHandle(devicePath, GENERIC_READ, lane);
 
     // Raw disk/volume devices only accept sector-aligned offsets and lengths.
     // Align the offset down and round the length up, then trim the result so
@@ -567,9 +612,8 @@ std::vector<char> DiskReader::ReadBlocks(const std::string& devicePath, uint64_t
         DWORD bytesRead = 0;
 
         if (!ReadFile(hDevice, data.data() + totalRead, toRead, &bytesRead, nullptr)) {
-            // Invalidate the cached handle on error.
-            s_handleCache.erase(devicePath);
-            CloseHandle(hDevice);
+            // Invalidate this lane's cached handle on error.
+            InvalidateCachedHandle(devicePath, lane);
             std::ostringstream ss;
             ss << "ReadFile failed on " << devicePath
                << " at offset " << alignedOffset + totalRead << " (" << toRead << " bytes): "
@@ -606,8 +650,7 @@ uint64_t DiskReader::WriteBlocks(const std::string& devicePath, uint64_t offset,
     fileOffset.QuadPart = static_cast<LONGLONG>(offset);
     
     if (!SetFilePointerEx(hDevice, fileOffset, nullptr, FILE_BEGIN)) {
-        s_handleCache.erase(devicePath);
-        CloseHandle(hDevice);
+        InvalidateCachedHandle(devicePath, 0);
         std::ostringstream ss;
         ss << "SetFilePointerEx failed on " << devicePath << " at offset " << offset
            << ": " << FormatWinError(GetLastError());
@@ -622,8 +665,7 @@ uint64_t DiskReader::WriteBlocks(const std::string& devicePath, uint64_t offset,
         DWORD bytesWritten = 0;
         
         if (!WriteFile(hDevice, data + totalWritten, toWrite, &bytesWritten, nullptr)) {
-            s_handleCache.erase(devicePath);
-            CloseHandle(hDevice);
+            InvalidateCachedHandle(devicePath, 0);
             std::ostringstream ss;
             ss << "WriteFile failed on " << devicePath
                << " at offset " << offset + totalWritten << " (" << toWrite << " bytes): "

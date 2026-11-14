@@ -7,7 +7,7 @@ import { createHash } from 'crypto';
 import { runBackupJob, runRestoreJob } from '../../src/main/helper/job-runner';
 import { readMacriumImage, openMacriumPartitionReader, macriumPartitionSize } from '../../src/main/imaging/mrimg';
 import { buildMrimgxImage } from '../helpers/mrimg-image';
-import { verifyImage, readImageInfo, resolveImageChain, clearImageInfoCache, encodeHeader, encodeBlockFrame, encodePartitionEntry, encodeBlockIndexEntry, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, FLAG_VERIFIED, FLAGS_OFFSET, FLAG_INCREMENTAL, FLAG_RESUMED, COMPRESSION_DEFLATE, COMPRESSION_ZSTD, crc32, newImageCipher, metadataFromCipher, scanPartialImage, compressBlock, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
+import { verifyImage, readImageInfo, readBlockDataFromImage, resolveImageChain, clearImageInfoCache, encodeHeader, encodeBlockFrame, encodePartitionEntry, encodeBlockIndexEntry, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, FLAG_VERIFIED, FLAGS_OFFSET, FLAG_INCREMENTAL, FLAG_RESUMED, COMPRESSION_DEFLATE, COMPRESSION_ZSTD, crc32, newImageCipher, metadataFromCipher, scanPartialImage, compressBlock, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
 import { ImagingJob, RestoreJob, NativeImagingApi, JobResult, RestoreJobResult } from '../../src/main/imaging/imaging-job';
 import { buildNtfsVolumeData, CLUSTER as NTFS_CLUSTER } from '../helpers/ntfs-fixture';
 import { buildCanonicalNtfsVolumeData, GR_CLUSTER, GR_SPC } from '../helpers/ntfs-resize-fixture';
@@ -205,6 +205,62 @@ describe('runBackupJob', () => {
     // the last partition's imaging (verification was off in this job).
     expect(progress.phase).toBe('completed');
     expect(progress.currentPartition).toBe('Writing image index…');
+  });
+
+  it('keeps capture output in source order with overlapping read lanes', async () => {
+    // Async read mock whose content depends on the source offset, so a frame
+    // written in the wrong order cannot look correct.
+    const native = createMockNative();
+    const lanes = new Set<number>();
+    native.readBlocksAsync = vi.fn(async (_device: string, offset: bigint, length: bigint, lane = 0) => {
+      lanes.add(lane);
+      const buf = Buffer.alloc(Number(length));
+      for (let i = 0; i < buf.length; i++) {
+        buf[i] = Number((offset + BigInt(i)) % 251n);
+      }
+      return buf;
+    });
+
+    const partitionOffset = 122683392;
+    const blockCount = 5;
+    writeJob({
+      type: 'backup',
+      imagePath,
+      blockSize: BLOCK,
+      compressionLevel: 0,
+      verificationEnabled: false,
+      readLanes: 4,
+      partitions: [
+        {
+          diskIndex: 0,
+          partitionIndex: 2,
+          size: BLOCK * blockCount,
+          offset: partitionOffset,
+          label: 'Partition 2',
+          readSource: 'physical'
+        }
+      ]
+    });
+
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = readResult();
+    expect(result.ok).toBe(true);
+    expect(lanes.size).toBe(4);
+
+    const info = readImageInfo(imagePath);
+    expect(info.blocks.length).toBe(blockCount);
+    for (let i = 0; i < blockCount; i++) {
+      const block = info.blocks[i];
+      expect(block.blockIndex).toBe(i);
+      const raw = readBlockDataFromImage(imagePath, block.fileOffset, info.header.compressionId);
+      const offset = BigInt(partitionOffset + i * BLOCK);
+      const expected = Buffer.alloc(BLOCK);
+      for (let b = 0; b < expected.length; b++) {
+        expected[b] = Number((offset + BigInt(b)) % 251n);
+      }
+      expect(raw).toEqual(expected);
+    }
   });
 
   it('aborts and removes the partial image when cancelled', async () => {

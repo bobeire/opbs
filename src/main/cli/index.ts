@@ -175,7 +175,7 @@ Commands:
   resume-list [directory]                List interrupted (resumable) images in a directory
                                          (default: backup location). Shows how many frames were
                                          already written so a later backup --resume can continue.
-  backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume]
+  backup <config.json> [--elevated] [--zstd] [--threads N] [--read-lanes N] [--used-blocks-only] [--resume]
                            [--usn] [--usn-full-scan-threshold PCT] [--repo <dir>] [--lock-days N]
                            Run a backup job (config as JSON file). With --repo, the image is
                            written into the repository's images/ directory and journaled as
@@ -183,6 +183,8 @@ Commands:
                            --usn reads only NTFS-journal-changed blocks for incrementals;
                            --usn-full-scan-threshold PCT (0-100) gives up on the journal
                            when it flags more than PCT% of a partition (implies --usn).
+                           --read-lanes N (2-8) keeps N source reads in flight; experimental,
+                           default is one read at a time.
   restore <config.json> [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk] Run a restore job (config as JSON file; imagePath accepts .opbs, .mrimgx, and .mrimg).
   wizard                             Interactive restore wizard: scans the drives for backup
                                      images (.opbs/.mrimgx/.mrimg), picks a target disk and partitions, preflights,
@@ -660,7 +662,7 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   const configPath = ctx.argv[0];
   if (!configPath) {
     console.error(
-      'Usage: backup <config.json> [--elevated] [--zstd] [--threads N] [--used-blocks-only] [--resume] [--usn] [--usn-full-scan-threshold PCT] [--source-vhd <path>] [--repo <dir|s3://bucket/prefix>] [--lock-days N]'
+      'Usage: backup <config.json> [--elevated] [--zstd] [--threads N] [--read-lanes N] [--used-blocks-only] [--resume] [--usn] [--usn-full-scan-threshold PCT] [--source-vhd <path>] [--repo <dir|s3://bucket/prefix>] [--lock-days N]'
     );
     return 1;
   }
@@ -773,6 +775,15 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   if (threadsFlag !== undefined) {
     const parsed = Number(threadsFlag);
     config.compressionThreads = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+  }
+  const readLanesFlag = flagValue(ctx.argv, '--read-lanes');
+  if (readLanesFlag !== undefined) {
+    const parsed = Number(readLanesFlag);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 8) {
+      console.error('--read-lanes must be an integer between 1 and 8');
+      return 1;
+    }
+    config.readLanes = Math.floor(parsed);
   }
   const sourceVhdFlag = flagValue(ctx.argv, '--source-vhd');
   if (sourceVhdFlag !== undefined) {

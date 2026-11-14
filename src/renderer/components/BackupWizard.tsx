@@ -46,6 +46,8 @@ interface BackupConfig {
   compressionLevel: number;
   compressionType?: 'deflate' | 'zstd';
   compressionThreads?: number;
+  /** Overlapping source-read lanes (1/unset = one read at a time). */
+  readLanes?: number;
   verificationEnabled: boolean;
   usedBlocksOnly?: boolean;
   /** Capture live when Windows cannot freeze a volume (no point in time). */
@@ -71,6 +73,8 @@ interface BackupProfile {
   compressionLevel: number;
   compressionType?: 'deflate' | 'zstd';
   compressionThreads?: number;
+  /** Overlapping source-read lanes (1/unset = one read at a time). */
+  readLanes?: number;
   verificationEnabled: boolean;
   incremental: boolean;
   /** Resume an interrupted backup of the same source/destination. */
@@ -182,6 +186,8 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   const [compressionThreads, setCompressionThreads] = useState(() =>
     Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1))
   );
+  // Opt-in until a build with it has been measured outside this project.
+  const [readLanes, setReadLanes] = useState(1);
   const [verificationEnabled, setVerificationEnabled] = useState(true);
   const [usedBlocksOnly, setUsedBlocksOnly] = useState(true);
   const [allowInconsistentCapture, setAllowInconsistentCapture] = useState(false);
@@ -454,6 +460,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     setCompressionThreads(
       profile.compressionThreads || Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1))
     );
+    setReadLanes(profile.readLanes ?? 1);
     setVerificationEnabled(profile.verificationEnabled ?? true);
     setUsedBlocksOnly(profile.usedBlocksOnly ?? true);
     setAllowInconsistentCapture(profile.allowInconsistentCapture ?? false);
@@ -526,6 +533,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       compressionLevel,
       compressionType,
       compressionThreads,
+      ...(readLanes > 1 ? { readLanes } : {}),
       verificationEnabled,
       usedBlocksOnly,
       allowInconsistentCapture,
@@ -575,6 +583,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       compressionLevel,
       compressionType,
       compressionThreads,
+      ...(readLanes > 1 ? { readLanes } : {}),
       verificationEnabled,
       usedBlocksOnly,
       ...(captureLive ? { allowInconsistentCapture: true } : {}),
@@ -1091,6 +1100,24 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                 />
                 <p className="field-hint">1+ parallelizes compression across worker threads (0 disables).</p>
               </div>
+
+              <div className="option-group">
+                <label>Overlapping read lanes (experimental):</label>
+                <select
+                  value={readLanes}
+                  onChange={(e) => setReadLanes(parseInt(e.target.value))}
+                >
+                  <option value={1}>1 — one read at a time (default)</option>
+                  <option value={2}>2 — two reads in flight</option>
+                  <option value={4}>4 — four reads in flight</option>
+                  <option value={8}>8 — eight reads in flight</option>
+                </select>
+                <p className="field-hint">
+                  Keeps several source reads in flight while frames are still written in order.
+                  This is opt-in: it has not yet been measured outside the project, and Node's I/O
+                  thread pool can only service four reads at once, so values above 4 mostly queue.
+                </p>
+              </div>
               
               <div className="option-group">
                 <label className="checkbox-label">
@@ -1274,6 +1301,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                 )}
                 <li>Destination: {destinationPath}</li>
                 <li>Compression: Level {compressionLevel} ({compressionType}{compressionThreads > 1 ? `, ${compressionThreads} threads` : ''})</li>
+                <li>Read lanes: {readLanes > 1 ? `${readLanes} overlapping reads (experimental)` : '1 (sequential)'}</li>
                 <li>Verification: {verificationEnabled ? 'Enabled' : 'Disabled'}</li>
                 <li>Used data only: {usedBlocksOnly ? 'Enabled (skips free space)' : 'Disabled (whole partition)'}</li>
                 <li>

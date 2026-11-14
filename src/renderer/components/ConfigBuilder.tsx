@@ -31,6 +31,8 @@ interface BackupForm {
   compressionType: 'zstd' | 'deflate';
   compressionLevel: number;
   compressionThreads: number;
+  /** Overlapping source-read lanes (0/unset = one read at a time). */
+  readLanes: number;
   verificationEnabled: boolean;
   usedBlocksOnly: boolean;
   useUsnJournal: boolean;
@@ -123,6 +125,7 @@ const DEFAULT_BACKUP: BackupForm = {
   compressionType: 'zstd',
   compressionLevel: 3,
   compressionThreads: 0,
+  readLanes: 1,
   verificationEnabled: true,
   usedBlocksOnly: true,
   useUsnJournal: true,
@@ -359,6 +362,7 @@ function ConfigBuilder() {
             compressionLevel: backup.compressionLevel,
             compressionType: backup.compressionType,
             compressionThreads: backup.compressionThreads > 0 ? backup.compressionThreads : undefined,
+            readLanes: backup.readLanes > 1 ? Math.min(8, backup.readLanes) : undefined,
             verificationEnabled: backup.verificationEnabled,
             usedBlocksOnly: backup.usedBlocksOnly,
             useUsnJournal: backup.useUsnJournal ? true : undefined,
@@ -523,6 +527,7 @@ function ConfigBuilder() {
         compressionType: rest.compressionType === 'deflate' ? 'deflate' : rest.compressionType === 'zstd' ? 'zstd' : prev.compressionType,
         compressionLevel: asNum(rest.compressionLevel, prev.compressionLevel),
         compressionThreads: asNum(rest.compressionThreads, prev.compressionThreads),
+        readLanes: Math.max(1, Math.min(8, asNum(rest.readLanes, prev.readLanes))),
         verificationEnabled: asBool(rest.verificationEnabled, prev.verificationEnabled),
         usedBlocksOnly: asBool(rest.usedBlocksOnly, prev.usedBlocksOnly),
         useUsnJournal: asBool(rest.useUsnJournal, prev.useUsnJournal),
@@ -740,6 +745,16 @@ function ConfigBuilder() {
                   min={0}
                   value={backup.compressionThreads}
                   onChange={(e) => setBackup((prev) => ({ ...prev, compressionThreads: Math.max(0, Number(e.target.value)) }))}
+                />
+              </div>
+              <div className="builder-row">
+                <label>Read lanes (experimental)</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={8}
+                  value={backup.readLanes}
+                  onChange={(e) => setBackup((prev) => ({ ...prev, readLanes: Math.max(1, Math.min(8, Number(e.target.value))) }))}
                 />
               </div>
             </div>

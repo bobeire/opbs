@@ -889,6 +889,7 @@ export class BackupScheduler {
       compressionLevel: config.compressionLevel,
       compressionType: config.compressionType,
       compressionThreads: config.compressionThreads,
+      ...(config.readLanes && config.readLanes > 1 ? { readLanes: config.readLanes } : {}),
       verificationEnabled: config.verificationEnabled,
       ...(config.usedBlocksOnly ? { usedBlocksOnly: true } : {}),
       ...(config.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),

@@ -226,7 +226,21 @@ Napi::Value DeleteSnapshot(const Napi::CallbackInfo& info) {
     }
 }
 
-// Read a block from disk
+// Read a block from disk. Optional 4th argument: read lane (0 = default).
+static int ReadLaneArg(const Napi::CallbackInfo& info, size_t index) {
+    if (info.Length() <= index || info[index].IsUndefined() || info[index].IsNull()) {
+        return 0;
+    }
+    if (!info[index].IsNumber()) {
+        throw std::runtime_error("read lane must be a number");
+    }
+    const int lane = info[index].As<Napi::Number>().Int32Value();
+    if (lane < 0 || lane > 63) {
+        throw std::runtime_error("read lane must be between 0 and 63");
+    }
+    return lane;
+}
+
 Napi::Value ReadBlocks(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
     std::string devicePath = info[0].As<Napi::String>().Utf8Value();
@@ -235,7 +249,8 @@ Napi::Value ReadBlocks(const Napi::CallbackInfo& info) {
     int64_t length = info[2].As<Napi::BigInt>().Int64Value(&lossless);
     
     try {
-        auto data = DiskReader::ReadBlocks(devicePath, offset, length);
+        const int lane = ReadLaneArg(info, 3);
+        auto data = DiskReader::ReadBlocks(devicePath, offset, length, lane);
         return Napi::Buffer<char>::Copy(env, data.data(), data.size());
     } catch (const std::exception& e) {
         Napi::TypeError::New(env, e.what()).ThrowAsJavaScriptException();
@@ -298,18 +313,19 @@ void CloseAllHandles(const Napi::CallbackInfo& /*info*/) {
 
 class AsyncReadWorker : public Napi::AsyncWorker {
 public:
-    AsyncReadWorker(Napi::Env env, std::string devicePath, int64_t offset, int64_t length)
+    AsyncReadWorker(Napi::Env env, std::string devicePath, int64_t offset, int64_t length, int lane)
         : Napi::AsyncWorker(env),
           m_devicePath(std::move(devicePath)),
           m_offset(offset),
           m_length(length),
+          m_lane(lane),
           m_deferred(Napi::Promise::Deferred::New(env)) {}
 
     Napi::Promise::Deferred& Deferred() { return m_deferred; }
 
     void Execute() override {
         try {
-            m_data = DiskReader::ReadBlocks(m_devicePath, m_offset, m_length);
+            m_data = DiskReader::ReadBlocks(m_devicePath, m_offset, m_length, m_lane);
         } catch (const std::exception& e) {
             SetError(e.what());
         }
@@ -332,6 +348,7 @@ private:
     std::string m_devicePath;
     int64_t m_offset;
     int64_t m_length;
+    int m_lane;
     std::vector<char> m_data;
     Napi::Promise::Deferred m_deferred;
 };
@@ -373,14 +390,23 @@ private:
     Napi::Promise::Deferred m_deferred;
 };
 
-// Async readBlocks — returns a Promise<Buffer>.
+// Async readBlocks — returns a Promise<Buffer>. Optional 4th argument: read
+// lane; each lane uses its own cached handle so reads can overlap.
 Napi::Value ReadBlocksAsync(const Napi::CallbackInfo& info) {
     std::string devicePath = info[0].As<Napi::String>().Utf8Value();
     bool lossless = false;
     int64_t offset = info[1].As<Napi::BigInt>().Int64Value(&lossless);
     int64_t length = info[2].As<Napi::BigInt>().Int64Value(&lossless);
 
-    auto* worker = new AsyncReadWorker(info.Env(), devicePath, offset, length);
+    int lane = 0;
+    try {
+        lane = ReadLaneArg(info, 3);
+    } catch (const std::exception& e) {
+        Napi::TypeError::New(info.Env(), e.what()).ThrowAsJavaScriptException();
+        return info.Env().Null();
+    }
+
+    auto* worker = new AsyncReadWorker(info.Env(), devicePath, offset, length, lane);
     auto promise = worker->Deferred().Promise();
     worker->Queue();
     return promise;

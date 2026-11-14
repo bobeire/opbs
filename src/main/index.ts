@@ -636,6 +636,7 @@ interface UnattendedBackupSchedule {
   compressionLevel: number;
   compressionType?: string;
   compressionThreads?: number;
+  readLanes?: number;
   verificationEnabled: boolean;
   allowInconsistentCapture?: boolean;
   incremental: boolean;

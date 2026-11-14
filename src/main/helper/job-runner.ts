@@ -62,6 +62,8 @@ import { detectFatType } from '../imaging/fs/fat32';
 
 type AnyShrinkPlan = NtfsShrinkPlan | Fat32ShrinkPlan;
 import { readUsedBlockIndexes } from '../imaging/fs/used-blocks';
+import { BlockPrefetcher, MAX_READ_LANES } from './read-prefetcher';
+import { verifyImageAsync, verifyWorkerAvailable } from '../imaging/verify-runner';
 import { mountImage, winfspAvailable, type MountConfig } from '../imaging/mount-manager';
 import { PartitionReader, ChainPartitionReader } from '../imaging/image-browse';
 import {
@@ -875,6 +877,31 @@ export async function runBackupJob(
       }[] = [];
       const windowSize = pool ? Math.max(2, pool.threads * 4) : 1;
 
+      // The one skip rule, shared by the capture loop and the read-ahead path
+      // so a prefetched block can never be one the loop would have skipped.
+      const blockIsWanted = (blockIndex: number): boolean =>
+        !((usedBits && !hasBlock(usedBits, blockIndex)) ||
+          (changedBits && !hasBlock(changedBits, blockIndex)));
+
+      // Opt-in overlapping reads. The default (`readLanes` unset/1) keeps the
+      // original one-await-per-block path untouched.
+      const readLanes = Math.max(1, Math.min(MAX_READ_LANES, Math.floor(job.readLanes ?? 1)));
+      const prefetcher =
+        readLanes > 1 && native.readBlocksAsync
+          ? new BlockPrefetcher(
+              native,
+              device,
+              baseOffset,
+              part.size,
+              blockSize,
+              blockIsWanted,
+              readLanes
+            )
+          : null;
+      if (prefetcher) {
+        logger.info(`${part.label}: reading with ${readLanes} overlapping read lanes`);
+      }
+
       const setCursor = (cursor2: number): void => {
         cursor = cursor2;
       };
@@ -1017,10 +1044,7 @@ export async function runBackupJob(
         // and counting it made the bar and the MB/s figure lie on sparse
         // volumes (field report 2026-11-13: 25% shown after a quarter of the
         // *volume* while most of the data was still unread).
-        if (
-          (usedBits && !hasBlock(usedBits, blockIndex)) ||
-          (changedBits && !hasBlock(changedBits, blockIndex))
-        ) {
+        if (!blockIsWanted(blockIndex)) {
           partitionBytes += Number(readLength);
           sourceBlockIndex++;
           skippedBlocks++;
@@ -1031,10 +1055,14 @@ export async function runBackupJob(
         try {
           const readOffset = baseOffset + BigInt(partitionBytes);
           // Use async I/O when available — frees the event loop during disk
-          // reads so compression workers and progress callbacks can run.
-          raw = native.readBlocksAsync
-            ? await native.readBlocksAsync(device, readOffset, readLength)
-            : Buffer.from(native.readBlocks(device, readOffset, readLength));
+          // reads so compression workers and progress callbacks can run. With
+          // lanes enabled the read was already issued ahead of time and this
+          // resolves in source order.
+          raw = prefetcher
+            ? await prefetcher.read(blockIndex)
+            : native.readBlocksAsync
+              ? await native.readBlocksAsync(device, readOffset, readLength)
+              : Buffer.from(native.readBlocks(device, readOffset, readLength));
         } catch (error) {
           // A read failure must ABORT, not warn and stop reading. The old
           // behaviour pushed a warning and `break`-ed out of the loop, so the
@@ -1161,13 +1189,27 @@ export async function runBackupJob(
 
     if (job.verificationEnabled) {
       writeProgress('verifying');
-      const verified = await verifyImage(job.imagePath, cipher?.key, (done, total) => {
+      const onVerifyProgress = (done: number, total: number): void => {
         progress.verifyDone = done;
         progress.verifyTotal = total;
         if (Date.now() - lastProgressWrite >= 500) {
           writeProgress('verifying');
         }
-      });
+      };
+      // Verify on a worker so the helper keeps writing progress and can react
+      // while a large image is re-read and decompressed. If the worker cannot
+      // start, fall back to the in-process pass rather than fail the backup.
+      const verifyThreads = Math.max(1, Math.min(4, job.compressionThreads ?? 4));
+      const verified = verifyWorkerAvailable()
+        ? await verifyImageAsync(job.imagePath, cipher?.key, onVerifyProgress, verifyThreads).catch(
+            async (error: unknown) => {
+              logger.warn(
+                `Verification worker failed (${errorMessage(error)}); verifying in-process instead`
+              );
+              return verifyImage(job.imagePath, cipher?.key, onVerifyProgress);
+            }
+          )
+        : await verifyImage(job.imagePath, cipher?.key, onVerifyProgress);
       verifiedBlocks = verified.blocksVerified;
       if (!verified.ok) {
         throw new Error(`Image verification failed: ${verified.error ?? 'unknown error'}`);

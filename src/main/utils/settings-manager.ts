@@ -169,6 +169,8 @@ export interface ScheduledBackup {
   compressionLevel: number;
   compressionType?: 'deflate' | 'zstd';
   compressionThreads?: number;
+  /** Overlapping source-read lanes (1/unset = one read at a time). */
+  readLanes?: number;
   verificationEnabled: boolean;
   incremental: boolean;
   /** Read only NTFS-journal-changed blocks for incrementals (USN tracking). */
@@ -210,6 +212,8 @@ export interface BackupProfile {
   compressionLevel: number;
   compressionType?: 'deflate' | 'zstd';
   compressionThreads?: number;
+  /** Overlapping source-read lanes (1/unset = one read at a time). */
+  readLanes?: number;
   verificationEnabled: boolean;
   incremental: boolean;
   passphrase?: string;
