@@ -103,6 +103,7 @@ Scope of this policy: [opbs.rhitcs.com/code-signing.html](https://opbs.rhitcs.co
 - **Read-only mount via WinFsp**: mount a partition from a `.opbs` or Macrium image as a virtual drive letter with **zero extra disk usage** — file reads are served lazily by decompressing only the covering blocks. Requires the free WinFsp runtime (https://winfsp.dev). Works for standard (non-admin) users through WinFsp's per-LUID volume namespace; a live smoke test covers mount → cross-process probe → unmount.
 - **Restore from Macrium Reflect images**: `restore` also accepts Macrium `.mrimgx` (Reflect X) and `.mrimg` (Reflect 7/8) containers — placement is read from the image's own geometry/table entries, every block is decompressed and MD5-verified before it lands on the target, and unsupported variants (split, file-and-folder backups, chain members with files missing from disk, password-protected Reflect 7/8 images) are refused up front instead of touching the disk. **Password-protected Reflect X (`.mrimgx`) images open with their passphrase** — browsing, extraction, mounting and restore, including delta backup sets. v7 (`.mrimg`) **and mrimgx (Reflect X) delta** differential/incremental chains browse and restore when the base images / backup set are on disk — the member is resolved against its chain so you always see/restore the full logical volume state. Works from the CLI, the restore wizard and the Config Builder.
 - **Disk-to-disk clone**: `clone` copies selected live partitions straight onto a different local disk (VSS snapshots, optional dissimilar layout + fresh GPT/MBR table, optional grow-on-restore), with no image file or cloud upload. The GUI **Partition Copy** screen makes this drag-and-drop: pick a target disk, drag partition chips onto it (or “Copy all partitions”), preview the auto-sequential 1 MiB-aligned layout with optional grow-to-fill, confirm the erase warning, and watch live progress.
+- **Self-contained recovery media**: `media create` writes a bootable WinPE stick or ISO carrying the OPBS CLI, the native disk addon and a Node runtime, so a machine can be restored — or backed up before a reinstall — without a working Windows install. The default stick is one FAT32 partition (the one-click path); the opt-in `--dual-partition` layout adds an NTFS data partition so images larger than FAT32's 4 GiB limit ride on the same stick you boot from, keeping the rescue environment and the restore data in one object. Building needs the Windows ADK, and a freshly built stick of either layout should be booted once before you depend on it.
 - **Backup from a virtual disk (VHD/VHDX)**: `sourceVirtualDisk` (CLI `--source-vhd`, or "Back up from a VHD/VHDX file…" on the backup wizard's source step) images a `.vhd`/`.vhdx` file directly — the elevated helper attaches the file **write-protected** (no drive letter), discovers the physical disk index it maps to, builds the ordinary backup job (empty partition selection = every partition on the file), runs it, then detaches. No need to mount the volume or run the backup against the host's live disks.
 - **Restore into a virtual disk (VHD/VHDX)**: `targetVirtualDisk` writes a restore into a `.vhd`/`.vhdx` file instead of a physical disk — the helper creates the file when missing (dynamic or fixed, up to 64 TiB), attaches it, re-runs every physical-disk safety gate against the attached disk, writes a fresh GPT/MBR table so the volumes are visible in Windows, then detaches the disk again. Available from the restore wizard, the Config Builder and JSON configs.
 - **Disk tools**: the **Disk Tools** screen (sidebar 🔧) groups four maintenance utilities — **MBR & Boot Repair** (read partition-table info from `Get-Disk`/`Get-Partition`, read the raw 512-byte MBR sector elevated for a full entry/CHS breakdown including the boot and disk signatures, and repair boot code / rebuild the BCD store via elevated `bootrec.exe`), **Disk Error Check** (read-only `chkdsk /scan`, plus elevated `/f` and slow `/r` modes), **SSD TRIM** (query `fsutil behavior query DisableDeleteNotify` and run an elevated `defrag /L` retrim), and **SMART Health** (per-disk reliability counters for every physical disk).
@@ -1195,9 +1196,18 @@ images in the backup location in the background to catch bit-rot early.
 
 ## WinPE recovery media
 
-`media create` builds a bootable WinPE ISO (or USB key) carrying the OPBS
-headless CLI, the native disk addon, and a stock Node.js runtime. Booting it
-presents a restore prompt backed by:
+A backup you cannot restore is not a backup. `media create` builds a bootable
+WinPE stick or ISO that carries the OPBS headless CLI, the native disk addon
+and a stock Node.js runtime, so recovery does not depend on the Windows
+install being recovered. Booting it opens a menu — restore this machine, back
+it up before a reinstall, command prompt, reboot, shut down — and every action
+returns to the menu, so a failed attempt is not a dead end.
+
+The wizard scans local drives and the media itself for images, and accepts a
+typed path for anywhere else it can reach, so the image does not need to be on
+the broken machine's drive. The backup option covers the other case: the disk
+is fine but Windows is not, so save an image before wiping it. Headless use is
+still one command:
 
 ```
 node.exe winpe-entry.js restore <restore.json> --elevated
@@ -1224,11 +1234,12 @@ OPBS.exe --cli media create --usb E --yes --dual-partition [--boot-size-mb 4096]
          [--copy-data D:\backups,E:\images\weekend.opbs]
 ```
 
-**Dual-partition USB (opt-in)**: the default stick stays exactly as it always
-was — one FAT32 partition written by `MakeWinPEMedia`, which is the one-click
-path for most people. With `--dual-partition` (or the checkbox on the Recovery
-Media screen) the stick is repartitioned instead as a small **FAT32 boot
-partition** plus an **NTFS data partition** on the rest of it:
+**Dual-partition USB (opt-in): one stick that carries its own image.** The
+default stick stays exactly as it always was — one FAT32 partition written by
+`MakeWinPEMedia`, which is the one-click path for most people. With
+`--dual-partition` (or the checkbox on the Recovery Media screen) the stick is
+repartitioned instead as a small **FAT32 boot partition** plus an **NTFS data
+partition** on the rest of it:
 
 - it boots the same way on UEFI and BIOS (the boot partition is active, and
   `bootsect /nt60 … /mbr` installs the boot code the same way
@@ -1236,16 +1247,22 @@ partition** plus an **NTFS data partition** on the rest of it:
 - the data partition is NTFS, so backup images **larger than FAT32's 4 GiB
   file-size limit** can live on the media — `--copy-data <path,…>` copies
   folders/files into `OPBS-Images\` on it (the recovery wizard's drive scan
-  finds them);
+  finds them). That is the point of the layout: the environment that boots and
+  the image it restores stay in one object, instead of a stick in one drawer
+  and a drive in another;
 - it lifts the 32 GB ceiling of the single-partition flow (only the boot
-  partition is FAT32, and it defaults to 4 GiB — tune with `--boot-size-mb`,
+  partition is FAT32, and it defaults to 2 GiB — tune with `--boot-size-mb`,
   1024–32768).
 
-The stick is erased completely either way. The dual layout is new: the
-generated `build.ps1` is exactly what runs elevated (and `--script-only` lets
-you inspect it first), but it has not yet had the same physical-media boot
-test as the single-partition flow — treat the first build of a new stick type
-as unproven until you have booted it once.
+The stick is erased completely either way. The dual layout has been boot-tested
+end to end — an 8 GB stick booted on a laptop (2026-10-31), both partitions
+byte-exact after a VHD restore drill, and the recovery wizard found and parsed
+an image in `OPBS-Images\` from inside WinPE. Boot your own stick once anyway;
+it is the cheapest way to hit a firmware quirk before you need it. And
+"portable" here means the media boots without its host OS, not that it boots on
+arbitrary hardware: unusual storage or NIC controllers need `--driver`
+injection, the same as any WinPE build. Images carried on the stick are as
+portable as the stick itself — encrypt them if losing the stick would matter.
 
 If the ADK is missing, the GUI detects it at startup and offers to download and
 silently install the Deployment Tools + WinPE add-on automatically (one UAC
@@ -1333,7 +1350,9 @@ which the app acquires by relaunching itself elevated through the UAC prompt.
   via NTFS `$Bitmap`, disk-to-disk clone (live VSS copy, dissimilar layout +
   fresh partition table), Macrium `.mrimgx`/`.mrimg` browse/extract/restore, read-only
   WinFsp mount of image partitions (GUI + CLI), WinPE media with driver
-  injection + headless payload smoke, `.opbs` right-click context menu verbs
+  injection + headless payload smoke, an opt-in dual-partition USB layout that
+  can carry its own images (boot a fresh stick once before relying on it), and
+  `.opbs` right-click context menu verbs
   (browse/mount/restore/verify) with a Settings toggle, automated restore drills
   (scheduled scratch-disk restore + on-disk filesystem validation, per-image
   "drill-tested" status), backup analytics/churn forensics (per-chain

@@ -210,10 +210,10 @@ to date has shipped; **Investigate** items need spike work first.
   release build, `smoke-selfcheck` green. The harness is versioned at
   `tools/winpe-live-test/` and includes the network probe (IPv4 + TCP, WARN by
   default, `--require-net` makes it hard).
-- 🚧 **Dual-partition recovery media (opt-in, unreleased)**: `media create
+- ✅ **Dual-partition recovery media (opt-in, shipped)**: `media create
   --usb <drive> --yes --dual-partition [--boot-size-mb N] [--copy-data <path,…>]`
   (or the checkbox on the Recovery Media screen) repartitions the stick as a
-  small FAT32 boot partition (default 4 GiB, `active`, boot code via
+  small FAT32 boot partition (default 2 GiB, `active`, boot code via
   `bootsect /nt60 … /mbr`) plus an NTFS data partition on the rest of it, and
   copies the built `<stage>/media` tree itself instead of `MakeWinPEMedia`
   (which would format the whole target FAT32). Backup images larger than
