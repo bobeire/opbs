@@ -1,5 +1,6 @@
 import { execFileSync } from 'child_process';
 import { psQuote, resolvePowershell, runElevatedPowerShell } from './elevated';
+import { windowsPowerShellEnv } from './powershell-env';
 import { toDiskIndex, toChkdskVolume } from './input-guard';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -70,7 +71,8 @@ function run(args: string[], timeoutMs = 30000): string {
   return execFileSync(resolvePowershell(), ['-NoProfile', '-NonInteractive', '-Command', ...args], {
     encoding: 'utf-8',
     timeout: timeoutMs,
-    windowsHide: true
+    windowsHide: true,
+    env: windowsPowerShellEnv()
   }).trim();
 }
 

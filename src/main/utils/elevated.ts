@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { windowsPowerShellEnv } from './powershell-env';
 
 /**
  * Shared helpers for spawning an elevated PowerShell session (one UAC
@@ -77,7 +78,7 @@ export function runElevatedPowerShell(scriptPath: string, env?: Record<string, s
     const child = spawn(powershell, ['-NoProfile', '-NonInteractive', '-Command', wrapper], {
       windowsHide: true,
       stdio: 'ignore',
-      env: env ? { ...process.env, ...env } : undefined
+      env: windowsPowerShellEnv(env ? { ...process.env, ...env } : process.env)
     });
     child.on('error', reject);
     child.on('close', (code) => resolve(code ?? -1));

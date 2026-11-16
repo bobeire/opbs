@@ -1,6 +1,7 @@
 import { execFileSync } from 'child_process';
 import { logger } from './logger';
 import { resolvePowershell } from './elevated';
+import { windowsPowerShellEnv } from './powershell-env';
 import { toDiskIndex } from './input-guard';
 
 export interface DiskReliability {
@@ -70,7 +71,7 @@ export function queryReliability(diskIndex: number): DiskReliability | null {
     const out = execFileSync(
       resolvePowershell(),
       ['-NoProfile', '-NonInteractive', '-Command', `$diskIndex = ${diskIndex}; ${PS_SCRIPT}`],
-      { encoding: 'utf-8', windowsHide: true, timeout: 20_000 }
+      { encoding: 'utf-8', windowsHide: true, timeout: 20_000, env: windowsPowerShellEnv() }
     );
     const parsed = JSON.parse(out.trim());
     if (parsed?.error || parsed?.missing) {

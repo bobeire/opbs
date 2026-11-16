@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { psQuote, resolvePowershell } from './elevated';
+import { windowsPowerShellEnv } from './powershell-env';
 import { logger } from './logger';
 
 /**
@@ -90,6 +91,7 @@ function extractZip(zip: string, destDir: string): void {
   execFileSync(resolvePowershell(), ['-NoProfile', '-NonInteractive', '-Command', script], {
     windowsHide: true,
     stdio: 'ignore',
+    env: windowsPowerShellEnv(),
     // A real install can legitimately take minutes; an unbounded wait cannot
     // be distinguished from a hang. (Field report 2026-11-04.)
     timeout: 600_000

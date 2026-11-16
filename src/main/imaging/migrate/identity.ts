@@ -1,6 +1,7 @@
 import { spawnSync } from 'child_process';
 import * as path from 'path';
 import { resolvePowershell } from '../../utils/elevated';
+import { windowsPowerShellEnv } from '../../utils/powershell-env';
 import type { MigrateOwnerRewrite } from './types';
 
 /**
@@ -14,7 +15,7 @@ export type CmdRun = (cmd: string, args: string[]) => { status: number | null; s
 export type RegArgRun = (args: string[]) => { status: number | null; stdout?: string; error?: string };
 
 const execCmd: CmdRun = (cmd, args) => {
-  const res = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, timeout: 60_000 });
+  const res = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, timeout: 60_000, env: windowsPowerShellEnv() });
   return { status: res.status, stdout: res.stdout ?? '', ...(res.error ? { error: res.error.message } : {}) };
 };
 

@@ -1,6 +1,7 @@
 import { execFile } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { windowsPowerShellEnv } from './powershell-env';
 
 /**
  * Best-effort protection for repository files (win32).
@@ -41,7 +42,7 @@ function runPowerShell(script: string): Promise<boolean> {
     execFile(
       powershellExe(),
       ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
-      { windowsHide: true, timeout: 30_000, maxBuffer: 1024 * 1024 },
+      { windowsHide: true, timeout: 30_000, maxBuffer: 1024 * 1024, env: windowsPowerShellEnv() },
       (error) => resolve(!error)
     );
   });

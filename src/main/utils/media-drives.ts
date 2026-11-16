@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import { resolvePowershell } from './elevated';
+import { windowsPowerShellEnv } from './powershell-env';
 import { logger } from './logger';
 
 /**
@@ -326,7 +327,8 @@ export function listMediaDrives(): MediaDriveGroups {
     const raw = execFileSync(resolvePowershell(), ['-NoProfile', '-NonInteractive', '-Command', LIST_SCRIPT], {
       encoding: 'utf-8',
       windowsHide: true,
-      timeout: 20_000
+      timeout: 20_000,
+      env: windowsPowerShellEnv()
     });
     return groupMediaDrives(parseMediaDrivesJson(raw), protectedDriveLetters());
   } catch (err) {

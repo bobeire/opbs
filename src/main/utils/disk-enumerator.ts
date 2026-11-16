@@ -1,6 +1,7 @@
 import { execFile } from 'child_process';
 import * as path from 'path';
 import { loadNative } from './native-loader';
+import { windowsPowerShellEnv } from './powershell-env';
 
 const powershellExe = process.env.SystemRoot
   ? path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
@@ -17,7 +18,7 @@ function runPowerShell(script: string, timeoutMs: number): Promise<string> {
     execFile(
       powershellExe,
       ['-NoProfile', '-NonInteractive', '-Command', script],
-      { encoding: 'utf-8', timeout: timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+      { encoding: 'utf-8', timeout: timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: windowsPowerShellEnv() },
       (error, stdout) => {
         if (error) reject(error);
         else resolve(String(stdout ?? ''));

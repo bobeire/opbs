@@ -11,6 +11,7 @@ import { readDrillHistory } from './drill-history';
 import { paritySidecarPath } from '../imaging/parity';
 import { queryReliability, assessDiskHealth, DiskReliability } from './disk-health';
 import { resolvePowershell } from './elevated';
+import { windowsPowerShellEnv } from './powershell-env';
 import { latestPerf, assessWriteSpeed } from './disk-perf';
 import { logger } from './logger';
 
@@ -201,7 +202,7 @@ export async function resolveDestinationDisk(directory: string): Promise<{ diskI
           '-Command',
           `(Get-Partition -DriveLetter '${letter}' -ErrorAction SilentlyContinue | Sort-Object -Property PartitionNumber | Select-Object -First 1 -ExpandProperty DiskNumber)`
         ],
-        { timeout: 15_000, windowsHide: true },
+        { timeout: 15_000, windowsHide: true, env: windowsPowerShellEnv() },
         (error, stdout) => (error ? reject(error) : resolve(stdout.trim()))
       );
     });

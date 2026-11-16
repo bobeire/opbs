@@ -1,6 +1,7 @@
 import { execFileSync } from 'child_process';
 import * as path from 'path';
 import { resolvePowershell } from './elevated';
+import { windowsPowerShellEnv } from './powershell-env';
 import { runElevated } from './disk-tools';
 import { logger } from './logger';
 
@@ -298,7 +299,7 @@ function queryJsonStatus(): { ok: boolean; stdout: string; stderr: string } {
     const stdout = execFileSync(
       resolvePowershell(),
       ['-NoProfile', '-NonInteractive', '-Command', BITLOCKER_STATUS_PS],
-      { encoding: 'utf-8', windowsHide: true, timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'] }
+      { encoding: 'utf-8', windowsHide: true, timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'], env: windowsPowerShellEnv() }
     );
     return { ok: true, stdout: String(stdout), stderr: '' };
   } catch (err) {

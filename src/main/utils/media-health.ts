@@ -4,6 +4,7 @@ import { resolveDestinationDisk } from './storage-health';
 import { DiskEnumerator, DiskInfo } from './disk-enumerator';
 import { isNonFilesystemLocation } from './location';
 import { resolvePowershell } from './elevated';
+import { windowsPowerShellEnv } from './powershell-env';
 import { logger } from './logger';
 
 /**
@@ -135,7 +136,7 @@ async function resolveDriveLetters(diskIndex: number): Promise<string[]> {
           '-Command',
           `(Get-Partition -DiskNumber ${diskIndex} -ErrorAction SilentlyContinue | Where-Object DriveLetter | ForEach-Object DriveLetter) -join ','`
         ],
-        { timeout: 15_000, windowsHide: true },
+        { timeout: 15_000, windowsHide: true, env: windowsPowerShellEnv() },
         (error, stdout) => (error ? reject(error) : resolve(stdout.trim()))
       );
     });

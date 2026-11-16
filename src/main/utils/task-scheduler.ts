@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { logger } from './logger';
 import { encryptSecret } from './secret-store';
+import { windowsPowerShellEnv } from './powershell-env';
 
 /**
  * `electron` is required lazily so the WinPE CLI (plain node.exe) can load this
@@ -132,7 +133,8 @@ function runSchTasksElevated(args: string[]): Promise<string> {
       '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptFile
     ], {
       windowsHide: true,
-      stdio: 'ignore'
+      stdio: 'ignore',
+      env: windowsPowerShellEnv()
     });
     child.on('error', (err) => {
       try { fs.unlinkSync(scriptFile); } catch { /* already cleaned */ }

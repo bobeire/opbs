@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import { resolvePowershell } from './elevated';
+import { windowsPowerShellEnv } from './powershell-env';
 import { isRecoveryProtectorType } from './bitlocker';
 import { deriveImageKey, readImageInfo } from '../imaging/image-format';
 import { logger } from './logger';
@@ -351,7 +352,7 @@ export function runCaptureQuery(): { ok: true; volumes: CapturedVolume[] } | { o
     const stdout = execFileSync(
       resolvePowershell(),
       ['-NoProfile', '-NonInteractive', '-Command', BITLOCKER_CAPTURE_PS],
-      { encoding: 'utf-8', windowsHide: true, timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] }
+      { encoding: 'utf-8', windowsHide: true, timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'], env: windowsPowerShellEnv() }
     );
     const volumes = parseCaptureJson(String(stdout));
     if (!volumes) {

@@ -5,6 +5,7 @@ import * as path from 'path';
 import { EventEmitter } from 'events';
 import { logger } from '../utils/logger';
 import { resolvePowershell } from '../utils/elevated';
+import { windowsPowerShellEnv } from '../utils/powershell-env';
 import { ensureHelperTaskRegistered, triggerHelperTask, isRunAsAdmin } from '../utils/task-scheduler';
 import { PipeServer, generatePipeName, type PipeMessage } from '../utils/pipe-ipc';
 
@@ -287,7 +288,8 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
 
         logger.info(`Launching elevated helper (UAC fallback): ${psScript}`);
         const ps = spawn(resolvePowershell(), ['-NoProfile', '-NonInteractive', '-Command', psScript], {
-          windowsHide: true
+          windowsHide: true,
+          env: windowsPowerShellEnv()
         });
 
         ps.on('error', (error) => {

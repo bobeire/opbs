@@ -8,6 +8,7 @@ import { openBrowse, listDirectory, readPath, resolvePath, extractPath, detectPa
 import { buildNtfsVolume, CLUSTER, FOREIGN_OWNER_SID } from '../helpers/ntfs-fixture';
 import { writeImageFromBytes } from '../helpers/opbs-image';
 import { spawnSync } from 'child_process';
+import { windowsPowerShellEnv } from '../../src/main/utils/powershell-env';
 
 /** Read a file's security descriptor as SDDL (Windows only). */
 function readSddl(file: string): string {
@@ -21,7 +22,11 @@ function readSddl(file: string): string {
   const quoted = `'${file.replace(/'/g, "''")}'`;
   const r = spawnSync(ps, ['-NoProfile', '-Command', `(Get-Acl -LiteralPath ${quoted}).Sddl`], {
     encoding: 'utf8',
-    windowsHide: true
+    windowsHide: true,
+    // A PowerShell 7 parent publishes Core-only module roots that a 5.1 child
+    // cannot load; Get-Acl then fails and prints nothing (the same failure the
+    // production helper guards against).
+    env: windowsPowerShellEnv()
   });
   return String(r.stdout ?? '').trim();
 }
