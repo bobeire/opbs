@@ -115,6 +115,7 @@ export class BackupManager extends EventEmitter {
       // every frame is re-read, with per-group progress instead of a frozen
       // window. The final 'completed' emit still waits for parity: a backup
       // is not done until its recovery data exists.
+      const parityStartedAt = Date.now();
       this.emitProgress({
         phase: 'finalizing',
         percentComplete: 100,
@@ -141,6 +142,7 @@ export class BackupManager extends EventEmitter {
       } catch (error) {
         logger.warn(`Could not build parity for ${result.imagePath}: ${error instanceof Error ? error.message : error}`);
       }
+      logger.info(`Timing: parity ${((Date.now() - parityStartedAt) / 1000).toFixed(1)}s`);
 
       this.emitProgress({
         phase: 'completed',

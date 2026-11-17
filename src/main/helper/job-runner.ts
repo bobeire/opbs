@@ -1130,7 +1130,18 @@ export async function runBackupJob(
       await drainAll();
     }
 
+    // Per-phase timing for field reports: the old log jumped straight from
+    // the capture plan to the end of the job, so a slow run looked like one
+    // slow transfer even when verification/consistency dominated.
+    const captureMs = Date.now() - captureStartedAt;
+    logger.info(
+      `Timing: capture ${(captureMs / 1000).toFixed(1)}s, ` +
+        `${(bytesCaptured / 1024 / 1024 / Math.max(captureMs / 1000, 0.001)).toFixed(1)} MB/s source read ` +
+        `(${blocksWritten} block(s), ${bytesCaptured} bytes)`
+    );
+
     // Write the block index at the end of the current volume.
+    const indexStartedAt = Date.now();
     writeProgress('writing-index');
     const blockIndexOffset = cursor;
     const countBuf = Buffer.alloc(8);
@@ -1142,6 +1153,10 @@ export async function runBackupJob(
       fs.writeSync(currentFd, entryBuf, 0, BLOCK_INDEX_ENTRY_SIZE, cursor);
       cursor += BLOCK_INDEX_ENTRY_SIZE;
     }
+    logger.info(
+      `Timing: block index ${((Date.now() - indexStartedAt) / 1000).toFixed(1)}s ` +
+        `(${blocks.length} entries)`
+    );
 
     // Patch partition table and header on the current (last) volume.
     for (let i = 0; i < partitionEntries.length; i++) {
@@ -1188,6 +1203,7 @@ export async function runBackupJob(
     }
 
     if (job.verificationEnabled) {
+      const verifyStartedAt = Date.now();
       writeProgress('verifying');
       const onVerifyProgress = (done: number, total: number): void => {
         progress.verifyDone = done;
@@ -1214,6 +1230,10 @@ export async function runBackupJob(
       if (!verified.ok) {
         throw new Error(`Image verification failed: ${verified.error ?? 'unknown error'}`);
       }
+      logger.info(
+        `Timing: verification ${((Date.now() - verifyStartedAt) / 1000).toFixed(1)}s ` +
+          `(${verifiedBlocks} block(s))`
+      );
     }
 
     // Mark the image as verified (and record that it was resumed, if so).
@@ -1318,6 +1338,7 @@ export async function runBackupJob(
       );
     } else {
       const { checkImageConsistency, describeConsistency } = await import('../imaging/fs/ntfs-consistency');
+      const fsCheckStartedAt = Date.now();
       for (const p of job.partitions) {
         let report;
         try {
@@ -1376,6 +1397,9 @@ export async function runBackupJob(
           );
         }
       }
+      logger.info(
+        `Timing: filesystem consistency ${((Date.now() - fsCheckStartedAt) / 1000).toFixed(1)}s`
+      );
     }
 
     const result: JobResult = {
