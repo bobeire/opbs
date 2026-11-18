@@ -2,6 +2,7 @@ import { Worker } from 'worker_threads';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { CompressionType } from './image-format';
+import { logger } from '../utils/logger';
 
 interface PendingOp {
   seq: number;
@@ -13,6 +14,25 @@ interface PendingOp {
 }
 
 type PoolOp = 'compress' | 'decompress';
+
+interface WorkerResultMessage {
+  seq: number;
+  ok: boolean;
+  data?: Buffer;
+  error?: string;
+}
+
+interface CodecStatusMessage {
+  type: 'codec-status';
+  addonPath: string | null;
+  nativeAddonLoaded: boolean;
+  zstdCompress: boolean;
+  zstdDecompress: boolean;
+  fzstdDecompress: boolean;
+  error?: string;
+}
+
+type PoolWorkerMessage = WorkerResultMessage | CodecStatusMessage;
 
 /**
  * Resolve the path to the native addon (opbs_native.node).
@@ -69,6 +89,7 @@ export class CompressionPool {
   private stopped = false;
   private readonly addonPath: string | undefined;
   private readonly workerPath: string;
+  private codecStatusLogged = false;
 
   constructor(
     threads: number,
@@ -107,9 +128,16 @@ export class CompressionPool {
       const worker = new Worker(this.workerPath, {
         workerData: { addonPath: this.addonPath }
       });
-      worker.on('message', (msg: { seq: number; ok: boolean; data?: Buffer; error?: string }) =>
-        this.onResult(msg.seq, msg.ok, msg.data, msg.error)
-      );
+      worker.on('message', (msg: PoolWorkerMessage | string) => {
+        // Workers also send a 'bye' after a termination request. Neither that
+        // nor the one-time codec report is a pending compression result.
+        if (typeof msg === 'string') return;
+        if ('type' in msg) {
+          if (msg.type === 'codec-status') this.onCodecStatus(msg);
+          return;
+        }
+        this.onResult(msg.seq, msg.ok, msg.data, msg.error);
+      });
       worker.on('error', (err) => this.onWorkerError(err));
       worker.on('exit', (code) => {
         if (code !== 0) {
@@ -163,6 +191,23 @@ export class CompressionPool {
         worker.unref();
       }
     }
+  }
+
+  private onCodecStatus(status: CodecStatusMessage): void {
+    // Every worker reports once at startup. One line per pool is enough to
+    // identify a silent JS fallback without flooding a multi-worker log.
+    if (this.codecStatusLogged) return;
+    this.codecStatusLogged = true;
+    const parts = [
+      `requested=${this.codec}`,
+      `nativeAddon=${status.nativeAddonLoaded ? 'loaded' : 'unavailable'}`,
+      `zstdCompress=${status.zstdCompress ? 'yes' : 'no'}`,
+      `zstdDecompress=${status.zstdDecompress ? 'yes' : 'no'}`,
+      `fzstdDecompress=${status.fzstdDecompress ? 'yes' : 'no'}`,
+      `addonPath=${status.addonPath ?? 'none'}`
+    ];
+    if (status.error) parts.push(`error=${status.error}`);
+    logger.info(`Codec status: ${parts.join(', ')}`);
   }
 
   private onResult(seq: number, ok: boolean, data?: Buffer, error?: string): void {

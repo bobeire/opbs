@@ -8,6 +8,7 @@ let nativeDecompress: ((data: Uint8Array) => Buffer) | null = null;
 let fzstdDecompress: ((data: Uint8Array) => Uint8Array) | null = null;
 
 const addonPath = (workerData as { addonPath?: string } | null)?.addonPath;
+let addonError: string | undefined;
 if (addonPath) {
   try {
     // Lazy require: the native addon path is only known at runtime (workerData),
@@ -16,8 +17,11 @@ if (addonPath) {
     const addon = require(addonPath);
     if (addon.zstdCompress) nativeCompress = addon.zstdCompress;
     if (addon.zstdDecompress) nativeDecompress = addon.zstdDecompress;
-  } catch {
-    /* native addon unavailable; fall through to JS codecs */
+  } catch (err) {
+    // Report why the native codec was not loaded. This used to be silent,
+    // which made a JS zstdify fallback indistinguishable from native zstd in
+    // field logs even though it is far slower.
+    addonError = err instanceof Error ? err.message : String(err);
   }
 }
 
@@ -30,6 +34,18 @@ try {
 } catch {
   /* will error at runtime if needed */
 }
+
+// One-time startup report so the parent can log which codec is actually in
+// use. It carries no `seq` and is never treated as a compression result.
+parentPort?.postMessage({
+  type: 'codec-status',
+  addonPath: addonPath ?? null,
+  nativeAddonLoaded: Boolean(nativeCompress || nativeDecompress),
+  zstdCompress: Boolean(nativeCompress),
+  zstdDecompress: Boolean(nativeDecompress),
+  fzstdDecompress: Boolean(fzstdDecompress),
+  ...(addonError ? { error: addonError } : {})
+});
 
 function compress(data: Uint8Array, level: number, codec: string): Buffer {
   if (codec === 'zstd') {

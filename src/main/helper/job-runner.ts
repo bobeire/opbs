@@ -828,7 +828,24 @@ export async function runBackupJob(
     // resumed numerator by an elapsed time that starts now would report a
     // fictional burst on the first block after a resume.
     const captureStartedAt = Date.now();
+    // Monotonic clock for sub-phase accounting. Date.now() is fine for the
+    // phase totals people compare between runs, but it can jump backwards and
+    // is too coarse to attribute seconds to individual block operations.
+    const captureClockStartedAt = performance.now();
     let bytesCaptured = 0;
+    let captureReadMs = 0;
+    let captureCrcMs = 0;
+    let captureCompressMs = 0;
+    let captureEncodeMs = 0;
+    let captureWriteMs = 0;
+    const crc32Timed = (data: Buffer): number => {
+      const crcStartedAt = performance.now();
+      try {
+        return crc32(data);
+      } finally {
+        captureCrcMs += performance.now() - crcStartedAt;
+      }
+    };
 
     for (let pi = 0; pi < job.partitions.length; pi++) {
       const part = job.partitions[pi];
@@ -916,7 +933,9 @@ export async function runBackupJob(
         item: { raw: Buffer; blockIndex: number; rawSize: number; rawCrc: number },
         compressed: Buffer
       ): void => {
+        const encodeStartedAt = performance.now();
         const frame = encodeBlockFrame(item.raw, compressed, cipher, { rawSize: item.rawSize, rawCrc: item.rawCrc });
+        captureEncodeMs += performance.now() - encodeStartedAt;
 
         // Multi-volume: if this frame would exceed the current volume's size
         // limit, close this volume and open the next one.
@@ -925,6 +944,7 @@ export async function runBackupJob(
         }
 
         let frameOffset = cursor;
+        const writeStartedAt = performance.now();
         try {
           const written = fs.writeSync(currentFd, frame, 0, frame.length, cursor);
           if (written !== frame.length) {
@@ -988,6 +1008,8 @@ export async function runBackupJob(
           } else {
             throw writeErr;
           }
+        } finally {
+          captureWriteMs += performance.now() - writeStartedAt;
         }
         setCursor(cursor + frame.length);
 
@@ -1015,9 +1037,22 @@ export async function runBackupJob(
       }): Promise<void> => {
         let compressed: Buffer;
         if (item.promise) {
-          compressed = await item.promise;
+          // Awaiting the pool result includes worker queue/wait time as well as
+          // the compression itself; that is the time the capture loop is
+          // blocked on this block's compressed bytes.
+          const compressionStartedAt = performance.now();
+          try {
+            compressed = await item.promise;
+          } finally {
+            captureCompressMs += performance.now() - compressionStartedAt;
+          }
         } else {
-          compressed = compressBlock(item.raw, compressionId, job.compressionLevel);
+          const compressionStartedAt = performance.now();
+          try {
+            compressed = compressBlock(item.raw, compressionId, job.compressionLevel);
+          } finally {
+            captureCompressMs += performance.now() - compressionStartedAt;
+          }
         }
         finalizeSync(item, compressed);
       };
@@ -1052,6 +1087,7 @@ export async function runBackupJob(
         }
 
         let raw: Buffer;
+        const readStartedAt = performance.now();
         try {
           const readOffset = baseOffset + BigInt(partitionBytes);
           // Use async I/O when available — frees the event loop during disk
@@ -1080,6 +1116,8 @@ export async function runBackupJob(
               `space or grow it with 'vssadmin resize shadowstorage', then run the backup again.`,
             { cause: error }
           );
+        } finally {
+          captureReadMs += performance.now() - readStartedAt;
         }
 
         // Reading is the work the plan accounts for. Advance source-side
@@ -1095,30 +1133,47 @@ export async function runBackupJob(
         progress.speed = elapsedSec > 0 ? bytesCaptured / elapsedSec : 0;
 
         // Incremental: skip storing blocks whose content matches the base image.
-        const baseCrc = baseCrcs.get(`${part.partitionIndex}:${blockIndex}`);
-        if (job.baseImagePath && baseCrc !== undefined && crc32(raw) === baseCrc) {
-          skippedBlocks++;
-          if (Date.now() - lastProgressWrite > 100) {
-            writeProgress('reading');
+        // Compute the CRC once and reuse it for the frame when the block is
+        // kept, so the sub-phase total reflects the CRC work actually done.
+        const baseCrc = job.baseImagePath ? baseCrcs.get(`${part.partitionIndex}:${blockIndex}`) : undefined;
+        let rawCrc: number | undefined;
+        if (baseCrc !== undefined) {
+          rawCrc = crc32Timed(raw);
+          if (rawCrc === baseCrc) {
+            skippedBlocks++;
+            if (Date.now() - lastProgressWrite > 100) {
+              writeProgress('reading');
+            }
+            continue;
           }
-          continue;
         }
 
         // With the pool, defer compression/write until the window fills; the
         // pool resolves in submission order, so draining stays sequential.
         if (pool) {
-          // Pre-compute CRC before transferring the buffer to the worker.
-          // After transfer the buffer is detached and can't be read.
+          // Pre-compute CRC before handing the buffer to the pool. The pool
+          // copies before transferring, but the raw bytes are needed here too.
           const rawSize = raw.length;
-          const rawCrc = crc32(raw);
-          inFlight.push({ raw, blockIndex, rawSize, rawCrc, promise: pool.compress(raw) });
+          rawCrc = rawCrc ?? crc32Timed(raw);
+          // submit() copies the block into a transferable buffer; that copy is
+          // part of the compression cost from the capture loop's point of view.
+          const submitStartedAt = performance.now();
+          const promise = pool.compress(raw);
+          captureCompressMs += performance.now() - submitStartedAt;
+          inFlight.push({ raw, blockIndex, rawSize, rawCrc, promise });
           while (shouldDrain()) {
             const item = inFlight.shift()!;
             await drainOne(item);
           }
         } else {
-          const compressed = compressBlock(raw, compressionId, job.compressionLevel);
-          finalizeSync({ raw, blockIndex, rawSize: raw.length, rawCrc: crc32(raw) }, compressed);
+          const compressionStartedAt = performance.now();
+          let compressed: Buffer;
+          try {
+            compressed = compressBlock(raw, compressionId, job.compressionLevel);
+          } finally {
+            captureCompressMs += performance.now() - compressionStartedAt;
+          }
+          finalizeSync({ raw, blockIndex, rawSize: raw.length, rawCrc: rawCrc ?? crc32Timed(raw) }, compressed);
         }
 
         if (Date.now() - lastProgressWrite > 100) {
@@ -1134,10 +1189,24 @@ export async function runBackupJob(
     // the capture plan to the end of the job, so a slow run looked like one
     // slow transfer even when verification/consistency dominated.
     const captureMs = Date.now() - captureStartedAt;
+    const captureClockMs = performance.now() - captureClockStartedAt;
+    const accountedMs = captureReadMs + captureCrcMs + captureCompressMs + captureEncodeMs + captureWriteMs;
+    const otherMs = Math.max(0, captureClockMs - accountedMs);
+    const seconds = (ms: number): string => (ms / 1000).toFixed(1);
+    const share = (ms: number): string => `${((ms / Math.max(captureClockMs, 0.001)) * 100).toFixed(1)}%`;
     logger.info(
-      `Timing: capture ${(captureMs / 1000).toFixed(1)}s, ` +
-        `${(bytesCaptured / 1024 / 1024 / Math.max(captureMs / 1000, 0.001)).toFixed(1)} MB/s source read ` +
-        `(${blocksWritten} block(s), ${bytesCaptured} bytes)`
+      `Timing: capture ${seconds(captureMs)}s, ` +
+        `${(bytesCaptured / 1024 / 1024 / Math.max(captureMs / 1000, 0.001)).toFixed(1)} MB/s capture throughput ` +
+        `(source bytes / capture time, ${blocksWritten} block(s), ${bytesCaptured} bytes)`
+    );
+    logger.info(
+      `Timing: capture sub-phases (${seconds(captureClockMs)}s): ` +
+        `read ${seconds(captureReadMs)}s (${share(captureReadMs)}), ` +
+        `crc ${seconds(captureCrcMs)}s (${share(captureCrcMs)}), ` +
+        `compress ${seconds(captureCompressMs)}s (${share(captureCompressMs)}; incl. pool wait), ` +
+        `encode ${seconds(captureEncodeMs)}s (${share(captureEncodeMs)}), ` +
+        `write ${seconds(captureWriteMs)}s (${share(captureWriteMs)}), ` +
+        `other ${seconds(otherMs)}s (${share(otherMs)})`
     );
 
     // Write the block index at the end of the current volume.
