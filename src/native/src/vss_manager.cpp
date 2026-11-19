@@ -403,16 +403,10 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(
     // we want for an application-consistent capture, since a writer that flushes
     // is the difference between crash-consistent and application-consistent.
     // Crash-consistent mode keeps the same context but does not engage writers.
-    // Experimental: when requested, use VSS_CTX_FILE_SHARE_BACKUP for the
-    // crash-consistent path (not runtime-verified for all targets/writers).
     VSS_SNAPSHOT_CONTEXT context = VSS_CTX_BACKUP;
-    if (!options.applicationConsistent && options.crashUseFileShareContext) {
-        context = VSS_CTX_FILE_SHARE_BACKUP;
-    }
     VssTrace(std::string("SetContext mode=") +
              (options.applicationConsistent ? "application" : "crash") +
-             " context=" +
-             ((context == VSS_CTX_FILE_SHARE_BACKUP) ? "VSS_CTX_FILE_SHARE_BACKUP" : "VSS_CTX_BACKUP"));
+             " context=VSS_CTX_BACKUP");
     hr = components->SetContext(context);
     if (FAILED(hr)) {
         VssErrorWithHr(L"SetContext", hr);

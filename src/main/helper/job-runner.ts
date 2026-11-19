@@ -303,14 +303,8 @@ export async function runBackupJob(
     const snapshotStartedAt = performance.now();
     const vssConsistency = job2.vssConsistency ?? 'application';
     const applicationConsistent = vssConsistency !== 'crash';
-    const crashUseFileShareContext =
-      vssConsistency === 'crash' && job2.vssCrashUseFileShareContext === true;
-    const snapshotOptions = { applicationConsistent, crashUseFileShareContext };
-    const consistencyLabel = crashUseFileShareContext
-      ? 'crash-consistent,file-share-context'
-      : applicationConsistent
-        ? 'application-consistent'
-        : 'crash-consistent';
+    const snapshotOptions = { applicationConsistent };
+    const consistencyLabel = applicationConsistent ? 'application-consistent' : 'crash-consistent';
 
     progress.currentPartition = 'snapshotting';
     writeProgress('snapshotting');

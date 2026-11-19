@@ -895,9 +895,6 @@ export class BackupScheduler {
       ...((config.usedBlocksOnly ?? true) ? { usedBlocksOnly: true } : {}),
       ...(config.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
       ...(config.vssConsistency === 'crash' ? { vssConsistency: 'crash' as const } : {}),
-      ...(config.vssConsistency === 'crash' && config.vssCrashUseFileShareContext
-        ? { vssCrashUseFileShareContext: true }
-        : {}),
       ...(config.useUsnJournal ? { useUsnJournal: true } : {}),
       ...(config.usnFullScanThreshold !== undefined
         ? { usnFullScanThreshold: config.usnFullScanThreshold }

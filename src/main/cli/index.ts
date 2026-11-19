@@ -176,8 +176,7 @@ Commands:
                                          (default: backup location). Shows how many frames were
                                          already written so a later backup --resume can continue.
   backup <config.json> [--elevated] [--zstd] [--threads N] [--read-lanes N] [--used-blocks-only] [--resume]
-                           [--usn] [--usn-full-scan-threshold PCT] [--vss-crash-consistent] [--vss-crash-file-share-context]
-                           [--repo <dir>] [--lock-days N]
+                           [--usn] [--usn-full-scan-threshold PCT] [--vss-crash-consistent] [--repo <dir>] [--lock-days N]
                            Run a backup job (config as JSON file). With --repo, the image is
                            written into the repository's images/ directory and journaled as
                            immutable for --lock-days days (default: the repository default).
@@ -186,9 +185,6 @@ Commands:
                            when it flags more than PCT% of a partition (implies --usn).
                            --vss-crash-consistent skips VSS writer coordination for a faster
                            crash-consistent snapshot (not application-consistent).
-                           --vss-crash-file-share-context (implies --vss-crash-consistent)
-                           uses VSS_CTX_FILE_SHARE_BACKUP for crash-consistent snapshot
-                           creation (experimental; behavior/support vary by system).
                            --read-lanes N (2-8) keeps N source reads in flight; experimental,
                            default is one read at a time.
   restore <config.json> [--elevated] [--threads N] [--layout P:OFF[:SIZE],...] [--table-scheme gpt|mbr|auto] [--confirm-layout] [--no-write-table] [--acknowledge-same-disk] Run a restore job (config as JSON file; imagePath accepts .opbs, .mrimgx, and .mrimg).
@@ -668,7 +664,7 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   const configPath = ctx.argv[0];
   if (!configPath) {
     console.error(
-      'Usage: backup <config.json> [--elevated] [--zstd] [--threads N] [--read-lanes N] [--used-blocks-only] [--resume] [--usn] [--usn-full-scan-threshold PCT] [--vss-crash-consistent] [--vss-crash-file-share-context] [--source-vhd <path>] [--repo <dir|s3://bucket/prefix>] [--lock-days N]'
+      'Usage: backup <config.json> [--elevated] [--zstd] [--threads N] [--read-lanes N] [--used-blocks-only] [--resume] [--usn] [--usn-full-scan-threshold PCT] [--vss-crash-consistent] [--source-vhd <path>] [--repo <dir|s3://bucket/prefix>] [--lock-days N]'
     );
     return 1;
   }
@@ -776,10 +772,6 @@ async function cmdBackup(ctx: CommandContext): Promise<number> {
   }
   if (ctx.argv.includes('--vss-crash-consistent')) {
     config.vssConsistency = 'crash';
-  }
-  if (ctx.argv.includes('--vss-crash-file-share-context')) {
-    config.vssConsistency = 'crash';
-    config.vssCrashUseFileShareContext = true;
   }
   if (ctx.argv.includes('--resume')) {
     config.resume = true;

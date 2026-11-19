@@ -16,14 +16,6 @@ struct SnapshotOptions {
      *        path. Much faster; databases may need recovery on restore.
      */
     bool applicationConsistent = true;
-
-    /**
-     * When applicationConsistent is false, request VSS_CTX_FILE_SHARE_BACKUP
-     * instead of VSS_CTX_BACKUP for snapshot-set creation. Experimental/opt-in;
-     * behavior and support vary by system/writers. Ignored for
-     * application-consistent snapshots.
-     */
-    bool crashUseFileShareContext = false;
 };
 
 class VssManager {

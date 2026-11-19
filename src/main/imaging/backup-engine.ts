@@ -70,9 +70,6 @@ export interface BackupJobConfig {
    * 'crash' skips writer engagement for a faster crash-consistent snapshot.
    */
   vssConsistency?: 'application' | 'crash';
-  /** When vssConsistency is 'crash', use VSS_CTX_FILE_SHARE_BACKUP for snapshot
-   *  set creation (experimental, opt-in). Ignored for application-consistent. */
-  vssCrashUseFileShareContext?: boolean;
   /** Maximum size in bytes for each volume file (0 = no splitting).
    *  Auto-detected from the destination filesystem (FAT32 → 3.9 GB). */
   maxVolumeSize?: number;
@@ -392,9 +389,6 @@ export class ImagingEngine implements BackupCoordinator {
       ...(config.usedBlocksOnly ? { usedBlocksOnly: true } : {}),
       ...(config.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
       ...(config.vssConsistency === 'crash' ? { vssConsistency: 'crash' as const } : {}),
-      ...(config.vssConsistency === 'crash' && config.vssCrashUseFileShareContext
-        ? { vssCrashUseFileShareContext: true }
-        : {}),
       ...(useUsnJournal && perPartitionUsn
         ? {
             useUsnJournal: true,
