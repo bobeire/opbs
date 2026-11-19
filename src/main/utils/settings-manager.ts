@@ -184,6 +184,8 @@ export interface ScheduledBackup {
   allowInconsistentCapture?: boolean;
   /** VSS snapshot consistency: 'application' (default) or crash-consistent fast path. */
   vssConsistency?: 'application' | 'crash';
+  /** Use VSS_CTX_FILE_SHARE_BACKUP for crash-consistent snapshots (experimental). */
+  vssCrashUseFileShareContext?: boolean;
   passphrase?: string;
   enabled: boolean;
   lastRun?: string;
@@ -225,6 +227,8 @@ export interface BackupProfile {
   allowInconsistentCapture?: boolean;
   /** VSS snapshot consistency: 'application' (default) or crash-consistent fast path. */
   vssConsistency?: 'application' | 'crash';
+  /** Use VSS_CTX_FILE_SHARE_BACKUP for crash-consistent snapshots (experimental). */
+  vssCrashUseFileShareContext?: boolean;
   /** Read only NTFS-journal-changed blocks for incrementals (USN tracking). */
   useUsnJournal?: boolean;
   /** Fraction (0..1) of a partition that USN may report as changed before the

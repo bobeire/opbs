@@ -1,7 +1,9 @@
 export type ReadSource = 'volume' | 'physical';
 
 export type VssConsistency = 'application' | 'crash';
-export type VssSnapshotOptionsArg = VssConsistency | { applicationConsistent?: boolean };
+export type VssSnapshotOptionsArg =
+  | VssConsistency
+  | { applicationConsistent?: boolean; crashUseFileShareContext?: boolean };
 
 export interface NativeImagingApi {
   createSnapshot(
@@ -168,6 +170,9 @@ export interface ImagingJob {
    * for a faster crash-consistent snapshot.
    */
   vssConsistency?: VssConsistency;
+  /** When vssConsistency is 'crash', request VSS_CTX_FILE_SHARE_BACKUP instead of
+   *  VSS_CTX_BACKUP for snapshot-set creation (experimental, opt-in). */
+  vssCrashUseFileShareContext?: boolean;
 }
 
 export interface RestoreTarget {

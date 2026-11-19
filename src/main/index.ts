@@ -644,6 +644,7 @@ interface UnattendedBackupSchedule {
   useUsnJournal?: boolean;
   usnFullScanThreshold?: number;
   vssConsistency?: 'application' | 'crash';
+  vssCrashUseFileShareContext?: boolean;
   passphrase?: string;
 }
 

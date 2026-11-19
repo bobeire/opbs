@@ -54,6 +54,8 @@ interface BackupConfig {
   allowInconsistentCapture?: boolean;
   /** VSS snapshot consistency: 'application' (default) or crash-consistent fast path. */
   vssConsistency?: 'application' | 'crash';
+  /** Use VSS_CTX_FILE_SHARE_BACKUP for crash-consistent snapshots (experimental). */
+  vssCrashUseFileShareContext?: boolean;
   useUsnJournal?: boolean;
   usnFullScanThreshold?: number;
   baseImagePath?: string;
@@ -88,6 +90,8 @@ interface BackupProfile {
   allowInconsistentCapture?: boolean;
   /** VSS snapshot consistency: 'application' (default) or crash-consistent fast path. */
   vssConsistency?: 'application' | 'crash';
+  /** Use VSS_CTX_FILE_SHARE_BACKUP for crash-consistent snapshots (experimental). */
+  vssCrashUseFileShareContext?: boolean;
   /** Read only NTFS-journal-changed blocks for incrementals (USN tracking). */
   useUsnJournal?: boolean;
   /** Fraction (0..1) of a partition that USN may report as changed before the
@@ -196,6 +200,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   const [usedBlocksOnly, setUsedBlocksOnly] = useState(true);
   const [allowInconsistentCapture, setAllowInconsistentCapture] = useState(false);
   const [vssConsistency, setVssConsistency] = useState<'application' | 'crash'>('application');
+  const [vssCrashUseFileShareContext, setVssCrashUseFileShareContext] = useState(false);
   const [snapshotFailure, setSnapshotFailure] = useState<'busy' | 'unsupported' | null>(null);
   const [useUsnJournal, setUseUsnJournal] = useState(true);
   const [usnThresholdPct, setUsnThresholdPct] = useState('');
@@ -470,6 +475,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     setUsedBlocksOnly(profile.usedBlocksOnly ?? true);
     setAllowInconsistentCapture(profile.allowInconsistentCapture ?? false);
     setVssConsistency(profile.vssConsistency ?? 'application');
+    setVssCrashUseFileShareContext(profile.vssCrashUseFileShareContext ?? false);
     setUseUsnJournal(profile.useUsnJournal ?? true);
     setUsnThresholdPct(
       profile.usnFullScanThreshold !== undefined
@@ -544,6 +550,9 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       usedBlocksOnly,
       allowInconsistentCapture,
       ...(vssConsistency === 'crash' ? { vssConsistency } : {}),
+      ...(vssConsistency === 'crash' && vssCrashUseFileShareContext
+        ? { vssCrashUseFileShareContext: true }
+        : {}),
       useUsnJournal,
       incremental: incrementalEnabled,
       ...(useUsnJournal && parseUsnPct(usnThresholdPct) !== undefined
@@ -595,6 +604,9 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       usedBlocksOnly,
       ...(captureLive ? { allowInconsistentCapture: true } : {}),
       ...(vssConsistency === 'crash' ? { vssConsistency } : {}),
+      ...(vssConsistency === 'crash' && vssCrashUseFileShareContext
+        ? { vssCrashUseFileShareContext: true }
+        : {}),
       useUsnJournal,
       ...(useUsnJournal && parseUsnPct(usnThresholdPct) !== undefined
         ? { usnFullScanThreshold: parseUsnPct(usnThresholdPct) }
@@ -1133,7 +1145,11 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                   <label>VSS snapshot consistency:</label>
                   <select
                     value={vssConsistency}
-                    onChange={(e) => setVssConsistency(e.target.value as 'application' | 'crash')}
+                    onChange={(e) => {
+                      const next = e.target.value as 'application' | 'crash';
+                      setVssConsistency(next);
+                      if (next !== 'crash') setVssCrashUseFileShareContext(false);
+                    }}
                   >
                     <option value="application">Application-consistent (default, coordinates with writers)</option>
                     <option value="crash">Crash-consistent (faster, skips writer coordination)</option>
@@ -1143,6 +1159,22 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                     are not application-consistent for VSS-aware apps (for example databases). Use this as an
                     advanced option when writer coordination is slow or unnecessary.
                   </p>
+                  {vssConsistency === 'crash' && (
+                    <label className="checkbox-label" style={{ marginTop: 8 }}>
+                      <input
+                        type="checkbox"
+                        checked={vssCrashUseFileShareContext}
+                        onChange={(e) => setVssCrashUseFileShareContext(e.target.checked)}
+                      />
+                      Use file-share backup VSS context (experimental)
+                    </label>
+                  )}
+                  {vssConsistency === 'crash' && (
+                    <p className="field-hint">
+                      Requests VSS_CTX_FILE_SHARE_BACKUP for crash-consistent snapshot creation. Experimental;
+                      behavior and support vary by system/writers. Ignored for application-consistent snapshots.
+                    </p>
+                  )}
                 </div>
               </details>
               

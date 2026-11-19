@@ -303,6 +303,14 @@ export async function runBackupJob(
     const snapshotStartedAt = performance.now();
     const vssConsistency = job2.vssConsistency ?? 'application';
     const applicationConsistent = vssConsistency !== 'crash';
+    const crashUseFileShareContext =
+      vssConsistency === 'crash' && job2.vssCrashUseFileShareContext === true;
+    const snapshotOptions = { applicationConsistent, crashUseFileShareContext };
+    const consistencyLabel = crashUseFileShareContext
+      ? 'crash-consistent,file-share-context'
+      : applicationConsistent
+        ? 'application-consistent'
+        : 'crash-consistent';
 
     progress.currentPartition = 'snapshotting';
     writeProgress('snapshotting');
@@ -344,15 +352,15 @@ export async function runBackupJob(
       try {
         if (typeof native.createSnapshotSet === 'function') {
           const t0 = performance.now();
-          snapshots = native.createSnapshotSet(paths, { applicationConsistent });
+          snapshots = native.createSnapshotSet(paths, snapshotOptions);
           logger.info(
-            `VSS snapshot set (${applicationConsistent ? 'application' : 'crash'}-consistent) ` +
+            `VSS snapshot set (${consistencyLabel}) ` +
               `in ${Math.round(performance.now() - t0)}ms for ${paths.length} volume(s)`
           );
         } else {
           // Older native build, or a test double. Per-volume snapshots do NOT
           // share one point in time, so say so rather than implying they do.
-          snapshots = paths.map((p) => native.createSnapshot(p, vssConsistency));
+          snapshots = paths.map((p) => native.createSnapshot(p, snapshotOptions));
           if (paths.length > 1) {
             warnings.push(
               `${paths.length} volumes were snapshotted separately rather than as one set, so this ` +
@@ -375,7 +383,7 @@ export async function runBackupJob(
           let frozen = 0;
           for (const volumePath of paths) {
             try {
-              const snap = native.createSnapshot(volumePath, { applicationConsistent });
+              const snap = native.createSnapshot(volumePath, snapshotOptions);
               snapshots.push(snap);
               if (snap.devicePath) frozen++;
             } catch (volumeError) {
@@ -438,7 +446,7 @@ export async function runBackupJob(
       snapshotsCreated += frozen;
       logger.info(
         `Timing: createSnapshots ${((performance.now() - snapshotStartedAt) / 1000).toFixed(1)}s ` +
-          `(consistency=${vssConsistency}, volumes=${paths.length}, snapshots=${frozen}, attempts=${attemptsMade})`
+          `(consistency=${consistencyLabel}, volumes=${paths.length}, snapshots=${frozen}, attempts=${attemptsMade})`
       );
       return;
     }
@@ -474,7 +482,7 @@ export async function runBackupJob(
     }
     logger.info(
       `Timing: createSnapshots ${((performance.now() - snapshotStartedAt) / 1000).toFixed(1)}s ` +
-        `(consistency=${vssConsistency}, volumes=${paths.length}, snapshots=0, attempts=${attemptsMade}, fallback=physical)`
+        `(consistency=${consistencyLabel}, volumes=${paths.length}, snapshots=0, attempts=${attemptsMade}, fallback=physical)`
     );
   };
 

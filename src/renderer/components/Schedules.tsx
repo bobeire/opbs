@@ -24,6 +24,8 @@ interface ScheduledBackup {
   allowInconsistentCapture?: boolean;
   /** VSS snapshot consistency: 'application' (default) or crash-consistent fast path. */
   vssConsistency?: 'application' | 'crash';
+  /** Use VSS_CTX_FILE_SHARE_BACKUP for crash-consistent snapshots (experimental). */
+  vssCrashUseFileShareContext?: boolean;
   incremental: boolean;
   passphrase?: string;
   enabled: boolean;
@@ -60,6 +62,8 @@ interface ScheduleForm {
   allowInconsistentCapture: boolean;
   /** VSS snapshot consistency: 'application' (default) or crash-consistent fast path. */
   vssConsistency: 'application' | 'crash';
+  /** Use VSS_CTX_FILE_SHARE_BACKUP for crash-consistent snapshots (experimental). */
+  vssCrashUseFileShareContext: boolean;
   incremental: boolean;
   passphrase: string;
   passphraseConfirm: string;
@@ -114,6 +118,8 @@ interface RunBackupConfig {
   verificationEnabled: boolean;
   allowInconsistentCapture?: boolean;
   vssConsistency?: 'application' | 'crash';
+  /** Use VSS_CTX_FILE_SHARE_BACKUP for crash-consistent snapshots (experimental). */
+  vssCrashUseFileShareContext?: boolean;
   passphrase?: string;
   /** Newest image in the destination directory; set for incremental runs. */
   baseImagePath?: string;
@@ -212,6 +218,7 @@ function Schedules() {
     verificationEnabled: defaults.defaultVerification,
     allowInconsistentCapture: false,
     vssConsistency: 'application',
+    vssCrashUseFileShareContext: false,
     incremental: false,
     passphrase: '',
     passphraseConfirm: '',
@@ -256,6 +263,7 @@ function Schedules() {
       verificationEnabled: job.verificationEnabled,
       allowInconsistentCapture: job.allowInconsistentCapture ?? false,
       vssConsistency: job.vssConsistency ?? 'application',
+      vssCrashUseFileShareContext: job.vssCrashUseFileShareContext ?? false,
       incremental: job.incremental,
       passphrase: job.passphrase || '',
       passphraseConfirm: job.passphrase || '',
@@ -420,6 +428,9 @@ function Schedules() {
       verificationEnabled: scheduleForm.verificationEnabled,
       ...(scheduleForm.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
       ...(scheduleForm.vssConsistency === 'crash' ? { vssConsistency: 'crash' } : {}),
+      ...(scheduleForm.vssConsistency === 'crash' && scheduleForm.vssCrashUseFileShareContext
+        ? { vssCrashUseFileShareContext: true }
+        : {}),
       incremental: scheduleForm.incremental,
       maxRetries: scheduleForm.maxRetries,
       retryDelayMinutes: scheduleForm.retryDelayMinutes,
@@ -490,6 +501,9 @@ function Schedules() {
       verificationEnabled: job.verificationEnabled,
       ...(job.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
       ...(job.vssConsistency === 'crash' ? { vssConsistency: 'crash' } : {}),
+      ...(job.vssConsistency === 'crash' && job.vssCrashUseFileShareContext
+        ? { vssCrashUseFileShareContext: true }
+        : {}),
       ...(job.passphrase ? { passphrase: job.passphrase } : {})
     };
     if (job.incremental) {
@@ -832,12 +846,15 @@ function Schedules() {
               <label>VSS snapshot consistency:</label>
               <select
                 value={scheduleForm.vssConsistency}
-                onChange={(e) =>
+                onChange={(e) => {
+                  const next = e.target.value === 'crash' ? 'crash' : 'application';
                   setScheduleForm({
                     ...scheduleForm,
-                    vssConsistency: e.target.value === 'crash' ? 'crash' : 'application'
-                  })
-                }
+                    vssConsistency: next,
+                    vssCrashUseFileShareContext:
+                      next === 'crash' ? scheduleForm.vssCrashUseFileShareContext : false
+                  });
+                }}
               >
                 <option value="application">Application-consistent (default, coordinates with writers)</option>
                 <option value="crash">Crash-consistent (faster, skips writer coordination)</option>
@@ -846,6 +863,27 @@ function Schedules() {
                 Crash-consistent snapshots skip VSS writer coordination and can be faster, but are not
                 application-consistent for VSS-aware apps. Advanced option.
               </p>
+              {scheduleForm.vssConsistency === 'crash' && (
+                <label className="checkbox-label" style={{ marginTop: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={scheduleForm.vssCrashUseFileShareContext}
+                    onChange={(e) =>
+                      setScheduleForm({
+                        ...scheduleForm,
+                        vssCrashUseFileShareContext: e.target.checked
+                      })
+                    }
+                  />
+                  Use file-share backup VSS context (experimental)
+                </label>
+              )}
+              {scheduleForm.vssConsistency === 'crash' && (
+                <p className="field-hint">
+                  Requests VSS_CTX_FILE_SHARE_BACKUP for crash-consistent snapshot creation. Experimental;
+                  behavior and support vary by system/writers. Ignored for application-consistent snapshots.
+                </p>
+              )}
             </div>
           </details>
 

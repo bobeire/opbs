@@ -401,6 +401,8 @@ export function buildUnattendedBackupConfig(schedule: {
   usnFullScanThreshold?: number;
   /** VSS snapshot consistency: 'application' (default) or crash-consistent fast path. */
   vssConsistency?: 'application' | 'crash';
+  /** Use VSS_CTX_FILE_SHARE_BACKUP for crash-consistent snapshots (experimental). */
+  vssCrashUseFileShareContext?: boolean;
   passphrase?: string;
 }): Record<string, unknown> {
   const config: Record<string, unknown> = {
@@ -424,7 +426,10 @@ export function buildUnattendedBackupConfig(schedule: {
       ? { usnFullScanThreshold: schedule.usnFullScanThreshold }
       : {}),
     ...(schedule.vssConsistency === 'crash' ? { vssConsistency: 'crash' } : {}),
-    // For incremental: omit baseImagePath — the CLI resolves it dynamically
+    ...(schedule.vssConsistency === 'crash' && schedule.vssCrashUseFileShareContext
+      ? { vssCrashUseFileShareContext: true }
+      : {}),
+    // For incremental: omit baseImagePath - the CLI resolves it dynamically
     // via findNewestImage() so each run picks up the latest chain.
   };
   if (schedule.passphrase) {
@@ -457,6 +462,7 @@ export async function registerUnattendedBackupTask(
     useUsnJournal?: boolean;
     usnFullScanThreshold?: number;
     vssConsistency?: 'application' | 'crash';
+    vssCrashUseFileShareContext?: boolean;
     passphrase?: string;
   }
 ): Promise<void> {

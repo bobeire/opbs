@@ -41,6 +41,7 @@ interface BackupForm {
   baseImagePath: string;
   passphrase: string;
   vssConsistency: 'application' | 'crash';
+  vssCrashUseFileShareContext: boolean;
 }
 
 interface RestoreForm {
@@ -134,7 +135,8 @@ const DEFAULT_BACKUP: BackupForm = {
   resume: false,
   baseImagePath: '',
   passphrase: '',
-  vssConsistency: 'application'
+  vssConsistency: 'application',
+  vssCrashUseFileShareContext: false
 };
 
 const DEFAULT_RESTORE: RestoreForm = {
@@ -368,6 +370,8 @@ function ConfigBuilder() {
             verificationEnabled: backup.verificationEnabled,
             usedBlocksOnly: backup.usedBlocksOnly,
             vssConsistency: backup.vssConsistency === 'crash' ? 'crash' : undefined,
+            vssCrashUseFileShareContext:
+              backup.vssConsistency === 'crash' && backup.vssCrashUseFileShareContext ? true : undefined,
             useUsnJournal: backup.useUsnJournal ? true : undefined,
             usnFullScanThreshold: parseUsnPctInput(backup.usnThresholdPct),
             resume: backup.resume ? true : undefined,
@@ -541,7 +545,9 @@ function ConfigBuilder() {
         resume: asBool(rest.resume, prev.resume),
         baseImagePath: asStr(rest.baseImagePath, prev.baseImagePath),
         passphrase: asStr(rest.passphrase, prev.passphrase),
-        vssConsistency: rest.vssConsistency === 'crash' ? 'crash' : 'application'
+        vssConsistency: rest.vssConsistency === 'crash' ? 'crash' : 'application',
+        vssCrashUseFileShareContext:
+          rest.vssConsistency === 'crash' ? asBool(rest.vssCrashUseFileShareContext, false) : false
       }));
       // A loaded config's passphrase is already set — treat it as confirmed.
       setBackupPassphraseConfirm(asStr(rest.passphrase, ''));
@@ -768,16 +774,38 @@ function ConfigBuilder() {
                     <label>VSS snapshot consistency</label>
                     <select
                       value={backup.vssConsistency}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const next = e.target.value === 'crash' ? 'crash' : 'application';
                         setBackup((prev) => ({
                           ...prev,
-                          vssConsistency: e.target.value === 'crash' ? 'crash' : 'application'
-                        }))
-                      }
+                          vssConsistency: next,
+                          vssCrashUseFileShareContext: next === 'crash' ? prev.vssCrashUseFileShareContext : false
+                        }));
+                      }}
                     >
                       <option value="application">Application-consistent (default)</option>
                       <option value="crash">Crash-consistent (faster, skips writers)</option>
                     </select>
+                    {backup.vssConsistency === 'crash' && (
+                      <label className="checkbox-label" style={{ marginTop: 8 }}>
+                        <input
+                          type="checkbox"
+                          checked={backup.vssCrashUseFileShareContext}
+                          onChange={(e) =>
+                            setBackup((prev) => ({
+                              ...prev,
+                              vssCrashUseFileShareContext: e.target.checked
+                            }))
+                          }
+                        />
+                        Use file-share backup VSS context (experimental)
+                      </label>
+                    )}
+                    {backup.vssConsistency === 'crash' && (
+                      <p className="field-hint">
+                        Requests VSS_CTX_FILE_SHARE_BACKUP for crash-consistent snapshots. Experimental.
+                      </p>
+                    )}
                   </div>
                 </div>
               </details>

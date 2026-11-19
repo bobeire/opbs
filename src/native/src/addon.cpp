@@ -171,7 +171,7 @@ Napi::Value QueryUsnJournal(const Napi::CallbackInfo& info) {    Napi::Env env =
 // Create VSS snapshot for a volume.
 // Optional 2nd arg:
 // - string "crash" for a crash-consistent (no-writer) fast path
-// - object { applicationConsistent?: boolean }
+// - object { applicationConsistent?: boolean, crashUseFileShareContext?: boolean }
 // Defaults to application-consistent.
 Napi::Value CreateSnapshot(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
@@ -184,6 +184,9 @@ Napi::Value CreateSnapshot(const Napi::CallbackInfo& info) {
             Napi::Object opts = info[1].As<Napi::Object>();
             if (opts.Has("applicationConsistent") && opts.Get("applicationConsistent").IsBoolean()) {
                 options.applicationConsistent = opts.Get("applicationConsistent").As<Napi::Boolean>().Value();
+            }
+            if (opts.Has("crashUseFileShareContext") && opts.Get("crashUseFileShareContext").IsBoolean()) {
+                options.crashUseFileShareContext = opts.Get("crashUseFileShareContext").As<Napi::Boolean>().Value();
             }
         }
     }
@@ -204,7 +207,7 @@ Napi::Value CreateSnapshot(const Napi::CallbackInfo& info) {
 // point in time. Returns an array of { id, devicePath } in the same order.
 // Optional 2nd arg:
 // - string "crash" for a crash-consistent (no-writer) fast path
-// - object { applicationConsistent?: boolean }
+// - object { applicationConsistent?: boolean, crashUseFileShareContext?: boolean }
 // Defaults to application-consistent.
 Napi::Value CreateSnapshotSet(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
@@ -222,6 +225,9 @@ Napi::Value CreateSnapshotSet(const Napi::CallbackInfo& info) {
             Napi::Object opts = info[1].As<Napi::Object>();
             if (opts.Has("applicationConsistent") && opts.Get("applicationConsistent").IsBoolean()) {
                 options.applicationConsistent = opts.Get("applicationConsistent").As<Napi::Boolean>().Value();
+            }
+            if (opts.Has("crashUseFileShareContext") && opts.Get("crashUseFileShareContext").IsBoolean()) {
+                options.crashUseFileShareContext = opts.Get("crashUseFileShareContext").As<Napi::Boolean>().Value();
             }
         }
     }
