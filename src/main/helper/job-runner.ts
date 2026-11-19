@@ -300,6 +300,10 @@ export async function runBackupJob(
     }
     if (volumes.size === 0) return;
 
+    const snapshotStartedAt = performance.now();
+    const vssConsistency = job2.vssConsistency ?? 'application';
+    const applicationConsistent = vssConsistency !== 'crash';
+
     progress.currentPartition = 'snapshotting';
     writeProgress('snapshotting');
 
@@ -339,11 +343,16 @@ export async function runBackupJob(
       attemptsMade = attempt + 1;
       try {
         if (typeof native.createSnapshotSet === 'function') {
-          snapshots = native.createSnapshotSet(paths);
+          const t0 = performance.now();
+          snapshots = native.createSnapshotSet(paths, { applicationConsistent });
+          logger.info(
+            `VSS snapshot set (${applicationConsistent ? 'application' : 'crash'}-consistent) ` +
+              `in ${Math.round(performance.now() - t0)}ms for ${paths.length} volume(s)`
+          );
         } else {
           // Older native build, or a test double. Per-volume snapshots do NOT
           // share one point in time, so say so rather than implying they do.
-          snapshots = paths.map((p) => native.createSnapshot(p));
+          snapshots = paths.map((p) => native.createSnapshot(p, vssConsistency));
           if (paths.length > 1) {
             warnings.push(
               `${paths.length} volumes were snapshotted separately rather than as one set, so this ` +
@@ -356,7 +365,7 @@ export async function runBackupJob(
         lastError = error;
         // A volume that cannot be snapshotted at all (FAT32, exFAT) makes the
         // whole set fail. Refusing the entire backup because one small boot
-        // partition exists is the wrong answer — snapshot what can be, and be
+        // partition exists is the wrong answer - snapshot what can be, and be
         // explicit about what could not. (Field report 2026-11-04: a
         // dual-partition USB's FAT32 boot volume killed the whole backup, and
         // the message told the user their VSS was broken.)
@@ -366,7 +375,7 @@ export async function runBackupJob(
           let frozen = 0;
           for (const volumePath of paths) {
             try {
-              const snap = native.createSnapshot(volumePath);
+              const snap = native.createSnapshot(volumePath, { applicationConsistent });
               snapshots.push(snap);
               if (snap.devicePath) frozen++;
             } catch (volumeError) {
@@ -391,22 +400,25 @@ export async function runBackupJob(
       // A probe read, ADVISORY ONLY. Treating a probe failure as fatal would
       // discard good snapshots: a shadow copy device can report "the device
       // is not ready" for a moment after creation even though the capture
-      // reads from it fine. Observed directly on 2026-11-04 — createSnapshotSet
+      // reads from it fine. Observed directly on 2026-11-04 - createSnapshotSet
       // succeeded and the very next 512-byte read returned error 21. A
       // genuinely unusable snapshot is caught by the capture itself, which
       // aborts on a read failure instead of writing a truncated image.
-      for (const snap of snapshots) {
-        if (!snap.devicePath) continue; // not frozen (FAT32/exFAT) — nothing to probe
-        try {
-          const probe = native.readBlocks(snap.devicePath, 0n, 512n);
-          if (!probe || probe.length === 0) {
-            logger.warn(`Snapshot ${snap.id} returned no data on probe; continuing anyway`);
+      // Gated behind OPBS_VSS_PROBE=1 to avoid extra I/O in normal runs.
+      if (process.env.OPBS_VSS_PROBE === '1') {
+        for (const snap of snapshots) {
+          if (!snap.devicePath) continue; // not frozen (FAT32/exFAT) - nothing to probe
+          try {
+            const probe = native.readBlocks(snap.devicePath, 0n, 512n);
+            if (!probe || probe.length === 0) {
+              logger.warn(`Snapshot ${snap.id} returned no data on probe; continuing anyway`);
+            }
+          } catch (error) {
+            logger.warn(
+              `Probe read on snapshot ${snap.id} failed (${errorMessage(error)}); continuing - ` +
+                `the capture itself aborts if the snapshot is genuinely unusable`
+            );
           }
-        } catch (error) {
-          logger.warn(
-            `Probe read on snapshot ${snap.id} failed (${errorMessage(error)}); continuing — ` +
-              `the capture itself aborts if the snapshot is genuinely unusable`
-          );
         }
       }
       // Entries with an empty devicePath could not be frozen (a FAT32 or exFAT
@@ -424,6 +436,10 @@ export async function runBackupJob(
         logger.info(`${label}: VSS snapshot ${snap.id} -> ${snap.devicePath}`);
       });
       snapshotsCreated += frozen;
+      logger.info(
+        `Timing: createSnapshots ${((performance.now() - snapshotStartedAt) / 1000).toFixed(1)}s ` +
+          `(consistency=${vssConsistency}, volumes=${paths.length}, snapshots=${frozen}, attempts=${attemptsMade})`
+      );
       return;
     }
 
@@ -438,7 +454,7 @@ export async function runBackupJob(
       }
       // The refusal distinguishes "VSS is broken on this machine" from
       // "this volume cannot be snapshotted" and from "another snapshot is
-      // running" — they need different fixes, and conflating them is part of
+      // running" - they need different fixes, and conflating them is part of
       // why the 2026-11-03 report took three days to understand.
       const label = [...volumes.values()].join(', ');
       throw new Error(snapshotFailureMessage(label, detail, attemptsMade, waitedMs), {
@@ -456,6 +472,10 @@ export async function runBackupJob(
         p.volumeDevicePath = undefined;
       }
     }
+    logger.info(
+      `Timing: createSnapshots ${((performance.now() - snapshotStartedAt) / 1000).toFixed(1)}s ` +
+        `(consistency=${vssConsistency}, volumes=${paths.length}, snapshots=0, attempts=${attemptsMade}, fallback=physical)`
+    );
   };
 
   const deleteSnapshots = (): void => {

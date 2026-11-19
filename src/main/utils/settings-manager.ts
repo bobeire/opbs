@@ -182,6 +182,8 @@ export interface ScheduledBackup {
   usedBlocksOnly?: boolean;
   /** Capture live when Windows cannot freeze a volume (no point in time). */
   allowInconsistentCapture?: boolean;
+  /** VSS snapshot consistency: 'application' (default) or crash-consistent fast path. */
+  vssConsistency?: 'application' | 'crash';
   passphrase?: string;
   enabled: boolean;
   lastRun?: string;
@@ -221,6 +223,8 @@ export interface BackupProfile {
   usedBlocksOnly?: boolean;
   /** Capture live when Windows cannot freeze a volume (no point in time). */
   allowInconsistentCapture?: boolean;
+  /** VSS snapshot consistency: 'application' (default) or crash-consistent fast path. */
+  vssConsistency?: 'application' | 'crash';
   /** Read only NTFS-journal-changed blocks for incrementals (USN tracking). */
   useUsnJournal?: boolean;
   /** Fraction (0..1) of a partition that USN may report as changed before the

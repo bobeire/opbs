@@ -65,6 +65,11 @@ export interface BackupJobConfig {
   /** Only capture blocks containing allocated clusters (NTFS $Bitmap). Free
    *  space is skipped; non-NTFS partitions fall back to a full capture. */
   usedBlocksOnly?: boolean;
+  /**
+   * VSS snapshot consistency: 'application' (default) coordinates with writers;
+   * 'crash' skips writer engagement for a faster crash-consistent snapshot.
+   */
+  vssConsistency?: 'application' | 'crash';
   /** Maximum size in bytes for each volume file (0 = no splitting).
    *  Auto-detected from the destination filesystem (FAT32 → 3.9 GB). */
   maxVolumeSize?: number;
@@ -383,6 +388,7 @@ export class ImagingEngine implements BackupCoordinator {
       ...(resumeCheckpoint ? { resumeCheckpoint } : {}),
       ...(config.usedBlocksOnly ? { usedBlocksOnly: true } : {}),
       ...(config.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
+      ...(config.vssConsistency === 'crash' ? { vssConsistency: 'crash' as const } : {}),
       ...(useUsnJournal && perPartitionUsn
         ? {
             useUsnJournal: true,

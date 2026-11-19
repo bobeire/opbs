@@ -6,7 +6,8 @@ import { EventEmitter } from 'events';
 import { logger } from '../utils/logger';
 import { resolvePowershell } from '../utils/elevated';
 import { windowsPowerShellEnv } from '../utils/powershell-env';
-import { ensureHelperTaskRegistered, triggerHelperTask, isRunAsAdmin } from '../utils/task-scheduler';
+import { ensureHelperTaskRegistered, triggerHelperTask } from '../utils/task-scheduler';
+import { isElevatedSync } from '../imaging/migrate/identity';
 import { PipeServer, generatePipeName, type PipeMessage } from '../utils/pipe-ipc';
 
 /**
@@ -258,9 +259,10 @@ export function launchElevatedJob<J, P, R>(job: J): JobLaunchOptions<P> & { prom
     }
 
     // Spawn the helper via task scheduler (primary) or UAC fallback.
-    // If the app is already running as admin (RunAsAdmin registry key), the
-    // helper inherits elevation — spawn it directly, no task/UAC needed.
-    const alreadyElevated = isRunAsAdmin(exe);
+    // If this process is already elevated, the helper inherits elevation —
+    // spawn it directly, no task/UAC needed. Do not treat the RunAsAdmin
+    // registry flag as "elevated now": it only takes effect after a restart.
+    const alreadyElevated = isElevatedSync();
     const args = [
       ...(appPath ? [appPath] : []),
       HELPER_FLAG,

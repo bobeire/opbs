@@ -40,6 +40,7 @@ interface BackupForm {
   resume: boolean;
   baseImagePath: string;
   passphrase: string;
+  vssConsistency: 'application' | 'crash';
 }
 
 interface RestoreForm {
@@ -132,7 +133,8 @@ const DEFAULT_BACKUP: BackupForm = {
   usnThresholdPct: '',
   resume: false,
   baseImagePath: '',
-  passphrase: ''
+  passphrase: '',
+  vssConsistency: 'application'
 };
 
 const DEFAULT_RESTORE: RestoreForm = {
@@ -365,6 +367,7 @@ function ConfigBuilder() {
             readLanes: backup.readLanes > 1 ? Math.min(8, backup.readLanes) : undefined,
             verificationEnabled: backup.verificationEnabled,
             usedBlocksOnly: backup.usedBlocksOnly,
+            vssConsistency: backup.vssConsistency === 'crash' ? 'crash' : undefined,
             useUsnJournal: backup.useUsnJournal ? true : undefined,
             usnFullScanThreshold: parseUsnPctInput(backup.usnThresholdPct),
             resume: backup.resume ? true : undefined,
@@ -537,7 +540,8 @@ function ConfigBuilder() {
             : prev.usnThresholdPct,
         resume: asBool(rest.resume, prev.resume),
         baseImagePath: asStr(rest.baseImagePath, prev.baseImagePath),
-        passphrase: asStr(rest.passphrase, prev.passphrase)
+        passphrase: asStr(rest.passphrase, prev.passphrase),
+        vssConsistency: rest.vssConsistency === 'crash' ? 'crash' : 'application'
       }));
       // A loaded config's passphrase is already set — treat it as confirmed.
       setBackupPassphraseConfirm(asStr(rest.passphrase, ''));
@@ -747,16 +751,36 @@ function ConfigBuilder() {
                   onChange={(e) => setBackup((prev) => ({ ...prev, compressionThreads: Math.max(0, Number(e.target.value)) }))}
                 />
               </div>
-              <div className="builder-row">
-                <label>Read lanes (experimental)</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={8}
-                  value={backup.readLanes}
-                  onChange={(e) => setBackup((prev) => ({ ...prev, readLanes: Math.max(1, Math.min(8, Number(e.target.value))) }))}
-                />
-              </div>
+              <details className="advanced-options" style={{ gridColumn: '1 / -1' }}>
+                <summary>Advanced options</summary>
+                <div className="builder-grid">
+                  <div className="builder-row">
+                    <label>Read lanes (experimental)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={8}
+                      value={backup.readLanes}
+                      onChange={(e) => setBackup((prev) => ({ ...prev, readLanes: Math.max(1, Math.min(8, Number(e.target.value))) }))}
+                    />
+                  </div>
+                  <div className="builder-row">
+                    <label>VSS snapshot consistency</label>
+                    <select
+                      value={backup.vssConsistency}
+                      onChange={(e) =>
+                        setBackup((prev) => ({
+                          ...prev,
+                          vssConsistency: e.target.value === 'crash' ? 'crash' : 'application'
+                        }))
+                      }
+                    >
+                      <option value="application">Application-consistent (default)</option>
+                      <option value="crash">Crash-consistent (faster, skips writers)</option>
+                    </select>
+                  </div>
+                </div>
+              </details>
             </div>
 
             <label className="checkbox-label">

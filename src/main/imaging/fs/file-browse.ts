@@ -918,17 +918,24 @@ function copyNtfsFile(session: NtfsBrowseSession, rec: NtfsFile, dest: string, e
   applyTimes(dest, ntfsToUnixSeconds(rec.modified));
 }
 
+function mkdirpSafe(dir: string): void {
+  if (!dir) return;
+  const root = path.parse(dir).root;
+  if (dir === root || dir === root.replace(/[\\/]+$/, '')) return;
+  fs.mkdirSync(dir, { recursive: true });
+}
+
 function extractNtfs(session: NtfsBrowseSession, relPath: string, outPath: string, ex: Extraction): void {
   const rec = resolveNtfsPath(session, relPath);
   if (!rec) throw new Error(`Path not found: ${relPath}`);
   if (rec.isDirectory) {
     const isRoot = rec.recordNumber === session.rootId;
     const dir = isRoot ? outPath : path.join(outPath, safeFileName(rec.name?.name ?? ''));
-    fs.mkdirSync(dir, { recursive: true });
+    mkdirpSafe(dir);
     extractNtfsDir(session, rec.recordNumber, dir, relPath, ex, new Set());
     applyTimes(dir, ntfsToUnixSeconds(rec.modified));
   } else {
-    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    mkdirpSafe(path.dirname(outPath));
     copyNtfsFile(session, rec, outPath, ex);
     ex.count = 1;
   }
@@ -956,7 +963,7 @@ function extractNtfsDir(
       if (!rec) throw new Error('Its file record could not be read.');
       const dest = ex.place(outDir, names, node.name, shown);
       if (rec.isDirectory) {
-        fs.mkdirSync(dest, { recursive: true });
+        mkdirpSafe(dest);
         extractNtfsDir(session, rec.recordNumber, dest, shown, ex, here);
         applyTimes(dest, ntfsToUnixSeconds(rec.modified));
         return false;
@@ -991,11 +998,11 @@ function extractFat32(session: Fat32BrowseSession, relPath: string, outPath: str
   if (!entry) throw new Error(`Path not found: ${relPath}`);
   if (entry.isDirectory) {
     const dir = entry.name === '' ? outPath : path.join(outPath, safeFileName(entry.name));
-    fs.mkdirSync(dir, { recursive: true });
+    mkdirpSafe(dir);
     extractFat32Dir(session, entry.startCluster, dir, relPath, ex, new Set());
     applyTimes(dir, entry.modified);
   } else {
-    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    mkdirpSafe(path.dirname(outPath));
     copyFat32File(session, entry, outPath, ex);
     ex.count = 1;
   }
@@ -1025,7 +1032,7 @@ function extractFat32Dir(
       }
       const dest = ex.place(outDir, names, entry.name, shown);
       if (entry.isDirectory) {
-        fs.mkdirSync(dest, { recursive: true });
+        mkdirpSafe(dest);
         extractFat32Dir(session, entry.startCluster, dest, shown, ex, here);
         applyTimes(dest, entry.modified);
         return false;
@@ -1054,11 +1061,11 @@ function extractExfat(session: ExfatBrowseSession, relPath: string, outPath: str
   if (!entry) throw new Error(`Path not found: ${relPath}`);
   if (entry.isDirectory) {
     const dir = entry.name === '' ? outPath : path.join(outPath, safeFileName(entry.name));
-    fs.mkdirSync(dir, { recursive: true });
+    mkdirpSafe(dir);
     extractExfatDir(session, entry.startCluster, dir, relPath, ex, new Set());
     applyTimes(dir, entry.modified);
   } else {
-    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    mkdirpSafe(path.dirname(outPath));
     copyExfatFile(session, entry, outPath, ex);
     ex.count = 1;
   }
@@ -1088,7 +1095,7 @@ function extractExfatDir(
       }
       const dest = ex.place(outDir, names, entry.name, shown);
       if (entry.isDirectory) {
-        fs.mkdirSync(dest, { recursive: true });
+        mkdirpSafe(dest);
         extractExfatDir(session, entry.startCluster, dest, shown, ex, here);
         applyTimes(dest, entry.modified);
         return false;

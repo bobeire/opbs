@@ -168,13 +168,28 @@ Napi::Value QueryUsnJournal(const Napi::CallbackInfo& info) {    Napi::Env env =
     }
 }
 
-// Create VSS snapshot for a volume
+// Create VSS snapshot for a volume.
+// Optional 2nd arg:
+// - string "crash" for a crash-consistent (no-writer) fast path
+// - object { applicationConsistent?: boolean }
+// Defaults to application-consistent.
 Napi::Value CreateSnapshot(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
     std::string volumePath = info[0].As<Napi::String>().Utf8Value();
+    SnapshotOptions options;
+    if (info.Length() > 1) {
+        if (info[1].IsString()) {
+            options.applicationConsistent = info[1].As<Napi::String>().Utf8Value() != "crash";
+        } else if (info[1].IsObject() && !info[1].IsArray()) {
+            Napi::Object opts = info[1].As<Napi::Object>();
+            if (opts.Has("applicationConsistent") && opts.Get("applicationConsistent").IsBoolean()) {
+                options.applicationConsistent = opts.Get("applicationConsistent").As<Napi::Boolean>().Value();
+            }
+        }
+    }
     
     try {
-        auto snapshot = VssManager::CreateSnapshot(volumePath);
+        auto snapshot = VssManager::CreateSnapshot(volumePath, options);
         auto result = Napi::Object::New(env);
         result.Set("id", snapshot.id);
         result.Set("devicePath", snapshot.devicePath);
@@ -187,6 +202,10 @@ Napi::Value CreateSnapshot(const Napi::CallbackInfo& info) {
 
 // Create one snapshot set covering several volumes, so they share a single
 // point in time. Returns an array of { id, devicePath } in the same order.
+// Optional 2nd arg:
+// - string "crash" for a crash-consistent (no-writer) fast path
+// - object { applicationConsistent?: boolean }
+// Defaults to application-consistent.
 Napi::Value CreateSnapshotSet(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
     Napi::Array paths = info[0].As<Napi::Array>();
@@ -195,9 +214,20 @@ Napi::Value CreateSnapshotSet(const Napi::CallbackInfo& info) {
     for (uint32_t i = 0; i < paths.Length(); i++) {
         volumes.push_back(paths.Get(i).As<Napi::String>().Utf8Value());
     }
+    SnapshotOptions options;
+    if (info.Length() > 1) {
+        if (info[1].IsString()) {
+            options.applicationConsistent = info[1].As<Napi::String>().Utf8Value() != "crash";
+        } else if (info[1].IsObject() && !info[1].IsArray()) {
+            Napi::Object opts = info[1].As<Napi::Object>();
+            if (opts.Has("applicationConsistent") && opts.Get("applicationConsistent").IsBoolean()) {
+                options.applicationConsistent = opts.Get("applicationConsistent").As<Napi::Boolean>().Value();
+            }
+        }
+    }
 
     try {
-        auto snapshots = VssManager::CreateSnapshotSet(volumes);
+        auto snapshots = VssManager::CreateSnapshotSet(volumes, options);
         Napi::Array result = Napi::Array::New(env, snapshots.size());
         for (size_t i = 0; i < snapshots.size(); i++) {
             Napi::Object entry = Napi::Object::New(env);

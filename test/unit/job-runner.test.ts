@@ -1817,9 +1817,9 @@ describe('incremental and encrypted jobs', () => {
     });
     await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
     expect(readResult().blocksWritten).toBe(totalBlocks);
-    // +1: each snapshot is probed with a 512-byte read before it is trusted.
-    // The data blocks are still exactly totalBlocks.
-    expect(native.readBlocks.mock.calls.length).toBe(totalBlocks + 1);
+    // Probe reads are advisory and gated behind OPBS_VSS_PROBE=1 (default off),
+    // so only the data blocks are read here.
+    expect(native.readBlocks.mock.calls.length).toBe(totalBlocks);
   });
 
   it('records the pre-snapshot USN cursor in the sidecar', async () => {
@@ -1938,8 +1938,8 @@ describe('incremental and encrypted jobs', () => {
     });
     await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
     // Foreign cursor → treated as "no cursor" → full read, correct frames.
-    // +1: the snapshot probe read, before any data block.
-    expect(native.readBlocks.mock.calls.length).toBe(totalBlocks + 1);
+    // Probe reads are advisory and gated behind OPBS_VSS_PROBE=1 (default off).
+    expect(native.readBlocks.mock.calls.length).toBe(totalBlocks);
     expect(readResult().blocksWritten).toBe(2);
   });
 

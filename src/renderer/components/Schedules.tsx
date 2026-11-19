@@ -22,6 +22,8 @@ interface ScheduledBackup {
   readLanes?: number;
   verificationEnabled: boolean;
   allowInconsistentCapture?: boolean;
+  /** VSS snapshot consistency: 'application' (default) or crash-consistent fast path. */
+  vssConsistency?: 'application' | 'crash';
   incremental: boolean;
   passphrase?: string;
   enabled: boolean;
@@ -56,6 +58,8 @@ interface ScheduleForm {
   verificationEnabled: boolean;
   /** Capture live when Windows cannot freeze a volume (no point in time). */
   allowInconsistentCapture: boolean;
+  /** VSS snapshot consistency: 'application' (default) or crash-consistent fast path. */
+  vssConsistency: 'application' | 'crash';
   incremental: boolean;
   passphrase: string;
   passphraseConfirm: string;
@@ -109,6 +113,7 @@ interface RunBackupConfig {
   readLanes?: number;
   verificationEnabled: boolean;
   allowInconsistentCapture?: boolean;
+  vssConsistency?: 'application' | 'crash';
   passphrase?: string;
   /** Newest image in the destination directory; set for incremental runs. */
   baseImagePath?: string;
@@ -206,6 +211,7 @@ function Schedules() {
     readLanes: 1,
     verificationEnabled: defaults.defaultVerification,
     allowInconsistentCapture: false,
+    vssConsistency: 'application',
     incremental: false,
     passphrase: '',
     passphraseConfirm: '',
@@ -249,6 +255,7 @@ function Schedules() {
       readLanes: job.readLanes ?? 1,
       verificationEnabled: job.verificationEnabled,
       allowInconsistentCapture: job.allowInconsistentCapture ?? false,
+      vssConsistency: job.vssConsistency ?? 'application',
       incremental: job.incremental,
       passphrase: job.passphrase || '',
       passphraseConfirm: job.passphrase || '',
@@ -412,6 +419,7 @@ function Schedules() {
       ...(scheduleForm.readLanes > 1 ? { readLanes: scheduleForm.readLanes } : {}),
       verificationEnabled: scheduleForm.verificationEnabled,
       ...(scheduleForm.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
+      ...(scheduleForm.vssConsistency === 'crash' ? { vssConsistency: 'crash' } : {}),
       incremental: scheduleForm.incremental,
       maxRetries: scheduleForm.maxRetries,
       retryDelayMinutes: scheduleForm.retryDelayMinutes,
@@ -481,6 +489,7 @@ function Schedules() {
       ...(job.readLanes && job.readLanes > 1 ? { readLanes: job.readLanes } : {}),
       verificationEnabled: job.verificationEnabled,
       ...(job.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
+      ...(job.vssConsistency === 'crash' ? { vssConsistency: 'crash' } : {}),
       ...(job.passphrase ? { passphrase: job.passphrase } : {})
     };
     if (job.incremental) {
@@ -800,22 +809,45 @@ function Schedules() {
             <p className="field-hint">1+ parallelizes compression across worker threads (0 disables).</p>
           </div>
 
-          <div className="setting-item">
-            <label>Overlapping read lanes (experimental):</label>
-            <select
-              value={scheduleForm.readLanes}
-              onChange={(e) => setScheduleForm({ ...scheduleForm, readLanes: parseInt(e.target.value) })}
-            >
-              <option value={1}>1 — one read at a time (default)</option>
-              <option value={2}>2 — two reads in flight</option>
-              <option value={4}>4 — four reads in flight</option>
-              <option value={8}>8 — eight reads in flight</option>
-            </select>
-            <p className="field-hint">
-              Keeps several source reads in flight while frames are still written in order. Opt-in
-              until someone outside this project has measured it; values above 4 mostly queue.
-            </p>
-          </div>
+          <details className="advanced-options">
+            <summary>Advanced options</summary>
+            <div className="setting-item">
+              <label>Overlapping read lanes (experimental):</label>
+              <select
+                value={scheduleForm.readLanes}
+                onChange={(e) => setScheduleForm({ ...scheduleForm, readLanes: parseInt(e.target.value) })}
+              >
+                <option value={1}>1 - one read at a time (default)</option>
+                <option value={2}>2 - two reads in flight</option>
+                <option value={4}>4 - four reads in flight</option>
+                <option value={8}>8 - eight reads in flight</option>
+              </select>
+              <p className="field-hint">
+                Keeps several source reads in flight while frames are still written in order. Opt-in
+                until someone outside this project has measured it; values above 4 mostly queue.
+              </p>
+            </div>
+
+            <div className="setting-item">
+              <label>VSS snapshot consistency:</label>
+              <select
+                value={scheduleForm.vssConsistency}
+                onChange={(e) =>
+                  setScheduleForm({
+                    ...scheduleForm,
+                    vssConsistency: e.target.value === 'crash' ? 'crash' : 'application'
+                  })
+                }
+              >
+                <option value="application">Application-consistent (default, coordinates with writers)</option>
+                <option value="crash">Crash-consistent (faster, skips writer coordination)</option>
+              </select>
+              <p className="field-hint">
+                Crash-consistent snapshots skip VSS writer coordination and can be faster, but are not
+                application-consistent for VSS-aware apps. Advanced option.
+              </p>
+            </div>
+          </details>
 
           <div className="setting-item">
             <label className="checkbox-label">

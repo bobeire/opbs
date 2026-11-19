@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <fstream>
 #include <cstdlib>
+#include <chrono>
 
 #ifdef _MSC_VER
 #pragma comment(lib, "vssapi.lib")
@@ -368,11 +369,16 @@ void CheckWriterState(IVssBackupComponents* components, const wchar_t* phase) {
     }
 }
 
-std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std::string>& volumePaths) {
+std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(
+    const std::vector<std::string>& volumePaths,
+    const SnapshotOptions& options
+) {
     if (volumePaths.empty()) {
         VssError(L"CreateSnapshotSet (no volumes)");
     }
     EnsureComInitialized();
+    VssTrace(std::string("CreateSnapshotSet consistency=") + (options.applicationConsistent ? "application" : "crash") +
+             " volumes=" + std::to_string(volumePaths.size()));
 
     IVssBackupComponents* backupComponents = nullptr;
     HRESULT hr = CreateVssBackupComponents(&backupComponents);
@@ -394,40 +400,62 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
 
     // The context MUST be set before StartSnapshotSet. VSS_CTX_BACKUP is the
     // backup context and it is the one that brings writers in — which is what
-    // we want, since a writer that flushes is the difference between a
-    // crash-consistent capture and an application-consistent one. Without an
-    // explicit context the caller is in an undefined state and later calls can
-    // fail on any machine with active writers. (Field report 2026-11-04: the
-    // sequence was incomplete and Macrium succeeded on the same machine.)
-    hr = components->SetContext(VSS_CTX_BACKUP);
+    // we want for an application-consistent capture, since a writer that flushes
+    // is the difference between crash-consistent and application-consistent.
+    // Crash-consistent mode keeps the same context but does not engage writers.
+    // Opt-in prototype: OPBS_VSS_CRASH_CONTEXT=file_share uses
+    // VSS_CTX_FILE_SHARE_BACKUP for the crash-consistent path to evaluate
+    // snapshot-set creation performance (not runtime-verified for all targets).
+    VSS_SNAPSHOT_CONTEXT context = VSS_CTX_BACKUP;
+    if (!options.applicationConsistent) {
+        const char* crashCtx = std::getenv("OPBS_VSS_CRASH_CONTEXT");
+        if (crashCtx != nullptr && std::string(crashCtx) == "file_share") {
+            context = VSS_CTX_FILE_SHARE_BACKUP;
+        }
+    }
+    VssTrace(std::string("SetContext mode=") +
+             (options.applicationConsistent ? "application" : "crash") +
+             " context=" +
+             ((context == VSS_CTX_FILE_SHARE_BACKUP) ? "VSS_CTX_FILE_SHARE_BACKUP" : "VSS_CTX_BACKUP"));
+    hr = components->SetContext(context);
     if (FAILED(hr)) {
         VssErrorWithHr(L"SetContext", hr);
     }
 
-    hr = components->SetBackupState(true, true, VSS_BT_FULL, false);
-    if (FAILED(hr)) {
-        VssErrorWithHr(L"SetBackupState", hr);
-    }
+    if (!options.applicationConsistent) {
+        // No component selection / no writer participation: a crash-consistent
+        // volume snapshot. Skips GatherWriterMetadata, PrepareForBackup, writer
+        // status checks, and BackupComplete to avoid writer stalls and overhead.
+        hr = components->SetBackupState(false, false, VSS_BT_COPY, false);
+        if (FAILED(hr)) {
+            VssErrorWithHr(L"SetBackupState", hr);
+        }
+    } else {
+        hr = components->SetBackupState(true, true, VSS_BT_FULL, false);
+        if (FAILED(hr)) {
+            VssErrorWithHr(L"SetBackupState", hr);
+        }
 
-    // GatherWriterMetadata is REQUIRED once the backup state asks for
-    // component selection (SetBackupState's first argument). Microsoft's
-    // requester contract is explicit about the order: gather the metadata
-    // before PrepareForBackup/DoSnapshotSet, or those calls fail on any
-    // machine where writers matter — that is, every normal Windows install.
-    // This was the single biggest omission in the old sequence.
-    IVssAsync* pMetaAsync = nullptr;
-    hr = components->GatherWriterMetadata(&pMetaAsync);
-    if (FAILED(hr)) {
-        VssErrorWithHr(L"GatherWriterMetadata", hr);
+        // GatherWriterMetadata is REQUIRED once the backup state asks for
+        // component selection (SetBackupState's first argument). Microsoft's
+        // requester contract is explicit about the order: gather the metadata
+        // before PrepareForBackup/DoSnapshotSet, or those calls fail on any
+        // machine where writers matter — that is, every normal Windows install.
+        // This was the single biggest omission in the old sequence.
+        IVssAsync* pMetaAsync = nullptr;
+        hr = components->GatherWriterMetadata(&pMetaAsync);
+        if (FAILED(hr)) {
+            VssErrorWithHr(L"GatherWriterMetadata", hr);
+        }
+        hr = WaitForAsync(pMetaAsync);
+        if (FAILED(hr)) {
+            VssErrorWithHr(L"GatherWriterMetadata wait", hr);
+        }
+        // Look at what the writers said before relying on them. A writer that is
+        // already failing will fail the snapshot later with a much less useful
+        // HRESULT.
+        CheckWriterState(components.get(), L"GatherWriterMetadata");
     }
-    hr = WaitForAsync(pMetaAsync);
-    if (FAILED(hr)) {
-        VssErrorWithHr(L"GatherWriterMetadata wait", hr);
-    }
-    // Look at what the writers said before relying on them. A writer that is
-    // already failing will fail the snapshot later with a much less useful
-    // HRESULT.
-    CheckWriterState(components.get(), L"GatherWriterMetadata");
 
     VSS_ID snapshotSetId = GUID_NULL;
     hr = components->StartSnapshotSet(&snapshotSetId);
@@ -451,28 +479,31 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
             VssErrorWithHr(L"AddToSnapshotSet", hr);
         }
     }
-    
-    IVssAsync* pAsync = nullptr;
-    hr = components->PrepareForBackup(&pAsync);
-    VssTrace("PrepareForBackup hr=" + HexHr(hr));
-    if (FAILED(hr)) {
-        VssErrorWithHr(L"PrepareForBackup", hr);
-    }
-    // Writers have been told to prepare. From here on, any failure — including
-    // the async wait — must tell them to abort, or they sit in a prepared
-    // state and the next snapshot fails for no visible reason.
-    setGuard.Prepared();
-    
-    hr = WaitForAsync(pAsync);
-    VssTrace("PrepareForBackup wait hr=" + HexHr(hr));
-    if (FAILED(hr)) {
-        VssErrorWithHr(L"PrepareForBackup wait", hr);
-    }
-    // Writers run their prepare phase here; a failure now is the last moment
-    // to name it before DoSnapshotSet turns it into an anonymous HRESULT.
-    CheckWriterState(components.get(), L"PrepareForBackup");
 
-    pAsync = nullptr;
+    if (options.applicationConsistent) {
+        IVssAsync* pAsync = nullptr;
+        hr = components->PrepareForBackup(&pAsync);
+        VssTrace("PrepareForBackup hr=" + HexHr(hr));
+        if (FAILED(hr)) {
+            VssErrorWithHr(L"PrepareForBackup", hr);
+        }
+        // Writers have been told to prepare. From here on, any failure — including
+        // the async wait — must tell them to abort, or they sit in a prepared
+        // state and the next snapshot fails for no visible reason.
+        setGuard.Prepared();
+        
+        hr = WaitForAsync(pAsync);
+        VssTrace("PrepareForBackup wait hr=" + HexHr(hr));
+        if (FAILED(hr)) {
+            VssErrorWithHr(L"PrepareForBackup wait", hr);
+        }
+        // Writers run their prepare phase here; a failure now is the last moment
+        // to name it before DoSnapshotSet turns it into an anonymous HRESULT.
+        CheckWriterState(components.get(), L"PrepareForBackup");
+    }
+
+    auto doSnapT0 = std::chrono::steady_clock::now();
+    IVssAsync* pAsync = nullptr;
     hr = components->DoSnapshotSet(&pAsync);
     VssTrace("DoSnapshotSet hr=" + HexHr(hr));
     if (FAILED(hr)) {
@@ -480,7 +511,9 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
     }
     
     hr = WaitForAsync(pAsync);
-    VssTrace("DoSnapshotSet wait hr=" + HexHr(hr));
+    auto doSnapMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - doSnapT0).count();
+    VssTrace("DoSnapshotSet wait hr=" + HexHr(hr) + " total_ms=" + std::to_string(doSnapMs));
     if (FAILED(hr)) {
         VssErrorWithHr(L"DoSnapshotSet wait", hr);
     }
@@ -529,23 +562,25 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
         infos.push_back(info);
     }
 
-    // Signal the end of the backup to the writers. Skipping this leaves them
-    // believing a backup is still in progress, which is how a machine ends up
-    // with writers wedged after a run — and wedged writers are exactly what
-    // makes the *next* snapshot fail for no visible reason.
-    pAsync = nullptr;
-    hr = components->BackupComplete(&pAsync);
-    if (SUCCEEDED(hr)) {
-        WaitForAsync(pAsync);
-    }
-    // Report the writers' final state, but never fail a snapshot we already
-    // hold: the data is captured and the user is better served by a warning
-    // in the log than by losing a good snapshot over a writer's complaint.
-    try {
-        CheckWriterState(components.get(), L"BackupComplete");
-    } catch (const std::exception& e) {
-        // Swallowed deliberately — see above. The snapshot itself is valid.
-        (void)e;
+    if (options.applicationConsistent) {
+        // Signal the end of the backup to the writers. Skipping this leaves them
+        // believing a backup is still in progress, which is how a machine ends up
+        // with writers wedged after a run — and wedged writers are exactly what
+        // makes the *next* snapshot fail for no visible reason.
+        pAsync = nullptr;
+        hr = components->BackupComplete(&pAsync);
+        if (SUCCEEDED(hr)) {
+            WaitForAsync(pAsync);
+        }
+        // Report the writers' final state, but never fail a snapshot we already
+        // hold: the data is captured and the user is better served by a warning
+        // in the log than by losing a good snapshot over a writer's complaint.
+        try {
+            CheckWriterState(components.get(), L"BackupComplete");
+        } catch (const std::exception& e) {
+            // Swallowed deliberately — see above. The snapshot itself is valid.
+            (void)e;
+        }
     }
 
     // Keep the requester object alive for as long as the snapshots are in use.
@@ -564,8 +599,11 @@ std::vector<VssSnapshotInfo> VssManager::CreateSnapshotSet(const std::vector<std
     return infos;
 }
 
-VssSnapshotInfo VssManager::CreateSnapshot(const std::string& volumePath) {
-    std::vector<VssSnapshotInfo> infos = CreateSnapshotSet({ volumePath });
+VssSnapshotInfo VssManager::CreateSnapshot(
+    const std::string& volumePath,
+    const SnapshotOptions& options
+) {
+    std::vector<VssSnapshotInfo> infos = CreateSnapshotSet({ volumePath }, options);
     return infos.at(0);
 }
 

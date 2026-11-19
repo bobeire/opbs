@@ -52,6 +52,8 @@ interface BackupConfig {
   usedBlocksOnly?: boolean;
   /** Capture live when Windows cannot freeze a volume (no point in time). */
   allowInconsistentCapture?: boolean;
+  /** VSS snapshot consistency: 'application' (default) or crash-consistent fast path. */
+  vssConsistency?: 'application' | 'crash';
   useUsnJournal?: boolean;
   usnFullScanThreshold?: number;
   baseImagePath?: string;
@@ -84,6 +86,8 @@ interface BackupProfile {
   usedBlocksOnly?: boolean;
   /** Capture live when Windows cannot freeze a volume (no point in time). */
   allowInconsistentCapture?: boolean;
+  /** VSS snapshot consistency: 'application' (default) or crash-consistent fast path. */
+  vssConsistency?: 'application' | 'crash';
   /** Read only NTFS-journal-changed blocks for incrementals (USN tracking). */
   useUsnJournal?: boolean;
   /** Fraction (0..1) of a partition that USN may report as changed before the
@@ -191,6 +195,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
   const [verificationEnabled, setVerificationEnabled] = useState(true);
   const [usedBlocksOnly, setUsedBlocksOnly] = useState(true);
   const [allowInconsistentCapture, setAllowInconsistentCapture] = useState(false);
+  const [vssConsistency, setVssConsistency] = useState<'application' | 'crash'>('application');
   const [snapshotFailure, setSnapshotFailure] = useState<'busy' | 'unsupported' | null>(null);
   const [useUsnJournal, setUseUsnJournal] = useState(true);
   const [usnThresholdPct, setUsnThresholdPct] = useState('');
@@ -464,6 +469,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
     setVerificationEnabled(profile.verificationEnabled ?? true);
     setUsedBlocksOnly(profile.usedBlocksOnly ?? true);
     setAllowInconsistentCapture(profile.allowInconsistentCapture ?? false);
+    setVssConsistency(profile.vssConsistency ?? 'application');
     setUseUsnJournal(profile.useUsnJournal ?? true);
     setUsnThresholdPct(
       profile.usnFullScanThreshold !== undefined
@@ -537,6 +543,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       verificationEnabled,
       usedBlocksOnly,
       allowInconsistentCapture,
+      ...(vssConsistency === 'crash' ? { vssConsistency } : {}),
       useUsnJournal,
       incremental: incrementalEnabled,
       ...(useUsnJournal && parseUsnPct(usnThresholdPct) !== undefined
@@ -587,6 +594,7 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
       verificationEnabled,
       usedBlocksOnly,
       ...(captureLive ? { allowInconsistentCapture: true } : {}),
+      ...(vssConsistency === 'crash' ? { vssConsistency } : {}),
       useUsnJournal,
       ...(useUsnJournal && parseUsnPct(usnThresholdPct) !== undefined
         ? { usnFullScanThreshold: parseUsnPct(usnThresholdPct) }
@@ -1101,23 +1109,42 @@ function BackupWizard({ onComplete, initialDestination, initialAllDisks, activeP
                 <p className="field-hint">1+ parallelizes compression across worker threads (0 disables).</p>
               </div>
 
-              <div className="option-group">
-                <label>Overlapping read lanes (experimental):</label>
-                <select
-                  value={readLanes}
-                  onChange={(e) => setReadLanes(parseInt(e.target.value))}
-                >
-                  <option value={1}>1 — one read at a time (default)</option>
-                  <option value={2}>2 — two reads in flight</option>
-                  <option value={4}>4 — four reads in flight</option>
-                  <option value={8}>8 — eight reads in flight</option>
-                </select>
-                <p className="field-hint">
-                  Keeps several source reads in flight while frames are still written in order.
-                  This is opt-in: it has not yet been measured outside the project, and Node's I/O
-                  thread pool can only service four reads at once, so values above 4 mostly queue.
-                </p>
-              </div>
+              <details className="advanced-options">
+                <summary>Advanced options</summary>
+                <div className="option-group">
+                  <label>Overlapping read lanes (experimental):</label>
+                  <select
+                    value={readLanes}
+                    onChange={(e) => setReadLanes(parseInt(e.target.value))}
+                  >
+                    <option value={1}>1 - one read at a time (default)</option>
+                    <option value={2}>2 - two reads in flight</option>
+                    <option value={4}>4 - four reads in flight</option>
+                    <option value={8}>8 - eight reads in flight</option>
+                  </select>
+                  <p className="field-hint">
+                    Keeps several source reads in flight while frames are still written in order.
+                    This is opt-in: it has not yet been measured outside the project, and Node's I/O
+                    thread pool can only service four reads at once, so values above 4 mostly queue.
+                  </p>
+                </div>
+
+                <div className="option-group">
+                  <label>VSS snapshot consistency:</label>
+                  <select
+                    value={vssConsistency}
+                    onChange={(e) => setVssConsistency(e.target.value as 'application' | 'crash')}
+                  >
+                    <option value="application">Application-consistent (default, coordinates with writers)</option>
+                    <option value="crash">Crash-consistent (faster, skips writer coordination)</option>
+                  </select>
+                  <p className="field-hint">
+                    Crash-consistent snapshots skip VSS writer metadata/coordination and can be faster, but
+                    are not application-consistent for VSS-aware apps (for example databases). Use this as an
+                    advanced option when writer coordination is slow or unnecessary.
+                  </p>
+                </div>
+              </details>
               
               <div className="option-group">
                 <label className="checkbox-label">

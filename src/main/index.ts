@@ -640,6 +640,10 @@ interface UnattendedBackupSchedule {
   verificationEnabled: boolean;
   allowInconsistentCapture?: boolean;
   incremental: boolean;
+  usedBlocksOnly?: boolean;
+  useUsnJournal?: boolean;
+  usnFullScanThreshold?: number;
+  vssConsistency?: 'application' | 'crash';
   passphrase?: string;
 }
 

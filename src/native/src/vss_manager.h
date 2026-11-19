@@ -8,6 +8,16 @@ struct VssSnapshotInfo {
     std::string devicePath;
 };
 
+/** Options for CreateSnapshotSet / CreateSnapshot. */
+struct SnapshotOptions {
+    /**
+     * true  (default): application-consistent — GatherWriterMetadata + writers.
+     * false: crash-consistent volume snapshot — skip writer metadata/prepare
+     *        path. Much faster; databases may need recovery on restore.
+     */
+    bool applicationConsistent = true;
+};
+
 class VssManager {
 public:
     /**
@@ -19,11 +29,23 @@ public:
      * For data spanning volumes that is a real inconsistency, and for the
      * rest it is at least a lie about what the image is. (Field report
      * 2026-11-04.)
+     *
+     * When options.applicationConsistent is false, writers are not engaged (no
+     * GatherWriterMetadata/PrepareForBackup/BackupComplete/writer status
+     * checks). This is faster and avoids writer stalls, but the snapshot is
+     * crash-consistent rather than application-consistent.
      */
-    static std::vector<VssSnapshotInfo> CreateSnapshotSet(const std::vector<std::string>& volumePaths);
+    static std::vector<VssSnapshotInfo> CreateSnapshotSet(
+        const std::vector<std::string>& volumePaths,
+        const SnapshotOptions& options = {}
+    );
 
     /** One volume. Thin wrapper over CreateSnapshotSet. */
-    static VssSnapshotInfo CreateSnapshot(const std::string& volumePath);
+    static VssSnapshotInfo CreateSnapshot(
+        const std::string& volumePath,
+        const SnapshotOptions& options = {}
+    );
+
     static void DeleteSnapshot(const std::string& snapshotId);
     static bool IsSupported();
 };

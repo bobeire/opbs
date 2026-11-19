@@ -393,6 +393,14 @@ export function buildUnattendedBackupConfig(schedule: {
   verificationEnabled: boolean;
   allowInconsistentCapture?: boolean;
   incremental: boolean;
+  /** Only capture allocated clusters; defaults to true (falls back to full if map unavailable). */
+  usedBlocksOnly?: boolean;
+  /** Read only NTFS-journal-changed blocks for incrementals (runner enforces safety/fallbacks). */
+  useUsnJournal?: boolean;
+  /** Fraction (0..1) of a partition changed before USN gives up to a full scan. */
+  usnFullScanThreshold?: number;
+  /** VSS snapshot consistency: 'application' (default) or crash-consistent fast path. */
+  vssConsistency?: 'application' | 'crash';
   passphrase?: string;
 }): Record<string, unknown> {
   const config: Record<string, unknown> = {
@@ -406,6 +414,16 @@ export function buildUnattendedBackupConfig(schedule: {
     verificationEnabled: schedule.verificationEnabled,
     ...(schedule.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
     incremental: schedule.incremental,
+    // Default to used-blocks capture for scheduled/unattended runs unless explicitly disabled.
+    // The capture falls back to a full partition read if the allocation map cannot be resolved.
+    usedBlocksOnly: schedule.usedBlocksOnly ?? true,
+    // USN narrowing is applied by the runner only for safe incremental cases (own-volume
+    // journal/cursor, with threshold fallback), so carrying these settings is safe.
+    ...(schedule.useUsnJournal ? { useUsnJournal: true } : {}),
+    ...(schedule.usnFullScanThreshold !== undefined
+      ? { usnFullScanThreshold: schedule.usnFullScanThreshold }
+      : {}),
+    ...(schedule.vssConsistency === 'crash' ? { vssConsistency: 'crash' } : {}),
     // For incremental: omit baseImagePath — the CLI resolves it dynamically
     // via findNewestImage() so each run picks up the latest chain.
   };
@@ -435,6 +453,10 @@ export async function registerUnattendedBackupTask(
     verificationEnabled: boolean;
     allowInconsistentCapture?: boolean;
     incremental: boolean;
+    usedBlocksOnly?: boolean;
+    useUsnJournal?: boolean;
+    usnFullScanThreshold?: number;
+    vssConsistency?: 'application' | 'crash';
     passphrase?: string;
   }
 ): Promise<void> {

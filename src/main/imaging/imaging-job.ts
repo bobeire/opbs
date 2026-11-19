@@ -1,13 +1,22 @@
 export type ReadSource = 'volume' | 'physical';
 
+export type VssConsistency = 'application' | 'crash';
+export type VssSnapshotOptionsArg = VssConsistency | { applicationConsistent?: boolean };
+
 export interface NativeImagingApi {
-  createSnapshot(volumePath: string): { id: string; devicePath: string };
+  createSnapshot(
+    volumePath: string,
+    consistency?: VssSnapshotOptionsArg
+  ): { id: string; devicePath: string };
   /**
    * One snapshot set covering several volumes, so they share a single point
    * in time. Optional so older native builds and test doubles still work;
    * the caller falls back to per-volume snapshots and says so.
    */
-  createSnapshotSet?(volumePaths: string[]): Array<{ id: string; devicePath: string }>;
+  createSnapshotSet?(
+    volumePaths: string[],
+    consistency?: VssSnapshotOptionsArg
+  ): Array<{ id: string; devicePath: string }>;
   deleteSnapshot(id: string): boolean;
   /** `lane` selects a distinct device handle for overlapping reads. */
   readBlocks(devicePath: string, offset: bigint, length: bigint, lane?: number): Buffer;
@@ -153,6 +162,12 @@ export interface ImagingJob {
   /** Maximum size in bytes for each volume file (0/undefined = no splitting).
    *  Used for multi-volume images on FAT32 destinations. */
   maxVolumeSize?: number;
+  /**
+   * VSS snapshot consistency: 'application' coordinates with writers for an
+   * application-consistent snapshot (default); 'crash' skips writer engagement
+   * for a faster crash-consistent snapshot.
+   */
+  vssConsistency?: VssConsistency;
 }
 
 export interface RestoreTarget {

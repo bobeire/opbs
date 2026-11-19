@@ -891,8 +891,10 @@ export class BackupScheduler {
       compressionThreads: config.compressionThreads,
       ...(config.readLanes && config.readLanes > 1 ? { readLanes: config.readLanes } : {}),
       verificationEnabled: config.verificationEnabled,
-      ...(config.usedBlocksOnly ? { usedBlocksOnly: true } : {}),
+      // Default to used-blocks capture unless explicitly disabled (falls back to full if unavailable).
+      ...((config.usedBlocksOnly ?? true) ? { usedBlocksOnly: true } : {}),
       ...(config.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
+      ...(config.vssConsistency === 'crash' ? { vssConsistency: 'crash' as const } : {}),
       ...(config.useUsnJournal ? { useUsnJournal: true } : {}),
       ...(config.usnFullScanThreshold !== undefined
         ? { usnFullScanThreshold: config.usnFullScanThreshold }
