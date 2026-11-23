@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { needsBrowsePassphrase, shouldReopenForPassphrase } from '../../src/renderer/lib/browse-passphrase';
+import {
+  browsePartitionHint,
+  browsePassphraseAttemptKey,
+  needsBrowsePassphrase,
+  shouldReopenForPassphrase
+} from '../../src/renderer/lib/browse-passphrase';
 
 describe('needsBrowsePassphrase', () => {
   it('shows the field for a locked Macrium v7 (.mrimg) image', () => {
@@ -30,5 +35,32 @@ describe('shouldReopenForPassphrase', () => {
 
   it('keeps the existing OPBS image flow unchanged', () => {
     expect(shouldReopenForPassphrase('D:\\image.opbs', true, 'opbs')).toBe(false);
+  });
+});
+
+describe('browsePassphraseAttemptKey', () => {
+  it('changes with either the image or the passphrase', () => {
+    const first = browsePassphraseAttemptKey('D:\\a.mrimg', 'one');
+    expect(first).toBe(browsePassphraseAttemptKey('D:\\a.mrimg', 'one'));
+    expect(first).not.toBe(browsePassphraseAttemptKey('D:\\a.mrimg', 'two'));
+    expect(first).not.toBe(browsePassphraseAttemptKey('D:\\b.mrimg', 'one'));
+  });
+});
+
+describe('browsePartitionHint', () => {
+  it('shows the exact refusal reason for a locked partition', () => {
+    expect(
+      browsePartitionHint({
+        partitionIndex: 0,
+        fsType: 'Unsupported',
+        reason: 'D:\\image.mrimg: this Macrium image is password-protected; enter its passphrase to open it.'
+      })
+    ).toContain('password-protected');
+  });
+
+  it('falls back to the filesystem hint when no reason is given', () => {
+    expect(browsePartitionHint({ partitionIndex: 2, fsType: 'FAT16' })).toContain(
+      'Partition 2 uses FAT16'
+    );
   });
 });

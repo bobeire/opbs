@@ -1,6 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { PassphraseInput } from './PassphraseInput';
-import { needsBrowsePassphrase, shouldReopenForPassphrase } from '../lib/browse-passphrase';
+import {
+  browsePartitionHint,
+  browsePassphraseAttemptKey,
+  needsBrowsePassphrase,
+  shouldReopenForPassphrase
+} from '../lib/browse-passphrase';
 
 interface BrowseNode {
   /** MFT record number (NTFS) or start cluster (FAT/exFAT), as sent by main. */
@@ -91,6 +96,9 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
   // mount id / image key through refs or it closes over null and drops every event.
   const mountIdRef = useRef<string | null>(null);
   const mountKeyRef = useRef('');
+  // Debounced unlocks are keyed by image + passphrase. Without this guard,
+  // adding info readiness to the effect dependencies would re-open forever.
+  const lastUnlockAttempt = useRef<string | null>(null);
 
   useEffect(() => {
     void window.electronAPI
@@ -210,12 +218,19 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
   // Password-protected Macrium images (.mrimgx and .mrimg) re-open shortly
   // after the passphrase changes (debounced while typing), so the partition
   // list reflects the unlocked — or wrong-key — state without an explicit button.
+  // info readiness is a dependency too: a passphrase typed before the locked
+  // image info arrives must still trigger the unlock.
   useEffect(() => {
     if (!shouldReopenForPassphrase(imagePath, info?.encrypted, info?.imageFormat)) return;
-    const timer = setTimeout(() => void openImage(imagePath, true), 500);
+    const key = browsePassphraseAttemptKey(imagePath, passphrase);
+    if (lastUnlockAttempt.current === key) return;
+    const timer = setTimeout(() => {
+      lastUnlockAttempt.current = key;
+      void openImage(imagePath, true);
+    }, 500);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [passphrase]);
+  }, [passphrase, imagePath, info?.encrypted, info?.imageFormat]);
 
   const handleSelectImage = async () => {
     const path = await window.electronAPI.selectFile({
@@ -555,10 +570,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
 
       {imagePath && partitionIndex !== null && !currentBrowsable && currentPartition && (
         <div className="error-message">
-          <p>
-            Partition {currentPartition.partitionIndex} uses {currentPartition.fsType ?? 'an unsupported'} — only
-            NTFS, FAT32 and exFAT partitions can be browsed.
-          </p>
+          <p>{browsePartitionHint(currentPartition)}</p>
         </div>
       )}
 

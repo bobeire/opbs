@@ -28,3 +28,18 @@ export function shouldReopenForPassphrase(
       (imageFormat === 'mrimg' || imageFormat === 'mrimgx')
   );
 }
+
+/** Identity of one unlock attempt, used to avoid re-opening after the result lands. */
+export function browsePassphraseAttemptKey(imagePath: string, passphrase: string): string {
+  return `${imagePath}\u0000${passphrase}`;
+}
+
+/** Hint shown for a partition that cannot be browsed. Prefer the exact reason. */
+export function browsePartitionHint(partition: {
+  partitionIndex: number;
+  fsType?: string;
+  reason?: string;
+}): string {
+  if (partition.reason) return partition.reason;
+  return `Partition ${partition.partitionIndex} uses ${partition.fsType ?? 'an unsupported'} — only NTFS, FAT32 and exFAT partitions can be browsed.`;
+}
