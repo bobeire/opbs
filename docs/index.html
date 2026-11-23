@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="OPBS — free, open-source disk imaging for Windows. Full, incremental and encrypted backups, disk cloning, scheduled restore drills and bit-rot scrubbing, plus restore of Macrium Reflect .mrimg and .mrimgx images." />
+  <meta name="description" content="OPBS — free, open-source disk imaging for Windows. Full, incremental and encrypted backups, disk cloning, scheduled restore drills and bit-rot scrubbing, plus restore of Macrium Reflect .mrimg and .mrimgx images, including encrypted Reflect X and sample-verified low-iteration Reflect 7 .mrimg." />
   <link rel="canonical" href="https://opbs.rhitcs.com/" />
   <title>OPBS — Open Pickle Backup System</title>
   <style>
@@ -174,7 +174,10 @@
       <p>
         Open Pickle Backup System brings block-level imaging, differential
         chains, AES-256-GCM encryption and read-only WinFsp mounts to
-        Windows — with a headless CLI for scripted environments.
+        Windows — with a headless CLI for scripted environments. It also
+        opens password-protected Macrium Reflect 7 <code>.mrimg</code> images
+        for the sample-verified low-iteration v7 encryption variant;
+        unverified variants are refused up front.
       </p>
       <div class="btn-group">
         <a href="https://github.com/bobeire/opbs/releases/latest" class="btn btn-primary" target="_blank">
@@ -265,7 +268,11 @@
         <p>
           Read, browse, mount and restore Macrium Reflect 7/8 (.mrimg) and
           Reflect X (.mrimgx) images directly — including differential and
-          incremental chains. Coming from Macrium Reflect Free?
+          incremental chains. Encrypted Reflect X images open with a
+          passphrase; password-protected Reflect 7 .mrimg images open for
+          the sample-verified low-iteration v7 variant (browse/mount
+          verified). Unverified encryption variants are refused.
+          Coming from Macrium Reflect Free?
           <a href="macrium.html">Migration guide ↗</a>
         </p>
       </div>
