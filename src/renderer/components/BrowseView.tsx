@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { PassphraseInput } from './PassphraseInput';
+import { needsBrowsePassphrase, shouldReopenForPassphrase } from '../lib/browse-passphrase';
 
 interface BrowseNode {
   /** MFT record number (NTFS) or start cluster (FAT/exFAT), as sent by main. */
@@ -206,11 +207,11 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
     }
   };
 
-  // Password-protected Reflect X images re-open shortly after the passphrase
-  // changes (debounced while typing), so the partition list reflects the
-  // unlocked — or wrong-key — state without an explicit button.
+  // Password-protected Macrium images (.mrimgx and .mrimg) re-open shortly
+  // after the passphrase changes (debounced while typing), so the partition
+  // list reflects the unlocked — or wrong-key — state without an explicit button.
   useEffect(() => {
-    if (!imagePath || info?.imageFormat !== 'mrimgx' || !info.encrypted) return;
+    if (!shouldReopenForPassphrase(imagePath, info?.encrypted, info?.imageFormat)) return;
     const timer = setTimeout(() => void openImage(imagePath, true), 500);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -445,7 +446,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
           </div>
         </div>
 
-        {info?.encrypted && info.imageFormat !== 'mrimg' && (
+        {needsBrowsePassphrase(info?.encrypted) && (
           <div className="setting-item">
             <label>Passphrase:</label>
             <PassphraseInput

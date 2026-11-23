@@ -1,0 +1,34 @@
+import { describe, it, expect } from 'vitest';
+import { needsBrowsePassphrase, shouldReopenForPassphrase } from '../../src/renderer/lib/browse-passphrase';
+
+describe('needsBrowsePassphrase', () => {
+  it('shows the field for a locked Macrium v7 (.mrimg) image', () => {
+    expect(needsBrowsePassphrase(true)).toBe(true);
+  });
+
+  it('hides the field for an unencrypted image', () => {
+    expect(needsBrowsePassphrase(false)).toBe(false);
+    expect(needsBrowsePassphrase(undefined)).toBe(false);
+  });
+});
+
+describe('shouldReopenForPassphrase', () => {
+  it('re-opens an encrypted .mrimg after the passphrase changes', () => {
+    expect(shouldReopenForPassphrase('D:\\image.mrimg', true, 'mrimg')).toBe(true);
+  });
+
+  it('still re-opens an encrypted .mrimgx', () => {
+    expect(shouldReopenForPassphrase('D:\\image.mrimgx', true, 'mrimgx')).toBe(true);
+  });
+
+  it('does not re-open without an image path or encryption', () => {
+    expect(shouldReopenForPassphrase('', true, 'mrimg')).toBe(false);
+    expect(shouldReopenForPassphrase(undefined, true, 'mrimgx')).toBe(false);
+    expect(shouldReopenForPassphrase('D:\\image.mrimg', false, 'mrimg')).toBe(false);
+    expect(shouldReopenForPassphrase('D:\\image.mrimg', undefined, 'mrimg')).toBe(false);
+  });
+
+  it('keeps the existing OPBS image flow unchanged', () => {
+    expect(shouldReopenForPassphrase('D:\\image.opbs', true, 'opbs')).toBe(false);
+  });
+});
