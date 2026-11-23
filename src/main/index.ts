@@ -1913,6 +1913,9 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
     // settled, so a fast mount-status could be dropped and leave "Mounting…".
     return await new Promise<{ ok: boolean; id: string; mountPoint?: string; error?: string }>((resolve) => {
       let settled = false;
+      // Progress reports the live mount; the helper stays up until unmount. If
+      // its pipe later drops, that is not a mount failure.
+      let mounted = false;
       const finish = (value: { ok: boolean; id: string; mountPoint?: string; error?: string }): void => {
         if (settled) return;
         settled = true;
@@ -1935,6 +1938,7 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
           logger.warn(`mount-status dropped (no window): state=${String(p?.state)} id=${id}`);
         }
         if (p && (p as { state?: string }).state === 'mounted') {
+          mounted = true;
           clearTimeout(timeout);
           finish({
             ok: true,
@@ -1970,6 +1974,15 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
           mountLaunchers.delete(id);
           clearTimeout(timeout);
           const message = error instanceof Error ? error.message : String(error);
+          if (mounted) {
+            // The mount was already reported live. A later pipe drop means the
+            // helper went away (normally on unmount), not that mounting failed.
+            logger.warn(`mount helper exited after mount was live (${id}): ${message}`);
+            if (mainWindow) {
+              mainWindow.webContents.send('mount-status', { id, state: 'unmounted', ok: true });
+            }
+            return;
+          }
           logger.warn(`mount-image failed: ${message} (${id})`);
           if (mainWindow) {
             mainWindow.webContents.send('mount-status', {

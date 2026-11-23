@@ -148,7 +148,7 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
       void loadDirectory('');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imagePath, partitionIndex, passphrase]);
+  }, [imagePath, partitionIndex, passphrase, currentBrowsable]);
 
   // Auto-mount triggered by context menu "Mount image" verb
   useEffect(() => {
