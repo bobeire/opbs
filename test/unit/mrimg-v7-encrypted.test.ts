@@ -3,6 +3,8 @@ import * as fs from 'fs';
 import * as crypto from 'crypto';
 import {
   deriveMacriumV7Key,
+  deriveMacriumV7KeyVerified,
+  MRIMG_V7_REFLECT8_ITERATIONS,
   verifyMacriumV7PasswordHash,
   macriumV7AesVariant,
   macriumV7BlockIv,
@@ -42,6 +44,21 @@ describe('mrimg v7 encrypted (low-iter, RE-verified vectors)', () => {
     );
     expect(verifyMacriumV7PasswordHash(mat, 'a8a6a658daa73d3141d57c0eb7db3e54')).toBe(true);
     expect(verifyMacriumV7PasswordHash(mat, '00000000000000000000000000000000')).toBe(false);
+  });
+
+  it('accepts only a verifier-matching iteration candidate', () => {
+    const expected = deriveMacriumV7Key('test-password', MRIMG_V7_REFLECT8_ITERATIONS, 10);
+    const verifier = crypto.createHash('md5').update(expected.key).digest('hex');
+    const unlocked = deriveMacriumV7KeyVerified(
+      'test-password',
+      [256, MRIMG_V7_REFLECT8_ITERATIONS],
+      10,
+      verifier
+    );
+    expect(unlocked?.key.toString('hex')).toBe(expected.key.toString('hex'));
+    expect(
+      deriveMacriumV7KeyVerified('wrong-password', [256, MRIMG_V7_REFLECT8_ITERATIONS], 10, verifier)
+    ).toBeUndefined();
   });
 
   it('computes v7 low-iter IV as u64_le(blockIndex)||imageid8', () => {
@@ -95,5 +112,32 @@ describe.skipIf(!hasSample)('mrimg v7 encrypted local sample (gated)', () => {
     expect(md5(await reader.read(884 * 65536, 65536))).toBe('b5511cb83f44d5fd727aab97ffe2ec38');
     expect(md5(await reader.read(947 * 65536, 65536))).toBe('3ccbfbf827c229030ff7fbc9ab2ead63');
     expect(md5(await reader.read(948 * 65536, 65536))).toBe('a31752f42f7c4f15947e559de102e3a8');
+  });
+});
+
+const V8_SAMPLE_IMG = 'D:/8E4391BD12C13D97-00-00.mrimg';
+const hasV8Sample = fs.existsSync(V8_SAMPLE_IMG) && fs.existsSync(SAMPLE_PW);
+
+describe.skipIf(!hasV8Sample)('mrimg Reflect 8 high-iter sample (gated)', () => {
+  it('unlocks by verifier and reads MD5-verified blocks', async () => {
+    const passphrase = fs.readFileSync(SAMPLE_PW, 'utf8').replace(/\r?\n$/, '');
+    const locked = readMacriumImage(V8_SAMPLE_IMG);
+    expect(locked.format).toBe('mrimg-v7');
+    expect(locked.encryption.enable).toBe(true);
+    expect(locked.unlocked).toBeFalsy();
+    expect(macriumUnsupportedReason(locked)).toMatch(/passphrase/);
+
+    const info = readMacriumImage(V8_SAMPLE_IMG, passphrase);
+    expect(info.unlocked).toBe(true);
+    expect(macriumUnsupportedReason(info)).toBeNull();
+    expect(info.partitions[0].fsType).toBe('ntfs');
+    expect(info.partitions[0].blockCount).toBe(1953516);
+
+    const reader = openMacriumPartitionReader(info, 0);
+    const md5 = (b: Buffer) => crypto.createHash('md5').update(b).digest('hex');
+    expect(md5(await reader.read(0, 65536))).toBe('c6e84dbd5ac58199ee17a5935a4ac17c');
+    expect(md5(await reader.read(65536, 65536))).toBe('485c44029a8c462a929a97fa0a8adbc0');
+    expect(md5(await reader.read(2 * 65536, 65536))).toBe('e722e11adbcf5cf2d3f6a50c12ecfb36');
+    expect(md5(await reader.read(3 * 65536, 65536))).toBe('fcd6bcb56c1689fcef28b57c22475bad');
   });
 });

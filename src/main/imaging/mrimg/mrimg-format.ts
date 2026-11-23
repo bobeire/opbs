@@ -11,12 +11,13 @@ import {
   decryptMacriumBlock,
   decryptMacriumMetadata,
   deriveMacriumKey,
-  deriveMacriumV7Key,
+  deriveMacriumV7KeyVerified,
   getMacriumKey,
   isMacriumV7LowIter,
   macriumAesVariant,
   macriumV7AesVariant,
   macriumV7BlockIv,
+  MRIMG_V7_REFLECT8_ITERATIONS,
   setMacriumKey,
   verifyMacriumHmac,
   verifyMacriumV7PasswordHash,
@@ -1338,15 +1339,29 @@ function resolveKeyMaterial(
         `${imagePath}: password-protected Macrium v7 image uses a high-iteration key derivation that is not yet verified/supported.`
       );
     }
-    const material: MacriumKeyMaterial =
-      typeof unlock === 'string'
-        ? deriveMacriumV7Key(unlock, iterations, aes)
-        : { key: Buffer.from(unlock.key, 'hex'), aes: unlock.aes };
-    if (material.key.length !== 32) {
-      throw new MacriumPasswordError(`${imagePath}: the supplied Macrium key is not 32 bytes.`);
-    }
-    if (!verifyMacriumV7PasswordHash(material, info.encryption.hmac ?? '')) {
-      throw new MacriumPasswordError(`${imagePath}: incorrect passphrase for this password-protected Macrium image.`);
+    let material: MacriumKeyMaterial;
+    if (typeof unlock === 'string') {
+      // Some Reflect 8 images omit the iteration tag entirely. Try the
+      // metadata count first, then the sample-verified Reflect 8 count. Both
+      // are accepted only when they reproduce the image's stored verifier.
+      const verified = deriveMacriumV7KeyVerified(
+        unlock,
+        [iterations, MRIMG_V7_REFLECT8_ITERATIONS],
+        aes,
+        info.encryption.hmac ?? ''
+      );
+      if (!verified) {
+        throw new MacriumPasswordError(`${imagePath}: incorrect passphrase for this password-protected Macrium image.`);
+      }
+      material = verified;
+    } else {
+      material = { key: Buffer.from(unlock.key, 'hex'), aes: unlock.aes };
+      if (material.key.length !== 32) {
+        throw new MacriumPasswordError(`${imagePath}: the supplied Macrium key is not 32 bytes.`);
+      }
+      if (!verifyMacriumV7PasswordHash(material, info.encryption.hmac ?? '')) {
+        throw new MacriumPasswordError(`${imagePath}: incorrect passphrase for this password-protected Macrium image.`);
+      }
     }
     return material;
   }

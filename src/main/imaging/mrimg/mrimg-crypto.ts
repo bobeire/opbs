@@ -196,9 +196,35 @@ export function verifyMacriumV7PasswordHash(material: MacriumKeyMaterial, expect
 }
 
 /**
- * v7 low-iter IV: u64_le(blockIndex) || imageid8.
- * High-iter IV derivation is RE-observed but NOT sample-verified; callers must
- * gate on `isMacriumV7LowIter` before using this.
+ * Reflect 8 high-iteration count observed in the sample-verified V8 `.mrimg`.
+ * Derivation, verifier and IV are otherwise identical to low-iter v7; only the
+ * count differs. Confirmed by MRVerify runtime trace and block-MD5 checks.
+ */
+export const MRIMG_V7_REFLECT8_ITERATIONS = 262144;
+
+/**
+ * Verifier-gated v7 key recovery for images whose XML omits the iteration
+ * count. A candidate is accepted only when it reproduces the image's stored
+ * MD5 verifier; a wrong passphrase can never be accepted by trial and error.
+ */
+export function deriveMacriumV7KeyVerified(
+  passphrase: string,
+  iterationCandidates: number[],
+  aes: MacriumAesVariant,
+  expectedVerifierHex: string
+): MacriumKeyMaterial | undefined {
+  for (const iterations of [...new Set(iterationCandidates)]) {
+    const material = deriveMacriumV7Key(passphrase, iterations, aes);
+    if (verifyMacriumV7PasswordHash(material, expectedVerifierHex)) return material;
+    material.key.fill(0);
+  }
+  return undefined;
+}
+
+/**
+ * v7 data-block IV: u64_le(blockIndex) || imageid8. Verified for both the
+ * 256-iter and sample-verified 262144-iter Reflect 8 variant. Other high-iter
+ * layouts remain unverified; callers must gate on `isMacriumV7LowIter`.
  */
 export function macriumV7BlockIv(imageId8: Buffer, blockIndex: number): Buffer {
   if (imageId8.length !== 8) {
