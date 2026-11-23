@@ -3,7 +3,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, pbkdf2Sync, t
 /**
  * Macrium Reflect X (`.mrimgx`) encryption, implemented from Macrium's
  * published format documentation (github.com/macrium/mrimgx_file_layout,
- * MIT — `docs/ENCRYPTION.md` and `src/libs/encryption/encryption.cpp`).
+ * MIT - `docs/ENCRYPTION.md` and `src/libs/encryption/encryption.cpp`).
  *
  * Summary:
  *  - Key: PBKDF2-HMAC-SHA256(password UTF-8, salt = SHA256(imageid bytes),
@@ -16,6 +16,15 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, pbkdf2Sync, t
  *
  * Ciphertext is padded to the AES block size, so a decrypted zstd frame can
  * carry up to 15 trailing bytes; `zstdFrameLength` finds the exact frame end.
+ *
+ * Macrium Reflect 7/8 (`.mrimg`) v7 encryption support is RE-verified for the
+ * low-iteration sample path only (see checkpoint evidence). It is NOT derived
+ * from a published spec. Do not broaden claims without sample verification.
+ *  - Key: PBKDF2-HMAC-SHA1(password UTF-8[:64], "0AD35278B9610A42\0", 17, iter, 32)
+ *  - Password check (low-iter sample): MD5(derived key) equals footer/XML hash
+ *  - Data blocks: AES-CBC, no padding, key prefix by <aes> (1=128,2=192,3=256)
+ *  - IV (low-iter, iter <= 0x493e0): u64_le(blockIndex) || imageid8
+ *  - High-iter IV derivation is RE-observed but NOT sample-verified.
  */
 
 export type MacriumAesVariant = 10 | 12 | 14;
@@ -144,6 +153,62 @@ export function decryptMacriumMetadata(stored: Buffer, material: MacriumKeyMater
   );
   decipher.setAutoPadding(false);
   return Buffer.concat([decipher.update(stored), decipher.final()]);
+}
+
+// --- Reflect 7/8 (v7 .mrimg) encryption - RE-verified low-iter sample path ---
+// Evidence: MRVerify.exe runtime trace (d860/fe80/iv1730/dec16b0) against a
+// known low-iter sample. Do not broaden claims without sample verification.
+
+export const MRIMG_V7_PBKDF2_SALT = Buffer.from('0AD35278B9610A42\0', 'latin1'); // 17 bytes
+export const MRIMG_V7_LOW_ITER_MAX = 0x493e0;
+
+export function macriumV7AesVariant(aesValue: number | undefined): MacriumAesVariant | undefined {
+  if (aesValue === 1) return 10;
+  if (aesValue === 2) return 12;
+  if (aesValue === 3) return 14;
+  return undefined;
+}
+
+export function isMacriumV7LowIter(iterations: number): boolean {
+  return Number.isFinite(iterations) && iterations > 0 && iterations <= MRIMG_V7_LOW_ITER_MAX;
+}
+
+/** v7 key derivation: PBKDF2-HMAC-SHA1(pw_utf8[:64], fixed 17-byte salt, iter, 32). */
+export function deriveMacriumV7Key(
+  passphrase: string,
+  iterations: number,
+  aes: MacriumAesVariant
+): MacriumKeyMaterial {
+  if (!Number.isFinite(iterations) || iterations <= 0) {
+    throw new Error(`Macrium v7 image records an invalid key derivation count (${iterations}).`);
+  }
+  const pw = Buffer.from(passphrase, 'utf8').subarray(0, 64);
+  const key = pbkdf2Sync(pw, MRIMG_V7_PBKDF2_SALT, iterations, 32, 'sha1');
+  return { key, aes };
+}
+
+/** Low-iter v7 verifier observed as MD5(derived key), 32 hex chars. */
+export function verifyMacriumV7PasswordHash(material: MacriumKeyMaterial, expectedHex: string): boolean {
+  if (!/^[0-9a-fA-F]{32}$/.test(expectedHex ?? '')) return false;
+  const expected = Buffer.from(expectedHex, 'hex');
+  const actual = createHash('md5').update(material.key).digest();
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+/**
+ * v7 low-iter IV: u64_le(blockIndex) || imageid8.
+ * High-iter IV derivation is RE-observed but NOT sample-verified; callers must
+ * gate on `isMacriumV7LowIter` before using this.
+ */
+export function macriumV7BlockIv(imageId8: Buffer, blockIndex: number): Buffer {
+  if (imageId8.length !== 8) {
+    throw new Error(`Macrium v7 image id must be 8 bytes; got ${imageId8.length}.`);
+  }
+  const iv = Buffer.alloc(16);
+  iv.writeUInt32LE(blockIndex >>> 0, 0);
+  iv.writeUInt32LE(Math.floor(blockIndex / 0x100000000) >>> 0, 4);
+  imageId8.copy(iv, 8);
+  return iv;
 }
 
 /**

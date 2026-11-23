@@ -8,12 +8,18 @@ import {
   MacriumKeyMaterial,
   MacriumPasswordError,
   clearMacriumKeys,
+  decryptMacriumBlock,
   decryptMacriumMetadata,
   deriveMacriumKey,
+  deriveMacriumV7Key,
   getMacriumKey,
+  isMacriumV7LowIter,
   macriumAesVariant,
+  macriumV7AesVariant,
+  macriumV7BlockIv,
   setMacriumKey,
   verifyMacriumHmac,
+  verifyMacriumV7PasswordHash,
   zstdFrameLength
 } from './mrimg-crypto';
 
@@ -290,10 +296,14 @@ export function macriumUnsupportedReason(info: MacriumImageInfo): string | null 
   if (info.encryption.enable && !info.unlocked) {
     return `${info.imagePath}: this Macrium image is password-protected; enter its passphrase to open it.`;
   }
-  if (info.encryption.enable && info.format !== 'mrimgx') {
-    // Reflect 7/8 (.mrimg) encryption predates Macrium's published format and
-    // has no public specification; only Reflect X images can be unlocked.
-    return `${info.imagePath}: password-protected Reflect 7/8 images are not supported yet; restore it with Macrium Reflect or decrypt it to an unencrypted image first.`;
+  if (info.encryption.enable && info.format === 'mrimg-v7') {
+    const iter = info.encryption.keyIterations > 0 ? info.encryption.keyIterations : 256;
+    if (!isMacriumV7LowIter(iter)) {
+      return `${info.imagePath}: password-protected Macrium v7 image uses a high-iteration key derivation that is not yet verified/supported.`;
+    }
+    // Verified low-iter v7: allow fall-through to other container checks.
+  } else if (info.encryption.enable && info.format !== 'mrimgx') {
+    return `${info.imagePath}: password-protected Macrium images are not supported yet; restore it with Macrium Reflect or decrypt it to an unencrypted image first.`;
   }
   if (info.splitFile) {
     return `${info.imagePath}: split Macrium images (multi-part .mrimgx/.0001 files) are not supported yet.`;
@@ -742,6 +752,8 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
   let backupTime: number | undefined;
   let aesValue = 0;
   let methodValue = -1;
+  let passwordHash = '';
+  let keyIterations = 0;
   {
     const xmlStart = footer.indexOf('<?xml', 13 + pathLen);
     if (xmlStart >= 20 && xmlStart + 7 <= footer.length) {
@@ -769,6 +781,12 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
         // <method>: 0 = full, 1 = incremental, 2 = differential, 3 = auto.
         const method = /<method>(\d+)<\/method>/.exec(xmlText);
         if (method) methodValue = Number(method[1]);
+        // v7 password verifier: <password Type="Hash">HEX32</password>
+        // Iterations field name varies; default 256 observed for low-iter v7.
+        const pwHash = /<password\b[^>]*\bType="Hash"[^>]*>([0-9a-fA-F]{32})<\/password>/i.exec(xmlText);
+        if (pwHash) passwordHash = pwHash[1].toUpperCase();
+        const iterMatch = /<(?:dwpbkdf2_iterations|pbkdf2_iterations|key_iterations|iterations)>(\d+)<\/\1>/i.exec(xmlText);
+        if (iterMatch) keyIterations = Number(iterMatch[1]);
 
         // Descriptor: timestamp immediately after the XML, then the raw
         // 512-byte MBR (with its GPT header/entries when present).
@@ -936,15 +954,19 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
         if (!valid) continue;
         // Validate by actually decompressing the first block. If it produces
         // valid data, the index is real. This is expensive but definitive.
-        try {
-          const firstOff = Number(footer.readBigUInt64LE(rec0 + 6));
-          const hdr = readFileRange(imagePath, firstOff, MR_V7_HEADER_LEN);
-          const frame = parseQuickLzFrame(hdr);
-          const stored = readFileRange(imagePath, firstOff, frame.compressedSize);
-          decompressQuickLz(stored);
-        } catch {
-          // First block failed to decompress — not a real block index.
-          continue;
+        // Encrypted v7 blocks are ciphertext here (no key at parse time), so
+        // skip plaintext decompression validation and rely on structural checks.
+        if (!encryptedVariant) {
+          try {
+            const firstOff = Number(footer.readBigUInt64LE(rec0 + 6));
+            const hdr = readFileRange(imagePath, firstOff, MR_V7_HEADER_LEN);
+            const frame = parseQuickLzFrame(hdr);
+            const stored = readFileRange(imagePath, firstOff, frame.compressedSize);
+            decompressQuickLz(stored);
+          } catch {
+            // First block failed to decompress - not a real block index.
+            continue;
+          }
         }
         sections.push({ rec0, count, delta: false });
         break;
@@ -966,10 +988,10 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
 
   if (sections.length === 0) {
     // The footer XML/filename already told us which unsupported variant this
-    // is — report that instead of a generic "no index" parse failure.
+    // is - report that instead of a generic "no index" parse failure.
     if (encryptedVariant) {
       throw new MacriumUnsupportedError(
-        `${imagePath}: password-protected Macrium images are not supported yet.`
+        `${imagePath}: password-protected Macrium v7 image could not be parsed (no block index found). Only verified low-iteration v7 images are supported.`
       );
     }
     if (splitVariant) {
@@ -1139,7 +1161,7 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
   if (candidateBlocks.length === 0) {
     if (encryptedVariant) {
       throw new MacriumUnsupportedError(
-        `${imagePath}: password-protected Macrium images are not supported yet.`
+        `${imagePath}: password-protected Macrium v7 image could not be parsed (no readable data blocks found). Only verified low-iteration v7 images are supported.`
       );
     }
     if (deltaVariant || splitVariant) {
@@ -1221,16 +1243,22 @@ export function readMacriumV7Image(imagePath: string): MacriumImageInfo {
 
   if (!isFileBackup) backupFormat = `disk (${diskFormat || 'mbr'})`;
 
+  const imageId = /^([0-9a-fA-F]{16})-\d{2}-\d{2}\.mrimg$/i.exec(path.basename(imagePath))?.[1]?.toUpperCase() ?? '';
   return {
     imagePath,
     format: 'mrimg-v7',
-    imageId: '',
+    imageId,
     backupType: isFileBackup ? 'file backup' : 'disk image',
     backupFormat,
     backupTime,
     fileNumber: 0,
     compression: { method: 'quicklz', level: compressed ? 'high' : 'none' },
-    encryption: { enable: encryptedVariant, keyIterations: 0 },
+    encryption: {
+      enable: encryptedVariant,
+      keyIterations: encryptedVariant ? (keyIterations > 0 ? keyIterations : 256) : 0,
+      aesType: encryptedVariant ? aesValue : undefined,
+      hmac: encryptedVariant && passwordHash ? passwordHash : undefined
+    },
     splitFile: splitVariant,
     deltaIndex: deltaVariant,
     chain,
@@ -1296,6 +1324,33 @@ function resolveKeyMaterial(
 ): MacriumKeyMaterial | undefined {
   if (!info.encryption.enable) return undefined;
   if (unlock === undefined) return undefined;
+
+  if (info.format === 'mrimg-v7') {
+    const aes = macriumV7AesVariant(info.encryption.aesType) ?? macriumAesVariant(info.encryption.aesType);
+    if (!aes) {
+      throw new MacriumUnsupportedError(
+        `${imagePath}: password-protected Macrium v7 image uses an unsupported AES variant (${info.encryption.aesType ?? 'unknown'}).`
+      );
+    }
+    const iterations = info.encryption.keyIterations > 0 ? info.encryption.keyIterations : 256;
+    if (!isMacriumV7LowIter(iterations)) {
+      throw new MacriumUnsupportedError(
+        `${imagePath}: password-protected Macrium v7 image uses a high-iteration key derivation that is not yet verified/supported.`
+      );
+    }
+    const material: MacriumKeyMaterial =
+      typeof unlock === 'string'
+        ? deriveMacriumV7Key(unlock, iterations, aes)
+        : { key: Buffer.from(unlock.key, 'hex'), aes: unlock.aes };
+    if (material.key.length !== 32) {
+      throw new MacriumPasswordError(`${imagePath}: the supplied Macrium key is not 32 bytes.`);
+    }
+    if (!verifyMacriumV7PasswordHash(material, info.encryption.hmac ?? '')) {
+      throw new MacriumPasswordError(`${imagePath}: incorrect passphrase for this password-protected Macrium image.`);
+    }
+    return material;
+  }
+
   const aes = macriumAesVariant(info.encryption.aesType) ?? 14;
   const material: MacriumKeyMaterial =
     typeof unlock === 'string'
@@ -1392,7 +1447,37 @@ function readMacriumImageUncached(
   const withChain = opts.chain !== false;
   const format = detectMacriumFormat(imagePath);
   if (format === 'mrimg-v7') {
-    return readMacriumV7Image(imagePath);
+    const info = readMacriumV7Image(imagePath);
+    const material = resolveKeyMaterial(imagePath, info, unlock);
+    if (material) {
+      info.unlocked = true;
+      setMacriumKey(imagePath, material);
+      if (info.encryption.enable && /^[0-9a-fA-F]{16}$/.test(info.imageId)) {
+        const imageId8 = Buffer.from(info.imageId, 'hex');
+        for (const p of info.partitions) {
+          if (p.fsType) continue;
+          const boot = p.blocks[0];
+          if (!boot || boot.filePosition < 0) continue;
+          try {
+            const firstEnc = readFileRange(imagePath, boot.filePosition, 16);
+            const firstPlain = decryptMacriumBlock(firstEnc, material, macriumV7BlockIv(imageId8, 0));
+            const frame = parseQuickLzFrame(firstPlain);
+            const encLen = Math.ceil(frame.compressedSize / 16) * 16;
+            const enc = encLen === 16 ? firstEnc : readFileRange(imagePath, boot.filePosition, encLen);
+            const plain = decryptMacriumBlock(enc, material, macriumV7BlockIv(imageId8, 0));
+            const raw = decompressQuickLz(plain.subarray(0, frame.compressedSize));
+            const sig = raw.subarray(3, 11).toString('latin1');
+            if (sig.startsWith('NTFS')) p.fsType = 'ntfs';
+            else if (sig.startsWith('EXFAT')) p.fsType = 'exfat';
+            else if (sig.startsWith('FAT32')) p.fsType = 'fat32';
+            else if (sig.startsWith('FAT16')) p.fsType = 'fat16';
+          } catch {
+            // Leave fsType unknown.
+          }
+        }
+      }
+    }
+    return info;
   }
   if (format !== 'mrimgx') throw new Error(`Not a Macrium Reflect image: ${imagePath}`);
 

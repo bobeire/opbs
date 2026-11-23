@@ -18,7 +18,9 @@ import {
   MacriumPasswordError,
   decryptMacriumBlock,
   getMacriumKey,
+  isMacriumV7LowIter,
   macriumBlockIv,
+  macriumV7BlockIv,
   zstdFrameLength
 } from './mrimg-crypto';
 
@@ -38,6 +40,57 @@ function readQuickLzBlock(imagePath: string, filePosition: number, compressed: b
   const frame = parseQuickLzFrame(header);
   const stored = readImageFileRange(imagePath, filePosition, frame.compressedSize);
   return compressed ? decompressQuickLz(stored) : stored;
+}
+
+function readV7EncryptedQuickLzBlock(
+  imagePath: string,
+  filePosition: number,
+  blockIndex: number,
+  compressed: boolean,
+  material: MacriumKeyMaterial,
+  imageId8: Buffer
+): Buffer {
+  const firstEnc = readImageFileRange(imagePath, filePosition, 16);
+  const firstIv = macriumV7BlockIv(imageId8, blockIndex);
+  const firstPlain = decryptMacriumBlock(firstEnc, material, firstIv);
+  const frame = parseQuickLzFrame(firstPlain);
+  if (!(frame.compressedSize > 0 && frame.decompressedSize > 0 && frame.compressedSize <= frame.decompressedSize + 64)) {
+    throw new Error(`Invalid encrypted v7 QuickLZ frame at ${filePosition} in ${imagePath} (block ${blockIndex})`);
+  }
+  const encLen = Math.ceil(frame.compressedSize / 16) * 16;
+  const enc = encLen === 16 ? firstEnc : readImageFileRange(imagePath, filePosition, encLen);
+  const iv = macriumV7BlockIv(imageId8, blockIndex);
+  const plain = decryptMacriumBlock(enc, material, iv);
+  const frameBuf = plain.subarray(0, frame.compressedSize);
+  return compressed ? decompressQuickLz(frameBuf) : Buffer.from(frameBuf.subarray(frame.headerLength, frame.headerLength + frame.decompressedSize));
+}
+
+function readV7DataBlock(
+  info: MacriumImageInfo,
+  filePosition: number,
+  blockIndex: number,
+  compressed: boolean
+): Buffer {
+  if (info.encryption.enable) {
+    const iter = info.encryption.keyIterations > 0 ? info.encryption.keyIterations : 256;
+    if (!isMacriumV7LowIter(iter)) {
+      throw new MacriumUnsupportedError(
+        `${info.imagePath}: password-protected Macrium v7 image uses a high-iteration key derivation that is not yet verified/supported.`
+      );
+    }
+    const material = getMacriumKey(info.imagePath);
+    if (!material) {
+      throw new MacriumPasswordError(
+        `${info.imagePath}: this Macrium image is password-protected; enter its passphrase to open it.`
+      );
+    }
+    if (!/^[0-9a-fA-F]{16}$/.test(info.imageId)) {
+      throw new MacriumUnsupportedError(`${info.imagePath}: encrypted Macrium v7 image has no valid image id.`);
+    }
+    const imageId8 = Buffer.from(info.imageId, 'hex');
+    return readV7EncryptedQuickLzBlock(info.imagePath, filePosition, blockIndex, compressed, material, imageId8);
+  }
+  return readQuickLzBlock(info.imagePath, filePosition, compressed);
 }
 
 /**
@@ -63,7 +116,7 @@ function loadBaseChainBlock(
   if (chain?.role === 'incremental' && chain.delta) {
     const hit = chain.delta.find((d) => d.logicalIndex === logicalIndex);
     if (hit) {
-      const raw = readQuickLzBlock(basePath, hit.filePosition, compressed);
+      const raw = readV7DataBlock(baseInfo, hit.filePosition, logicalIndex, compressed);
       const digest = createHash('md5').update(raw).digest();
       if (!digest.equals(hit.md5)) {
         throw new Error(`Macrium data block ${logicalIndex} failed hash verification in ${basePath}.`);
@@ -91,7 +144,7 @@ function loadBaseChainBlock(
     }
     return undefined;
   }
-  const raw = readQuickLzBlock(basePath, el.filePosition, compressed);
+  const raw = readV7DataBlock(baseInfo, el.filePosition, logicalIndex, compressed);
   const digest = createHash('md5').update(raw).digest();
   if (!digest.equals(el.md5)) {
     throw new Error(`Macrium data block ${logicalIndex} failed hash verification in ${basePath}.`);
@@ -288,7 +341,7 @@ export class MacriumPartitionReader implements PartitionReader {
       // local-index lookup.
       const hit = chain.delta?.find((d) => d.logicalIndex === idx);
       if (hit) {
-        raw = readQuickLzBlock(this.info.imagePath, hit.filePosition, this.compressed);
+        raw = readV7DataBlock(this.info, hit.filePosition, idx, this.compressed);
         expectedMd5 = hit.md5;
       } else if (chain.basePath) {
         try {
@@ -325,7 +378,7 @@ export class MacriumPartitionReader implements PartitionReader {
       } else {
         expectedMd5 = el.md5;
         if (this.info.format === 'mrimg-v7') {
-          raw = readQuickLzBlock(this.info.imagePath, el.filePosition, this.compressed);
+          raw = readV7DataBlock(this.info, el.filePosition, idx, this.compressed);
         } else {
           // An mrimgx index element names the file that stores its bytes:
           // this image on a full container, or the chain member the composed
