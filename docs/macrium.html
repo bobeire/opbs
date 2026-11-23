@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="Restore a Macrium Reflect image without Macrium installed. OPBS opens .mrimg (Reflect 7/8) and .mrimgx (Reflect X) files — full, differential and incremental, encrypted Reflect X and sample-verified low-iteration Reflect 7 .mrimg included — and browses, mounts or restores them. Free, open source, Windows." />
+  <meta name="description" content="Restore a Macrium Reflect image without Macrium installed. OPBS opens .mrimg (Reflect 7/8) and .mrimgx (Reflect X) files — full, differential and incremental, encrypted Reflect X and sample-verified low-iteration Reflect 7 and verifier-gated Reflect 8 .mrimg included — and browses, mounts or restores them. Free, open source, Windows." />
   <title>Restore .mrimg and .mrimgx without Macrium — OPBS</title>
   <link rel="canonical" href="https://opbs.rhitcs.com/macrium.html" />
   <meta property="og:type" content="article" />
   <meta property="og:site_name" content="OPBS" />
   <meta property="og:title" content="Restore .mrimg and .mrimgx without Macrium — OPBS" />
-  <meta property="og:description" content="Macrium Reflect Free is gone, but your images still restore. OPBS reads Reflect 7/8 and Reflect X containers, including encrypted Reflect X, sample-verified low-iteration Reflect 7 .mrimg and delta chains — free and open source." />
+  <meta property="og:description" content="Macrium Reflect Free is gone, but your images still restore. OPBS reads Reflect 7/8 and Reflect X containers, including encrypted Reflect X, sample-verified low-iteration Reflect 7 and verifier-gated Reflect 8 .mrimg, and delta chains — free and open source." />
   <meta property="og:url" content="https://opbs.rhitcs.com/macrium.html" />
   <meta name="twitter:card" content="summary" />
   <script type="application/ld+json">
@@ -30,7 +30,7 @@
         "name": "Does OPBS open password-protected Macrium images?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "Reflect X (.mrimgx) yes: enter the passphrase and browse, extract, mount or restore, delta sets included — implemented from Macrium's published format documentation. Password-protected Reflect 7 .mrimg images open for the sample-verified low-iteration v7 encryption variant: browse and mount were confirmed on real encrypted samples, and block decrypt was checked against Macrium's stored MD5s. The observed high-iteration/ESSIV-like variant and other unverified encryption layouts are detected and refused before writing anything; Reflect 8 encrypted images have not been sample-verified."
+          "text": "Reflect X (.mrimgx) yes: enter the passphrase and browse, extract, mount or restore, delta sets included — implemented from Macrium's published format documentation. Password-protected Reflect 7/8 .mrimg images open for sample-verified variants: low-iteration v7 and the verifier-gated Reflect 8 layout (262,144 iterations when the XML omits the count). Browse and mount were confirmed on real encrypted samples, and block decrypt was checked against Macrium's stored MD5s. Other high-iteration/ESSIV-like and unverified encryption layouts are detected and refused before writing anything. Full restore/extract of encrypted .mrimg images has not been separately runtime-verified."
         }
       },
       {
@@ -281,8 +281,9 @@
       <strong style="color:#d0d7e3">restores your existing
       <code>.mrimg</code> and <code>.mrimgx</code> images</strong> — including
       differential and incremental chains. Encrypted Reflect X images open
-      with a passphrase; password-protected Reflect 7 <code>.mrimg</code>
-      images open for the sample-verified low-iteration v7 variant
+      with a passphrase; password-protected Reflect 7/8
+      <code>.mrimg</code> images open on the sample-verified low-iteration
+      v7 and verifier-gated Reflect 8 (262,144-iteration) variants
       (browse/mount verified). No subscription, no account, no removal date.
     </p>
     <div class="btn-group">
@@ -318,7 +319,7 @@
           <td class="ok">&#10003;</td>
           <td class="ok">&#10003;</td>
           <td class="ok">&#10003;</td>
-          <td class="ok">&#10003; (passphrase, low-iter verified)</td>
+          <td class="ok">&#10003; (passphrase, sample-verified)</td>
         </tr>
         <tr>
           <td>Reflect 8</td>
@@ -326,7 +327,7 @@
           <td class="ok">&#10003;</td>
           <td class="ok">&#10003;</td>
           <td class="ok">&#10003;</td>
-          <td class="no">not sample-verified</td>
+          <td class="ok">&#10003; (passphrase, verifier-gated sample)</td>
         </tr>
         <tr>
           <td>Reflect X</td>
@@ -359,14 +360,17 @@
       normally.
     </p>
     <p class="note">
-      <strong>Password-protected Reflect 7 <code>.mrimg</code> (low-iteration
-      v7) opens with its passphrase</strong> — browse and mount were confirmed
-      on real encrypted low-iteration v7 samples. The derived-key verifier,
-      block IV and AES-CBC decrypt were checked against Macrium's own stored
-      MD5s. The observed high-iteration/ESSIV-like variant is not implemented
-      and is refused up front; Reflect 8 encrypted images have not been
-      sample-verified. Full restore/extract of encrypted v7 images has not
-      been separately runtime-verified.
+      <strong>Password-protected Reflect 7/8 <code>.mrimg</code> opens with its
+      passphrase on the sample-verified variants</strong> — low-iteration v7 and
+      the Reflect 8 layout observed with 262,144 iterations. Browse and mount
+      were confirmed on real encrypted samples; the derived-key verifier, block
+      IV and AES-CBC decrypt were checked against Macrium's own stored MD5s.
+      When the image omits its iteration count, OPBS tries the metadata count
+      and the sample-verified 262,144 count, accepting a derived key only if it
+      reproduces the image's stored verifier. Other high-iteration/ESSIV-like
+      and otherwise unverified layouts are refused up front. Full
+      restore/extract of encrypted v7/V8 images has not been separately
+      runtime-verified.
     </p>
   </div>
 </section>
@@ -470,8 +474,9 @@
     <div class="note">
       <strong>Validated on real images.</strong> The Macrium reader is covered
       by a real-sample test suite (Reflect 8 <code>.mrimg</code>, Reflect X
-      <code>.mrimgx</code>, encrypted low-iteration Reflect 7 <code>.mrimg</code>
-      samples, plus the official Macrium demo) that checks
+      <code>.mrimgx</code>, encrypted low-iteration Reflect 7 and verifier-gated
+      Reflect 8 <code>.mrimg</code> samples, plus the official Macrium demo)
+      that checks
       block-level decode against stored MD5s — and skips cleanly when no
       samples are present, so the suite stays honest.
     </div>
@@ -483,14 +488,14 @@
     </div>
     <div class="note warn">
       <strong>Refused up front, never mid-restore:</strong> unverified Macrium
-      encryption variants (including the observed high-iteration
-      Reflect&nbsp;7/8 <code>.mrimg</code> variant), split multi-part sets, and
+      encryption variants (including high-iteration layouts outside the
+      sample-verified Reflect&nbsp;8 path), split multi-part sets, and
       file-and-folder (File Backup) images are not supported. OPBS detects them
       from the file contents and refuses with a clear message before touching
       the disk, instead of failing halfway through with a confusing parse
       error. Password-protected Reflect&nbsp;X images and the sample-verified
-      low-iteration Reflect&nbsp;7 <code>.mrimg</code> variant open with a
-      passphrase.
+      low-iteration Reflect&nbsp;7 / verifier-gated Reflect&nbsp;8
+      <code>.mrimg</code> variants open with a passphrase.
     </div>
     <div class="note">
       <strong>Permissions across installations.</strong> Restoring files with
@@ -605,7 +610,7 @@ OPBS.exe --cli browse "D:\Images\win11-01-01.mrimg" --partition 2</pre>
     </p>
     <ul class="plain" style="margin-top:24px">
       <li><strong style="color:#d0d7e3">Not a Macrium clone.</strong> OPBS reads and restores Macrium images, but writes new backups in its own open <code>.opbs</code> format.</li>
-      <li><strong style="color:#d0d7e3">Refuses what it can't do safely:</strong> unverified Macrium encryption variants (including the high-iteration Reflect&nbsp;7/8 <code>.mrimg</code> variant), split multi-part sets, and file-and-folder Macrium images (see above).</li>
+      <li><strong style="color:#d0d7e3">Refuses what it can't do safely:</strong> unverified Macrium encryption variants (including high-iteration layouts outside the sample-verified Reflect&nbsp;8 path), split multi-part sets, and file-and-folder Macrium images (see above).</li>
       <li><strong style="color:#d0d7e3">Windows-only</strong>, and young: OPBS is at v0.6.x. It has a real test suite and real-sample validation, but it has not been in the field for 20 years.</li>
     </ul>
     <ul class="plain limit" style="margin-top:8px">
@@ -650,12 +655,15 @@ OPBS.exe --cli browse "D:\Images\win11-01-01.mrimg" --partition 2</pre>
           of its 122,864 blocks decrypts to the digest Macrium itself stored.
         </p>
         <p>
-          <strong style="color:#d0d7e3">Reflect 7 (<code>.mrimg</code>): the
-          low-iteration v7 variant is supported and sample-verified.</strong>
+          <strong style="color:#d0d7e3">Reflect 7/8 (<code>.mrimg</code>): the
+          low-iteration v7 and verifier-gated Reflect 8 (262,144-iteration)
+          variants are sample-verified.</strong>
           Enter the passphrase to browse and mount; block decrypt was checked
-          against Macrium's stored MD5s. The observed high-iteration/ESSIV-like
-          variant is refused up front. Reflect 8 encrypted images have not been
-          sample-verified.
+          against Macrium's stored MD5s. When the iteration count is missing,
+          OPBS accepts a derived key only when it reproduces the image's stored
+          verifier. Other high-iteration/ESSIV-like and unverified layouts are
+          refused up front. Full restore/extract of encrypted
+          <code>.mrimg</code> images has not been separately runtime-verified.
         </p>
       </div>
     </details>
