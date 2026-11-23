@@ -43,3 +43,11 @@ export function browsePartitionHint(partition: {
   if (partition.reason) return partition.reason;
   return `Partition ${partition.partitionIndex} uses ${partition.fsType ?? 'an unsupported'} — only NTFS, FAT32 and exFAT partitions can be browsed.`;
 }
+
+/**
+ * The partition hint already displays an exact refusal reason when present, so
+ * only a generic error is needed otherwise. Keeps the message from appearing twice.
+ */
+export function needsBrowsePartitionError(refusal: string | undefined): boolean {
+  return !refusal;
+}

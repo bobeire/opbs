@@ -3,6 +3,7 @@ import { PassphraseInput } from './PassphraseInput';
 import {
   browsePartitionHint,
   browsePassphraseAttemptKey,
+  needsBrowsePartitionError,
   needsBrowsePassphrase,
   shouldReopenForPassphrase
 } from '../lib/browse-passphrase';
@@ -195,15 +196,14 @@ function BrowseView({ onComplete, initialImagePath, autoMount }: BrowseViewProps
         setPartitionIndex(browsable[0].partitionIndex);
       } else if (loaded.partitions.length > 0) {
         // Partitions exist but none are browsable — still show the list so the
-        // user can see which filesystems are present, and prefer the exact
-        // refusal reason (encrypted/split/delta Macrium container) over the
-        // generic filesystem hint.
+        // user can see which filesystems are present. An exact refusal reason
+        // (encrypted/split/delta Macrium container) is shown by the partition
+        // hint below; only set a generic error when there is no reason.
         setPartitionIndex(loaded.partitions[0].partitionIndex);
         const refusal = loaded.partitions.find((p: BrowsePartition) => p.reason)?.reason;
-        setError(
-          refusal ??
-            'No browsable partitions in this image. Only NTFS, FAT32 and exFAT partitions can be browsed.'
-        );
+        if (needsBrowsePartitionError(refusal)) {
+          setError('No browsable partitions in this image. Only NTFS, FAT32 and exFAT partitions can be browsed.');
+        }
       } else {
         setError('This image has no partitions.');
       }

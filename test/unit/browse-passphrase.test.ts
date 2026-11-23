@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   browsePartitionHint,
   browsePassphraseAttemptKey,
+  needsBrowsePartitionError,
   needsBrowsePassphrase,
   shouldReopenForPassphrase
 } from '../../src/renderer/lib/browse-passphrase';
@@ -62,5 +63,15 @@ describe('browsePartitionHint', () => {
     expect(browsePartitionHint({ partitionIndex: 2, fsType: 'FAT16' })).toContain(
       'Partition 2 uses FAT16'
     );
+  });
+});
+
+describe('needsBrowsePartitionError', () => {
+  it('does not add a second message when the hint shows the exact refusal reason', () => {
+    expect(needsBrowsePartitionError('this Macrium image is password-protected')).toBe(false);
+  });
+
+  it('still shows the generic error when there is no refusal reason', () => {
+    expect(needsBrowsePartitionError(undefined)).toBe(true);
   });
 });
