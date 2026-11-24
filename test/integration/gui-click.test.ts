@@ -273,6 +273,16 @@ test(
 
     expect(await win.title()).toContain('OPBS');
 
+    // New installs open in Standard view, which has a shorter sidebar. Use
+    // the visible, no-dialog switch so this test still walks the full
+    // Advanced navigation below regardless of the install's first-run state.
+    const advancedSwitch = win.locator('.mode-switch-btn', { hasText: /Advanced view/i });
+    if ((await advancedSwitch.count()) > 0) {
+      await advancedSwitch.click();
+      await win.locator('.nav-item', { hasText: /Dashboard/ }).waitFor({ state: 'visible' });
+      console.log('[gui-click] switched from Standard to Advanced view');
+    }
+
     for (const target of NAV) {
       const navButton = win.locator('.nav-item', { hasText: target.label });
       await navButton.click();
