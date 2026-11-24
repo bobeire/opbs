@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildRestoreTargetLayout,
+  friendlyRestorePlacementError,
   needsExplicitPlacement,
   parseByteOffset
 } from '../../src/renderer/lib/restore-placement';
@@ -37,6 +38,46 @@ describe('parseByteOffset', () => {
     expect(parseByteOffset('1.5')).toBeUndefined();
     expect(parseByteOffset('-1')).toBeUndefined();
     expect(parseByteOffset('later')).toBeUndefined();
+  });
+});
+
+describe('friendlyRestorePlacementError', () => {
+  it('replaces the missing-source-offset error with GUI guidance', () => {
+    const friendly = friendlyRestorePlacementError(
+      'Cannot restore: Cannot determine the source on-disk offset of partition 0 in this Macrium image. ' +
+        'Provide explicit placement (CLI: --layout 0:<offsetBytes>).'
+    );
+
+    expect(friendly).toContain('does not record where partition 0 started');
+    expect(friendly).toContain('a target byte offset is required for this restore');
+    expect(friendly).toContain('does not mean the target drive is unsuitable');
+    expect(friendly).toContain('In the Target step');
+    expect(friendly).toContain('target drive\'s layout');
+    expect(friendly).toContain('Use 1 MiB');
+    expect(friendly).not.toContain('CLI');
+    expect(friendly).not.toContain('--layout');
+    expect(friendly).not.toContain('Cannot restore');
+  });
+
+  it('explains that offset 0 is invalid for a new GPT or MBR table', () => {
+    const gpt = friendlyRestorePlacementError(
+      'Cannot build a GPT partition table: GPT partitions must start at or after LBA 34 ' +
+        '(byte 17408); offset 0 cannot be represented'
+    );
+    const mbr = friendlyRestorePlacementError(
+      'Cannot build an MBR partition table: MBR partitions must start at or after LBA 63 ' +
+        '(byte 32256); offset 0 cannot be represented'
+    );
+
+    expect(gpt).toContain('Byte offset 0 cannot be used');
+    expect(gpt).toContain('partition-table validation check, not a drive failure');
+    expect(gpt).toContain('1048576 bytes / 1 MiB');
+    expect(mbr).toContain('Byte offset 0 cannot be used');
+  });
+
+  it('leaves unrelated and missing errors alone', () => {
+    expect(friendlyRestorePlacementError(undefined)).toBeUndefined();
+    expect(friendlyRestorePlacementError('Cannot unlock encrypted image')).toBeUndefined();
   });
 });
 

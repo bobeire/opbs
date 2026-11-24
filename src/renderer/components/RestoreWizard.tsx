@@ -3,6 +3,7 @@ import { PassphraseInput } from './PassphraseInput';
 import { restorePassphraseOption } from '../lib/restore-passphrase';
 import {
   buildRestoreTargetLayout,
+  friendlyRestorePlacementError,
   needsExplicitPlacement,
   parseByteOffset
 } from '../lib/restore-placement';
@@ -656,12 +657,18 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     !(imageInfo?.encrypted && !appliedPassphrase.trim()) &&
     (!destructiveAckNeeded || acknowledge);
 
+  // The engine keeps exact error text for the CLI; the wizard shows guidance
+  // that points at the placement controls instead of leaking CLI syntax.
+  const friendlyPreflightError = friendlyRestorePlacementError(preflight?.error);
+
   // Why the button is unavailable, in words. A disabled button with no
   // explanation is a dead end — it looks like the app is broken.
   const startBlockedReason = !preflight
     ? 'Waiting for the plan to be validated…'
     : !preflight.ok
-      ? (preflight.error ?? 'This plan cannot run — see the message above.')
+      ? (friendlyPreflightError ??
+        preflight.error ??
+        'This plan cannot run — see the message above.')
       : !targetReady
         ? 'Choose a target first.'
         : imageInfo?.encrypted && !appliedPassphrase.trim()
@@ -936,7 +943,9 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                 <div className="warning-box">
                   <p>
                     <strong>This image does not record where the selected partition started on the
-                    source disk.</strong> Choose the byte offset to write it to before continuing.
+                    source disk.</strong> Entering a target start offset is required for this
+                    restore. This prompt is normal for this kind of image and does not mean the
+                    target drive is unsuitable.
                   </p>
                   {imageInfo?.partitions
                     .filter(
@@ -975,9 +984,11 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                       );
                     })}
                   <p className="field-hint">
-                    Example: 1048576 is 1 MiB, a common first-partition offset. An unknown offset is
-                    never assumed to be 0; a fresh GPT table also cannot place a partition at byte 0.
-                    Changing it requires the destructive-layout acknowledgement on the next step.
+                    Use the offset that matches the target drive's layout. "Use 1 MiB" fills in
+                    1048576 bytes, a common first-partition offset; choose it only if that is the
+                    layout you want. An unknown offset is never assumed to be 0, and a fresh GPT
+                    table cannot place a partition at byte 0. Changing it requires the
+                    destructive-layout acknowledgement on the next step.
                   </p>
                 </div>
               )}
@@ -987,7 +998,11 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                   {preflight && !preflight.ok && preflight.passphraseRequired ? (
                     <div className="bitlocker-unlock-box">
                       <div className="error-message">
-                        <p>{preflight.error ?? 'This image is password-protected.'}</p>
+                        <p>
+                          {friendlyPreflightError ??
+                            preflight.error ??
+                            'This image is password-protected.'}
+                        </p>
                       </div>
                       <div className="bitlocker-unlock-row">
                         <PassphraseInput
@@ -1018,7 +1033,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                   ) : preflight && !preflight.ok && preflight.unlockRequired ? (
                     <div className="bitlocker-unlock-box">
                       <div className="error-message">
-                        <p>{preflight.error}</p>
+                        <p>{friendlyPreflightError ?? preflight.error}</p>
                       </div>
                       {unlockNotice && (
                         <div className="warning-box">
@@ -1056,7 +1071,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                     </div>
                   ) : preflight && !preflight.ok ? (
                     <div className="error-message">
-                      <p>Cannot restore: {preflight.error}</p>
+                      <p>{friendlyPreflightError ?? `Cannot restore: ${preflight.error}`}</p>
                     </div>
                   ) : preflight?.ok ? (
                     <>

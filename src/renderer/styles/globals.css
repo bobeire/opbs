@@ -192,6 +192,148 @@ body {
   padding: 30px;
 }
 
+/* Standard interface mode */
+.standard-nav-menu {
+  padding-top: 24px;
+}
+
+.sidebar-footer.standard-sidebar-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mode-switch-btn {
+  width: 100%;
+  padding: 10px 12px;
+  background-color: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-color);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.2s, background-color 0.2s;
+}
+
+.mode-switch-btn:hover {
+  border-color: var(--primary-color);
+  background-color: var(--subtle-hover);
+}
+
+.standard-home {
+  max-width: 1040px;
+}
+
+.standard-intro h1 {
+  font-size: 1.75rem;
+  margin-bottom: 10px;
+}
+
+.standard-intro p {
+  color: var(--text-muted);
+  max-width: 720px;
+  line-height: 1.5;
+}
+
+.standard-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin: 28px 0;
+}
+
+.standard-action-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 20px;
+  background-color: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  color: var(--text-color);
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.15s, border-color 0.15s;
+}
+
+.standard-action-card:hover {
+  border-color: var(--primary-color);
+  transform: translateY(-1px);
+}
+
+.standard-action-icon {
+  font-size: 1.7rem;
+}
+
+.standard-action-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.standard-action-copy strong {
+  font-size: 1.05rem;
+}
+
+.standard-action-copy small,
+.standard-muted {
+  color: var(--text-muted);
+}
+
+.standard-action-arrow {
+  color: var(--primary-color);
+  font-size: 1.2rem;
+}
+
+.standard-status {
+  background-color: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 20px;
+}
+
+.standard-status h2 {
+  font-size: 1.15rem;
+  margin-bottom: 16px;
+}
+
+.standard-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 18px;
+}
+
+.standard-status-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.standard-status-item strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.standard-status-item small {
+  color: var(--text-muted);
+}
+
+.standard-mode-note {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  margin-top: 20px;
+}
+
+.settings-subheading {
+  font-size: 1rem;
+  margin: 18px 0 6px;
+}
+
 /* Dashboard */
 .dashboard h1 {
   font-size: 1.75rem;

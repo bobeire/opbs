@@ -17,7 +17,9 @@ import Repositories from './components/Repositories';
 import ToastHost from './components/ToastHost';
 import AdkPrompt from './components/AdkPrompt';
 import SplashScreen from './components/SplashScreen';
+import StandardHome from './components/StandardHome';
 import { applyTheme } from './lib/theme';
+import { normalizeInterfaceMode, type InterfaceMode } from './lib/interface-mode';
 
 type Page =
   | 'dashboard'
@@ -97,6 +99,7 @@ function App() {
   const [backupRunning, setBackupRunning] = useState(false);
   const [lastBackupProgress, setLastBackupProgress] = useState<BackupProgress | null>(null);
   const [recoveryNotice, setRecoveryNotice] = useState<RecoveryNotice | null>(null);
+  const [interfaceMode, setInterfaceMode] = useState<InterfaceMode>('advanced');
   const [appVersion, setAppVersion] = useState<string>('');
   const [initialDataReady, setInitialDataReady] = useState(false);
   const [splashMinElapsed, setSplashMinElapsed] = useState(false);
@@ -114,6 +117,18 @@ function App() {
 
   const handleDashboardLoaded = useCallback(() => setInitialDataReady(true), []);
 
+  // Standard view's visible way back to the full tool set. No modal: the
+  // switch applies immediately and only changes the shell; it does not touch
+  // disks, schedules, or running jobs.
+  const switchToAdvanced = useCallback(async () => {
+    try {
+      const saved = await window.electronAPI.updateSettings({ interfaceMode: 'advanced' });
+      setInterfaceMode(normalizeInterfaceMode(saved?.interfaceMode));
+    } catch {
+      // Keep the current view if the setting could not be saved.
+    }
+  }, []);
+
   // Hidden until the dashboard's drive/backup data is loaded (and a minimum
   // display time has passed). A file-association open landing on another page
   // hides it immediately — that data isn't what it's waiting for.
@@ -121,8 +136,13 @@ function App() {
 
   useEffect(() => {
     void window.electronAPI.getVersion().then((v) => setAppVersion(v));
-    // Theme: authoritative settings value over the cached first-paint value.
-    void window.electronAPI.getSettings().then((s) => applyTheme(s?.theme));
+    // Theme and interface mode: authoritative settings values over first paint.
+    // Unknown/missing modes resolve to Advanced so existing installs look the
+    // same as before this opt-in existed.
+    void window.electronAPI.getSettings().then((s) => {
+      applyTheme(s?.theme);
+      setInterfaceMode(normalizeInterfaceMode(s?.interfaceMode));
+    });
     // `--open-page <page>` startup flag: pulled here (not pushed at
     // did-finish-load) so the nav can't race listener registration.
     void window.electronAPI.takeStartupNav().then((page) => {
@@ -285,8 +305,25 @@ function App() {
       case 'vss':
         return <VssView />;
       case 'settings':
-        return <Settings />;
+        return <Settings onInterfaceModeSaved={setInterfaceMode} />;
       default:
+        if (interfaceMode === 'standard') {
+          return (
+            <StandardHome
+              onLoaded={handleDashboardLoaded}
+              onNavigate={(page) => {
+                if (page === 'restore') {
+                  setRestoreIntent({ mode: 'restore' });
+                } else if (page === 'browse') {
+                  setBrowseIntent(null);
+                } else if (page === 'backup') {
+                  setBackupIntent(null);
+                }
+                setCurrentPage(page);
+              }}
+            />
+          );
+        }
         return (
           <Dashboard
             onLoaded={handleDashboardLoaded}
@@ -314,17 +351,85 @@ function App() {
           <p>Open Pickle Backup System</p>
         </div>
         
-        <ul className="nav-menu">
-          <li>
-            <button
-              className={`nav-item ${currentPage === 'dashboard' ? 'active' : ''}`}
-              onClick={() => setCurrentPage('dashboard')}
-            >
-              <span className="nav-icon">📊</span>
-              Dashboard
-            </button>
-          </li>
-          <li>
+        {interfaceMode === 'standard' ? (
+          <ul className="nav-menu standard-nav-menu">
+            <li>
+              <button
+                className={`nav-item ${currentPage === 'dashboard' ? 'active' : ''}`}
+                onClick={() => setCurrentPage('dashboard')}
+              >
+                <span className="nav-icon">🏠</span>
+                Home
+              </button>
+            </li>
+            <li>
+              <button
+                className={`nav-item ${currentPage === 'backup' ? 'active' : ''}`}
+                onClick={() => {
+                  setBackupIntent(null);
+                  setCurrentPage('backup');
+                }}
+              >
+                <span className="nav-icon">💾</span>
+                New Backup
+                {backupRunning && <span className="nav-badge">Running</span>}
+              </button>
+            </li>
+            <li>
+              <button
+                className={`nav-item ${currentPage === 'restore' ? 'active' : ''}`}
+                onClick={() => {
+                  setRestoreIntent({ mode: 'restore' });
+                  setCurrentPage('restore');
+                }}
+              >
+                <span className="nav-icon">♻️</span>
+                Restore
+              </button>
+            </li>
+            <li>
+              <button
+                className={`nav-item ${currentPage === 'browse' ? 'active' : ''}`}
+                onClick={() => {
+                  setBrowseIntent(null);
+                  setCurrentPage('browse');
+                }}
+              >
+                <span className="nav-icon">🗂️</span>
+                Browse Files
+              </button>
+            </li>
+            <li>
+              <button
+                className={`nav-item ${currentPage === 'media' ? 'active' : ''}`}
+                onClick={() => setCurrentPage('media')}
+              >
+                <span className="nav-icon">💿</span>
+                Recovery Media
+              </button>
+            </li>
+            <li>
+              <button
+                className={`nav-item ${currentPage === 'settings' ? 'active' : ''}`}
+                onClick={() => setCurrentPage('settings')}
+              >
+                <span className="nav-icon">⚙️</span>
+                Settings
+              </button>
+            </li>
+          </ul>
+        ) : (
+            <ul className="nav-menu">
+            <li>
+              <button
+                className={`nav-item ${currentPage === 'dashboard' ? 'active' : ''}`}
+                onClick={() => setCurrentPage('dashboard')}
+              >
+                <span className="nav-icon">📊</span>
+                Dashboard
+              </button>
+            </li>
+            <li>
             <button
               className={`nav-item ${currentPage === 'backup' ? 'active' : ''}`}
               onClick={() => setCurrentPage('backup')}
@@ -333,8 +438,8 @@ function App() {
               New Backup
               {backupRunning && <span className="nav-badge">Running</span>}
             </button>
-          </li>
-          <li>
+            </li>
+            <li>
             <button
               className={`nav-item ${currentPage === 'restore' ? 'active' : ''}`}
               onClick={() => setCurrentPage('restore')}
@@ -342,8 +447,8 @@ function App() {
               <span className="nav-icon">♻️</span>
               Restore
             </button>
-          </li>
-          <li>
+            </li>
+            <li>
             <button
               className={`nav-item ${currentPage === 'migrate' ? 'active' : ''}`}
               onClick={() => setCurrentPage('migrate')}
@@ -351,8 +456,8 @@ function App() {
               <span className="nav-icon">🚚</span>
               Migrate
             </button>
-          </li>
-          <li>
+            </li>
+            <li>
             <button
               className={`nav-item ${currentPage === 'copy' ? 'active' : ''}`}
               onClick={() => setCurrentPage('copy')}
@@ -360,8 +465,8 @@ function App() {
               <span className="nav-icon">📤</span>
               Partition Copy
             </button>
-          </li>
-          <li>
+            </li>
+            <li>
             <button
               className={`nav-item ${currentPage === 'disks' ? 'active' : ''}`}
               onClick={() => setCurrentPage('disks')}
@@ -369,8 +474,8 @@ function App() {
               <span className="nav-icon">🔧</span>
               Disk Tools
             </button>
-          </li>
-          <li>
+            </li>
+            <li>
             <button
               className={`nav-item ${currentPage === 'repositories' ? 'active' : ''}`}
               onClick={() => setCurrentPage('repositories')}
@@ -378,8 +483,8 @@ function App() {
               <span className="nav-icon">🗄️</span>
               Repositories
             </button>
-          </li>
-          <li>
+            </li>
+            <li>
             <button
               className={`nav-item ${currentPage === 'schedules' ? 'active' : ''}`}
               onClick={() => setCurrentPage('schedules')}
@@ -387,8 +492,8 @@ function App() {
               <span className="nav-icon">🕐</span>
               Schedules
             </button>
-          </li>
-          <li>
+            </li>
+            <li>
             <button
               className={`nav-item ${currentPage === 'builder' ? 'active' : ''}`}
               onClick={() => setCurrentPage('builder')}
@@ -396,8 +501,8 @@ function App() {
               <span className="nav-icon">📝</span>
               Config Builder
             </button>
-          </li>
-          <li>
+            </li>
+            <li>
             <button
               className={`nav-item ${currentPage === 'browse' ? 'active' : ''}`}
               onClick={() => setCurrentPage('browse')}
@@ -405,8 +510,8 @@ function App() {
               <span className="nav-icon">🗂️</span>
               Browse Files
             </button>
-          </li>
-          <li>
+            </li>
+            <li>
             <button
               className={`nav-item ${currentPage === 'media' ? 'active' : ''}`}
               onClick={() => setCurrentPage('media')}
@@ -414,8 +519,8 @@ function App() {
               <span className="nav-icon">💿</span>
               Recovery Media
             </button>
-          </li>
-          <li>
+            </li>
+            <li>
             <button
               className={`nav-item ${currentPage === 'vss' ? 'active' : ''}`}
               onClick={() => setCurrentPage('vss')}
@@ -423,8 +528,8 @@ function App() {
               <span className="nav-icon">🧊</span>
               Volume Shadow Copy
             </button>
-          </li>
-          <li>
+            </li>
+            <li>
             <button
               className={`nav-item ${currentPage === 'network' ? 'active' : ''}`}
               onClick={() => setCurrentPage('network')}
@@ -432,8 +537,8 @@ function App() {
               <span className="nav-icon">🌐</span>
               Network
             </button>
-          </li>
-          <li>
+            </li>
+            <li>
             <button
               className={`nav-item ${currentPage === 'logs' ? 'active' : ''}`}
               onClick={() => setCurrentPage('logs')}
@@ -441,8 +546,8 @@ function App() {
               <span className="nav-icon">📜</span>
               Logs
             </button>
-          </li>
-          <li>
+            </li>
+            <li>
             <button
               className={`nav-item ${currentPage === 'settings' ? 'active' : ''}`}
               onClick={() => setCurrentPage('settings')}
@@ -450,10 +555,16 @@ function App() {
               <span className="nav-icon">⚙️</span>
               Settings
             </button>
-          </li>
+            </li>
         </ul>
-        
-        <div className="sidebar-footer">
+        )}
+
+        <div className={`sidebar-footer ${interfaceMode === 'standard' ? 'standard-sidebar-footer' : ''}`}>
+          {interfaceMode === 'standard' && (
+            <button className="mode-switch-btn" onClick={() => void switchToAdvanced()}>
+              Advanced view
+            </button>
+          )}
           <button className="version-btn" onClick={() => window.electronAPI.showAbout()}>
             v{appVersion}
           </button>

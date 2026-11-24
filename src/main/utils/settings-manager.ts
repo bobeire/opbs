@@ -65,6 +65,9 @@ export interface AppSettings {
    *  error toast when the network is blocked); the manual "Check for
    *  updates" button keeps working unchanged. */
   checkForUpdatesOnStartup: boolean;
+  /** Renderer shell to show. Missing/unknown values backfill to the current
+   *  Advanced experience so existing installs are unchanged. */
+  interfaceMode: 'advanced' | 'standard';
 }
 
 /** Persisted main-window geometry; sanitized by utils/window-state.ts. */
@@ -235,11 +238,19 @@ export interface BackupProfile {
   repoLockDays?: number;
 }
 
+/** Only the opt-in value is accepted; everything else means Advanced. */
+export function normalizeInterfaceMode(value: unknown): AppSettings['interfaceMode'] {
+  return value === 'standard' ? 'standard' : 'advanced';
+}
+
 const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
   windowState: null,
   adkPromptDisabled: false,
   checkForUpdatesOnStartup: true,
+  // First run starts in Standard. Files that already exist are normalized to
+  // Advanced below, so upgrading installs keep the interface they know.
+  interfaceMode: 'standard',
   defaultCompression: 3,
   defaultVerification: true,
   backupLocation: '',
@@ -372,22 +383,29 @@ export class SettingsManager {
   }
 
   private load(): AppSettings {
+    // No settings file means a genuinely fresh install. The fallbacks below
+    // are for files that already existed, which must keep the Advanced view.
+    if (!fs.existsSync(this.settingsFile)) {
+      return { ...DEFAULT_SETTINGS };
+    }
+
     try {
-      if (fs.existsSync(this.settingsFile)) {
-        const data = fs.readFileSync(this.settingsFile, 'utf-8');
-        const parsed = JSON.parse(data);
-        return {
-          ...DEFAULT_SETTINGS,
-          ...parsed,
-          cloud: {
-            ...DEFAULT_SETTINGS.cloud,
-            ...(parsed?.cloud || {}),
-            s3: { ...DEFAULT_SETTINGS.cloud.s3, ...(parsed?.cloud?.s3 || {}) },
-            sftp: { ...DEFAULT_SETTINGS.cloud.sftp, ...(parsed?.cloud?.sftp || {}) },
-            ftp: { ...DEFAULT_SETTINGS.cloud.ftp, ...(parsed?.cloud?.ftp || {}) }
-          }
-        };
-      }
+      const data = fs.readFileSync(this.settingsFile, 'utf-8');
+      const parsed = JSON.parse(data);
+      return {
+        ...DEFAULT_SETTINGS,
+        ...parsed,
+        cloud: {
+          ...DEFAULT_SETTINGS.cloud,
+          ...(parsed?.cloud || {}),
+          s3: { ...DEFAULT_SETTINGS.cloud.s3, ...(parsed?.cloud?.s3 || {}) },
+          sftp: { ...DEFAULT_SETTINGS.cloud.sftp, ...(parsed?.cloud?.sftp || {}) },
+          ftp: { ...DEFAULT_SETTINGS.cloud.ftp, ...(parsed?.cloud?.ftp || {}) }
+        },
+        // Old files have no mode; malformed values must not produce an
+        // unusable shell. Both cases deliberately land on Advanced.
+        interfaceMode: normalizeInterfaceMode(parsed?.interfaceMode)
+      };
     } catch (error) {
       // Do NOT fall through to a silent default here. The next save() would
       // overwrite the damaged file and the settings — schedules, cloud
@@ -409,9 +427,12 @@ export class SettingsManager {
         ` Fix or delete that file, then restart. (${error instanceof Error ? error.message : error})`;
       logger.error(message);
       console.error(message);
-    }
 
-    return { ...DEFAULT_SETTINGS };
+      // A damaged file almost certainly belongs to an existing install. Do not
+      // surprise that user with a different shell while their settings are
+      // preserved for repair.
+      return { ...DEFAULT_SETTINGS, interfaceMode: 'advanced' };
+    }
   }
 
   /**
@@ -459,7 +480,16 @@ export class SettingsManager {
   }
 
   updateSettings(updates: Partial<AppSettings>): AppSettings {
-    this.settings = { ...this.settings, ...updates };
+    // IPC callers can send arbitrary JSON, so normalize even a partial update
+    // before it reaches the renderer shell.
+    this.settings = {
+      ...this.settings,
+      ...updates,
+      interfaceMode:
+        updates.interfaceMode === undefined
+          ? this.settings.interfaceMode
+          : normalizeInterfaceMode(updates.interfaceMode)
+    };
     this.save();
     return this.getSettings();
   }

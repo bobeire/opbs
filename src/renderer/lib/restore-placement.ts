@@ -50,6 +50,31 @@ export function parseByteOffset(value: string | undefined): number | undefined {
 }
 
 /**
+ * Translate the engine's placement refusals into GUI guidance. The engine and
+ * CLI keep their precise, script-friendly wording; only the wizard shows this
+ * text. Returns undefined for errors this helper does not own.
+ */
+export function friendlyRestorePlacementError(message: string | undefined): string | undefined {
+  if (!message) return undefined;
+
+  const missingOffset = message.match(
+    /Cannot determine the source on-disk offset of partition (\d+)/
+  );
+  if (missingOffset) {
+    return `This image does not record where partition ${missingOffset[1]} started, so a target byte offset is required for this restore. This prompt is normal for images that omit source placement; it does not mean the target drive is unsuitable. In the Target step, enter the offset that matches your target drive's layout (or choose "Use 1 MiB" if that is the layout you want), then continue.`;
+  }
+
+  const invalidOffset = message.match(
+    /(?:GPT|MBR) partitions must start at or after .+?; offset (\d+) cannot be represented/
+  );
+  if (invalidOffset) {
+    return `Byte offset ${invalidOffset[1]} cannot be used on this target's partition table. This is the partition-table validation check, not a drive failure. In the Target step, enter a start offset that matches your target drive's layout (for example, 1048576 bytes / 1 MiB), then continue.`;
+  }
+
+  return undefined;
+}
+
+/**
  * Build the restore layout from the wizard's size and explicit-offset fields.
  * An entry is emitted only when at least one of those was supplied, so normal
  * one-click restores keep their unchanged captured placement.

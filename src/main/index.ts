@@ -7,7 +7,7 @@ import { DiskEnumerator } from './utils/disk-enumerator';
 import { BackupManager } from './backup/manager';
 import { RestoreManager } from './restore/manager';
 import { BackupScheduler } from './backup/scheduler';
-import { SettingsManager } from './utils/settings-manager';
+import { SettingsManager, normalizeInterfaceMode } from './utils/settings-manager';
 import { logger } from './utils/logger';
 import { initAutoUpdater, checkForUpdates, quitAndInstall } from './utils/auto-updater';
 import { discoverNetworkMachines, enumerateShares, testNetworkDestination } from './utils/network';
@@ -1261,7 +1261,12 @@ function setupIpcHandlers(): void {
       if (typeof parsed !== 'object' || parsed === null) {
         return { ok: false, error: 'Invalid settings file format' };
       }
-      const merged = settingsManager.updateSettings(parsed);
+      // Older exports have no interfaceMode. Treat that as Advanced rather
+      // than inheriting a new install's Standard default during import.
+      const merged = settingsManager.updateSettings({
+        ...parsed,
+        interfaceMode: normalizeInterfaceMode(parsed.interfaceMode)
+      });
       logger.setLevel(merged.logLevel);
       scheduler.resyncFromSettings();
       return { ok: true, settings: merged };

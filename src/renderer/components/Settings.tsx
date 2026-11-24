@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { applyTheme } from '../lib/theme';
+import { normalizeInterfaceMode, type InterfaceMode } from '../lib/interface-mode';
 import { PassphraseInput } from './PassphraseInput';
 
 interface NotificationSettings {
@@ -125,6 +126,11 @@ interface Settings {
   theme: 'system' | 'light' | 'dark';
   adkPromptDisabled: boolean;
   checkForUpdatesOnStartup: boolean;
+  interfaceMode: InterfaceMode;
+}
+
+interface SettingsProps {
+  onInterfaceModeSaved?: (mode: InterfaceMode) => void;
 }
 
 /** Settings read back from the IPC layer: any field or section member may be
@@ -239,10 +245,11 @@ const DEFAULT_SETTINGS: Settings = {
   },
   fileAssociations: true,
   adkPromptDisabled: false,
-  checkForUpdatesOnStartup: true
+  checkForUpdatesOnStartup: true,
+  interfaceMode: 'advanced'
 };
 
-function Settings() {
+function Settings({ onInterfaceModeSaved }: SettingsProps) {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [hasChanges, setHasChanges] = useState(false);
   const [s3Checking, setS3Checking] = useState(false);
@@ -327,13 +334,16 @@ function Settings() {
       sftp: { ...DEFAULT_SETTINGS.cloud.sftp, ...(loaded?.cloud?.sftp || {}) },
       ftp: { ...DEFAULT_SETTINGS.cloud.ftp, ...(loaded?.cloud?.ftp || {}) }
     },
-    errorReporting: { ...DEFAULT_SETTINGS.errorReporting, ...(loaded?.errorReporting || {}) }
+    errorReporting: { ...DEFAULT_SETTINGS.errorReporting, ...(loaded?.errorReporting || {}) },
+    interfaceMode: normalizeInterfaceMode(loaded?.interfaceMode)
   });
 
   const handleSave = async () => {
     const saved = await window.electronAPI.updateSettings(settings);
-    setSettings(mergeSettings(saved));
+    const merged = mergeSettings(saved);
+    setSettings(merged);
     applyTheme(saved?.theme ?? settings.theme);
+    onInterfaceModeSaved?.(merged.interfaceMode);
     setHasChanges(false);
   };
 
@@ -452,7 +462,9 @@ function Settings() {
     setImportResult(null);
     const res = await window.electronAPI.importSettings();
     if (res.ok) {
-      setSettings(mergeSettings(res.settings));
+      const merged = mergeSettings(res.settings);
+      setSettings(merged);
+      onInterfaceModeSaved?.(merged.interfaceMode);
       setHasChanges(false);
       setImportResult({ ok: true, message: 'Settings imported.' });
     } else if (!res.canceled) {
@@ -488,6 +500,28 @@ function Settings() {
                 onChange={() => handleChange('theme', mode)}
               />
               {mode === 'system' ? 'Match Windows' : mode === 'light' ? 'Light' : 'Dark'}
+            </label>
+          ))}
+        </div>
+
+        <h3 className="settings-subheading">Interface view</h3>
+        <p className="field-hint">
+          Advanced is the current full view. Standard shows a shorter home page and sidebar.
+          Choose a view, then use Save Settings to apply it.
+        </p>
+        <div className="target-kind-toggle" role="radiogroup" aria-label="Interface view">
+          {(['advanced', 'standard'] as const).map((mode) => (
+            <label
+              key={mode}
+              className={`target-kind-option ${settings.interfaceMode === mode ? 'selected' : ''}`}
+            >
+              <input
+                type="radio"
+                name="interfaceMode"
+                checked={settings.interfaceMode === mode}
+                onChange={() => handleChange('interfaceMode', mode)}
+              />
+              {mode === 'advanced' ? 'Advanced' : 'Standard'}
             </label>
           ))}
         </div>
