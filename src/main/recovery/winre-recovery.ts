@@ -67,6 +67,9 @@ export interface RecoveryStageConfig {
   targetVirtualDisk?: { path: string; virtualSize: number; type: 'dynamic' | 'fixed' };
   targetPartitions: number[];
   passphrase?: string;
+  /** Explicit placement for images that record no source offset. */
+  targetLayout?: Array<{ partitionIndex: number; offset: number; size?: number }>;
+  acknowledgeLayout?: boolean;
   verifyBeforeWrite?: boolean;
   clearFreeSpace?: boolean;
   acknowledgeSameDisk?: boolean;
@@ -362,6 +365,12 @@ export function recoveryPayloadTextFiles(config: RecoveryStageConfig): Array<{ n
             : { targetDiskIndex: config.targetDiskIndex }),
           targetPartitions: config.targetPartitions,
           ...(config.passphrase ? { passphrase: config.passphrase } : {}),
+          ...(config.targetLayout
+            ? {
+                targetLayout: config.targetLayout,
+                ...(config.acknowledgeLayout === true ? { acknowledgeLayout: true } : {})
+              }
+            : {}),
           verifyBeforeWrite: config.verifyBeforeWrite !== false,
           clearFreeSpace: config.clearFreeSpace !== false
         },

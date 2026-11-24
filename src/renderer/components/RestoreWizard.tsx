@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { PassphraseInput } from './PassphraseInput';
+import { restorePassphraseOption } from '../lib/restore-passphrase';
+import {
+  buildRestoreTargetLayout,
+  needsExplicitPlacement,
+  parseByteOffset
+} from '../lib/restore-placement';
 
 /** VHD/VHDX target state shared by the target step, preflight and start. */
 function virtualDiskFormatFromPath(p: string): 'vhd' | 'vhdx' {
@@ -155,9 +161,15 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   // Per-partition target size in GB (string so an empty field means "keep the
   // captured size"). A smaller value shrinks the NTFS filesystem on restore.
   const [partitionSizesGb, setPartitionSizesGb] = useState<Record<number, string>>({});
+  // Byte offset for images that do not record where the partition lived on the
+  // source disk. Empty is deliberate: never silently treat "unknown" as 0.
+  const [placementOffsets, setPlacementOffsets] = useState<Record<number, string>>({});
   const [applyDeltas, setApplyDeltas] = useState(true);
   const [clearFreeSpace, setClearFreeSpace] = useState(true);
   const [passphrase, setPassphrase] = useState('');
+  // Debounced value actually sent to the image reader/preflight. Typing must
+  // not derive a 262k-iteration key or swap out the input on every character.
+  const [appliedPassphrase, setAppliedPassphrase] = useState('');
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [acknowledge, setAcknowledge] = useState(false);
@@ -252,6 +264,48 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     };
   }, []);
 
+  // A new image (including one opened from a file association) starts with a
+  // clean passphrase; never apply the previous image's secret to it.
+  useEffect(() => {
+    if (!initialImagePath) return;
+    let alive = true;
+    void Promise.resolve().then(() => {
+      if (alive) {
+        setPassphrase('');
+        setAppliedPassphrase('');
+        setPartitionSizesGb({});
+        setPlacementOffsets({});
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, [initialImagePath]);
+
+  // Only a settled passphrase is sent to the image reader/preflight. This is
+  // deliberately debounced: the Reflect 8 key derivation is 262,144 PBKDF2
+  // iterations, and re-running it per character both stalls typing and makes
+  // the controlled input appear to reset. Enter applies it immediately.
+  useEffect(() => {
+    let alive = true;
+    if (!imagePath) {
+      void Promise.resolve().then(() => {
+        if (alive) setAppliedPassphrase('');
+      });
+      return () => {
+        alive = false;
+      };
+    }
+    const trimmed = passphrase.trim();
+    const timer = setTimeout(() => {
+      if (alive) setAppliedPassphrase((current) => (current === trimmed ? current : trimmed));
+    }, 500);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [imagePath, passphrase]);
+
   // A new image invalidates the previous summary (the path-changing handlers
   // clear it explicitly). A wrong passphrase must NOT blank it — that would
   // lose the partition list while the user corrects the field — so the fetch
@@ -259,7 +313,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   useEffect(() => {
     if (!imagePath) return;
     window.electronAPI
-      .getImageInfo(imagePath, passphrase || undefined)
+      .getImageInfo(imagePath, appliedPassphrase || undefined)
       .then((info: ImageInfo) => {
         setImageInfo(info);
         // Offer a virtual disk big enough for the whole image until the user
@@ -276,27 +330,23 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
       .catch(() => {
         /* keep the last good summary — a wrong passphrase must not blank it */
       });
-  }, [imagePath, passphrase]);
+  }, [imagePath, appliedPassphrase]);
 
-  // Per-partition target sizes (GB) become a targetLayout override: an entry
-  // is emitted only for a partition whose size field was actually filled in.
-  // Offsets come from the image's captured on-disk offsets so only the size
-  // deviates. Returns undefined when no size was customized (no override).
+  // Per-partition size and explicit-offset fields become a targetLayout
+  // override. Normal restores emit no override at all; only an explicitly
+  // supplied offset can move an image that recorded no source placement.
   const buildTargetLayout = useCallback(
-    (): Array<{ partitionIndex: number; offset: number; size?: number }> | undefined => {
-      const layout: Array<{ partitionIndex: number; offset: number; size?: number }> = [];
-      for (const p of imageInfo?.partitions ?? []) {
-        if (!targetPartitions.includes(p.index)) continue;
-        const gb = partitionSizesGb[p.index];
-        if (gb === undefined || gb.trim() === '') continue;
-        const bytes = Math.round(Number(gb) * 1024 ** 3);
-        if (!Number.isFinite(bytes) || bytes <= 0) continue;
-        layout.push({ partitionIndex: p.index, offset: p.offsetOnDisk ?? 0, size: bytes });
-      }
-      return layout.length > 0 ? layout : undefined;
-    },
-    [imageInfo, targetPartitions, partitionSizesGb]
+    () =>
+      buildRestoreTargetLayout({
+        partitions: imageInfo?.partitions ?? [],
+        targetPartitions,
+        partitionSizesGb,
+        placementOffsets
+      }),
+    [imageInfo, targetPartitions, partitionSizesGb, placementOffsets]
   );
+
+  const placementNeeded = needsExplicitPlacement(imageInfo?.partitions ?? [], targetPartitions);
 
   // Dry-run the restore whenever the target selection changes so the user sees
   // the data-loss warning and passphrase requirement BEFORE anything starts.
@@ -315,10 +365,16 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
             imagePath,
             targetPartitions,
             applyDeltas,
-            // A customized per-partition size resizes the filesystem (grow or
-            // shrink) and moves the partition table, so the layout must be
-            // acknowledged — the wizard surfaces that as the destructive ack.
-            ...(targetLayout ? { targetLayout, acknowledgeLayout: true } : {}),
+            // The dry run must unlock the image with the same settled
+            // passphrase as the real restore, or Continue stays stuck.
+            ...restorePassphraseOption(appliedPassphrase),
+            // A customized size or explicit offset moves the partition table,
+            // so the layout must be acknowledged — the wizard surfaces that
+            // as the destructive ack. Preflight is a dry run, but the same-disk
+            // flag is required to let it report (rather than refuse) that case.
+            ...(targetLayout
+              ? { targetLayout, acknowledgeLayout: true, acknowledgeSameDisk: true }
+              : {}),
             ...(targetKind === 'vhd'
               ? {
                   targetVirtualDisk: {
@@ -360,7 +416,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     vhdPath,
     vhdSizeGb,
     vhdType,
-    passphrase
+    appliedPassphrase
   ]);
 
   // Unlock the image's BitLocker-locked volume with a recovery password, then
@@ -399,6 +455,10 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
         stagedRef.current = result.imagePath;
         setStagedFrom(uri);
         setImageInfo(null);
+        setPassphrase('');
+        setAppliedPassphrase('');
+        setPartitionSizesGb({});
+        setPlacementOffsets({});
         setImagePath(result.imagePath);
         setCloudProgress(null);
       } else {
@@ -424,6 +484,10 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     if (path) {
       releaseStaged();
       setImageInfo(null);
+      setPassphrase('');
+      setAppliedPassphrase('');
+      setPartitionSizesGb({});
+      setPlacementOffsets({});
       setImagePath(path);
     }
   };
@@ -438,6 +502,10 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
 
   const targetReady = targetKind === 'disk' ? targetDiskIndex !== null : vhdPath.trim() !== '';
 
+  // Enter (or the Check button) skips the debounce for users who have already
+  // finished typing and want the preflight to run now.
+  const applyPassphraseNow = () => setAppliedPassphrase(passphrase.trim());
+
   const handleStartRestore = async () => {
     setCurrentStep('progress');
     setRestoreResult(null);
@@ -451,7 +519,9 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
         verifyBeforeWrite: true,
         applyDeltas,
         clearFreeSpace,
-        ...(targetLayout ? { targetLayout, acknowledgeLayout: true } : {}),
+        ...(targetLayout
+          ? { targetLayout, acknowledgeLayout: true, acknowledgeSameDisk: true }
+          : {}),
         ...(targetKind === 'vhd'
           ? {
               targetVirtualDisk: {
@@ -462,7 +532,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
               }
             }
           : { targetDiskIndex: targetDiskIndex! }),
-        ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {})
+        ...restorePassphraseOption(appliedPassphrase)
       })) as RestoreResultSummary | undefined;
       if (stagedRef.current) {
         // Restore finished — the staged temp copy has served its purpose.
@@ -482,7 +552,8 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
   // Stage the restore to run after a one-shot reboot into the recovery
   // environment — the escape hatch for the live-system-disk hard block. The
   // payload mirrors handleStartRestore's start config (only the core fields
-  // the bridge accepts) and always acknowledges the same-disk overwrite.
+  // the bridge accepts), including explicit placement, and always acknowledges
+  // the same-disk overwrite.
   const handleStageForRecovery = async () => {
     if (targetDiskIndex === null || recoveryPhase !== 'idle') return;
     setRecoveryPhase('staging');
@@ -491,13 +562,15 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     setRecoveryBitLocker(false);
     setRecoveryPanelOpen(true);
     try {
+      const targetLayout = buildTargetLayout();
       const result = await window.electronAPI.recoveryStage({
         imagePath,
         targetDiskIndex,
         targetPartitions,
         verifyBeforeWrite: true,
         clearFreeSpace,
-        ...(passphrase.trim() ? { passphrase: passphrase.trim() } : {}),
+        ...restorePassphraseOption(appliedPassphrase),
+        ...(targetLayout ? { targetLayout, acknowledgeLayout: true } : {}),
         acknowledgeSameDisk: true
       });
       if (result.ok) {
@@ -580,7 +653,7 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
     preflight.ok &&
     targetReady &&
     !systemDiskBlocked &&
-    !(imageInfo?.encrypted && !passphrase.trim()) &&
+    !(imageInfo?.encrypted && !appliedPassphrase.trim()) &&
     (!destructiveAckNeeded || acknowledge);
 
   // Why the button is unavailable, in words. A disabled button with no
@@ -591,8 +664,8 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
       ? (preflight.error ?? 'This plan cannot run — see the message above.')
       : !targetReady
         ? 'Choose a target first.'
-        : imageInfo?.encrypted && !passphrase.trim()
-          ? 'Enter the image passphrase above to restore.'
+        : imageInfo?.encrypted && !appliedPassphrase.trim()
+          ? 'Enter the image passphrase on the previous step to restore.'
           : destructiveAckNeeded && !acknowledge
             ? 'Tick the acknowledgement above to continue.'
             : 'This restore cannot start yet.';
@@ -805,8 +878,13 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                                   setTargetPartitions(
                                     targetPartitions.filter((p) => p !== partition.index)
                                   );
-                                  // Drop the size override with the selection.
+                                  // Drop the overrides with the selection.
                                   setPartitionSizesGb((prev) => {
+                                    const next = { ...prev };
+                                    delete next[partition.index];
+                                    return next;
+                                  });
+                                  setPlacementOffsets((prev) => {
                                     const next = { ...prev };
                                     delete next[partition.index];
                                     return next;
@@ -854,11 +932,59 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                 </div>
               )}
 
+              {targetReady && placementNeeded && (
+                <div className="warning-box">
+                  <p>
+                    <strong>This image does not record where the selected partition started on the
+                    source disk.</strong> Choose the byte offset to write it to before continuing.
+                  </p>
+                  {imageInfo?.partitions
+                    .filter(
+                      (p) => targetPartitions.includes(p.index) && !(Number(p.offsetOnDisk) > 0)
+                    )
+                    .map((p) => {
+                      const parsed = parseByteOffset(placementOffsets[p.index]);
+                      return (
+                        <div className="bitlocker-unlock-row" key={p.index}>
+                          <label>Partition {p.index} target offset (bytes):</label>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            value={placementOffsets[p.index] ?? ''}
+                            placeholder="1048576"
+                            aria-label={`Target offset for partition ${p.index} in bytes`}
+                            onChange={(e) =>
+                              setPlacementOffsets((prev) => ({
+                                ...prev,
+                                [p.index]: e.target.value
+                              }))
+                            }
+                          />
+                          <button
+                            className="btn-secondary"
+                            onClick={() =>
+                              setPlacementOffsets((prev) => ({ ...prev, [p.index]: '1048576' }))
+                            }
+                          >
+                            Use 1 MiB
+                          </button>
+                          {parsed !== undefined && (
+                            <span className="field-hint">= {formatSize(parsed)}</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  <p className="field-hint">
+                    Example: 1048576 is 1 MiB, a common first-partition offset. An unknown offset is
+                    never assumed to be 0; a fresh GPT table also cannot place a partition at byte 0.
+                    Changing it requires the destructive-layout acknowledgement on the next step.
+                  </p>
+                </div>
+              )}
+
               {targetReady && targetPartitions.length > 0 && (
                 <div className="preflight-panel">
-                  {preflightLoading ? (
-                    <p className="field-hint">Checking target disk…</p>
-                  ) : preflight && !preflight.ok && preflight.passphraseRequired ? (
+                  {preflight && !preflight.ok && preflight.passphraseRequired ? (
                     <div className="bitlocker-unlock-box">
                       <div className="error-message">
                         <p>{preflight.error ?? 'This image is password-protected.'}</p>
@@ -869,15 +995,26 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                           style={{ flex: 1, minWidth: 240 }}
                           value={passphrase}
                           onChange={setPassphrase}
+                          onEnter={applyPassphraseNow}
                           placeholder="Image passphrase"
                           ariaLabel="Image passphrase"
                         />
+                        <button
+                          className="btn-primary"
+                          onClick={applyPassphraseNow}
+                          disabled={preflightLoading || !passphrase.trim()}
+                        >
+                          Check
+                        </button>
                       </div>
                       <p className="field-hint">
-                        The key is derived from this passphrase in the app; only the derived key is
-                        passed to the elevated helper.
+                        {preflightLoading
+                          ? 'Checking passphrase…'
+                          : 'Press Enter or Check to use this passphrase. The key is derived in the app; only the derived key is passed to the elevated helper.'}
                       </p>
                     </div>
+                  ) : preflightLoading ? (
+                    <p className="field-hint">Checking target disk…</p>
                   ) : preflight && !preflight.ok && preflight.unlockRequired ? (
                     <div className="bitlocker-unlock-box">
                       <div className="error-message">
@@ -1165,15 +1302,16 @@ function RestoreWizard({ onComplete, initialImagePath, mode = 'restore' }: Resto
                 </p>
               </div>
 
-              <div className="option-group">
-                <label>Encryption Passphrase:</label>
-                <PassphraseInput
-                  value={passphrase}
-                  onChange={setPassphrase}
-                  placeholder={imageInfo?.encrypted ? 'Required for encrypted image' : 'Optional'}
-                  ariaLabel="Encryption passphrase"
-                />
-              </div>
+              {imageInfo?.encrypted && (
+                <div className="option-group">
+                  <label>Image Passphrase:</label>
+                  <p className="option-note">
+                    {appliedPassphrase
+                      ? 'Checked on the previous step and used for this restore. Go Back to change it.'
+                      : 'No passphrase has been checked yet. Go Back and enter it before starting.'}
+                  </p>
+                </div>
+              )}
             </div>
             
             {destructiveAckNeeded && (

@@ -422,6 +422,8 @@ declare global {
         targetVirtualDisk?: { path: string; virtualSize: number; type: 'dynamic' | 'fixed' };
         targetPartitions: number[];
         passphrase?: string;
+        targetLayout?: Array<{ partitionIndex: number; offset: number; size?: number }>;
+        acknowledgeLayout?: boolean;
         verifyBeforeWrite?: boolean;
         clearFreeSpace?: boolean;
         acknowledgeSameDisk?: boolean;

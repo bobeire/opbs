@@ -197,6 +197,25 @@ describe('recoveryPayloadTextFiles', () => {
     expect(restoreJson(restoreConfig({ passphrase: 'hunter2' })).passphrase).toBe('hunter2');
   });
 
+  it('round-trips explicit placement so a staged restore keeps the wizard choice', () => {
+    const parsed = restoreJson(
+      restoreConfig({
+        targetLayout: [{ partitionIndex: 0, offset: 1_048_576 }],
+        acknowledgeLayout: true
+      })
+    );
+    expect(parsed.targetLayout).toEqual([{ partitionIndex: 0, offset: 1_048_576 }]);
+    expect(parsed.acknowledgeLayout).toBe(true);
+  });
+
+  it('does not imply layout acknowledgement when only a layout was supplied', () => {
+    const parsed = restoreJson(
+      restoreConfig({ targetLayout: [{ partitionIndex: 0, offset: 1_048_576 }] })
+    );
+    expect(parsed.targetLayout).toBeDefined();
+    expect(parsed.acknowledgeLayout).toBeUndefined();
+  });
+
   it('writes targetVirtualDisk instead of targetDiskIndex for virtual-disk targets', () => {
     const parsed = restoreJson(
       restoreConfig({
