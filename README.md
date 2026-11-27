@@ -1213,6 +1213,18 @@ still one command:
 node.exe winpe-entry.js restore <restore.json> --elevated
 ```
 
+**Backing up an unlocked BitLocker volume from the media.** WinPE has no VSS,
+and a raw physical read of a BitLocker volume captures ciphertext, not files.
+On boot media the backup wizard therefore prompts for the 48-digit recovery
+password of any locked BitLocker volume, unlocks it with the existing unlock
+tool, then reads the unlocked volume devices without VSS or USN. The wizard
+says plainly that these images have no guaranteed single point in time; the
+image header carries that warning forward and restore repeats it. Prefer a
+normal VSS backup whenever Windows can run. The headless equivalent is
+`backup <config.json> --read-unlocked-volume-no-vss` after unlocking the
+volume. This path is unit-tested only; no packaged-GUI end-to-end run and no
+real WinPE runtime capture have been performed for it yet.
+
 Prerequisites: the Windows ADK (with the **Windows Preinstallation
 Environment** component) and Node.js. Run elevated (or confirm the UAC prompt,
 which one elevation spawn covers the whole build):

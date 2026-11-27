@@ -7,7 +7,7 @@ import { createHash } from 'crypto';
 import { runBackupJob, runRestoreJob } from '../../src/main/helper/job-runner';
 import { readMacriumImage, openMacriumPartitionReader, macriumPartitionSize } from '../../src/main/imaging/mrimg';
 import { buildMrimgxImage } from '../helpers/mrimg-image';
-import { verifyImage, readImageInfo, readBlockDataFromImage, resolveImageChain, clearImageInfoCache, encodeHeader, encodeBlockFrame, encodePartitionEntry, encodeBlockIndexEntry, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, FLAG_VERIFIED, FLAGS_OFFSET, FLAG_INCREMENTAL, FLAG_RESUMED, COMPRESSION_DEFLATE, COMPRESSION_ZSTD, crc32, newImageCipher, metadataFromCipher, scanPartialImage, compressBlock, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
+import { verifyImage, readImageInfo, readBlockDataFromImage, resolveImageChain, clearImageInfoCache, encodeHeader, encodeBlockFrame, encodePartitionEntry, encodeBlockIndexEntry, HEADER_SIZE, PARTITION_TABLE_ENTRY_SIZE, BLOCK_INDEX_ENTRY_SIZE, IMAGE_VERSION, FLAG_HAS_BLOCK_INDEX, FLAG_INCONSISTENT_CAPTURE, FLAG_VERIFIED, FLAGS_OFFSET, FLAG_INCREMENTAL, FLAG_RESUMED, COMPRESSION_DEFLATE, COMPRESSION_ZSTD, crc32, newImageCipher, metadataFromCipher, scanPartialImage, compressBlock, PartitionEntryMeta, BlockRecord, ImageHeader } from '../../src/main/imaging/image-format';
 import { ImagingJob, RestoreJob, NativeImagingApi, JobResult, RestoreJobResult } from '../../src/main/imaging/imaging-job';
 import { buildNtfsVolumeData, CLUSTER as NTFS_CLUSTER } from '../helpers/ntfs-fixture';
 import { buildCanonicalNtfsVolumeData, GR_CLUSTER, GR_SPC } from '../helpers/ntfs-resize-fixture';
@@ -412,6 +412,89 @@ describe('runBackupJob', () => {
     expect(result.ok).toBe(true);
     // The decision is on the record, not buried.
     expect(result.warnings.join(' ')).toMatch(/WITHOUT a consistent point in time/);
+  });
+
+  it('captures an unlocked volume without VSS and labels the image inconsistent', async () => {
+    writeJob({
+      type: 'backup',
+      imagePath,
+      blockSize: BLOCK,
+      compressionLevel: 0,
+      verificationEnabled: false,
+      readUnlockedVolumeNoVss: true,
+      useUsnJournal: true,
+      perPartitionUsn: {
+        2: { volume: '\\\\?\\Volume{unlocked}\\', lastUsn: 0 }
+      },
+      partitions: [
+        {
+          diskIndex: 0,
+          partitionIndex: 2,
+          size: BLOCK,
+          offset: 122683392,
+          label: 'Windows (unlocked)',
+          readSource: 'volume',
+          volumeDevicePath: '\\\\?\\Volume{unlocked}\\',
+          skipSnapshot: true
+        }
+      ]
+    });
+
+    const native = createMockNative();
+    native.createSnapshot = vi.fn(() => {
+      throw new Error('VSS must not be used in this mode');
+    });
+    native.getUsnJournalInfo = vi.fn(() => {
+      throw new Error('USN must not be used in this mode');
+    });
+
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    const result = readResult();
+    expect(result.ok).toBe(true);
+    expect(result.snapshotsCreated).toBe(0);
+    expect(native.createSnapshot).not.toHaveBeenCalled();
+    expect(native.getUsnJournalInfo).not.toHaveBeenCalled();
+    // No physical fallback: every source read came from the volume device.
+    expect(native.getPhysicalDrivePath).not.toHaveBeenCalled();
+    expect(native.readBlocks).toHaveBeenCalledWith('\\\\?\\Volume{unlocked}\\', 0n, BigInt(BLOCK));
+    expect(result.warnings.join(' ')).toMatch(/without VSS/);
+    expect(result.warnings.join(' ')).toMatch(/no guaranteed single point in time/i);
+
+    const info = readImageInfo(imagePath);
+    expect(info.header.flags & FLAG_INCONSISTENT_CAPTURE).toBe(FLAG_INCONSISTENT_CAPTURE);
+  });
+
+  it('never retries a used-blocks scan on the physical disk for a skipSnapshot volume', async () => {
+    writeJob({
+      type: 'backup',
+      imagePath,
+      blockSize: BLOCK,
+      compressionLevel: 0,
+      verificationEnabled: false,
+      usedBlocksOnly: true,
+      readUnlockedVolumeNoVss: true,
+      partitions: [
+        {
+          diskIndex: 0,
+          partitionIndex: 2,
+          size: BLOCK,
+          offset: 122683392,
+          label: 'Windows (unlocked)',
+          readSource: 'volume',
+          volumeDevicePath: '\\\\?\\Volume{unlocked}\\',
+          skipSnapshot: true
+        }
+      ]
+    });
+
+    const native = createMockNative();
+    await runBackupJob(jobPath, resultPath, progressPath, cancelPath, native);
+
+    expect(readResult().ok).toBe(true);
+    // The synthetic volume is not a real NTFS bitmap, so the volume-side scan
+    // fails. A physical retry would read encrypted sectors; it must not happen.
+    expect(native.getPhysicalDrivePath).not.toHaveBeenCalled();
   });
 
   describe('runBackupJob with resume', () => {

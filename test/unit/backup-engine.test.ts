@@ -96,6 +96,42 @@ function createVolumeBackedEnumerator(): DiskEnumerator {  return {
   } as unknown as DiskEnumerator;
 }
 
+/** WinPE-style enumeration: no PowerShell, so no drive letters, but the native
+ *  volume mapper still knows which NTFS partition holds the unlocked volume. */
+function createWinpeEnumerator(unmapped = false): DiskEnumerator {
+  return {
+    getDisks: vi.fn(async () => [
+      { index: 0, model: 'NVMe Corp SSD 1TB', size: 1_000_000_000_000, serial: 'SN-ABCD-1234' }
+    ]),
+    getPartitions: vi.fn(async () => [
+      {
+        diskIndex: 0,
+        partitionIndex: 0,
+        offset: 1048576,
+        size: 104857600,
+        type: 0xEF,
+        label: 'Partition 0',
+        driveLetter: null,
+        fsType: 'Unknown'
+      },
+      {
+        diskIndex: 0,
+        partitionIndex: 2,
+        offset: 122683392,
+        size: 998686136832,
+        type: 0x07,
+        label: 'Partition 2',
+        driveLetter: null,
+        fsType: 'Unknown'
+      }
+    ]),
+    getPhysicalDrivePath: vi.fn((i: number) => `\\\\.\\PhysicalDrive${i}`),
+    getVolumePath: vi.fn(async (_diskIndex: number, offset: number) =>
+      unmapped ? null : offset === 122683392 ? '\\\\?\\Volume{unlocked}\\' : null
+    )
+  } as unknown as DiskEnumerator;
+}
+
 /** Header-only image good enough for `buildJob`'s base-image partition check. */
 function writeBaseImage(imgPath: string, partitionCount: number): void {
   const header: ImageHeader = {
@@ -229,6 +265,48 @@ describe('ImagingEngine', () => {
         usedBlocksOnly: true
       });
       expect(used.usedBlocksOnly).toBe(true);
+    });
+
+    it('resolves letterless NTFS volumes for a no-VSS recovery capture and disables USN', async () => {
+      const job = await new ImagingEngine(createWinpeEnumerator()).buildJob({
+        sourceDiskIndex: 0,
+        sourcePartitions: [0, 2],
+        destinationPath: dir,
+        compressionLevel: 3,
+        verificationEnabled: false,
+        readUnlockedVolumeNoVss: true,
+        useUsnJournal: true
+      });
+
+      expect(job.readUnlockedVolumeNoVss).toBe(true);
+      expect(job.useUsnJournal).toBeUndefined();
+      expect(job.perPartitionUsn).toBeUndefined();
+      // EFI has no mapped volume and stays on the raw path; NTFS is mapped even
+      // without a drive letter and is captured from the unlocked volume.
+      expect(job.partitions[0]).toMatchObject({
+        partitionIndex: 0,
+        readSource: 'physical'
+      });
+      expect(job.partitions[0]).not.toHaveProperty('skipSnapshot');
+      expect(job.partitions[1]).toMatchObject({
+        partitionIndex: 2,
+        readSource: 'volume',
+        volumeDevicePath: '\\\\?\\Volume{unlocked}\\',
+        skipSnapshot: true
+      });
+    });
+
+    it('refuses an unmapped NTFS volume in no-VSS mode instead of capturing ciphertext', async () => {
+      await expect(
+        new ImagingEngine(createWinpeEnumerator(true)).buildJob({
+          sourceDiskIndex: 0,
+          sourcePartitions: [2],
+          destinationPath: dir,
+          compressionLevel: 3,
+          verificationEnabled: false,
+          readUnlockedVolumeNoVss: true
+        })
+      ).rejects.toThrow(/no volume device.*encrypted sectors|encrypted sectors/i);
     });
 
     it('seeds per-partition USN cursors when the base image has no sidecar', async () => {

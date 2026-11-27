@@ -202,10 +202,25 @@ HANDLE DiskReader::GetCachedHandle(const std::string& devicePath, DWORD access, 
     // documented way to open them is with FILE_FLAG_BACKUP_SEMANTICS — that
     // is what the VSS samples do. Without it ReadFile returned "the device is
     // not ready" on a snapshot that had just been created successfully.
-    const bool isDevicePath = devicePath.rfind("\\\\.\\", 0) == 0 || devicePath.rfind("\\\\?\\GLOBALROOT", 0) == 0;
+    // \\?\Volume{GUID}\ is a volume device too (getVolumePath returns this
+    // form). It must use the same backup-semantics flags as physical drives and
+    // shadow copies; treating it as a normal directory path risks a misleading
+    // "access denied" or a cached, filesystem-level view of the volume.
+    const bool isDevicePath =
+        devicePath.rfind("\\\\.\\", 0) == 0 ||
+        devicePath.rfind("\\\\?\\GLOBALROOT", 0) == 0 ||
+        devicePath.rfind("\\\\?\\Volume{", 0) == 0;
     const DWORD flags = isDevicePath ? FILE_FLAG_BACKUP_SEMANTICS : FILE_FLAG_SEQUENTIAL_SCAN;
+    // A volume GUID path from FindFirstVolume carries a trailing backslash.
+    // CreateFile treats that form as the volume's root directory; the raw
+    // volume handle needs the backslash omitted.
+    std::string openPath = devicePath;
+    if (isDevicePath && devicePath.rfind("\\\\?\\Volume{", 0) == 0 &&
+        !openPath.empty() && openPath.back() == '\\') {
+        openPath.pop_back();
+    }
     HANDLE hDevice = CreateFileW(
-        std::wstring(devicePath.begin(), devicePath.end()).c_str(),
+        std::wstring(openPath.begin(), openPath.end()).c_str(),
         access,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr,

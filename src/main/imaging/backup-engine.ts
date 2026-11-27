@@ -51,6 +51,13 @@ export interface BackupJobConfig {
    * `ImagingJob.allowInconsistentCapture` for why this exists at all.
    */
   allowInconsistentCapture?: boolean;
+  /**
+   * Recovery-media mode for unlocked BitLocker volumes: read the volume device
+   * (decrypted) instead of the raw physical disk, and do not attempt VSS.
+   * Mounted volume devices cannot be snapshotted in WinPE; a raw read there
+   * would capture ciphertext. This is opt-in and never the desktop default.
+   */
+  readUnlockedVolumeNoVss?: boolean;
   /** Worker threads for multithreaded compression (0/unset = synchronous). */
   compressionThreads?: number;
   /** Overlapping source-read lanes (1/unset = the original single read).
@@ -159,7 +166,45 @@ export class ImagingEngine implements BackupCoordinator {
     }
 
     const items: ImagingPartition[] = [];
+    const unlockedNoVss = !!config.readUnlockedVolumeNoVss;
     for (const part of selected) {
+      const label = part.label ?? `Partition ${part.partitionIndex}`;
+
+      if (unlockedNoVss) {
+        // WinPE has no PowerShell, so the normal enrichment never supplies a
+        // drive letter. The native volume mapper does not need one: it resolves
+        // the volume from the partition offset via disk extents. Resolve it for
+        // every partition here, including letterless ones.
+        const volumeDevicePath = await this.diskEnumerator.getVolumePath(diskIndex, part.offset);
+        // NTFS here means a BitLocker-protected OS/data volume (MBR 0x07 / GPT
+        // basic data). If we cannot map it, a physical read would silently
+        // capture ciphertext instead of the unlocked plaintext the user was
+        // promised, so stop before writing anything.
+        if (!volumeDevicePath && part.type === 0x07) {
+          throw new Error(
+            `Partition ${part.partitionIndex} (${label}): no volume device could be resolved for the ` +
+              `unlocked-volume backup. Reading the raw disk would capture encrypted sectors, not the ` +
+              `decrypted volume, so the backup has been stopped before writing anything. Unlock the ` +
+              `BitLocker volume with its recovery password (or check the disk/partition selection) and ` +
+              `try again.`
+          );
+        }
+        items.push({
+          diskIndex,
+          partitionIndex: part.partitionIndex,
+          size: part.size,
+          offset: part.offset,
+          label,
+          readSource: volumeDevicePath ? 'volume' : 'physical',
+          volumeDevicePath: volumeDevicePath ?? undefined,
+          driveLetter: part.driveLetter || undefined,
+          // Only volume-backed partitions opt out of VSS. A non-NTFS partition
+          // with no volume device (MSR, EFI, recovery) stays on the raw path.
+          ...(volumeDevicePath ? { skipSnapshot: true } : {})
+        });
+        continue;
+      }
+
       const ineligibleRawType = !part.driveLetter && !canUseVssSnapshot(part);
       const volumeDevicePath = ineligibleRawType
         ? null
@@ -183,7 +228,7 @@ export class ImagingEngine implements BackupCoordinator {
         partitionIndex: part.partitionIndex,
         size: part.size,
         offset: part.offset,
-        label: part.label ?? `Partition ${part.partitionIndex}`,
+        label,
         readSource: volumeDevicePath ? 'volume' : 'physical',
         volumeDevicePath: volumeDevicePath ?? undefined,
         driveLetter: part.driveLetter || undefined
@@ -265,7 +310,10 @@ export class ImagingEngine implements BackupCoordinator {
     // overlays the recorded position(s) on top. Missing or unreadable sidecars
     // are NOT fatal: the seeds stay at `lastUsn: 0` (this run full-scans) and
     // the helper rewrites a fresh sidecar, repairing the chain.
-    let useUsnJournal = config.useUsnJournal;
+    // A no-VSS volume read has no stable snapshot point to anchor a USN delta
+    // against: the journal and the captured blocks come from different moments.
+    // Ignore the request in this mode rather than writing a misleading sidecar.
+    let useUsnJournal = config.useUsnJournal && !unlockedNoVss;
     let perPartitionUsn: Record<number, { volume: string; lastUsn: number }> | undefined;
     if (useUsnJournal) {
       const volParts = items.filter((p) => p.readSource === 'volume' && p.volumeDevicePath);
@@ -388,6 +436,7 @@ export class ImagingEngine implements BackupCoordinator {
       ...(resumeCheckpoint ? { resumeCheckpoint } : {}),
       ...(config.usedBlocksOnly ? { usedBlocksOnly: true } : {}),
       ...(config.allowInconsistentCapture ? { allowInconsistentCapture: true } : {}),
+      ...(unlockedNoVss ? { readUnlockedVolumeNoVss: true } : {}),
       ...(config.vssConsistency === 'crash' ? { vssConsistency: 'crash' as const } : {}),
       ...(useUsnJournal && perPartitionUsn
         ? {

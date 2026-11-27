@@ -97,4 +97,22 @@ describe('DiskEnumerator queryVolumes enrichment', () => {
     expect(partitions[0].driveLetter).toBeNull();
     expect(partitions[0].fsType).toBe('Unknown');
   });
+
+  it('resolves the volume device from the partition offset without a drive letter', () => {
+    // WinPE has no PowerShell enrichment, so letters stay null. The native
+    // mapper uses disk extents instead and must still find the unlocked volume.
+    mockPsOutput(psPartition({ DriveLetter: '' }));
+    (mockNative.getVolumePath as any).mockReturnValue('\\\\?\\Volume{unlocked}\\');
+
+    expect(enumerator.getVolumePath(0, 122683392)).toBe('\\\\?\\Volume{unlocked}\\');
+    expect(mockNative.getVolumePath).toHaveBeenCalledWith(0, 122683392);
+  });
+
+  it('returns null when native volume mapping fails', () => {
+    (mockNative.getVolumePath as any).mockImplementation(() => {
+      throw new Error('no matching volume');
+    });
+
+    expect(enumerator.getVolumePath(0, 122683392)).toBeNull();
+  });
 });

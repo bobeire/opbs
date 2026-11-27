@@ -56,6 +56,7 @@ export interface WizardPartition {
   size: number;
   fsType: string;
   label?: string;
+  driveLetter?: string;
 }
 
 export interface WizardImageDetails {
@@ -596,20 +597,43 @@ export interface BackupWizardDestination {
   freeBytes: number;
 }
 
+/** Non-secret BitLocker state needed before a no-VSS volume capture. */
+export interface WizardBitlockerVolume {
+  letter: string;
+  locked: boolean;
+  volumeType?: string;
+  conversion?: string;
+  hasRecoveryProtector?: boolean;
+}
+
+export interface WizardBitlockerStatus {
+  ok: boolean;
+  volumes: WizardBitlockerVolume[];
+  error?: string;
+}
+
 /** The backup job the wizard builds (CLI `backup` config shape). */
 export interface BackupWizardJob {
   sourceDiskIndex: number;
-  /** Empty = every partition on the source disk. */
+  /** Explicit partition indexes. Whole-disk selection fills this in. */
   sourcePartitions: number[];
   destinationPath: string;
   compressionLevel: number;
   verificationEnabled: boolean;
   usedBlocksOnly: boolean;
+  /** WinPE recovery capture: unlocked volume devices, no VSS, no USN. */
+  readUnlockedVolumeNoVss: boolean;
 }
 
 export interface BackupWizardDeps {
   getDisks(): Promise<WizardDisk[]>;
   getPartitions(diskIndex: number): Promise<WizardPartition[]>;
+  /** True on the bootable recovery media (X: / MiniNT), where VSS is absent. */
+  isWinPE?(): boolean;
+  /** Read-only BitLocker preflight (manage-bde -status in WinPE). */
+  getBitlockerStatus?(): Promise<WizardBitlockerStatus>;
+  /** Unlock one volume with a 48-digit recovery password. Never logs it. */
+  unlockBitlocker?(letter: string, recoveryPassword: string): Promise<{ ok: boolean; error?: string }>;
   /** Volumes that can hold an image: letter, label, free space. */
   listDestinations(): Promise<BackupWizardDestination[]>;
   /** Run the backup, streaming progress; must resolve even on failure. */
@@ -818,6 +842,100 @@ export async function askPowerNow(io: WizardIO, action: 'reboot' | 'shutdown'): 
 }
 
 /**
+ * Preflight BitLocker before a no-VSS volume read.
+ *
+ * WinPE has no VSS, so the only safe way to capture an encrypted Windows
+ * volume is to unlock it first and read the volume device (plaintext) rather
+ * than the physical disk (ciphertext). `manage-bde -status` supplies the lock
+ * state and conversion state; a locked volume gets one recovery-password
+ * prompt, handled by the existing unlock tool. No password is printed or
+ * stored by the wizard.
+ */
+async function preflightUnlockedVolumeCapture(
+  io: WizardIO,
+  deps: BackupWizardDeps,
+  style: Style
+): Promise<boolean> {
+  io.print();
+  io.print('  Checking BitLocker before reading unlocked volumes...');
+  let status: WizardBitlockerStatus;
+  try {
+    status = await deps.getBitlockerStatus!();
+  } catch (error) {
+    io.print(`  ${style.red('Preflight FAILED')}: ${errMsg(error)}`);
+    io.print('  Nothing was written. The backup cannot safely continue without BitLocker status.');
+    return false;
+  }
+  if (!status.ok) {
+    io.print(`  ${style.red('Preflight FAILED')}: ${status.error ?? 'BitLocker status is unavailable.'}`);
+    io.print('  Nothing was written. Unlock BitLocker manually or use a normal VSS backup.');
+    return false;
+  }
+
+  const midConversion = status.volumes.filter((v) =>
+    /InProgress|Paused/i.test(v.conversion ?? '')
+  );
+  if (midConversion.length > 0) {
+    io.print(
+      `  ${style.red('Preflight FAILED')}: encryption or decryption is ${midConversion
+        .map((v) => `${v.letter}: (${v.conversion})`)
+        .join(', ')}.`
+    );
+    io.print('  Nothing was written. Wait for conversion to finish and run the backup again.');
+    return false;
+  }
+
+  for (const volume of status.volumes.filter((v) => v.locked)) {
+    io.print(`  ${style.amber(`${volume.letter}: is locked`)}${volume.volumeType ? ` [${volume.volumeType}]` : ''}.`);
+    if (volume.hasRecoveryProtector === false) {
+      io.print(
+        `  ${style.red('Preflight FAILED')}: ${volume.letter}: has no recovery-password protector, ` +
+          'so the wizard cannot unlock it here.'
+      );
+      io.print('  Nothing was written. Unlock the volume before starting this backup.');
+      return false;
+    }
+    if (!deps.unlockBitlocker) {
+      io.print(`  ${style.red('Preflight FAILED')}: no unlock tool is available for ${volume.letter}:.`);
+      return false;
+    }
+
+    let unlocked = false;
+    for (let attempt = 0; attempt < 3 && !unlocked; attempt++) {
+      const password = (await io.ask(`  Recovery password for ${volume.letter}: (q to cancel) > `)).trim();
+      if (password.toLowerCase() === 'q') throw new AbortWizard();
+      if (!password) {
+        io.print('  Enter the 48-digit recovery password.');
+        continue;
+      }
+      let error: string | undefined;
+      try {
+        const result = await deps.unlockBitlocker(volume.letter, password);
+        unlocked = result.ok;
+        error = result.error;
+      } catch (err) {
+        error = errMsg(err);
+      }
+      if (unlocked) {
+        io.print(`  ${style.green(`${volume.letter}: unlocked`)}.`);
+      } else {
+        io.print(`  ${style.amber('Unlock failed')}${error ? `: ${error}` : ''}`);
+      }
+    }
+    if (!unlocked) {
+      io.print(`  ${style.red('Preflight FAILED')}: ${volume.letter}: could not be unlocked.`);
+      io.print('  Nothing was written.');
+      return false;
+    }
+  }
+
+  if (status.volumes.length === 0) {
+    io.print(`  ${style.dim('No BitLocker volumes were reported; continuing with volume reads.')}`);
+  }
+  return true;
+}
+
+/**
  * Guided backup for the recovery environment: pick a disk, pick somewhere to
  * write the image, confirm. Nothing on the source disk is touched — this is
  * for saving a machine before reinstalling it. Deliberately whole-disk by
@@ -836,6 +954,17 @@ export async function runBackupWizard(
     io.print();
     io.print('  Writes an image of a disk to another drive. Nothing on the source');
     io.print('  disk is changed - use this to save a machine before reinstalling.');
+
+    // WinPE cannot create VSS snapshots. On boot media, read unlocked volume
+    // devices instead; a raw disk read there would copy BitLocker ciphertext.
+    const readUnlockedVolumeNoVss = deps.isWinPE?.() === true;
+    if (readUnlockedVolumeNoVss) {
+      io.print();
+      io.print(
+        `  ${style.amber('Recovery media mode')}: unlocked volumes will be read in decrypted form ` +
+          'without VSS (no USN). These images have no guaranteed point in time.'
+      );
+    }
 
     // [1/3] what to back up -------------------------------------------------
     io.print();
@@ -869,6 +998,11 @@ export async function runBackupWizard(
       }
     }
 
+    if (currentPartitions.length === 0) {
+      io.print('  No partitions were found on the source disk.');
+      return 1;
+    }
+
     let sourcePartitions: number[];
     for (;;) {
       io.print();
@@ -876,7 +1010,9 @@ export async function runBackupWizard(
       const mode = (await io.ask('Mode > ')).trim().toLowerCase();
       if (mode === 'q') throw new AbortWizard();
       if (mode === '' || mode === 'w') {
-        sourcePartitions = [];
+        // buildJob rejects an empty selection on a physical disk. Fill it in
+        // here so "whole disk" actually works from recovery media.
+        sourcePartitions = currentPartitions.map((p) => p.partitionIndex);
         break;
       }
       const valid = currentPartitions.map((p) => p.partitionIndex);
@@ -890,6 +1026,14 @@ export async function runBackupWizard(
       }
       sourcePartitions = await askPartitionList(io, valid);
       break;
+    }
+
+    if (readUnlockedVolumeNoVss) {
+      if (!deps.getBitlockerStatus) {
+        io.print('  BitLocker status is unavailable; a no-VSS volume backup cannot be trusted.');
+        return 1;
+      }
+      if (!(await preflightUnlockedVolumeCapture(io, deps, style))) return 1;
     }
 
     // [2/3] where to write it ------------------------------------------------
@@ -939,6 +1083,9 @@ export async function runBackupWizard(
     io.print(`           ${sourcePartitions.length ? `partitions ${sourcePartitions.join(', ')}` : 'whole disk (all partitions)'}`);
     io.print(`  Target : ${destination.label} (${fmtBytes(destination.freeBytes)} free)`);
     io.print(`  Verify : ${verificationEnabled ? 'yes' : 'no'}   Used blocks only: ${usedBlocksOnly ? 'yes' : 'no'}`);
+    io.print(
+      `  Capture: ${readUnlockedVolumeNoVss ? 'unlocked volume devices, no VSS (no point in time)' : 'standard VSS snapshot path'}`
+    );
     io.print();
     io.print(`  ${style.amber('Type BACKUP to start, anything else to cancel.')}`);
     const confirm = (await io.ask('Confirm > ')).trim();
@@ -956,7 +1103,8 @@ export async function runBackupWizard(
         destinationPath: destination.path,
         compressionLevel,
         verificationEnabled,
-        usedBlocksOnly
+        usedBlocksOnly,
+        readUnlockedVolumeNoVss
       },
       (p) => {
         const pct = Number.isFinite(p.percent) ? p.percent.toFixed(0) : '0';

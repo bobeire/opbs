@@ -646,9 +646,9 @@ export class RestoreEngine implements RestoreCoordinator {
     try {
       if ((readImageInfo(chain[0]).header.flags & FLAG_INCONSISTENT_CAPTURE) !== 0) {
         warnings.push(
-          'This image was captured with live reads permitted, so it has no guaranteed single point ' +
-            'in time. It may restore as a filesystem that looks corrupt even though every block ' +
-            'verifies. If you have a newer backup, prefer it.'
+          'This image was captured from live volumes (including unlocked-volume reads without VSS), ' +
+            'so it has no guaranteed single point in time. It may restore as a filesystem that looks ' +
+            'corrupt even though every block verifies. If you have a newer backup, prefer it.'
         );
       }
     } catch {

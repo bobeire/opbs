@@ -492,16 +492,91 @@ describe('runBackupWizard', () => {
     expect(deps.execute).toHaveBeenCalledWith(
       {
         sourceDiskIndex: 0,
-        sourcePartitions: [],
+        sourcePartitions: [0, 1],
         destinationPath: 'E:\\',
         compressionLevel: 1,
         verificationEnabled: true,
-        usedBlocksOnly: true
+        usedBlocksOnly: true,
+        readUnlockedVolumeNoVss: false
       },
       expect.any(Function)
     );
     expect(text()).toContain('Backup complete');
     expect(text()).toContain('The image is in E:\\');
+  });
+
+  it('prompts for a recovery password on WinPE before a no-VSS backup', async () => {
+    // Deliberately not a real recovery key: the wizard never prints or stores
+    // whatever the user types here.
+    const recoveryPassword = '9'.repeat(48);
+    const { io, text } = fakeIO(['0', '', recoveryPassword, '0', '', '', '', 'BACKUP']);
+    const deps = makeBackupDeps({
+      isWinPE: () => true,
+      getBitlockerStatus: vi.fn(async () => ({
+        ok: true,
+        volumes: [
+          {
+            letter: 'C',
+            locked: true,
+            volumeType: 'OS Volume',
+            conversion: 'FullyEncrypted',
+            hasRecoveryProtector: true
+          }
+        ]
+      })),
+      unlockBitlocker: vi.fn(async () => ({ ok: true }))
+    });
+
+    expect(await runBackupWizard(io, deps)).toBe(0);
+    expect(deps.unlockBitlocker).toHaveBeenCalledWith('C', recoveryPassword);
+    expect(deps.execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceDiskIndex: 0,
+        sourcePartitions: [0, 1],
+        readUnlockedVolumeNoVss: true
+      }),
+      expect.any(Function)
+    );
+    const out = text();
+    expect(out).toContain('Recovery media mode');
+    expect(out).toContain('C: is locked');
+    expect(out).toContain('C: unlocked');
+    // Secret hygiene: the entered password must never appear in wizard output.
+    expect(out).not.toContain(recoveryPassword);
+  });
+
+  it('stops the no-VSS backup when the recovery password cannot unlock the volume', async () => {
+    const recoveryPassword = '8'.repeat(48);
+    const { io, text } = fakeIO(['0', '', recoveryPassword, recoveryPassword, recoveryPassword]);
+    const deps = makeBackupDeps({
+      isWinPE: () => true,
+      getBitlockerStatus: vi.fn(async () => ({
+        ok: true,
+        volumes: [{ letter: 'C', locked: true, hasRecoveryProtector: true }]
+      })),
+      unlockBitlocker: vi.fn(async () => ({ ok: false, error: 'invalid password' }))
+    });
+
+    expect(await runBackupWizard(io, deps)).toBe(1);
+    expect(deps.unlockBitlocker).toHaveBeenCalledTimes(3);
+    expect(deps.execute).not.toHaveBeenCalled();
+    expect(text()).toContain('Preflight FAILED');
+    expect(text()).not.toContain(recoveryPassword);
+  });
+
+  it('refuses a no-VSS backup while BitLocker conversion is in progress', async () => {
+    const { io, text } = fakeIO(['0', '']);
+    const deps = makeBackupDeps({
+      isWinPE: () => true,
+      getBitlockerStatus: vi.fn(async () => ({
+        ok: true,
+        volumes: [{ letter: 'C', locked: false, conversion: 'EncryptionInProgress' }]
+      }))
+    });
+
+    expect(await runBackupWizard(io, deps)).toBe(1);
+    expect(deps.execute).not.toHaveBeenCalled();
+    expect(text()).toContain('encryption or decryption is');
   });
 
   it('writes nothing when the confirmation is not BACKUP', async () => {

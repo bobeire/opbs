@@ -294,7 +294,10 @@ export async function runBackupJob(
     // image for everything else. (Field report 2026-11-04.)
     const volumes = new Map<string, string>();
     for (const p of job2.partitions) {
-      if (p.readSource === 'volume' && p.volumeDevicePath && !volumes.has(p.volumeDevicePath)) {
+      // Unlocked-volume recovery captures deliberately have no snapshot. They
+      // must never be added to a VSS set (WinPE has no writers/provider for
+      // this), and a snapshot failure elsewhere must not rewrite them.
+      if (p.readSource === 'volume' && p.volumeDevicePath && !p.skipSnapshot && !volumes.has(p.volumeDevicePath)) {
         volumes.set(p.volumeDevicePath, p.label);
       }
     }
@@ -464,6 +467,10 @@ export async function runBackupJob(
       });
     }
     for (const p of job2.partitions) {
+      // A no-VSS unlocked-volume capture stays on its volume device even when
+      // another partition's snapshot failed. Falling back to the raw disk here
+      // would silently turn decrypted plaintext back into BitLocker ciphertext.
+      if (p.skipSnapshot) continue;
       if (volumes.has(p.volumeDevicePath ?? '')) {
         warnings.push(
           `${p.label}: no VSS snapshot (${detail}); capturing WITHOUT a consistent point in time. ` +
@@ -544,7 +551,13 @@ export async function runBackupJob(
         // partition did get a snapshot, because a false "this may be
         // inconsistent" is much cheaper than a missing one. The person who
         // restores this image is usually not the person who made it.
-        (job.allowInconsistentCapture ? FLAG_INCONSISTENT_CAPTURE : 0),
+        // Unlocked-volume recovery reads have no point in time by design. Mark
+        // the image so a restore years from now still says so, even when the
+        // run itself reported success.
+        (job.allowInconsistentCapture || job.readUnlockedVolumeNoVss ||
+         job.partitions.some((p) => p.skipSnapshot)
+          ? FLAG_INCONSISTENT_CAPTURE
+          : 0),
       blockIndexOffset: 0,
       cipherId: cipher ? cipher.cipherId : CIPHER_NONE,
       kdfIterations: cipher ? cipher.kdfIterations : 0,
@@ -620,6 +633,15 @@ export async function runBackupJob(
       cursor = dataOffset;
     }
 
+    // No-VSS unlocked-volume captures move while we read them. A USN cursor
+    // from such a run would not describe the blocks in the image, so neither
+    // query nor record one for those partitions — even if an older job file
+    // still carries a stale `useUsnJournal`/`perPartitionUsn` request.
+    const noVssPartitions = new Set(job.partitions.filter((p) => p.skipSnapshot).map((p) => p.partitionIndex));
+    const noVssVolumes = new Set(
+      job.partitions.filter((p) => p.skipSnapshot && p.volumeDevicePath).map((p) => p.volumeDevicePath!)
+    );
+
     // Capture each tracked volume's USN cursor BEFORE the snapshot freezes.
     // The image reflects the snapshot moment: a cursor queried after capture +
     // verify would exclude changes that are neither in this image nor in the
@@ -627,9 +649,14 @@ export async function runBackupJob(
     let usnCursors: Map<string, string> | undefined;
     if (job.useUsnJournal && native.getUsnJournalInfo) {
       usnCursors = new Map();
+      const trackedEntries = job.perPartitionUsn
+        ? Object.entries(job.perPartitionUsn).filter(
+            ([pi, entry]) => !noVssPartitions.has(Number(pi)) && !noVssVolumes.has(entry.volume)
+          )
+        : [];
       const volumes = job.perPartitionUsn
-        ? [...new Set(Object.values(job.perPartitionUsn).map((e) => e.volume))]
-        : job.usnVolume
+        ? [...new Set(trackedEntries.map(([, entry]) => entry.volume))]
+        : job.usnVolume && !noVssVolumes.has(job.usnVolume)
           ? [job.usnVolume]
           : [];
       for (const volume of volumes) {
@@ -649,6 +676,15 @@ export async function runBackupJob(
       throw new Error(`Failed to create VSS snapshot: ${errorMessage(error)}`, { cause: error });
     }
 
+    const unlockedNoVss = job.partitions.filter((p) => p.skipSnapshot);
+    if (unlockedNoVss.length > 0) {
+      warnings.push(
+        `${unlockedNoVss.map((p) => p.label).join(', ')}: captured from unlocked volume devices ` +
+          `without VSS. The decrypted volume was read live, so this image has no guaranteed single ` +
+          `point in time and may be internally inconsistent. Prefer a VSS-based backup when one is available.`
+      );
+    }
+
     // Consistency probes: read each partition's allocation map before the
     // capture and again after. A shadow copy freezes the volume, so the two
     // are identical by construction; a live read moves under us and the map
@@ -665,7 +701,10 @@ export async function runBackupJob(
       // Only worth probing when we are reading a live volume. A shadow copy is
       // frozen: its map cannot change, so the check would cost I/O to prove
       // nothing. The live read is exactly where the risk is.
-      if (snap) continue;
+      // A no-VSS unlocked-volume capture is expected to move under us; the
+      // warning above already says so. A probe here would either fail outright
+      // or give a false all-clear for a different moment.
+      if (snap || p.skipSnapshot) continue;
       const device =
         p.readSource === 'volume' && p.volumeDevicePath
           ? p.volumeDevicePath
@@ -751,7 +790,8 @@ export async function runBackupJob(
         job.useUsnJournal &&
         job.baseImagePath &&
         part.readSource === 'volume' &&
-        part.volumeDevicePath
+        part.volumeDevicePath &&
+        !part.skipSnapshot
       ) {
         const usnEntry = job.perPartitionUsn?.[part.partitionIndex];
         const volumePath = usnEntry?.volume ?? job.usnVolume;
@@ -799,7 +839,10 @@ export async function runBackupJob(
         // If the snapshot device didn't yield a readable allocation map, retry
         // against the physical drive. Some filesystems (exFAT/FAT32) have no
         // VSS snapshot, and the snapshot device can read back as zeroes.
-        if (!usedBlocks && part.readSource === 'volume') {
+        // Never fall back to the raw physical disk for a no-VSS unlocked
+        // BitLocker volume: it would capture ciphertext. If the allocation map
+        // cannot be read there, capture the whole volume instead.
+        if (!usedBlocks && part.readSource === 'volume' && !part.skipSnapshot) {
           try {
             const phys = native.getPhysicalDrivePath(part.diskIndex);
             logger.info(`${part.label}: retrying used-blocks scan on physical device ${phys}`);
@@ -1354,6 +1397,8 @@ export async function runBackupJob(
           // Multi-volume: one v2 sidecar entry per tracked partition.
           const entries: Array<{ partitionIndex: number; volume: string; usn: string }> = [];
           for (const [pi, entry] of Object.entries(job.perPartitionUsn)) {
+            // A no-VSS capture has no stable point for this cursor to describe.
+            if (noVssPartitions.has(Number(pi)) || noVssVolumes.has(entry.volume)) continue;
             const usn = usnCursors.get(entry.volume);
             if (usn !== undefined) {
               entries.push({ partitionIndex: Number(pi), volume: entry.volume, usn });
@@ -1453,7 +1498,14 @@ export async function runBackupJob(
           continue;
         }
         if (!report.ok) {
-          keepForInspection = true;
+          // A no-VSS unlocked-volume capture already carries the
+          // "no point in time" label. A live-read filesystem check can find
+          // real smear, but that is an expected risk of this mode, not a reason
+          // to discard the only backup the user could make from boot media.
+          // Report it loudly and keep the image; do not claim it is sound.
+          if (!p.skipSnapshot) {
+            keepForInspection = true;
+          }
           // Leave the machine-readable report beside the image. The people who
           // have to decide what to do with a failed image — and the people
           // debugging why it failed — should not have to run a multi-minute
@@ -1479,6 +1531,14 @@ export async function runBackupJob(
             detail = `The full report is in ${sidecarPath}; run \`opbs fscheck\` on the image for the same verdict.`;
           } catch {
             // Keep the original advice if the report could not be written.
+          }
+          if (p.skipSnapshot) {
+            warnings.push(
+              `${p.label}: the live, no-VSS capture failed the filesystem consistency check: ` +
+                `${describeConsistency(report)} The image is kept but is NOT guaranteed to restore ` +
+                `cleanly. ${detail}`
+            );
+            continue;
           }
           throw new Error(
             `Backup produced an internally inconsistent image on ${p.label}: ` +

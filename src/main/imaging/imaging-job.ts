@@ -67,6 +67,14 @@ export interface ImagingPartition {
   /** Source drive letter when the partition has one (BitLocker key capture
    *  matches encrypted volumes to job partitions by letter). */
   driveLetter?: string;
+  /**
+   * Read this partition from its volume device without taking a VSS snapshot.
+   * Used for unlocked BitLocker volumes on bootable recovery media, where raw
+   * physical reads would capture ciphertext and VSS is unavailable. Such a
+   * capture has no guaranteed point in time and is marked as inconsistent in
+   * the image header.
+   */
+  skipSnapshot?: boolean;
 }
 
 /**
@@ -170,6 +178,13 @@ export interface ImagingJob {
    * for a faster crash-consistent snapshot.
    */
   vssConsistency?: VssConsistency;
+  /**
+   * Recovery-media mode: read unlocked volume devices in their decrypted form
+   * without VSS. Every volume-backed partition in the job is marked
+   * `skipSnapshot`; no USN tracking is used, and the image is labelled as
+   * having no guaranteed point in time.
+   */
+  readUnlockedVolumeNoVss?: boolean;
 
 }
 
