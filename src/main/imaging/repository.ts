@@ -702,7 +702,8 @@ export interface VerifyProblem {
     | 'anchor-mismatch'
     | 'remote-missing'
     | 'remote-size'
-    | 'remote-error';
+    | 'remote-error'
+    | 'file-backup';
   detail: string;
 }
 

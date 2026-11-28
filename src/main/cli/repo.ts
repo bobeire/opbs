@@ -21,6 +21,7 @@ import {
   type VerifyResult
 } from '../imaging/repository';
 import { verifyWithAnchor, writeRepositoryAnchor, type VerifyWithAnchorResult } from '../imaging/repo-anchor';
+import { verifyFileSnapshots } from '../files/verify';
 import { openRepoSession, isS3RepoTarget, type RepoSession } from '../imaging/repo-s3';
 import type { S3Config } from '../utils/s3';
 
@@ -208,6 +209,16 @@ async function runRepoAction(
               ...keyOpts(ctx.argv),
               remoteOnly: isS3
             });
+        if (!isS3) {
+          const fileReport = await verifyFileSnapshots(dir, {
+            ...keyOpts(ctx.argv),
+            fast: ctx.argv.includes('--fast')
+          });
+          for (const problem of fileReport.problems) {
+            report.problems.push({ kind: 'file-backup', detail: `File snapshots: ${problem.detail}` });
+          }
+          report.ok = report.problems.length === 0;
+        }
         if (ctx.opts.json) {
           console.log(JSON.stringify(report, null, 2));
           return report.ok ? 0 : 1;

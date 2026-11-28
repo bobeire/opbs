@@ -45,6 +45,7 @@ import { resolvePassphrase } from './passphrase';
 import { cmdRepo, finalizeBackupRepo, parseLockDays } from './repo';
 import { cmdFleet } from './fleet';
 import { cmdMigrate } from './migrate';
+import { cmdFiles } from './files';
 import { isRepository } from '../imaging/repository';
 import { openRepoSession, type RepoSession } from '../imaging/repo-s3';
 import { compactChain } from '../imaging/compact-engine';
@@ -127,6 +128,8 @@ export async function runCli(args: string[]): Promise<number> {
         return await cmdRepo(ctx);
       case 'fleet':
         return await cmdFleet(ctx);
+      case 'files':
+        return await cmdFiles(ctx);
       case 'health':
         return await cmdHealth(ctx);
       case 'media':
@@ -452,7 +455,12 @@ store put <s3://bucket/prefix|sftp://user@host/path|ftp://user@host/path> <file>
                                          Stays mounted until you press Ctrl+C (unmount). The
                                          volume is virtual: no extra disk space is used.
                                          --check only reports whether WinFsp is installed.
+  files backup <config.json> [--dry-run] [--mirror <dir>] [--apply-mirror]
+                            Create an encrypted, versioned file/folder snapshot in an OPBS repository.
+  files list|restore|verify|prune|mirror  List, restore, verify, retain, or one-way mirror file snapshots.
+                            Run 'files help' for the full additive command list.
   new-config <output.json>               Write an example job configuration.
+  new-config backup-files <output.json>  Write an example file/folder backup configuration.
 
 Global:
   --json        Machine-readable output.
@@ -3304,6 +3312,33 @@ async function cmdMount(ctx: CommandContext): Promise<number> {
 }
 
 function cmdNewConfig(ctx: CommandContext): Promise<number> {
+  if (ctx.argv[0] === 'backup-files') {
+    const fileOutput = ctx.argv[1];
+    if (!fileOutput) {
+      console.error('Usage: new-config backup-files <output.json>');
+      return Promise.resolve(1);
+    }
+    const fileExample = {
+      type: 'backup-files',
+      sources: ['C:\\Users\\me\\Documents', 'C:\\Users\\me\\Pictures'],
+      repo: 'D:\\OPBS-REPO',
+      excludes: ['**\\node_modules\\**', '**\\*.tmp'],
+      chunkSize: 1024 * 1024,
+      lockDays: 30,
+      onUnreadable: 'warn',
+      mirror: {
+        enabled: false,
+        apply: false,
+        path: 'E:\\Mirror',
+        deletions: 'off',
+        maxDeleteFiles: 10,
+        maxDeleteBytes: 104857600
+      }
+    };
+    fs.writeFileSync(fileOutput, JSON.stringify(fileExample, null, 2));
+    console.log(`Example file backup configuration written to ${fileOutput}`);
+    return Promise.resolve(0);
+  }
   const output = ctx.argv[0];
   if (!output) {
     console.error('Usage: new-config <output.json>');
