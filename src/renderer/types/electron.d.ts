@@ -551,6 +551,59 @@ declare global {
       repoPrune: (options: { dir: string; dryRun?: boolean; passphrase?: string }) => Promise<RepoPruneResult>;
       repoUnlock: (options: { dir: string; target: string; passphrase?: string }) => Promise<RepoActionResult>;
       onRepoProgress: (callback: (progress: { message: string }) => void) => () => void;
+
+      // Versioned file/folder backups
+      filesBackup: (options: {
+        config: unknown;
+        passphrase?: string;
+        keyfile?: string;
+        dryRun?: boolean;
+        mirrorTarget?: string;
+        applyMirror?: boolean;
+        allowDeletes?: boolean;
+        confirmDeletes?: boolean;
+        deletions?: 'off' | 'quarantine';
+        stagingPath?: string;
+        quarantinePath?: string;
+      }) => Promise<FileBackupResultInfo>;
+      filesList: (options: { repo: string }) => Promise<FileListResultInfo>;
+      filesVerify: (options: {
+        repo: string;
+        id?: string;
+        fast?: boolean;
+        passphrase?: string;
+        keyfile?: string;
+      }) => Promise<FileVerifyResultInfo>;
+      filesRestore: (options: {
+        repo: string;
+        id: string;
+        target: string;
+        include?: string[];
+        overwrite?: 'skip' | 'replace' | 'rename';
+        passphrase?: string;
+        keyfile?: string;
+      }) => Promise<FileRestoreResultInfo>;
+      filesPrune: (options: {
+        repo: string;
+        keep?: number;
+        apply?: boolean;
+        passphrase?: string;
+        keyfile?: string;
+      }) => Promise<FilePruneResultInfo>;
+      filesMirror: (options: {
+        repo: string;
+        id: string;
+        target: string;
+        apply?: boolean;
+        allowDeletes?: boolean;
+        confirmDeletes?: boolean;
+        deletions?: 'off' | 'quarantine';
+        stagingPath?: string;
+        quarantinePath?: string;
+        passphrase?: string;
+        keyfile?: string;
+      }) => Promise<FileMirrorResultInfo>;
+      onFileBackupProgress: (callback: (progress: FileBackupProgressInfo) => void) => () => void;
       compactChain: (
         imagePath: string,
         options?: {
@@ -692,6 +745,129 @@ declare global {
     ok: boolean;
     error?: string;
     unlocked?: string[];
+  }
+
+  // Versioned file/folder backups
+  interface FileBackupProgressInfo {
+    phase: 'preparing' | 'scanning' | 'reading' | 'writing' | 'catalog' | 'mirroring' | 'completed';
+    percent: number;
+    bytesDone: number;
+    totalBytes: number;
+    currentPath: string;
+  }
+
+  interface FileSnapshotStatsInfo {
+    files: number;
+    directories: number;
+    symlinks: number;
+    logicalBytes: number;
+    storedBytes: number;
+    uniqueChunks: number;
+  }
+
+  interface FileMirrorChangeInfo {
+    path: string;
+    action: 'add' | 'change' | 'delete' | 'replace';
+    size: number;
+  }
+
+  interface FileMirrorReportInfo {
+    ok: boolean;
+    error?: string;
+    dryRun: boolean;
+    applied: boolean;
+    snapshotId: string;
+    target: string;
+    policy: string;
+    deletionsAllowed: boolean;
+    confirmationRequired: boolean;
+    added: FileMirrorChangeInfo[];
+    changed: FileMirrorChangeInfo[];
+    deleted: FileMirrorChangeInfo[];
+    replaced: FileMirrorChangeInfo[];
+    quarantined: number;
+    problems: string[];
+    reportPath?: string;
+  }
+
+  interface FileBackupResultInfo {
+    ok: boolean;
+    error?: string;
+    dryRun?: boolean;
+    snapshotId?: string;
+    filesRead?: number;
+    warnings?: string[];
+    manifest?: { stats: FileSnapshotStatsInfo };
+    mirror?: FileMirrorReportInfo;
+  }
+
+  interface FileListRecordInfo {
+    id: string;
+    at: string;
+    files?: number;
+    bytes?: number;
+    lockUntil?: string;
+  }
+
+  interface FileListResultInfo {
+    ok: boolean;
+    error?: string;
+    snapshots: FileListRecordInfo[];
+  }
+
+  interface FileVerifyResultInfo {
+    ok: boolean;
+    error?: string;
+    problems: Array<{ kind: string; detail: string }>;
+    snapshots: Array<{ id: string; createdAt: string; files: number; bytes: number; lockUntil?: string }>;
+    signaturesVerified: boolean;
+  }
+
+  interface FileRestoreResultInfo {
+    ok: boolean;
+    error?: string;
+    snapshotId?: string;
+    target?: string;
+    restored?: string[];
+    skipped?: Array<{ path: string; reason: string }>;
+    warnings?: string[];
+    reportPath?: string;
+  }
+
+  interface FilePruneEntryInfo {
+    id: string;
+    reason: string;
+    bytes: number;
+  }
+
+  interface FilePruneResultInfo {
+    ok: boolean;
+    error?: string;
+    dryRun?: boolean;
+    eligible?: FilePruneEntryInfo[];
+    skipped?: FilePruneEntryInfo[];
+    removed?: FilePruneEntryInfo[];
+    chunksRemoved?: number;
+    bytesRemoved?: number;
+  }
+
+  interface FileMirrorResultInfo {
+    ok: boolean;
+    error?: string;
+    dryRun?: boolean;
+    applied?: boolean;
+    snapshotId?: string;
+    target?: string;
+    policy?: string;
+    deletionsAllowed?: boolean;
+    confirmationRequired?: boolean;
+    added?: FileMirrorChangeInfo[];
+    changed?: FileMirrorChangeInfo[];
+    deleted?: FileMirrorChangeInfo[];
+    replaced?: FileMirrorChangeInfo[];
+    quarantined?: number;
+    problems?: string[];
+    reportPath?: string;
   }
 
   // User-state migration (wizard)

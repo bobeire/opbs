@@ -14,7 +14,7 @@ interface DestinationHealth {
 }
 
 interface StandardHomeProps {
-  onNavigate: (page: 'backup' | 'restore' | 'browse' | 'media') => void;
+  onNavigate: (page: 'backup' | 'restore' | 'browse' | 'media' | 'files') => void;
   /** Fires once the initial backup-list queries settle (drives the startup splash). */
   onLoaded?: () => void;
 }
@@ -91,6 +91,14 @@ function StandardHome({ onNavigate, onLoaded }: StandardHomeProps) {
           <span className="standard-action-copy">
             <strong>Back up now</strong>
             <small>Choose what to capture and where to store the image.</small>
+          </span>
+          <span className="standard-action-arrow" aria-hidden="true">→</span>
+        </button>
+        <button className="standard-action-card" onClick={() => onNavigate('files')}>
+          <span className="standard-action-icon" aria-hidden="true">📁</span>
+          <span className="standard-action-copy">
+            <strong>Back up files &amp; folders</strong>
+            <small>Keep dated, encrypted versions of selected files in a repository.</small>
           </span>
           <span className="standard-action-arrow" aria-hidden="true">→</span>
         </button>

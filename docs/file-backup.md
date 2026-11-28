@@ -1,14 +1,15 @@
-# Versioned file/folder backups (CLI preview)
+# Versioned file/folder backups
 
 OPBS can back up selected folders and files into an existing OPBS repository as
 **encrypted, versioned snapshots**. This is a separate artifact from a disk
 image: a snapshot is not a mountable volume and is never accepted by the disk
 restore path.
 
-This feature is currently **CLI-only**. There is no GUI page, no live watcher,
-and no VSS-backed file capture yet. It is intended for desktop Windows paths
-that are readable by the current process; WinPE source capture is not part of
-this version.
+This feature is available in the **Files & Folders** page in the GUI and through
+the headless `files` CLI commands below. Both use the same in-process engine.
+There is no live watcher and no VSS-backed file capture yet. It is intended for
+desktop Windows paths that are readable by the current process; WinPE source
+capture is not part of this version.
 
 ## What it does
 
@@ -34,6 +35,31 @@ this version.
 - Full ACL, ownership, alternate-data-stream or junction fidelity. Permission
   bits are recorded, but ACLs and ADS are not restored.
 - WinPE source capture.
+
+## In the GUI
+
+Open **Files & Folders** from the sidebar (or **Back up files & folders** on the
+Standard home page). The page is organized as a short sequence:
+
+1. **Repository & key** — choose an existing OPBS repository. Leave the
+   passphrase and keyfile fields empty when the repository's automatic keyfile
+   is available; otherwise supply one of them.
+2. **Create a version** — add folders or files, add exclude patterns if needed,
+   then choose **Preview — write nothing** or **Save a version**. The preview
+   writes no snapshot, catalog record, or mirror change.
+3. **Saved versions** — refresh the list, optionally select a version, and run
+   a full or quick verification.
+4. **Restore a version** — pick a destination folder, choose what happens to
+   existing files (skip by default), and optionally narrow the restore with
+   path patterns.
+5. **One-way mirror** — set a destination, then plan or apply. Applying is a
+   separate button; removals need their own checkbox, and a large removal set
+   needs a further explicit confirmation. Allowed removals are moved into
+   quarantine rather than deleted outright.
+6. **Cleanup** — plan retention first; applying it is a separate button.
+
+No modal or confirmation dialog appears when switching to this page. All
+data-changing actions are explicit buttons inside the page.
 
 ## Prerequisites
 
@@ -168,7 +194,7 @@ Verified in this codebase by automated tests only:
 
 Not yet verified:
 
-- packaged-GUI end-to-end use (there is no GUI flow yet)
+- packaged-GUI end-to-end use (the GUI page has not been exercised in a packaged build)
 - VSS or WinPE file capture
 - real-world locked-file behavior under every Windows application
 - large-scale performance or restore-speed claims

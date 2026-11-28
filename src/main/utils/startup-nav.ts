@@ -15,7 +15,8 @@ export const OPEN_PAGE_ALLOWLIST = [
   'vss',
   'copy',
   'disks',
-  'repositories'
+  'repositories',
+  'files'
 ] as const;
 
 export type OpenPage = (typeof OPEN_PAGE_ALLOWLIST)[number];

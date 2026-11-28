@@ -5,6 +5,7 @@ describe('parseOpenPageArg', () => {
   it('returns the page for a valid flag', () => {
     expect(parseOpenPageArg(['C:\\OPBS.exe', '--open-page', 'browse'])).toBe('browse');
     expect(parseOpenPageArg(['OPBS.exe', '--open-page', 'backup'])).toBe('backup');
+    expect(parseOpenPageArg(['OPBS.exe', '--open-page', 'files'])).toBe('files');
   });
 
   it('returns null when the flag is absent', () => {

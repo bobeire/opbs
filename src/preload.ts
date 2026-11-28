@@ -11,6 +11,15 @@ type CloudDownloadProgress = {
   bytesTotal: number;
 };
 
+/** Payload of the 'files-backup-progress' event (mirrors FileBackupProgress in main). */
+type FileBackupProgress = {
+  phase: 'preparing' | 'scanning' | 'reading' | 'writing' | 'catalog' | 'mirroring' | 'completed';
+  percent: number;
+  bytesDone: number;
+  totalBytes: number;
+  currentPath: string;
+};
+
 contextBridge.exposeInMainWorld('electronAPI', {
   // Disk information
   getDisks: () => ipcRenderer.invoke('get-disks'),
@@ -26,6 +35,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
   unregisterUnattendedBackupTask: (scheduleId: string) => ipcRenderer.invoke('unregister-unattended-backup-task', scheduleId),
   listUnattendedBackupTasks: () => ipcRenderer.invoke('list-unattended-backup-tasks'),
   getTaskStatus: (taskName: string) => ipcRenderer.invoke('get-task-status', taskName),
+
+  // Versioned file/folder backups
+  filesBackup: (options: unknown) => ipcRenderer.invoke('files-backup', options),
+  filesList: (options: unknown) => ipcRenderer.invoke('files-list', options),
+  filesVerify: (options: unknown) => ipcRenderer.invoke('files-verify', options),
+  filesRestore: (options: unknown) => ipcRenderer.invoke('files-restore', options),
+  filesPrune: (options: unknown) => ipcRenderer.invoke('files-prune', options),
+  filesMirror: (options: unknown) => ipcRenderer.invoke('files-mirror', options),
+  onFileBackupProgress: (callback: (progress: FileBackupProgress) => void) => {
+    const handler = (_event: unknown, progress: FileBackupProgress) => callback(progress);
+    ipcRenderer.on('files-backup-progress', handler);
+    return () => {
+      ipcRenderer.removeListener('files-backup-progress', handler);
+    };
+  },
 
   // Restore operations
   startRestore: (config: unknown) => ipcRenderer.invoke('start-restore', config),

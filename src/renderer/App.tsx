@@ -14,6 +14,7 @@ import NetworkView from './components/NetworkView';
 import PartitionCopy from './components/PartitionCopy';
 import DiskTools from './components/DiskTools';
 import Repositories from './components/Repositories';
+import FileBackupView from './components/FileBackupView';
 import ToastHost from './components/ToastHost';
 import AdkPrompt from './components/AdkPrompt';
 import SplashScreen from './components/SplashScreen';
@@ -29,6 +30,7 @@ type Page =
   | 'copy'
   | 'disks'
   | 'repositories'
+  | 'files'
   | 'browse'
   | 'media'
   | 'schedules'
@@ -243,7 +245,7 @@ function App() {
 
   useEffect(() => {
     const cleanup = window.electronAPI.onNav((page) => {
-      if (page === 'browse' || page === 'backup' || page === 'restore' || page === 'schedules' || page === 'vss' || page === 'copy' || page === 'disks' || page === 'repositories') {
+      if (page === 'browse' || page === 'backup' || page === 'restore' || page === 'schedules' || page === 'vss' || page === 'copy' || page === 'disks' || page === 'repositories' || page === 'files') {
         setCurrentPage(page);
       }
     });
@@ -283,6 +285,8 @@ function App() {
         return <DiskTools onComplete={() => setCurrentPage('dashboard')} />;
       case 'repositories':
         return <Repositories />;
+      case 'files':
+        return <FileBackupView />;
       case 'browse':
         return <BrowseView key={browseIntent?.imagePath ?? 'empty'} onComplete={() => setCurrentPage('dashboard')} initialImagePath={browseIntent?.imagePath} autoMount={browseIntent?.autoMount} />;
       case 'media':
@@ -377,6 +381,15 @@ function App() {
             </li>
             <li>
               <button
+                className={`nav-item ${currentPage === 'files' ? 'active' : ''}`}
+                onClick={() => setCurrentPage('files')}
+              >
+                <span className="nav-icon">📁</span>
+                Files &amp; Folders
+              </button>
+            </li>
+            <li>
+              <button
                 className={`nav-item ${currentPage === 'restore' ? 'active' : ''}`}
                 onClick={() => {
                   setRestoreIntent({ mode: 'restore' });
@@ -437,6 +450,15 @@ function App() {
               <span className="nav-icon">💾</span>
               New Backup
               {backupRunning && <span className="nav-badge">Running</span>}
+            </button>
+            </li>
+            <li>
+            <button
+              className={`nav-item ${currentPage === 'files' ? 'active' : ''}`}
+              onClick={() => setCurrentPage('files')}
+            >
+              <span className="nav-icon">📁</span>
+              File Backups
             </button>
             </li>
             <li>

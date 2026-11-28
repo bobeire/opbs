@@ -2859,3 +2859,69 @@ body {
 .passphrase-status.pending {
   color: var(--text-muted);
 }
+
+/* Versioned file/folder backups page */
+.file-backup-inline {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.file-backup-inline input[type='text'] {
+  flex: 1 1 320px;
+}
+
+.file-backup-sources {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.file-backup-sources li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+
+.file-backup-sources .mono-value {
+  overflow-wrap: anywhere;
+}
+
+.file-backup-details {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  font-size: 13px;
+}
+
+.file-backup-progress {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+
+.file-backup-progress-bar {
+  height: 8px;
+  margin-top: 8px;
+  background: var(--border-color);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.file-backup-progress-bar > div {
+  height: 100%;
+  background: var(--success-color);
+  transition: width 0.2s ease;
+}
+
+.file-backup-progress .field-hint {
+  margin: 8px 0 0;
+}

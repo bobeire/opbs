@@ -2364,4 +2364,189 @@ ipcMain.handle('add-recent-destination', async (_, directory: string) => {
       }
     }
   });
+
+  // Versioned file/folder backups. The GUI uses the same in-process engine as
+  // `--cli files`, so both paths write identical artifacts. Failures come back
+  // as result objects; an IPC rejection would read as an unknown error in the
+  // page and lose the engine's own wording.
+  const fileKeyOptions = (options: { passphrase?: string; keyfile?: string }) => ({
+    ...(options.passphrase ? { passphrase: options.passphrase } : {}),
+    ...(options.keyfile ? { keyfile: options.keyfile } : {})
+  });
+  const fileError = (error: unknown) => ({
+    ok: false,
+    error: error instanceof Error ? error.message : String(error)
+  });
+
+  ipcMain.handle(
+    'files-backup',
+    async (
+      event,
+      options: {
+        config: unknown;
+        passphrase?: string;
+        keyfile?: string;
+        dryRun?: boolean;
+        mirrorTarget?: string;
+        applyMirror?: boolean;
+        allowDeletes?: boolean;
+        confirmDeletes?: boolean;
+        deletions?: 'off' | 'quarantine';
+        stagingPath?: string;
+        quarantinePath?: string;
+      }
+    ) => {
+      try {
+        const { runFileBackup } = await import('./files/backup');
+        return await runFileBackup(options.config, {
+          ...fileKeyOptions(options),
+          dryRun: options.dryRun === true,
+          ...(options.mirrorTarget ? { mirrorTarget: options.mirrorTarget } : {}),
+          applyMirror: options.applyMirror === true,
+          allowDeletes: options.allowDeletes === true,
+          confirmDeletes: options.confirmDeletes === true,
+          deletions: options.deletions,
+          ...(options.stagingPath ? { stagingPath: options.stagingPath } : {}),
+          ...(options.quarantinePath ? { quarantinePath: options.quarantinePath } : {}),
+          onProgress: (progress) => {
+            try {
+              event.sender.send('files-backup-progress', progress);
+            } catch {
+              // Renderer navigated away mid-run.
+            }
+          }
+        });
+      } catch (error) {
+        return fileError(error);
+      }
+    }
+  );
+
+  ipcMain.handle('files-list', async (_event, options: { repo: string }) => {
+    try {
+      const { listFileSnapshots } = await import('./files/prune');
+      return { ok: true, snapshots: listFileSnapshots(options.repo) };
+    } catch (error) {
+      return { ...fileError(error), snapshots: [] };
+    }
+  });
+
+  ipcMain.handle(
+    'files-verify',
+    async (
+      _event,
+      options: { repo: string; id?: string; fast?: boolean; passphrase?: string; keyfile?: string }
+    ) => {
+      try {
+        const { verifyFileSnapshots } = await import('./files/verify');
+        return await verifyFileSnapshots(options.repo, {
+          ...fileKeyOptions(options),
+          ...(options.id ? { id: options.id } : {}),
+          fast: options.fast === true
+        });
+      } catch (error) {
+        return { ...fileError(error), problems: [], snapshots: [], signaturesVerified: false };
+      }
+    }
+  );
+
+  ipcMain.handle(
+    'files-restore',
+    async (
+      _event,
+      options: {
+        repo: string;
+        id: string;
+        target: string;
+        include?: string[];
+        overwrite?: 'skip' | 'replace' | 'rename';
+        passphrase?: string;
+        keyfile?: string;
+      }
+    ) => {
+      try {
+        const { restoreFileSnapshot } = await import('./files/restore');
+        return restoreFileSnapshot({
+          ...fileKeyOptions(options),
+          repoDir: options.repo,
+          id: options.id,
+          target: options.target,
+          include: options.include ?? [],
+          overwrite: options.overwrite ?? 'skip'
+        });
+      } catch (error) {
+        return fileError(error);
+      }
+    }
+  );
+
+  ipcMain.handle(
+    'files-prune',
+    async (
+      _event,
+      options: {
+        repo: string;
+        keep?: number;
+        apply?: boolean;
+        passphrase?: string;
+        keyfile?: string;
+      }
+    ) => {
+      try {
+        const { pruneFileSnapshots } = await import('./files/prune');
+        return await pruneFileSnapshots(options.repo, {
+          ...fileKeyOptions(options),
+          keep: options.keep ?? 3,
+          apply: options.apply === true
+        });
+      } catch (error) {
+        return fileError(error);
+      }
+    }
+  );
+
+  ipcMain.handle(
+    'files-mirror',
+    async (
+      _event,
+      options: {
+        repo: string;
+        id: string;
+        target: string;
+        apply?: boolean;
+        allowDeletes?: boolean;
+        confirmDeletes?: boolean;
+        deletions?: 'off' | 'quarantine';
+        stagingPath?: string;
+        quarantinePath?: string;
+        passphrase?: string;
+        keyfile?: string;
+      }
+    ) => {
+      try {
+        const { loadHeader, resolveRepoKey } = await import('./imaging/repository');
+        const { deriveFileKeys } = await import('./files/crypto');
+        const { loadSnapshotManifest } = await import('./files/verify');
+        const { runFileMirror } = await import('./files/mirror');
+        const keys = fileKeyOptions(options);
+        const repoKey = resolveRepoKey(loadHeader(options.repo), keys);
+        const { manifest } = loadSnapshotManifest(options.repo, options.id, deriveFileKeys(repoKey).enc);
+        return await runFileMirror({
+          repoDir: options.repo,
+          manifest,
+          target: options.target,
+          apply: options.apply === true,
+          allowDeletes: options.allowDeletes === true,
+          confirmDeletes: options.confirmDeletes === true,
+          deletions: options.deletions ?? 'off',
+          ...(options.stagingPath ? { stagingPath: options.stagingPath } : {}),
+          ...(options.quarantinePath ? { quarantinePath: options.quarantinePath } : {}),
+          repoKey
+        });
+      } catch (error) {
+        const failure = fileError(error);
+        return { ...failure, problems: [failure.error] };
+      }
+    }
+  );
 }
